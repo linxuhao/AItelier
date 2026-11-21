@@ -173,6 +173,9 @@ class StateLists:
             for text in new:
                 reason = self.groups.exit_check(conn, text, moment)
                 if reason is not None:
+                    if self.public_view:
+                        # A group turn learns only that an item was blocked, never why (7.7.7, review F3).
+                        raise StateGraphError("withheld: nothing was added")
                     from core.state_groups import WITHHELD_REASONS
                     raise StateGraphError(f"withheld: {reason} ({WITHHELD_REASONS[reason]}); nothing was added")
             if len(existing) + len(new) > LIST_LIMITS["open_per_list"]:

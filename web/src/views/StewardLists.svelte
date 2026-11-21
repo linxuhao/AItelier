@@ -7,6 +7,7 @@
   // (they add and check items there too), so the view re-reads on a slow cadence.
   const REFRESH_MS = 30000;
   const LISTS: FamilyListName[] = ['shopping', 'todo'];
+  const ADD_MAX = 10;
   let lists = $state<Record<FamilyListName, FamilyListItem[]>>({shopping: [], todo: []});
   let loaded = $state(false), error = $state(''), busy = $state(false);
   let drafts = $state<Record<FamilyListName, string>>({shopping: '', todo: ''});
@@ -26,9 +27,10 @@
     finally { busy = false; }
   }
   function add(list: FamilyListName) {
-    // One item per line (or separated by 、 , ，), at most 10 at a time.
-    const items = drafts[list].split(/[\n、,，]/).map(s => s.trim()).filter(Boolean).slice(0, 10);
+    // One item per line (or separated by 、 , ，), at most 10 at a time: more is refused, not cut.
+    const items = drafts[list].split(/[\n、,，]/).map(s => s.trim()).filter(Boolean);
     if (!items.length) return;
+    if (items.length > ADD_MAX) { error = t('steward.listTooMany').replace('{n}', String(ADD_MAX)); return; }
     void run(async () => { await addFamilyListItems(list, items); drafts[list] = ''; });
   }
   const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '';

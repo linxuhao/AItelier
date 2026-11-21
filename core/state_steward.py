@@ -939,11 +939,15 @@ class StateSteward:
     def _keyed(self, conn, operation, request_key, request_hash):
         return self._replay(conn, operation, request_key, request_hash) if request_key is not None else None
 
-    def _done(self, conn, operation, request_key, request_hash, schedule_id, result):
-        """Emit the change on the steward's project, then record the result."""
+    def _schedule_changed(self, conn, schedule_id):
+        """Emit steward_schedule_changed on the steward's project (when it exists)."""
         home = steward_project()
         if conn.execute("SELECT 1 FROM state_projects WHERE project_id=?", (home,)).fetchone():
             self.store._event(conn, home, None, "steward_schedule_changed", {"schedule_id": schedule_id})
+
+    def _done(self, conn, operation, request_key, request_hash, schedule_id, result):
+        """Emit the change on the steward's project, then record the result."""
+        self._schedule_changed(conn, schedule_id)
         return self._record(conn, operation, request_key, request_hash, result) if request_key is not None else result
 
     @staticmethod
@@ -1054,11 +1058,15 @@ class StateSteward:
         """Change what is given. A new schedule or zone, or enabling, recomputes the
         next run from now; disabling clears it; otherwise it is kept. A `target` (or a
         `channel`) given re-points the reminder: family_group records the group bound NOW.
-        A group reminder is exit-checked when its text changes, when it becomes one and when
-        it is enabled; it is never enabled while the group it recorded is unbound (a new
-        binding never revives it, 7.9.4)."""
-        if target is not None or channel is not None:
-            target = self._target(target or "family_group", channel)
+        A `channel` alone keeps the row's target: it re-points a family_group row and is
+        invalid_target on an owner row (review F1: an owner's private instruction never becomes
+        group text by a channel). A group reminder is exit-checked when its text changes, when
+        it becomes one and when it is enabled; it is never enabled while the group it recorded
+        is unbound (a new binding never revives it, 7.9.4)."""
+        if target is not None:
+            target = self._target(target, channel)
+        elif channel is not None:
+            self._target("family_group", channel)
         request_hash = _hash(["update", schedule_id, expected_version, title, instruction, schedule, tz, enabled]
                              + ([] if target is None and channel is None else [target, channel]))
         with self.store.transaction(write=True) as conn:
@@ -1079,6 +1087,11 @@ class StateSteward:
             enabled = bool(row["enabled"]) if enabled is None else enabled
             moment = _now()
             bound = (row["target_channel"], row["target_group_ref"], row["target_bound_at"])
+            if target is None and channel is not None:
+                if row["target"] != "family_group":
+                    raise ScheduleInvalid("invalid_target", "a channel names the family group of a family_group "
+                                                            "reminder; this one is for the owner")
+                target = "family_group"
             repointed = target is not None
             target = target if repointed else row["target"]
             if target == "owner":

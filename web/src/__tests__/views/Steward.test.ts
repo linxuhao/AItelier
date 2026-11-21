@@ -610,6 +610,38 @@ describe('reminders', () => {
       schedule: {kind: 'once', at: new Date('2030-01-02T09:30').toISOString()}, tz: browserZone, target: 'family_group'}));
   });
 
+  it('review F1/F4: editing a group reminder re-points it when its group was unbound or another channel is chosen', async () => {
+    const save = async (row: StewardSchedule, pick?: string) => {
+      api.updateStewardSchedule.mockResolvedValueOnce(row);
+      const view = render(StewardScheduleForm, {...form(), row});
+      await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
+      await new Promise(r => setTimeout(r, 0));
+      if (pick) {
+        const select = await waitFor(() => view.container.querySelector('[data-schedule-channel]') as HTMLSelectElement);
+        await fireEvent.change(select, {target: {value: pick}});
+      }
+      await fireEvent.click(view.getByRole('button', {name: 'Save'}));
+      await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenCalled());
+      const fields = api.updateStewardSchedule.mock.calls.at(-1)[2];
+      cleanup(); api.updateStewardSchedule.mockClear(); api.listOwnerGroups.mockClear();
+      return fields;
+    };
+    const group = {target: 'family_group' as const, target_channel: 'wechat' as const, instruction: '该吃药了'};
+    // Its group unbound, another bound on Slack now: re-pointed there (the old channel is not sent).
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'slack'}]});
+    const unbound = await save(schedule({...group, target_unbound: true, enabled: false}));
+    expect(unbound.target).toBe('family_group');
+    expect(unbound.channel).toBeUndefined();
+    // A group on each channel, the other one chosen: target and channel both go.
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'slack'}, {channel: 'wechat'}]});
+    const moved = await save(schedule({...group, target_unbound: false}), 'slack');
+    expect([moved.target, moved.channel]).toEqual(['family_group', 'slack']);
+    // Nothing about the group changed: no target, the recorded group is kept.
+    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    const kept = await save(schedule({...group, target_unbound: false}));
+    expect([kept.target, kept.channel]).toEqual([undefined, undefined]);
+  });
+
   it('step 25 C11: a 422 withheld says the group may not see it; the list marks group reminders and an unbound group', async () => {
     api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
     api.createStewardSchedule.mockRejectedValue(new ApiError(422, '', null, {code: 'withheld', reason: 'private_project: the name or id of a project that is not public'}));

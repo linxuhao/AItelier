@@ -61,10 +61,14 @@
     busy = true; error = ''; conflict = null;
     const fields: StewardScheduleFields = {title: title.trim(), instruction: instruction.trim(), schedule, tz};
     // Sent only when it says something: a reminder to the group (created or re-pointed), or one
-    // turned back to the owner. An edit that keeps the target keeps the group it recorded.
+    // turned back to the owner. An edit that keeps the target keeps the group it recorded, unless
+    // that group was unbound or another channel's group was chosen: then it is re-pointed to the
+    // group bound now (review F1/F4). A channel no group is bound on now is not sent.
     const was = initial?.target ?? 'owner';
-    if (initial ? target !== was : target === 'family_group') fields.target = target;
-    if (fields.target === 'family_group' && channel) fields.channel = channel;
+    const regroup = !!initial && was === 'family_group' && target === 'family_group'
+      && (!!initial.target_unbound || (!!channel && channel !== (initial.target_channel ?? '')));
+    if (initial ? target !== was || regroup : target === 'family_group') fields.target = target;
+    if (fields.target === 'family_group' && channel && groups.includes(channel)) fields.channel = channel;
     try {
       const saved = initial ? await updateStewardSchedule(initial.schedule_id, baseVersion, fields)
         : await createStewardSchedule(fields);

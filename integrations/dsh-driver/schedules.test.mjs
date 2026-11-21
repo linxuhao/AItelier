@@ -247,6 +247,34 @@ test('each refusal (withheld, group_unbound, group_notice_budget, not_fired) and
   timer.close();
 });
 
+test('review F2: no sendGroup, or one that throws, is send_failed - one owner wake each, never counted as sent', async () => {
+  for (const sendGroup of [undefined, async () => { throw new Error('bridge gone'); }]) {
+    const clock = clockAt('2026-11-18T09:00:05Z');
+    const rows = [groupRow('g', '2026-11-18T09:00:00Z', { title: '吃药' })];
+    const { request } = groupBackend(rows, () => clock);
+    const delivered = [];
+    const timer = new ScheduleTimer({ request, now: () => clock, log: () => {}, deliver: async (text, id) => delivered.push([id, text]),
+      sendGroup, setTimer: () => ({}), clearTimer: () => {} });
+    await timer.refresh();
+    assert.deepEqual(delivered.map(([id]) => id), ['group-notice:g:2026-11-18T09:00:00Z:not-sent']);
+    assert.match(delivered[0][1], /send_failed/);
+    timer.close();
+  }
+});
+
+test('review F2: group notices go out before the owner wake, so a failed owner wake drops none of them', async () => {
+  const clock = clockAt('2026-11-18T09:00:05Z');
+  const rows = [row('o', '2026-11-18T09:00:00Z'), groupRow('g', '2026-11-18T09:00:00Z'), groupRow('h', '2026-11-18T09:00:00Z', { instruction: '出门带伞' })];
+  const { request } = groupBackend(rows, () => clock);
+  const sent = [], logs = [];
+  const timer = new ScheduleTimer({ request, now: () => clock, log: l => logs.push(l), deliver: async () => { throw new Error('outbox down'); },
+    sendGroup: async (...a) => (sent.push(a[2]), true), setTimer: () => ({}), clearTimer: () => {} });
+  await timer.refresh();
+  assert.deepEqual(sent.sort(), ['出门带伞', '该吃药了']);
+  assert.ok(logs.some(l => /outbox down/.test(l)), 'the owner wake failure is logged');
+  timer.close();
+});
+
 test('schedule_set carries target and channel to the backend', async () => {
   const { request, calls } = backend([], () => 0);
   await setSchedule(request, { title: '吃药', instruction: '该吃药了', schedule: { kind: 'once', at: '2026-11-19T08:00:00Z' }, target: 'family_group', channel: 'wechat' });

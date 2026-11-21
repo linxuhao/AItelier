@@ -38,6 +38,18 @@ describe('StewardLists', () => {
     expect((view.container.querySelector('[data-list="todo"]') as HTMLElement).textContent).toContain('Nothing on this list.');
   });
 
+  it('review F4: more than 10 items at once is refused with a message, nothing is cut and the draft is kept', async () => {
+    const view = render(StewardLists);
+    await view.findByText('牛奶');
+    const input = view.container.querySelector('[data-list-input="shopping"]') as HTMLInputElement;
+    const eleven = Array.from({length: 11}, (_, i) => 'x' + i).join('，');
+    await fireEvent.input(input, {target: {value: eleven}});
+    await fireEvent.submit(input.closest('form') as HTMLFormElement);
+    await waitFor(() => expect(view.getByRole('alert').textContent).toBe('At most 10 items at a time: nothing was added'));
+    expect(api.addFamilyListItems).not.toHaveBeenCalled();
+    expect(input.value).toBe(eleven);
+  });
+
   it('adds several items at once, checks, removes and clears the checked ones', async () => {
     const view = render(StewardLists);
     await view.findByText('牛奶');

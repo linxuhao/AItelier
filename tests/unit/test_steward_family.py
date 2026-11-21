@@ -258,6 +258,53 @@ def test_unbinding_disables_the_groups_reminders_and_a_rebinding_never_revives_t
     assert out_rows(world) == []
 
 
+def test_review_f1_a_channel_alone_never_turns_an_owner_reminder_into_group_text(world, clock):
+    bound_group(world)
+    mine = world.owner.steward.create_schedule("医生", "call the doctor about my results",
+                                               {"kind": "once", "at": IN_TEN}, as_owner=True)
+    refused(lambda: world.owner.steward.update_schedule(mine["schedule_id"], mine["version"], channel="wechat",
+                                                        as_owner=True), "invalid_target")
+    refused(lambda: execute(world.steward, "update_steward_schedule",
+                            {"request_key": "u1", "schedule_id": mine["schedule_id"],
+                             "expected_version": mine["version"], "channel": "wechat"}, allow_write=True),
+            "invalid_target")
+    assert rows(world, "SELECT target, target_channel FROM state_steward_schedules WHERE schedule_id=?",
+                (mine["schedule_id"],)) == [("owner", None)]
+    # On a group reminder a channel alone re-points it to that channel's group (still family_group).
+    group = group_reminder(world, key="g1")
+    moved = world.owner.steward.update_schedule(group["schedule_id"], group["version"], channel="wechat",
+                                                as_owner=True)
+    assert (moved["target"], moved["target_channel"], moved["target_group_ref"]) == ("family_group", "wechat", ROOM)
+
+
+def changed_events(world):
+    return rows(world, "SELECT COUNT(*) FROM state_events WHERE event_type='steward_schedule_changed'")[0][0]
+
+
+def test_review_f3_both_disabling_paths_stamp_the_row_and_tell_the_host(world, clock):
+    bound_group(world)
+    made = group_reminder(world, at="2027-01-01T08:10:00+00:00")
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_owner_groups SET bound_at=? WHERE group_ref=?", ("2027-01-01T07:59:00+00:00", ROOM))
+        conn.commit()
+    clock.moment = datetime(2027, 1, 1, 8, 11, tzinfo=timezone.utc)
+    shot = fire(world, made)
+    before = changed_events(world)
+    assert notice(world, made["schedule_id"], shot["due_at"])["refused"] == "group_unbound"
+    assert rows(world, "SELECT enabled, updated_by, updated_at FROM state_steward_schedules") == [
+        (0, "steward", clock.moment.isoformat())]
+    assert changed_events(world) == before + 1
+
+
+def test_review_f3_unbinding_emits_a_change_per_stopped_reminder(world, clock):
+    bound_group(world)
+    group_reminder(world, key="a", at="2027-01-02T08:00:00+00:00")
+    group_reminder(world, key="b", text="倒垃圾", at="2027-01-02T09:00:00+00:00")
+    before = changed_events(world)
+    assert world.owner.groups.unbind_owner_group("wechat")["reminders_disabled"] == 2
+    assert changed_events(world) == before + 2
+
+
 def test_a_fired_reminder_whose_group_was_rebound_is_group_unbound_and_disabled(world, clock):
     bound_group(world)
     made = group_reminder(world, at="2027-01-01T08:10:00+00:00")
@@ -402,6 +449,19 @@ def test_an_owner_dm_item_naming_a_private_project_is_withheld_and_the_group_rep
     question = ask(world, "m1", "清单上有什么")
     listing = "、".join(i["text"] for i in world.owner.lists.list_items(as_owner=True)["lists"]["shopping"])
     assert reply(world, question["message_id"], "购物清单：" + listing)["withheld"] is False
+
+
+def test_review_f3_a_group_turn_learns_only_that_an_item_was_withheld_never_why(world, clock, projects):
+    bound_group(world)
+    audience(world, senders=(MEMBER,), turn="t1")
+    with pytest.raises(StateGraphError) as caught:
+        add(lists_view(world), ["给家庭账本记一笔"], turn="t1")
+    assert str(caught.value) == "withheld: nothing was added"
+    # The owner's turn and the dashboard still hear the kind.
+    with pytest.raises(StateGraphError) as owner:
+        world.owner.lists.add_items("todo", ["给家庭账本记一笔"], as_owner=True)
+    assert str(owner.value).startswith("withheld: private_project")
+    assert rows(world, "SELECT COUNT(*) FROM state_steward_list_items") == [(0,)]
 
 
 def test_the_list_bounds_dedupe_and_thirty_day_purge(world, clock):

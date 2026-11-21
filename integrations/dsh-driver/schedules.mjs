@@ -13,9 +13,12 @@
  *  reply is (`sendGroup`, the bridge's one 10-second queue). One that fired more than 30
  *  minutes late is skipped. A skip, a refusal (withheld, group_unbound, group_notice_budget,
  *  group_quota_account, not_fired) or a failed send posts nothing, is never retried (the time
- *  has passed) and gives the steward ONE owner wake to tell its owner. The one case nobody
- *  hears of: this host dies after the fire commits and before post_group_notice (the row has
- *  moved on; a restart does not fire it again, 7.9.9 (c)). */
+ *  has passed) and gives the steward ONE owner wake to tell its owner. Group notices go out
+ *  before the owner wake, each on its own, so one failure never drops another. Two windows
+ *  nobody hears of, both a host death (7.9.9 (c)): after the fire commits and before
+ *  post_group_notice (the row has moved on; a restart does not fire it again), and after
+ *  post_group_notice commits and before sendGroup (the stored notice row shows in the group's
+ *  messages though nothing was sent; a replay answers duplicate and sends nothing). */
 
 /** State events about schedules: the runtime's, never a model turn. */
 export const SCHEDULE_EVENTS = new Set(['steward_schedule_changed']);
@@ -149,12 +152,16 @@ export class ScheduleTimer {
   async #look() {
     const rows = await listSchedules(this.request);
     const fired = await fireDue(this.request, rows, this.now(), undefined, WAKE_MAX, this.log);
+    // Group notices first, each isolated: an owner wake that fails never drops one (review F2).
+    for (const notice of fired.filter(isGroup)) {
+      try { await this.#notice(notice); }
+      catch (error) { this.log(`schedule ${notice.schedule.schedule_id}: group reminder failed (${String(error?.message ?? error).slice(0, 200)})`); }
+    }
     const owner = fired.filter(f => !isGroup(f));
     if (owner.length) {
       const id = 'schedule:' + owner.map(f => `${f.schedule.schedule_id}:${f.due_at}`).join(',');
       await this.deliver(wakeText(owner), id);
     }
-    for (const notice of fired.filter(isGroup)) await this.#notice(notice);
     const next = (fired.length ? await listSchedules(this.request) : rows)
       .filter(r => r.enabled && r.next_run_at).map(r => Date.parse(r.next_run_at)).sort((a, b) => a - b)[0];
     return Math.max(1000, Math.min(RECHECK_MS, next === undefined ? RECHECK_MS : next - this.now()));

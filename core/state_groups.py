@@ -321,11 +321,17 @@ class StateGroups:
                     conn.execute(f"DELETE FROM {table} WHERE channel=? AND group_ref=?", (channel, group))
                 # Step 25 C11 (7.9.4): the reminders made for this binding stop; a new binding
                 # (even of the same group: a new bound_at) never revives them.
-                disabled = conn.execute(
-                    "UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL,updated_by='owner',"
-                    "updated_at=? WHERE target='family_group' AND target_channel=? AND target_group_ref=? AND "
-                    "target_bound_at=? AND deleted_at IS NULL AND enabled=1",
-                    (_now().isoformat(), channel, group, row["bound_at"])).rowcount
+                stopped = [r[0] for r in conn.execute(
+                    "SELECT schedule_id FROM state_steward_schedules WHERE target='family_group' AND target_channel=? "
+                    "AND target_group_ref=? AND target_bound_at=? AND deleted_at IS NULL AND enabled=1",
+                    (channel, group, row["bound_at"]))]
+                for schedule_id in stopped:
+                    conn.execute("UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL,"
+                                 "updated_by='owner',updated_at=? WHERE schedule_id=?", (_now().isoformat(), schedule_id))
+                    self.steward._schedule_changed(conn, schedule_id)
+                disabled = len(stopped)
+        if row is not None and disabled:
+            self.steward._notify()
         return {"unbound": row is not None, "channel": channel,
                 **({"reminders_disabled": disabled} if row is not None else {})}
 
@@ -722,8 +728,9 @@ class StateGroups:
                 hour = (moment - timedelta(hours=1)).isoformat()
                 if live is None:
                     refused = "group_unbound"
-                    conn.execute("UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL "
-                                 "WHERE schedule_id=?", (schedule_id,))
+                    conn.execute("UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL,"
+                                 "updated_by='steward',updated_at=? WHERE schedule_id=?", (moment.isoformat(), schedule_id))
+                    self.steward._schedule_changed(conn, schedule_id)
                 elif (detail := self.exit_check(conn, row["instruction"], moment)) is not None:
                     refused = "withheld"
                 elif self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
@@ -743,6 +750,8 @@ class StateGroups:
                 result = {"posted": True, "message_id": message_id, "channel": channel, "group_ref": group,
                           "text": body, "title": title}
             out = self.steward._record(conn, "post_group_notice", request_key, request_hash, result)
+        if refused == "group_unbound":
+            self.steward._notify()
         if refused is not None:
             self._log("notice refused " + refused, row["target_channel"] if row is not None else None,
                       row["target_group_ref"] if row is not None else None, None)

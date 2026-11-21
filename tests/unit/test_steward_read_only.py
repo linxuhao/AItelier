@@ -152,7 +152,11 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "report_channel_status",
         # ...and records what the WeChat bridge answered to the owner's request for a new
         # login QR ({requested} or {refused}; never the QR), run by the host in code.
-        "complete_owner_channel_login_request"}
+        "complete_owner_channel_login_request",
+        # Step 22 (design-steward 7.6): the HOST pushes the directors' open questions to the
+        # owner's default channel and relays a channel message as the answer to the codes it
+        # names (the model passes one message id; tests/unit/test_owner_questions.py).
+        "sync_owner_questions", "relay_owner_answer"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

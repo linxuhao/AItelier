@@ -122,6 +122,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # The owner's requests for a new WeChat login QR and what the bridge answered (never
     # the QR itself). No projection.
     "state_owner_channel_login_requests",
+    # Step 22: the questions pushed to the owner's chat channel (code, when pushed and
+    # reminded, how closed) and each answer relayed from it. No projection.
+    "state_owner_question_pushes", "state_owner_question_answers",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

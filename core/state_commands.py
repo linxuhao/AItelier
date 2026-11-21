@@ -1293,6 +1293,18 @@ class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
 
+# Step 22 (core.state_owner_questions, design-steward 7.6): the steward's HOST pushes the
+# directors' open questions to the owner's default channel, and relays an owner channel
+# message as the answer to the pushed questions it names (the model passes one message id).
+class SyncOwnerQuestions(Project):
+    pass
+
+
+class RelayOwnerAnswer(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    source_message_id: str = Field(min_length=1, max_length=200)
+
+
 READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
@@ -1328,6 +1340,7 @@ READ_REQUESTS = {
     "list_steward_schedules": ListStewardSchedules,
     "list_owner_channels": Empty, "message_sources": MessageSources,
     "list_owner_channel_login_requests": Empty,
+    "list_pushed_owner_questions": Empty,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1409,6 +1422,8 @@ WRITER_ONLY_READS = frozenset({
     "list_owner_channels", "message_sources",
     # Step 19: the owner's pending requests for a new WeChat login QR. A private table.
     "list_owner_channel_login_requests",
+    # Step 22: the questions pushed to the owner's channel and still waiting. A private table.
+    "list_pushed_owner_questions",
 })
 
 
@@ -1475,6 +1490,7 @@ WRITE_REQUESTS = {
     "relay_owner_message": RelayOwnerMessage, "bind_owner_channel": BindOwnerChannel,
     "record_channel_delivery": RecordChannelDelivery, "report_channel_status": ReportChannelStatus,
     "complete_owner_channel_login_request": CompleteOwnerChannelLoginRequest,
+    "sync_owner_questions": SyncOwnerQuestions, "relay_owner_answer": RelayOwnerAnswer,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -1845,6 +1861,9 @@ def _handlers(service) -> dict:
         "message_sources": service.channels.message_sources,
         "list_owner_channel_login_requests": service.channels.list_login_requests,
         "complete_owner_channel_login_request": service.channels.complete_login_request,
+        "sync_owner_questions": service.owner_questions.sync,
+        "relay_owner_answer": service.owner_questions.relay_answer,
+        "list_pushed_owner_questions": service.owner_questions.list_pushed,
     }
 
 
@@ -1932,6 +1951,13 @@ def _driver_defaults(service, action, arguments):
 # complete_owner_channel_login_request (also the host's, run in code) only records what
 # the WeChat bridge answered to the owner's request for a new login QR: {requested} or
 # {refused, retry_after_s?}, never the QR.
+# The two step 22 actions (design-steward 7.6) are called by the steward's HOST code, never
+# by its model directly: sync_owner_questions writes the push of the directors' open
+# questions as the steward's own message and its ledger rows, and relay_owner_answer writes
+# an owner channel message, byte for byte, as the owner's answer to the pushed questions it
+# names. relay_owner_answer is triggered by the model through the host's relay_answer tool,
+# which passes ONE message id: the codes are read by code, the words copied by code, and the
+# sender's binding checked again by the command.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -1945,7 +1971,8 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "acknowledge_driver_message",
     "create_steward_schedule", "update_steward_schedule", "delete_steward_schedule", "fire_steward_schedule",
     "relay_owner_message", "bind_owner_channel", "record_channel_delivery", "report_channel_status",
-    "complete_owner_channel_login_request"})
+    "complete_owner_channel_login_request",
+    "sync_owner_questions", "relay_owner_answer"})
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

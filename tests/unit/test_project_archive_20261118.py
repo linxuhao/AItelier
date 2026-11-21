@@ -460,6 +460,9 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
         later = {"state_owner_channels", "state_owner_channel_codes", "state_message_sources",
                  "state_owner_channel_status", "state_owner_channel_bind_attempts",
                  "state_owner_channel_login_requests",
+                 # Step 22: the owner's pushed questions and relayed answers
+                 # (core/state_owner_questions.py).
+                 "state_owner_question_pushes", "state_owner_question_answers",
                  # The Git bundle release ledger (evidence/bundle-store-release-20261120):
                  # one append-only row per released candidate digest.
                  "state_git_bundle_releases"}

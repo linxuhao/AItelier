@@ -707,11 +707,14 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # and the channels' status table: the owner's channel list with status, and the report;
 # and the remembered binding attempts, read by the steward's bind and relay commands;
 # and the owner's requests for a new WeChat login QR: the steward's list query, the
-# owner's channel list and QR route, and the steward's completion command.
+# owner's channel list and QR route, and the steward's completion command. Step 22 adds the
+# pushed questions and the relayed answers: the pushed-questions query and the steward's
+# two commands (the push and the relay).
 STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
                   "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
                   "state_owner_channel_status", "state_owner_channel_bind_attempts",
-                  "state_owner_channel_login_requests")
+                  "state_owner_channel_login_requests",
+                  "state_owner_question_pushes", "state_owner_question_answers")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -751,6 +754,8 @@ def _steward_calls(svc):
         "message_sources": lambda: svc.channels.message_sources([C.CHANNEL_MESSAGE]),
         "execute list_owner_channel_login_requests": lambda: execute(svc, "list_owner_channel_login_requests", {}),
         "list_login_requests": lambda: svc.channels.list_login_requests(),
+        "execute list_pushed_owner_questions": lambda: execute(svc, "list_pushed_owner_questions", {}),
+        "list_pushed": lambda: svc.owner_questions.list_pushed(),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -838,6 +843,11 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/state/commands/complete_owner_channel_login_request",
              {"project_id": steward_project(), "request_key": "q",
               "request_id": C.canary("state_owner_channel_login_requests"), "result": {"requested": True}}),
+            ("POST", "/api/state/query/list_pushed_owner_questions", {}),
+            ("POST", "/api/state/commands/sync_owner_questions", {"project_id": steward_project()}),
+            ("POST", "/api/state/commands/relay_owner_answer",
+             {"project_id": steward_project(), "request_key": "a",
+              "source_message_id": C.canary("state_owner_question_answers")}),
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
@@ -874,6 +884,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert [tuple(r) for r in conn.execute("SELECT request_id, status FROM "
                                                    "state_owner_channel_login_requests")] \
                 == [(C.canary("state_owner_channel_login_requests"), "pending")]
+            assert [tuple(r) for r in conn.execute("SELECT code_no, closed_at FROM state_owner_question_pushes")] \
+                == [(7, None)]
+            assert conn.execute("SELECT COUNT(*) FROM state_owner_question_answers").fetchone()[0] == 1
 
 
 def _trusted_db(anonymous):

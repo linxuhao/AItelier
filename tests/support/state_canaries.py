@@ -226,6 +226,17 @@ def _plan():
              "result_json) VALUES(?,'wechat','2999-01-01T00:00:00+00:00',?,'pending',?)"),
             (c("state_owner_channel_login_requests"), c("state_owner_channel_login_requests"),
              '{"refused": "%s"}' % c("state_owner_channel_login_requests"))),
+        # Step 22: a pushed question (the canary as its project, message and segment) and an
+        # answer relayed for it (the canary as its source and answer message).
+        "state_owner_question_pushes": (
+            ("INSERT INTO state_owner_question_pushes(code_no,project_id,message_id,segment_id,asker_driver_id,"
+             "pushed_at) VALUES(7,?,?,?,?,?)"),
+            (c("state_owner_question_pushes"), c("state_owner_question_pushes"), c("state_owner_question_pushes"),
+             c("state_owner_question_pushes"), now)),
+        "state_owner_question_answers": (
+            ("INSERT INTO state_owner_question_answers(source_message_id,code_no,answer_message_id,at,received_at) "
+             "VALUES(?,7,?,?,?)"),
+            (c("state_owner_question_answers"), c("state_owner_question_answers"), now, now)),
     }
 
 

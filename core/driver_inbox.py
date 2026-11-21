@@ -671,11 +671,13 @@ class DriverInbox:
         return result
 
     def write_user_half(self, conn, project_id, subject, body, reply_to_message_id=None, target_driver_id=None,
-                        answers=None):
+                        answers=None, target_driver_ids=None):
         """The user's message row and the deliveries that wake its driver(s), on the
         caller's write connection; (message_id, created_at, deliveries). The one
-        writer of the user's half: the dashboard's message above and a message the
-        owner sent from a chat channel (core.state_channels) land identically."""
+        writer of the user's half: the dashboard's message above, a message the
+        owner sent from a chat channel (core.state_channels) and an owner's channel
+        answer to a pushed question (core.state_owner_questions, which names its
+        recipients in `target_driver_ids`) land identically."""
         parent = None
         if reply_to_message_id is not None:
             parent = self._conversation_message(conn, project_id, reply_to_message_id)
@@ -683,7 +685,9 @@ class DriverInbox:
                 raise StateGraphError("unknown_message")
             if parent["audience"] != "user" or not parent["sender_driver_id"]:
                 raise StateGraphError("invalid_reply_target")
-        if target_driver_id is not None:
+        if target_driver_ids is not None:
+            targets = list(target_driver_ids)
+        elif target_driver_id is not None:
             targets = [target_driver_id]
         elif parent is not None:
             targets = [parent["sender_driver_id"]]

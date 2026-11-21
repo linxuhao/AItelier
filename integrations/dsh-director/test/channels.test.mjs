@@ -1886,3 +1886,13 @@ test('login: past loginPerHour or loginPerDay accepted logins the channel is not
     assert.ok(logs.some(([event, fields]) => event === 'channel_login_refused' && fields.reason === 'rate_limited'));
   } finally { Date.now = realNow; channels.stop(); }
 });
+
+test('channelText: a text with nothing left once flattened goes as written, still within the cap', () => {
+  const rules = '|---|---|\n'.repeat(200);
+  for (const channel of CHANNEL_NAMES) {
+    const sent = channelText(channel, rules);
+    assert.ok(Array.from(sent).length <= CHANNEL_LIMITS.mirrorChars, `${channel} ${Array.from(sent).length}`);
+    assert.ok(sent.endsWith(MORE), sent.slice(-40));
+  }
+  assert.equal(channelText('slack', '|---|---|'), '|---|---|', 'a short one goes as written');
+});

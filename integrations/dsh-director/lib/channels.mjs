@@ -141,11 +141,14 @@ const cutAt = (points, budget) => {
   return head.slice(0, end).join('').trimEnd();
 };
 export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars) {
+  // As written and uncapped on purpose (710ac311c0): cut or reflowed, a code line the owner
+  // is asked to send back could be lost or altered.
   if (body.split('\n').some(line => CODE.test(line.trim()))) return body;
   if (!(max > MORE_CHARS)) max = CHANNEL_LIMITS.mirrorChars;
   const lines = body.split('\n').map(line => flattenLine(line, channel)).filter(line => line !== null);
   const shaped = lines.join('\n');
-  if (!shaped.trim()) return body;
+  // Nothing left once flattened (only rule rows or marks): the text goes as written, still capped.
+  if (!shaped.trim()) return Array.from(body).length <= max ? body : cutAt(Array.from(body), max - MORE_CHARS) + MORE;
   if (Array.from(shaped).length <= max) return shaped;
   const phrases = lines.filter(line => VERBATIM.test(line));
   const rest = Array.from(lines.filter(line => !VERBATIM.test(line)).join('\n').trim());

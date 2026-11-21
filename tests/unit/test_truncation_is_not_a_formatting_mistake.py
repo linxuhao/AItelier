@@ -552,6 +552,9 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "table-name templated SQL DDL for the driver note entry tables",
     ("core/state_driver_notes.py", "SCHEMA"):
         "SQL DDL for the driver notes table",
+    ("core/state_git_artifacts.py", "RELEASE_RULE_SQL"):
+        "SQL executed by the bundle release planner, pinned by its own "
+        "release-rule test, never read as prose in an agent prompt",
     ("core/state_graph.py", "SCHEMA"):
         "SQL DDL schema for the state graph tables",
     ("core/state_handoffs.py", "SCHEMA"):

@@ -5,6 +5,7 @@
   import { t } from '../lib/i18n.svelte';
   import { channelAlertLine, channelAlertText, type ChannelClock } from '../lib/channelAlert';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import StewardGroups from './StewardGroups.svelte';
   // The owner's chat channels (design 7.2): who is bound on Slack / WeChat, the
   // one-time bind code, unbind, and where the steward's unprompted messages go.
   // Binding happens off this page (the owner sends the code to the bot), so while
@@ -194,6 +195,7 @@
               onclick={() => void newQr(channel)}>{t('steward.chanNewQr')}</button>
           {/if}
         </div>
+        {#if channel === 'wechat'}<StewardGroups {channel} bound={r.bound} />{/if}
       </article>
     {/each}
     <label class="default">{t('steward.chanDefault')}

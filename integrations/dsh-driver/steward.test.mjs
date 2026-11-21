@@ -271,9 +271,12 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-7), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']);
   // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience
-  // is groups.audience); 24.1b: the requester and the confirmations.
-  assert.deepEqual(Object.keys(steward.catalog).sort(), ['confirm', 'connections', 'humanInput', 'requesterOf', 'resyncDue', 'writes']);
+  // is groups.audience); 24.1b: the requester and the confirmations; 24.1c: the connection reads
+  // and proposals.
+  assert.deepEqual(Object.keys(steward.catalog).sort(), ['confirm', 'connections', 'humanInput', 'manage', 'requesterOf',
+    'resyncDue', 'writes']);
   assert.deepEqual(Object.keys(steward.catalog.confirm).sort(), ['cancel', 'create', 'deliver', 'get']);
+  assert.deepEqual(Object.keys(steward.catalog.manage).sort(), ['propose', 'refresh', 'tools']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
     'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),

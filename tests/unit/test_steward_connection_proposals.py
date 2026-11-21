@@ -646,9 +646,10 @@ def test_a_director_proposes_nothing_and_writes_no_registry(world):
                          ("steward_connection_secret_set", {"conn_id": "media", "value": "v"}),
                          ("steward_connection_probe", {"conn_id": "media"}),
                          ("steward_connection_delete", {"conn_id": "media"})):
-        for service in (world.director, world.steward):
-            with pytest.raises(StateGraphError):
-                execute(service, action, args, allow_write=True)
+        with pytest.raises(StateGraphError):
+            execute(world.director, action, args, allow_write=True)
+        with pytest.raises(StateGraphError, match="steward_read_only"):
+            execute(world.steward, action, args, allow_write=True)
     assert "steward_connection_refresh" in STEWARD_WRITE_ACTIONS
     assert not {"steward_connection_upsert", "steward_connection_tools_set", "steward_connection_secret_set",
                 "steward_connection_probe", "steward_connection_delete"} & STEWARD_WRITE_ACTIONS

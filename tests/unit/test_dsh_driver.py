@@ -870,9 +870,12 @@ def test_a_steward_start_writes_no_extra_mcp_entry(runtime, monkeypatch):
     ids = [e["id"] for e in entries]
     assert [i for i in ids if i in EXTRA_MCP_IDS] == [], (
         "a steward start must not register the director's local services")
-    # Not one MCP client at all: the steward has no State MCP wiring either, so
-    # nothing in its profile can open a session on a service it cannot call.
-    assert not [e for e in entries if e["name"] == "@deepseek-ai/dsh-mcp-client"], ids
+    # One MCP client only (step 24.1a): the backend's gateway for the steward's OWN
+    # connections. No State MCP wiring, no director service: nothing in its profile
+    # opens a session on a service it cannot call.
+    clients = [e for e in entries if e["name"] == "@deepseek-ai/dsh-mcp-client"]
+    assert [e["id"] for e in clients] == ["mcp-sw"], ids
+    assert clients[0]["config"]["url"] == runtime.base_url.rstrip("/") + "/api/steward/mcp"
     assert ids[:2] == ["dsh-director", "aitelier-driver"], ids
 
 

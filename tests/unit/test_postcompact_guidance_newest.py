@@ -168,3 +168,70 @@ def test_newest_slice_survives_more_rows_than_one_reader_page(services):
     assert guidance["included"] == 8
     assert guidance["omitted"] == 105 - 8
     assert projected_subjects(guidance) == [f"page-{index:03d}" for index in range(97, 105)]
+
+
+# -- The fallback projection a host renders itself ---------------------------
+#
+# `.codex/hooks/postcompact_driver_state.py` renders this block locally when the
+# server does not advertise driver_postcompact_guidance, and
+# `SQLiteDirectorMessaging.project_active_standing` is the same projection on
+# the server side of that contract. It had the same two defects: the OLDEST
+# standing rows were selected, and the budget trimmed the newest of them.
+
+
+def fallback_rows(projection):
+    """The `[omitted_active_standing=` marker and the rows above it."""
+    lines = projection.splitlines()
+    marker = lines[-1] if lines and lines[-1].startswith("[omitted_active_standing=") else ""
+    return (lines[:-1] if marker else lines), marker
+
+
+def test_fallback_projection_keeps_the_newest_standing_and_broadcast_rows(services):
+    for index in range(10):
+        send(services["ada"], request_key=f"standing-{index}",
+             subject=f"standing-{index:02d}", delivery_mode="standing")
+    for index in range(6):
+        send(services["ada"], request_key=f"broadcast-{index}",
+             subject=f"broadcast-{index:02d}", ack_mode="broadcast")
+
+    lines, marker = fallback_rows(
+        services["bob"].director_messages.project_active_standing("beta"))
+
+    payloads = [json.loads(line) for line in lines]
+    # 16 candidates (standing seq 1..10, broadcasts 11..16): the newest eight.
+    assert [payload["delivery_seq"] for payload in payloads] == list(range(9, 17))
+    assert [payload["subject"] for payload in payloads] == (
+        ["standing-08", "standing-09"] + [f"broadcast-{index:02d}" for index in range(6)])
+    assert marker == "[omitted_active_standing=8]"
+
+
+def test_fallback_projection_counts_every_omitted_broadcast(services):
+    for index in range(12):
+        send(services["ada"], request_key=f"broadcast-{index}",
+             subject=f"broadcast-{index:02d}", ack_mode="broadcast")
+
+    lines, marker = fallback_rows(
+        services["bob"].director_messages.project_active_standing("beta"))
+
+    assert [json.loads(line)["delivery_seq"] for line in lines] == list(range(5, 13))
+    # The marker counts what the projection left out over the WHOLE broadcast
+    # set, not over one page of it: the four oldest are the ones omitted.
+    assert marker == "[omitted_active_standing=4]"
+
+
+def test_fallback_projection_budget_trims_the_oldest_rows(services):
+    body = "boundary " * 40  # 360 characters, so every excerpt spends its full 320
+    for index in range(12):
+        send(services["ada"], request_key=f"long-{index}",
+             subject=f"long-{index:02d}", body=body, delivery_mode="standing")
+
+    projection = services["bob"].director_messages.project_active_standing("beta")
+    lines, marker = fallback_rows(projection)
+
+    assert len(projection) <= 3000
+    assert 1 <= len(lines) < 8  # the budget really did trim the newest slice
+    # A suffix of the newest slice: the trim dropped the OLD end, so the newest
+    # row is still there and the oldest carried row is the one about to go.
+    assert [json.loads(line)["delivery_seq"] for line in lines] == list(
+        range(12 - len(lines) + 1, 13))
+    assert marker == f"[omitted_active_standing={12 - len(lines)}]"

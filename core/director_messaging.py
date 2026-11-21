@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from functools import wraps
+from functools import partial, wraps
 from datetime import datetime, timezone
 import json
 import re
@@ -240,6 +240,41 @@ def initialize(db) -> None:
     # Runs on its own connection after the one above has closed: the rebuild takes
     # BEGIN IMMEDIATE and must not overlap an open transaction on this handle.
     _migrate_reply_fk(db)
+
+
+# The reader's own page ceiling: ``list_director_messages`` accepts limit 1..100.
+_NEWEST_PAGE = 100
+
+
+def _newest_rows(read, slice_size: int = 8):
+    """The NEWEST ``slice_size`` rows of a forward-paged read, in ascending order.
+
+    ``read(after=, limit=)`` is ``list_director_messages``, which pages FORWARD
+    from a delivery cursor, so its first page holds the OLDEST matching rows. A
+    newest-first selection therefore has to reach the END of the matching
+    stream: draining the pages is what makes that possible without widening the
+    reader's contract (``after``/``next_after``/``has_more`` keep meaning
+    exactly what they meant). Only the tail is retained, so memory stays bounded
+    by ``slice_size`` however long the inbox is.
+
+    Returns ``(rows, matched_total)``. The total comes from the FIRST page, where
+    the cursor is 0, so it counts every matched row - the same number a one-shot
+    read reports, and the number the resume projections turn into their
+    ``omitted`` counts.
+    """
+    kept, matched_total, after = [], 0, 0
+    while True:
+        result = read(after=after, limit=_NEWEST_PAGE)["result"]
+        if after == 0:
+            matched_total = result["matched_total"]
+        kept = (kept + result["items"])[-slice_size:]
+        next_after = result["next_after"]
+        # A page that produced nothing (or a cursor that did not move) cannot be
+        # paged past; stopping there returns the newest rows actually reached
+        # instead of spinning.
+        if not result["has_more"] or not result["items"] or next_after <= after:
+            return kept, matched_total
+        after = next_after
 
 
 class SQLiteDirectorMessaging:
@@ -647,18 +682,41 @@ class SQLiteDirectorMessaging:
                              "next_after": next_after})
 
     def project_active_standing(self, project_id):
-        """Return bounded, redacted active standing guidance without mutation."""
-        result = self.list_director_messages(
-            project_id, after=0, limit=8, delivery_mode="standing",
-            statuses=["unread", "acknowledged"], protocol_version="v3" if self.v3 else "v2")["result"]
+        """Return bounded, redacted active standing guidance without mutation.
+
+        This is a RESUME projection - the bounded view a host renders for a
+        driver that just lost its context - so it carries what the driver has
+        not worked under yet: each slice is drained to its NEWEST rows (the
+        reader pages forward, so only draining reaches them), the union keeps
+        the newest eight, and the 3000-character budget gives way at the OLD
+        end, leaving a suffix of that newest slice. Keeping the oldest rows here
+        meant the newest standing guidance never reached a resuming driver.
+
+        The public projection is unchanged apart from being truthful about what
+        it leaves out: every row keeps the same JSON keys, and
+        ``[omitted_active_standing=N]`` still counts matched rows the projection
+        did not carry - now counted over the WHOLE broadcast set instead of the
+        first page of it.
+        """
+        standing, matched_total = _newest_rows(partial(
+            self.list_director_messages, project_id, delivery_mode="standing",
+            statuses=["unread", "acknowledged"],
+            protocol_version="v3" if self.v3 else "v2"))
+        items = standing
         if self.v3:
-            transient = self.list_director_messages(project_id,limit=8,delivery_mode="transient", protocol_version="v3",
-                                                   statuses=["unread","acknowledged"],needs_my_ack=True)["result"]
-            selected = [i for i in transient["items"] if i.get("ack_mode")=="broadcast"]
-            result["items"] = sorted(result["items"] + selected, key=lambda i:i["delivery"]["delivery_seq"])[:8]
-            result["matched_total"] += len(selected)
+            # `ack_mode="broadcast"` narrows the read to the deliveries this
+            # projection can show, so matched_total counts that whole set rather
+            # than a page of it (the Python filter this replaces dropped the
+            # at_least_n rows the reader returned alongside them).
+            transient, transient_total = _newest_rows(partial(
+                self.list_director_messages, project_id, delivery_mode="transient",
+                ack_mode="broadcast", protocol_version="v3",
+                statuses=["unread", "acknowledged"], needs_my_ack=True))
+            items = sorted(standing + transient,
+                           key=lambda i: i["delivery"]["delivery_seq"])[-8:]
+            matched_total += transient_total
         lines = []
-        for item in result["items"]:
+        for item in items:
             message, delivery = item["message"], item["delivery"]
             lines.append(json.dumps({
                 "message_id": message["message_id"],
@@ -671,10 +729,13 @@ class SQLiteDirectorMessaging:
                 "subject": self._redactor(message["subject"]),
                 "body_excerpt": self._redactor(message["body"])[:320],
             }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
-        included = len(lines)
+        # The lines are in ascending delivery order, so the budget has to give
+        # way at the FRONT of them: the newest row is the last one dropped.
+        available = len(lines)
+        included = available
         while True:
-            omitted = result["matched_total"] - included
-            parts = lines[:included]
+            omitted = matched_total - included
+            parts = lines[available - included:]
             if omitted:
                 parts.append(f"[omitted_active_standing={omitted}]")
             projection = "\n".join(parts)

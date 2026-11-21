@@ -129,43 +129,13 @@ def state_seed_text(context: dict, dependency_receipts, relay: bool) -> str:
 _UNDECLARED_TRUST = object()
 
 
-# What a post-compaction guidance block may spend: the reader's own page ceiling
-# (``list_director_messages`` accepts limit 1..100), how many rows the block
-# keeps, and the character budget the projection must fit.
-_GUIDANCE_PAGE = 100
+# What a post-compaction guidance block keeps: how many rows, and the character
+# budget the projection must fit. The row SELECTION is core.director_messaging's
+# `_newest_rows`, which drains the reader's forward pages - the same helper
+# `project_active_standing` uses for the fallback projection a host renders when
+# the server does not advertise this operation.
 _GUIDANCE_SLICE = 8
 _GUIDANCE_BUDGET = 3000
-
-
-def _newest_slice(read, slice_size: int = _GUIDANCE_SLICE):
-    """The NEWEST ``slice_size`` rows of a forward-paged inbox read, ascending.
-
-    ``read(after, limit)`` is ``list_director_messages`` and it pages FORWARD from
-    a delivery cursor, so its first page holds the OLDEST matching rows. A
-    newest-first selection therefore has to reach the END of the matching
-    stream: draining the pages is what makes that possible without widening the
-    reader's contract (``after``/``next_after``/``has_more`` keep meaning
-    exactly what they meant). Only the tail is retained, so memory stays bounded
-    by ``slice_size`` however long the inbox is.
-
-    Returns ``(rows, matched_total)``. The total is taken from the FIRST page,
-    where the cursor is 0, so it counts every matched row — the same number the
-    one-shot read used to report, which is what the guidance block turns into
-    ``omitted``.
-    """
-    kept, matched_total, after = [], 0, 0
-    while True:
-        result = read(after=after, limit=_GUIDANCE_PAGE)["result"]
-        if after == 0:
-            matched_total = result["matched_total"]
-        kept = (kept + result["items"])[-slice_size:]
-        next_after = result["next_after"]
-        # A page that produced nothing (or a cursor that did not move) cannot be
-        # paged past; stopping there returns the newest rows actually reached
-        # instead of spinning.
-        if not result["has_more"] or not result["items"] or next_after <= after:
-            return kept, matched_total
-        after = next_after
 
 
 class StateService:
@@ -255,7 +225,7 @@ class StateService:
         The block is a resume prompt, so recency is the whole point: the newest
         standing rules are the ones the driver has not worked under yet, while
         the oldest have already shaped every compaction before this one. Each
-        slice is therefore selected from the NEWEST end (``_newest_slice``
+        slice is therefore selected from the NEWEST end (``_newest_rows``
         drains the forward-paged read), the union is kept in one deterministic
         ascending order, the newest ``_GUIDANCE_SLICE`` rows of it survive, and
         the character budget is spent by dropping from the OLD end. ``included``
@@ -263,12 +233,13 @@ class StateService:
         and how many matched rows it left out (a count, never a list).
         """
         from core.state_driver_notes import _redact
+        from core.director_messaging import _newest_rows
         if not self.project_read_trusted or not (self.driver_id or self.actor.startswith("owner:")):
             raise StateGraphError("private_guidance")
-        standing, standing_total = _newest_slice(functools.partial(
+        standing, standing_total = _newest_rows(functools.partial(
             self.director_messages.list_director_messages, project_id,
             delivery_mode="standing", statuses=["unread", "acknowledged"],
-            protocol_version="v3"))
+            protocol_version="v3"), slice_size=_GUIDANCE_SLICE)
         if standing_only:
             # Owner standing-only selection: skip the broadcast transient query
             # and its count entirely; only the current project standing and the
@@ -276,10 +247,11 @@ class StateService:
             # optional default False preserves the original aggregate exactly.
             transient, transient_total = [], 0
         else:
-            transient, transient_total = _newest_slice(functools.partial(
+            transient, transient_total = _newest_rows(functools.partial(
                 self.director_messages.list_director_messages, project_id,
                 delivery_mode="transient", ack_mode="broadcast", needs_my_ack=True,
-                statuses=["unread", "acknowledged"], protocol_version="v3"))
+                statuses=["unread", "acknowledged"], protocol_version="v3"),
+                slice_size=_GUIDANCE_SLICE)
         total = standing_total + transient_total
         rows = []
         for item in standing + transient:

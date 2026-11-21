@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS state_steward_connections (
  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
  generation INTEGER NOT NULL, config_version INTEGER NOT NULL, auth_identity TEXT,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_probe_at TEXT, last_error TEXT,
- instructions TEXT, last_change TEXT NOT NULL);
+ instructions TEXT, last_change TEXT NOT NULL,
+ identity_confirmed INTEGER NOT NULL DEFAULT 0 CHECK(identity_confirmed IN (0,1)));
 CREATE TABLE IF NOT EXISTS state_steward_connection_tools (
  conn_id TEXT NOT NULL, raw_name TEXT NOT NULL, gw_name TEXT NOT NULL,
  definition_json TEXT NOT NULL, schema_sha256 TEXT NOT NULL,
@@ -95,8 +96,8 @@ FORBIDDEN_HEADERS = {"host", "cookie", "content-length", "content-type", "accept
                      "transfer-encoding", "mcp-session-id", "mcp-protocol-version",
                      "x-aitelier-driver-token"}
 LABEL_MAX = 40
-# The 24.1a auth kinds; `oauth` arrives with 24.1b.
-AUTH_KINDS_NOW = ("none", "header")
+# Every auth kind (24.1b: oauth, core.steward_oauth).
+AUTH_KINDS_NOW = ("none", "header", "oauth")
 RESTART_STREAM_DELAY = timedelta(seconds=90)   # tools_stream_down: past the ~60 s reopen window
 RESTART_LIMIT_WINDOW = timedelta(hours=24)
 REFRESH_INTERVAL = timedelta(seconds=60)
@@ -346,9 +347,9 @@ def delete_secret(conn_id: str) -> None:
 
 def prune_orphan_secrets(store) -> list[str]:
     """At startup: delete every secret file whose connection is gone (a delete that died
-    between its commit and the file's removal). The files are judged from a finished
-    read, and each is deleted only if its connection is still absent just before.
-    OAuth revocation comes with 24.1b."""
+    between its commit and the file's removal) - its OAuth tokens revoked first. The
+    files are judged from a finished read, and each is deleted only if its connection is
+    still absent just before (the revocation runs outside every transaction)."""
     directory = secrets_dir()
     if not directory.is_dir():
         return []
@@ -364,19 +365,34 @@ def prune_orphan_secrets(store) -> list[str]:
         with store.transaction() as conn:
             back = conn.execute("SELECT 1 FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
         if back is None:
+            _revoke_quietly(conn_id, read_secret(conn_id))
             delete_secret(conn_id)
             removed.append(conn_id)
     return removed
 
 
+def _revoke_quietly(conn_id: str, secret: dict | None) -> None:
+    """Revoke a connection's OAuth tokens where its server offers it; never fails the caller."""
+    tokens = (secret or {}).get("tokens")
+    if not isinstance(tokens, dict):
+        return
+    try:
+        from core import steward_oauth
+        steward_oauth.revoke(conn_id, tokens.get("conn_url") or "", secret)
+    except Exception:  # noqa: BLE001 - best effort; the tokens are deleted anyway
+        pass
+
+
 def secret_status(row) -> str:
-    """`set` / `unset` for a header connection (never the value); `set` for `none`."""
+    """`set` / `unset` for a header connection (never the value); `set` for `none`;
+    `set` / `oauth_needs_consent` for an oauth one (authorized and not refused)."""
     if row["auth_kind"] == "none":
         return "set"
+    if row["auth_kind"] == "oauth":
+        from core import steward_oauth
+        return steward_oauth.token_status(row["conn_id"])
     secret = read_secret(row["conn_id"])
-    if row["auth_kind"] == "header":
-        return "set" if secret and isinstance(secret.get("header_value"), str) and secret["header_value"] else "unset"
-    return "oauth_needs_consent"
+    return "set" if secret and isinstance(secret.get("header_value"), str) and secret["header_value"] else "unset"
 
 
 # ---------------------------------------------------------------- reserved endpoints
@@ -504,9 +520,11 @@ def _collisions(rows) -> set[tuple[str, str]]:
 
 
 def connection_usable(row) -> bool:
-    """A connection whose tools can be in the effective set: enabled, its secret set,
-    its auth kind available now (OAuth is 24.1b: never usable yet)."""
-    return bool(row["enabled"]) and row["auth_kind"] in AUTH_KINDS_NOW and secret_status(row) == "set"
+    """A connection whose tools can be in the effective set: enabled, its secret set (an
+    oauth one: authorized, not refused) and - oauth - its bound identity confirmed by the
+    owner (7.8.6)."""
+    return (bool(row["enabled"]) and row["auth_kind"] in AUTH_KINDS_NOW and secret_status(row) == "set"
+            and (row["auth_kind"] != "oauth" or bool(row["identity_confirmed"])))
 
 
 def effective(conn) -> list[dict]:
@@ -689,10 +707,8 @@ class StateStewardConnections:
                 ord(c) < 32 or c in "「」\"'" or 0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069
                 or ord(c) in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF) for c in label):
             raise StateGraphError("invalid_label")
-        if auth_kind not in ("none", "header", "oauth"):
-            raise StateGraphError("invalid_auth_kind")
         if auth_kind not in AUTH_KINDS_NOW:
-            raise StateGraphError("auth_kind_unavailable: oauth connections arrive with step 24.1b")
+            raise StateGraphError("invalid_auth_kind")
         if visibility not in ("private", "public"):
             raise StateGraphError("invalid_visibility")
         if auth_kind == "header":
@@ -703,18 +719,26 @@ class StateStewardConnections:
             header_name = None
         checked_address(url, require=False)
         moment = _iso(_utcnow())
+        dropped = None
         with self.store.transaction(write=True) as conn:
             label = label.strip()
             if conn.execute("SELECT 1 FROM state_steward_connections WHERE label=? AND conn_id<>?",
                             (label, conn_id)).fetchone():
                 raise StateGraphError("label_exists")
             old = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+            moved = old is not None and (old["url"], old["auth_kind"], old["header_name"]) != (url, auth_kind, header_name)
+            # An oauth connection is enabled only once the owner confirmed the identity its
+            # authorization bound (7.8.6); a new address or auth forgets that authorization.
+            if enabled and auth_kind == "oauth" and (old is None or moved or not old["identity_confirmed"]):
+                raise StateGraphError("identity_unconfirmed: authorize the connection and confirm the account first")
             if old is None:
-                conn.execute("INSERT INTO state_steward_connections VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                conn.execute("INSERT INTO state_steward_connections(conn_id,conn_uid,label,url,auth_kind,header_name,"
+                             "visibility,enabled,generation,config_version,auth_identity,created_at,updated_at,"
+                             "last_probe_at,last_error,instructions,last_change,identity_confirmed) "
+                             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
                              (conn_id, _secrets.token_hex(16), label, url, auth_kind, header_name, visibility,
                               int(bool(enabled)), 1, 1, None, moment, moment, None, None, None, "dashboard"))
             else:
-                moved = (old["url"], old["auth_kind"], old["header_name"]) != (url, auth_kind, header_name)
                 conn.execute("UPDATE state_steward_connections SET label=?,url=?,auth_kind=?,header_name=?,"
                              "visibility=?,enabled=?,generation=generation+?,config_version=config_version+1,"
                              "updated_at=?,last_change='dashboard' WHERE conn_id=?",
@@ -722,6 +746,11 @@ class StateStewardConnections:
                               moment, conn_id))
                 if old["url"] != url:
                     conn.execute("UPDATE state_steward_connection_tools SET egress=1 WHERE conn_id=?", (conn_id,))
+                if moved and old["auth_kind"] == "oauth":
+                    # The tokens were issued for the old address: never sent to a new one.
+                    conn.execute("UPDATE state_steward_connections SET auth_identity=NULL, identity_confirmed=0 "
+                                 "WHERE conn_id=?", (conn_id,))
+                    dropped = (read_secret(conn_id), old["url"])
                 if old["visibility"] == "private" and visibility == "public":
                     # The public default (7.8.4, 7.8.10a): url / *_url arguments blocked, added only.
                     for tool in conn.execute("SELECT raw_name,definition_json,blocked_args FROM "
@@ -732,18 +761,125 @@ class StateStewardConnections:
                             conn.execute("UPDATE state_steward_connection_tools SET blocked_args=? WHERE conn_id=? "
                                          "AND raw_name=?", (json.dumps(sorted(added)), conn_id, tool["raw_name"]))
             result = self._public(conn, self._row(conn, conn_id))
+        if dropped is not None:
+            from core import steward_oauth
+            _revoke_quietly(conn_id, dropped[0])
+            steward_oauth.drop_tokens(conn_id)
+            with self.store.transaction() as conn:
+                result = self._public(conn, self._row(conn, conn_id))
         tools_changed()
         return result
 
     def delete(self, conn_id):
+        """Remove a connection; an oauth one's tokens are revoked first where the server
+        offers it (and at startup for a file whose connection is gone)."""
         self._owner()
         with self.store.transaction(write=True) as conn:
             self._row(conn, conn_id)
             conn.execute("DELETE FROM state_steward_connection_tools WHERE conn_id=?", (conn_id,))
             conn.execute("DELETE FROM state_steward_connections WHERE conn_id=?", (conn_id,))
+        _revoke_quietly(conn_id, read_secret(conn_id))
         delete_secret(conn_id)
         tools_changed()
         return {"deleted": conn_id}
+
+    # -- OAuth (24.1b, 7.8.6): the owner session alone
+    def oauth_client_set(self, conn_id, client_id=None, client_secret=None):
+        """The owner's own registered OAuth client (Google); empty: dynamic registration."""
+        from core import steward_oauth
+        self._owner()
+        with self.store.transaction() as conn:
+            row = self._row(conn, conn_id)
+        if row["auth_kind"] != "oauth":
+            raise StateGraphError("secret_not_applicable: not an oauth connection")
+        for value, limit in ((client_id, 500), (client_secret, 2000)):
+            if value is not None and (not isinstance(value, str) or len(value) > limit
+                                      or any(ord(c) < 33 or ord(c) == 127 for c in value)):
+                raise StateGraphError("invalid_secret")
+        steward_oauth.set_client(conn_id, client_id or None, client_secret or None)
+        return {"conn_id": conn_id, "client": "set" if client_id else "unset"}
+
+    def oauth_start(self, conn_id):
+        """The authorization URL the owner's browser goes to (state bound to this session)."""
+        from core import steward_oauth
+        self._owner()
+        with self.store.transaction() as conn:
+            row = dict(self._row(conn, conn_id))
+        try:
+            return steward_oauth.start(row, self.actor)
+        except StateGraphError as exc:
+            self._probe_error(conn_id, str(exc).split(":")[0], probed=False)
+            raise
+
+    def oauth_complete(self, state, code=None, iss=None, error=None):
+        """The authorization server sent the owner's browser back: check the state (this
+        owner session, once, 10 minutes) and iss, exchange the code, keep the tokens and
+        the bound identity. Another identity than before: unconfirmed and disabled."""
+        from core import steward_oauth
+        self._owner()
+        conn_id = steward_oauth.conn_id_of_state(state)
+        if conn_id is None:
+            raise StateGraphError("oauth_state_unknown")
+        with self.store.transaction() as conn:
+            row = dict(self._row(conn, conn_id))
+        pending = steward_oauth.take_pending(conn_id, state, self.actor)
+        if error is not None:
+            self._probe_error(conn_id, "oauth_denied", probed=False)
+            raise StateGraphError("oauth_denied: the authorization was not given")
+        try:
+            done = steward_oauth.complete(row, pending, code, iss)
+        except StateGraphError as exc:
+            self._probe_error(conn_id, str(exc).split(":")[0], probed=False)
+            raise
+        secret = read_secret(conn_id) or {}
+        if isinstance(secret.get("tokens"), dict):
+            secret["tokens"]["conn_url"] = row["url"]
+            write_secret(conn_id, secret)
+        identity = done["identity"]
+        with self.store.transaction(write=True) as conn:
+            old = self._row(conn, conn_id)
+            same = identity is not None and old["auth_identity"] == identity and bool(old["identity_confirmed"])
+            conn.execute("UPDATE state_steward_connections SET auth_identity=?, identity_confirmed=?, enabled=?, "
+                         "generation=generation+1, config_version=config_version+1, last_error=NULL, updated_at=?, "
+                         "last_change='dashboard' WHERE conn_id=?",
+                         (identity, int(same), int(bool(old["enabled"]) and same), _iso(_utcnow()), conn_id))
+            result = self._public(conn, self._row(conn, conn_id))
+        tools_changed()
+        return result
+
+    def identity_confirm(self, conn_id, identity):
+        """The owner says the account the authorization bound is the right one (the value
+        shown must be the current one); only then can the connection be enabled."""
+        self._owner()
+        with self.store.transaction(write=True) as conn:
+            row = self._row(conn, conn_id)
+            if row["auth_kind"] != "oauth" or not row["auth_identity"] or secret_status(row) != "set":
+                raise StateGraphError("identity_unavailable: authorize the connection first")
+            if identity != row["auth_identity"]:
+                raise StateGraphError("identity_changed: the authorized account is not the one shown - reload")
+            conn.execute("UPDATE state_steward_connections SET identity_confirmed=1, config_version=config_version+1, "
+                         "updated_at=?, last_change='dashboard' WHERE conn_id=?", (_iso(_utcnow()), conn_id))
+            result = self._public(conn, self._row(conn, conn_id))
+        tools_changed()
+        return result
+
+    def oauth_sign_out(self, conn_id):
+        """Revoke and forget the tokens (the client registration stays): unauthorized,
+        unconfirmed, disabled."""
+        from core import steward_oauth
+        self._owner()
+        with self.store.transaction(write=True) as conn:
+            row = self._row(conn, conn_id)
+            if row["auth_kind"] != "oauth":
+                raise StateGraphError("secret_not_applicable: not an oauth connection")
+            conn.execute("UPDATE state_steward_connections SET auth_identity=NULL, identity_confirmed=0, enabled=0, "
+                         "generation=generation+1, config_version=config_version+1, updated_at=?, "
+                         "last_change='dashboard' WHERE conn_id=?", (_iso(_utcnow()), conn_id))
+        _revoke_quietly(conn_id, read_secret(conn_id))
+        steward_oauth.drop_tokens(conn_id)
+        tools_changed()
+        with self.store.transaction() as conn:
+            return self._public(conn, self._row(conn, conn_id))
 
     def tools_set(self, conn_id, tools):
         """The owner's ticks, per tool: allowed, outward, egress, blocked_args, daily_cap.
@@ -851,10 +987,13 @@ class StateStewardConnections:
         with self.store.transaction() as conn:
             return self._tools(conn, conn_id, instructions=self.steward.is_owner_session())
 
-    def _probe_error(self, conn_id, code):
+    def _probe_error(self, conn_id, code, *, probed=True):
         with self.store.transaction(write=True) as conn:
-            conn.execute("UPDATE state_steward_connections SET last_probe_at=?, last_error=? WHERE conn_id=?",
-                         (_iso(_utcnow()), code[:200], conn_id))
+            if probed:
+                conn.execute("UPDATE state_steward_connections SET last_probe_at=?, last_error=? WHERE conn_id=?",
+                             (_iso(_utcnow()), code[:200], conn_id))
+            else:
+                conn.execute("UPDATE state_steward_connections SET last_error=? WHERE conn_id=?", (code[:200], conn_id))
 
     # -- the steward host's writes
     def tools_resync_due(self, effective_hash):
@@ -910,6 +1049,7 @@ class StateStewardConnections:
                 "header_name": row["header_name"], "visibility": row["visibility"], "enabled": bool(row["enabled"]),
                 "generation": row["generation"], "config_version": row["config_version"],
                 "secret": secret_status(row), "auth_identity": row["auth_identity"],
+                "identity_confirmed": bool(row["identity_confirmed"]),
                 "created_at": row["created_at"], "updated_at": row["updated_at"],
                 "last_probe_at": row["last_probe_at"], "last_error": row["last_error"],
                 "last_change": row["last_change"], "usable": connection_usable(row),
@@ -949,6 +1089,11 @@ class StateStewardConnections:
 def ensure_schema(db) -> None:
     with db.get_connection() as conn:
         conn.executescript(SCHEMA)
+        # 24.1b: a connection table made by 24.1a lacks the identity mark.
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(state_steward_connections)")}
+        if "identity_confirmed" not in columns:
+            conn.execute("ALTER TABLE state_steward_connections ADD COLUMN identity_confirmed INTEGER NOT NULL "
+                         "DEFAULT 0 CHECK(identity_confirmed IN (0,1))")
         conn.commit()
 
 

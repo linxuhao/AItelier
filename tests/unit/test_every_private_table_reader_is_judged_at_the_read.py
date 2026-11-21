@@ -719,7 +719,9 @@ STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "s
                   "state_owner_channel_login_requests", "state_channel_alerts",
                   "state_steward_connections", "state_steward_connection_tools", "state_steward_turn_audience",
                   "state_steward_tools_served", "state_steward_restart_due", "state_steward_restart_done",
-                  "state_steward_tool_calls")
+                  "state_steward_tool_calls",
+                  # Step 24.1b: the confirmations and the dashboard-message marks.
+                  "state_steward_confirmations", "state_steward_dashboard_messages")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -884,6 +886,16 @@ class TestTheStewardReadersRefuseTheAnonymous:
             # The gateway answers on its own port alone (director 487); a loopback Host.
             ("POST", "http://127.0.0.1:4445/api/steward/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
             ("GET", "http://127.0.0.1:4445/api/steward/mcp", None),
+            ("POST", "/api/state/commands/get_steward_confirmation", {"code": C.STEWARD_CONFIRMATION}),
+            ("POST", "/api/state/commands/create_steward_confirmation",
+             {"name": f"mcp__sw__{C.STEWARD_CONNECTION}__tool", "arguments": {},
+              "requester_message_id": C.canary("state_steward_dashboard_messages")}),
+            ("GET", "/api/steward/confirmations", None),
+            ("POST", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/start", None),
+            ("GET", f"/api/steward/connections/oauth/callback?state={C.STEWARD_CONNECTION}.x&code=c", None),
+            ("POST", f"/api/steward/connections/{C.STEWARD_CONNECTION}/identity", {"identity": "x"}),
+            ("POST", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/signout", None),
+            ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/client", {"client_id": "c"}),
         ]
         results = {}
         try:

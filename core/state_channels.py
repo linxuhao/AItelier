@@ -88,6 +88,7 @@ from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 from core import drivers
+from core import state_steward_confirmations as confirmations
 from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, now
@@ -870,6 +871,12 @@ class StateChannels:
                      (message_id, channel, sender_ref, channel_message_ref, moment.isoformat(), channel_at))
         matched = match_phrase(conn, body)
         result = {"message_id": message_id, "duplicate": False, "approval": None}
+        # Step 24.1b (design-steward 7.8.9): the requester's exact `确认 <code>` / `取消 <code>`
+        # for a confirmation of theirs is decided here, in the transaction that writes it.
+        confirmation = confirmations.match_reply(conn, body, channel=channel, sender_ref=sender_ref,
+                                                 written_at=written_at)
+        if confirmation is not None:
+            result["confirmation"] = confirmation
         if matched is not None and written_at is None:
             result["approval"] = {"proposal_id": matched["proposal_id"], "action": matched["action"],
                                   "outcome": "refused", "refusal": "approval_undated"}
@@ -1490,8 +1497,17 @@ class StateChannels:
         same text field on the same stored row)."""
         matched = {}
 
+        confirmed = {}
+
         def written(conn, message_id):
             if project_id == steward_project() and self.steward.is_owner_session():
+                # Step 24.1b: the browser session's message can ask for an outward action
+                # (the dashboard is its conversation) and can confirm one, by server time.
+                confirmations.record_dashboard_message(conn, message_id)
+                decided = confirmations.match_reply(conn, body, channel=confirmations.DASHBOARD, sender_ref=None,
+                                                    written_at=_now())
+                if decided is not None:
+                    confirmed.update(decided)
                 found = match_phrase(conn, body)
                 if found is not None:
                     matched.update(found, message_id=message_id)
@@ -1502,6 +1518,8 @@ class StateChannels:
         if matched:
             record = {"phrase": matched["phrase"], "message_id": matched["message_id"]}
             result = {**result, "approval": self._decide(matched, self.actor, record)}
+        if confirmed:
+            result = {**result, "confirmation": dict(confirmed)}
         return result
 
     # ---------------------------------------------------------------- the decision

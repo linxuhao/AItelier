@@ -66,6 +66,10 @@ services:
       # opens in its own process; 4444 answers 404 for it. Published below on the
       # host's loopback alone - the DSH host's steward dials 127.0.0.1:4445.
       AITELIER_STEWARD_GATEWAY_PORT: "4445"
+      # Step 24.1b (design-steward 7.8.6): the dashboard's public https address; a
+      # steward connection's OAuth callback is <it>/api/steward/connections/oauth/callback.
+      # Empty: OAuth connections cannot be authorized (oauth_redirect_unconfigured).
+      AITELIER_PUBLIC_BASE_URL: "${AITELIER_PUBLIC_BASE_URL:-}"
       # MCP Host allowlist is operator-configurable; `:*` is FastMCP's official
       # wildcard-port form, so the public bare host and explicit ports pass.
       AITELIER_MCP_ALLOWED_HOSTS: "${AITELIER_MCP_ALLOWED_HOSTS:-aitelier.linxuhao.app,aitelier.linxuhao.app:*}"

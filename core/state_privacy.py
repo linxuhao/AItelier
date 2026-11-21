@@ -142,6 +142,9 @@ PRIVATE_STATE_TABLES = frozenset({
     "state_steward_connections", "state_steward_connection_tools",
     "state_steward_tools_served", "state_steward_restart_due", "state_steward_restart_done",
     "state_steward_tool_calls",
+    # Step 24.1b: confirmations of outward actions (the exact arguments - a mail's text - and
+    # the text the requester read) and the marks of the owner's dashboard messages.
+    "state_steward_confirmations", "state_steward_dashboard_messages",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

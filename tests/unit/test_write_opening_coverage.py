@@ -56,7 +56,9 @@ PROJECTLESS = {action: "the request names no project: the steward's connection r
                for action in ("steward_connection_upsert", "steward_connection_delete",
                               "steward_connection_tools_set", "steward_connection_secret_set",
                               "steward_connection_probe", "steward_connection_refresh",
-                              "steward_tools_resync_due")}
+                              "steward_tools_resync_due",
+                              # Step 24.1b: the host's confirmation request and read.
+                              "create_steward_confirmation", "get_steward_confirmation")}
 _PROJECT_FIELDS = {"project_id", "sender_project_id", "target_project_id", "attempt_id", "delivery_id",
                    "node_key", "driver_id"}
 

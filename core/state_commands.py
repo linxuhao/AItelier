@@ -1353,6 +1353,21 @@ class StewardToolsResyncDue(Request):
     effective_hash: str = Field(min_length=64, max_length=64)
 
 
+# Step 24.1b (design-steward 7.8.9): outward actions confirmed by the person who asked.
+# Both are the steward HOST's (code, never the model): the requester and the conversation
+# come from the owner message named, and the text the person reads is written by code.
+class CreateStewardConfirmation(Request):
+    name: str = Field(min_length=1, max_length=100, description="the tool's public name mcp__sw__<conn_id>__<gw_name>")
+    arguments: dict[str, Any] = Field(description="the exact arguments the tool will run with")
+    requester_message_id: str = Field(min_length=1, max_length=100, description=(
+        "the newest owner message of this turn (a chat channel's or the dashboard's)"))
+    audience: str = Field(default="owner", min_length=1, max_length=260)
+
+
+class GetStewardConfirmation(Request):
+    code: str = Field(min_length=5, max_length=5)
+
+
 class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
@@ -1657,6 +1672,7 @@ WRITE_REQUESTS = {
     "steward_connection_secret_set": StewardConnectionSecretSet,
     "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
     "steward_tools_resync_due": StewardToolsResyncDue,
+    "create_steward_confirmation": CreateStewardConfirmation, "get_steward_confirmation": GetStewardConfirmation,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -2052,6 +2068,8 @@ def _handlers(service) -> dict:
         "steward_connection_probe": service.steward_connections.probe,
         "steward_connection_refresh": service.steward_connections.refresh,
         "steward_tools_resync_due": service.steward_connections.tools_resync_due,
+        "create_steward_confirmation": service.steward_confirmations.create,
+        "get_steward_confirmation": service.steward_confirmations.get,
     }
 
 
@@ -2157,6 +2175,11 @@ def _driver_defaults(service, action, arguments):
 # the turn audience step 23's set_steward_turn_audience recorded. steward_connection_refresh
 # re-reads one REGISTERED connection's tool list (discovery fields only: never allowed,
 # outward, visibility or enabled); the steward cannot change its connections otherwise.
+# Step 24.1b (design-steward 7.8.9): create_steward_confirmation and get_steward_confirmation
+# are the HOST's too: the first stores the exact call and writes, by code, the text the
+# requester reads (the requester derived from the owner message it names); the second
+# hands run_confirmed the STORED name and arguments. Neither confirms anything: only the
+# requester's own exact reply does (core.state_channels), and the gateway consumes it.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -2174,6 +2197,7 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
     "note_family_memory",
     "steward_tools_resync_due", "steward_connection_refresh",
+    "create_steward_confirmation", "get_steward_confirmation",
     # Step 25 (design-steward 7.9.4, 7.9.5): post_group_notice is the HOST's, called in code
     # with the schedule row that fired (the model has no tool for it); the three list writes are
     # the family list tools (add and check from a group turn too, remove in an owner turn only).

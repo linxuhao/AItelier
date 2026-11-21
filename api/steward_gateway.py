@@ -35,11 +35,16 @@ turn's audience before that turn's first step runs (a failed record rejects the 
 and no record reads as not the owner's (fail closed). `tools/call` is judged in order -
 connection usable, tool allowed and unchanged, private connection only in an `owner`
 turn, no blocked argument (at any depth; on a public connection also no `url` / `*_url`
-key anywhere in the arguments unless the owner unblocked that path), daily cap, outward
-tools
-need a confirmation (24.1b; until then refused) - and, in the same write transaction,
-a pending ledger row is reserved (so two concurrent calls never both pass the last
-unit of a cap); then forwarded, and the row completed.
+key anywhere in the arguments unless the owner unblocked that path), daily cap, an
+outward tool consumes one confirmation its requester gave for exactly these arguments
+(core.state_steward_confirmations, 24.1b) - and, in the same write transaction, a
+pending ledger row is reserved (so two concurrent calls never both pass the last unit
+of a cap) and the confirmation consumed; then forwarded, and the row completed. An
+outward call is forwarded once and never retried.
+
+An oauth connection's upstream client carries `OAuthBearer` (core.steward_oauth): the
+token is refreshed under a minute before expiry, and once after an upstream 401, without
+reopening the session.
 """
 from __future__ import annotations
 
@@ -59,7 +64,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.websockets import WebSocketClose
 
 from api import authz
+from core import state_steward_confirmations as sconf
 from core import state_steward_connections as sc
+from core import steward_oauth
 from core.state_graph import StateGraphError, StateGraphStore
 
 logger = logging.getLogger(__name__)
@@ -275,6 +282,32 @@ def transport_for(address: str):
     return PinnedTransport(address)
 
 
+class OAuthBearer(httpx.Auth):
+    """The connection's access token on every upstream request: refreshed when under a
+    minute is left, and once after a 401 (then the request is sent once more)."""
+
+    def __init__(self, conn_id: str, url: str, store):
+        self.conn_id, self.url, self.store = conn_id, url, store
+
+    async def async_auth_flow(self, request):
+        token = await asyncio.to_thread(steward_oauth.ensure_token, self.conn_id, self.url, store=self.store)
+        request.headers["Authorization"] = "Bearer " + token
+        response = yield request
+        if response.status_code == 401:
+            token = await asyncio.to_thread(steward_oauth.ensure_token, self.conn_id, self.url, stale=token,
+                                            store=self.store)
+            request.headers["Authorization"] = "Bearer " + token
+            yield request
+
+
+class _Refused(Exception):
+    """A refusal found after the judgement wrote: raised to roll its transaction back."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
 class SessionBroken(Exception):
     """The upstream session is gone (closed stream, 404): reopen once for a non-outward tool."""
 
@@ -295,11 +328,13 @@ class Upstream:
 
     async def open(self):
         address = await asyncio.to_thread(sc.checked_address, self.row["url"])
-        headers = {}
+        headers, auth = {}, None
         if self.row["auth_kind"] == "header":
             secret = await asyncio.to_thread(sc.read_secret, self.conn_id) or {}
             headers[self.row["header_name"] or "Authorization"] = secret.get("header_value", "")
-        self.task = asyncio.create_task(self._run(address, headers))
+        elif self.row["auth_kind"] == "oauth":
+            auth = OAuthBearer(self.conn_id, self.row["url"], _store(self.gateway.app))
+        self.task = asyncio.create_task(self._run(address, headers, auth))
         try:
             await asyncio.wait_for(self.ready.wait(), OPEN_TIMEOUT)
         except asyncio.TimeoutError:
@@ -308,11 +343,12 @@ class Upstream:
             await self.close()
             raise sc.ProbeFailed(self.error or "upstream_unavailable")
 
-    async def _run(self, address, headers):
+    async def _run(self, address, headers, auth=None):
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
         try:
-            async with httpx.AsyncClient(headers=headers, transport=transport_for(address), follow_redirects=False,
+            async with httpx.AsyncClient(headers=headers, auth=auth, transport=transport_for(address),
+                                         follow_redirects=False,
                                          timeout=httpx.Timeout(30.0, read=UPSTREAM_TIMEOUT)) as client:
                 async with streamable_http_client(self.row["url"], http_client=client) as (read, write, _sid):
                     async with ClientSession(read, write, message_handler=self._message) as session:
@@ -322,7 +358,9 @@ class Upstream:
                         self.ready.set()
                         await self.closing.wait()
         except BaseException as exc:  # noqa: BLE001 - the session is simply gone
-            if not isinstance(exc, asyncio.CancelledError):
+            if _refused_refresh(exc):
+                self.error = self.error or "connection_unavailable"
+            elif not isinstance(exc, asyncio.CancelledError):
                 self.error = self.error or ("upstream_unavailable:" + type(exc).__name__)
         finally:
             self.session = None
@@ -372,6 +410,13 @@ def _session_lost(exc: BaseException) -> bool:
                                                        (CONNECTION_CLOSED, "Connection closed"))
     return isinstance(exc, (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream,
                             httpx.TransportError))
+
+
+def _refused_refresh(exc: BaseException) -> bool:
+    """A refused OAuth refresh, also when the mcp client's task group wraps it."""
+    if isinstance(exc, steward_oauth.RefreshRefused):
+        return True
+    return any(_refused_refresh(e) for e in getattr(exc, "exceptions", ()) or ())
 
 
 def fingerprint(row) -> tuple:
@@ -599,7 +644,7 @@ class Gateway:
         for attempt in (1, 2):
             upstream = await self.upstream(row)
             try:
-                result = await asyncio.wait_for(_call_tool(upstream.session, raw_name, arguments), UPSTREAM_TIMEOUT)
+                result = await self._within_session(upstream, _call_tool(upstream.session, raw_name, arguments))
                 return result.model_dump(mode="json", by_alias=True, exclude_none=True)
             except asyncio.TimeoutError:
                 raise
@@ -612,6 +657,27 @@ class Gateway:
             if not retry or attempt == 2:
                 raise SessionBroken(type(broken).__name__)
         raise SessionBroken("unreachable")
+
+    @staticmethod
+    async def _within_session(upstream, coroutine):
+        """Await one request while its session lives. The mcp client does not answer a
+        pending request when its transport dies under it (a refused OAuth refresh inside a
+        POST, an HTTP error status): the session's own task ends instead, so that ends the
+        wait - a refused refresh as RefreshRefused, anything else as a lost session."""
+        call = asyncio.ensure_future(coroutine)
+        waiting = {call} | ({upstream.task} if upstream.task is not None else set())
+        done, _ = await asyncio.wait(waiting, timeout=UPSTREAM_TIMEOUT, return_when=asyncio.FIRST_COMPLETED)
+        if call in done:
+            return call.result()
+        call.cancel()
+        with suppress(BaseException):
+            await call
+        if not done:
+            raise asyncio.TimeoutError()
+        if upstream.error == "connection_unavailable":
+            raise steward_oauth.RefreshRefused("oauth_needs_consent")
+        import anyio
+        raise anyio.ClosedResourceError()
 
     # -- JSON-RPC
     async def handle(self, message, driver: dict, session_id: str | None) -> dict | None:
@@ -658,39 +724,52 @@ class Gateway:
 
         def judge():
             """One BEGIN IMMEDIATE transaction: the judgement and, when it passes, the
-            reserved ledger row (the daily cap counts reserved rows too)."""
+            reserved ledger row (the daily cap counts reserved rows too) and, for an
+            outward call, the confirmation consumed (7.8.9 step 6). A refusal after the
+            reservation rolls the whole transaction back, the row with it."""
             with _store(self.app).transaction(write=True) as conn:
                 row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
                 if row is None:
-                    return "tool_not_allowed", None, None, None
+                    return "tool_not_allowed", None, None, None, None
                 if not sc.connection_usable(row):
-                    return "connection_unavailable", None, None, None
+                    return "connection_unavailable", None, None, None, None
                 entry = next((e for e in sc.effective(conn) if e["conn_id"] == conn_id and e["gw_name"] == gw), None)
                 if entry is None:
-                    return "tool_not_allowed", None, None, None
+                    return "tool_not_allowed", None, None, None, None
                 if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
-                    return "not_visible_in_this_turn", None, None, None
+                    return "not_visible_in_this_turn", None, None, None, None
                 if sc.blocked_present(arguments, entry["blocked_args"]) or (
                         row["visibility"] == "public"
                         and sc.url_argument_present(arguments, sc.unblocked_url_paths(entry))):
-                    return "argument_blocked", None, None, None
-                if entry["outward"]:
-                    if entry["daily_cap"] is not None and sc.calls_today(conn, conn_id, entry["raw_name"]) >= entry["daily_cap"]:
-                        return "daily_cap_reached", None, None, None
-                    return "confirmation_required", None, None, None
+                    return "argument_blocked", None, None, None, None
                 call_id = sc.reserve_call(conn, conn_id, entry["raw_name"], entry["daily_cap"])
                 if call_id is None:
-                    return "daily_cap_reached", None, None, None
-                return None, dict(row), entry, call_id
+                    return "daily_cap_reached", None, None, None, None
+                code = None
+                if entry["outward"]:
+                    try:
+                        code = sconf.consume(conn, row, entry["raw_name"], arguments)
+                    except StateGraphError:
+                        raise _Refused("invalid_arguments")
+                    if code is None:
+                        raise _Refused("confirmation_required")
+                return None, dict(row), entry, call_id, code
 
-        refusal, row, entry, call_id = await asyncio.to_thread(judge)
+        def judged():
+            try:
+                return judge()
+            except _Refused as refused:  # the transaction rolled back: no row, nothing consumed
+                return refused.code, None, None, None, None
+
+        refusal, row, entry, call_id, confirmation = await asyncio.to_thread(judged)
         texts = {"tool_not_allowed": "this tool is not allowed for you",
                  "connection_unavailable": "this connection is not available now",
                  "not_visible_in_this_turn": "this connection is not available in this conversation",
                  "argument_blocked": "an argument of this call is blocked by your owner",
                  "daily_cap_reached": "this tool reached its daily limit",
                  "confirmation_required": "an outward tool runs only after the requester confirms "
-                                          "(call request_confirmation first)"}
+                                          "(call request_confirmation first)",
+                 "invalid_arguments": "the arguments are not canonical JSON text"}
         if refusal:
             logger.info("steward gateway: tools/call %s refused %s", name, refusal)
             return _error(mid, refusal, texts[refusal])
@@ -705,6 +784,8 @@ class Gateway:
             rpc_error = "upstream_timeout"
         except (SessionBroken, sc.ProbeFailed) as exc:
             rpc_error = getattr(exc, "code", None) or "upstream_unavailable"
+        except steward_oauth.RefreshRefused:
+            rpc_error = "connection_unavailable"
         except StateGraphError as exc:
             rpc_error = str(exc).split(":")[0]
         except Exception as exc:  # noqa: BLE001 - an upstream JSON-RPC error, by its code
@@ -717,6 +798,13 @@ class Gateway:
         await asyncio.to_thread(sc.finish_call, _store(self.app), call_id, rpc_error=rpc_error,
                                 is_error=is_error, request_bytes=request_bytes, response_bytes=response_bytes,
                                 duration_ms=duration)
+        if confirmation is not None:
+            # The record says how its one forward went (never the result body).
+            def settle():
+                with _store(self.app).transaction(write=True) as conn:
+                    sconf.finish(conn, confirmation, not rpc_error and not is_error,
+                                 rpc_error or ("tool_error" if is_error else None))
+            await asyncio.to_thread(settle)
         logger.info("steward gateway: tools/call %s status=%s bytes=%d/%d %dms", name,
                     rpc_error or ("tool_error" if is_error else "ok"), request_bytes, response_bytes, duration)
         return answer

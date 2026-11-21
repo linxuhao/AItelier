@@ -59,7 +59,9 @@ LIST_PRIVATE={'state_steward_list_items'}
 # PRIVATE, each with its own canary (the turn audience is step 23's, above).
 CONNECTION_PRIVATE={'state_steward_connections','state_steward_connection_tools',
                     'state_steward_tools_served','state_steward_restart_due','state_steward_restart_done',
-                    'state_steward_tool_calls'}
+                    'state_steward_tool_calls',
+                    # Step 24.1b: the confirmations of outward actions and the dashboard-message marks.
+                    'state_steward_confirmations','state_steward_dashboard_messages'}
 BASE='f367c46f2cd29d4d3306aa6ca540bf8c54ebbeb9'
 # Both history rows replay a pre-policy source out of the git object store, so
 # they need a checkout WITH history, not a docker daemon.

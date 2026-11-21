@@ -211,6 +211,9 @@ class StateService:
         # Step 24.1a: the steward's own MCP connections (after the steward: its identity checks).
         from core.state_steward_connections import StateStewardConnections
         self.steward_connections = StateStewardConnections(self.store, actor, driver_id, steward=self.steward)
+        # Step 24.1b: outward actions confirmed by the person who asked.
+        from core.state_steward_confirmations import StateStewardConfirmations
+        self.steward_confirmations = StateStewardConfirmations(self.store, actor, driver_id, steward=self.steward)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

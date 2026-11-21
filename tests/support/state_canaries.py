@@ -43,6 +43,7 @@ STEWARD_MEMORY_REQUEST = "memreq-canary"
 STEWARD_SCHEDULE = "sch-canary"
 CHANNEL_MESSAGE = "message-source-canary"
 STEWARD_CONNECTION = "canaryconn"
+STEWARD_CONFIRMATION = "KCNRY"
 
 
 def canary(table: str) -> str:
@@ -300,6 +301,17 @@ def _plan():
             ("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day,rpc_error,is_error) "
              "VALUES(?,'tool',?,'2999-01-01',?,0)"),
             (STEWARD_CONNECTION, now, c("state_steward_tool_calls"))),
+        # Step 24.1b: a pending confirmation of an outward action (the canary in its
+        # arguments and its text) and the mark of an owner dashboard message.
+        "state_steward_confirmations": (
+            ("INSERT INTO state_steward_confirmations(code,conn_id,raw_name,gw_name,args_json,args_sha256,"
+             "requester_kind,channel,conversation_ref,sender_ref,requester_message_id,audience,message_text,status,"
+             "created_at) VALUES(?,?,'tool','tool',?,'0','owner','dashboard',NULL,NULL,?,'owner',?,'pending',?)"),
+            (STEWARD_CONFIRMATION, STEWARD_CONNECTION, '{"body": "%s"}' % c("state_steward_confirmations"),
+             c("state_steward_confirmations"), c("state_steward_confirmations"), now)),
+        "state_steward_dashboard_messages": (
+            "INSERT INTO state_steward_dashboard_messages(message_id,at) VALUES(?,?)",
+            (c("state_steward_dashboard_messages"), now)),
     }
 
 

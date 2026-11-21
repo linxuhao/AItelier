@@ -43,6 +43,7 @@ export const SHIPPED = [
   join('steward.md'),
   join('host.d.ts'),
   join('hosts', 'local.mjs'),
+  join('hosts', 'local-commands.mjs'),
   join('index.mjs'),
   join('lib', 'core.mjs'),
   join('lib', 'goal.mjs'),

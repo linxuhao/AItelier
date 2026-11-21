@@ -445,6 +445,71 @@ def _rejects_thinking_disabled(model: str) -> bool:
     return "glm" in model.lower()
 
 
+#: The generation parameters `_apply_binding` injects on AItelier's own
+#: initiative — the caller never asked for any of them. They live in two
+#: places: TOP-LEVEL (`thinking` / `reasoning_effort` for native Anthropic,
+#: whose own dialect has no `extra_body`) and INSIDE `extra_body`, which is
+#: forwarded verbatim to every other provider (`thinking`, `reasoning_effort`,
+#: `reasoning_split` on minimax, `chat_template_kwargs`).
+#:
+#: Order is load-bearing: a message that names the NESTED key is answered by
+#: dropping just that key, and only a message that names `extra_body` itself is
+#: answered by dropping the whole envelope.
+_INJECTED_GENERATION_PARAMS = (
+    "chat_template_kwargs",
+    "reasoning_split",
+    "reasoning_effort",
+    "thinking",
+    "extra_body",
+)
+
+
+def _is_request_shaped(exc: BaseException) -> bool:
+    """A 400: the request is wrong in a way every endpoint would repeat.
+
+    That is exactly why both the failover walk and the retry decorator refuse
+    them — and exactly why a 400 is fatal to the step unless we can fix the
+    request ourselves.
+    """
+    return (isinstance(exc, litellm.exceptions.BadRequestError)
+            or getattr(exc, "status_code", None) == 400)
+
+
+def _named_injected_param(text: str) -> str | None:
+    """The first generation parameter WE injected that `text` names, if any."""
+    for name in _INJECTED_GENERATION_PARAMS:
+        if name in text:
+            return name
+    return None
+
+
+def _drop_injected_param(kwargs: dict, name: str) -> str:
+    """Delete `name` from wherever `_apply_binding` put it.
+
+    Returns a short description of what was removed ("extra_body.thinking"), or
+    "" when this request does not carry the key at all — in which case there is
+    nothing to fix and the caller must raise instead of retrying blind.
+
+    `extra_body` is popped as a whole only when it EMPTIES, so dropping one
+    nested key (the common case) keeps the rest of the envelope.
+    """
+    dropped: list[str] = []
+    if name != "extra_body":
+        if name in kwargs:
+            kwargs.pop(name, None)
+            dropped.append(name)
+        extra_body = kwargs.get("extra_body")
+        if isinstance(extra_body, dict) and name in extra_body:
+            extra_body.pop(name, None)
+            dropped.append(f"extra_body.{name}")
+            if not extra_body:
+                kwargs.pop("extra_body", None)
+    elif "extra_body" in kwargs:
+        kwargs.pop("extra_body", None)
+        dropped.append("extra_body")
+    return ", ".join(dropped)
+
+
 def resolve_agent_model(model_name: str) -> str:
     """Apply the single-model pin, if one is set, to an already-resolved model.
 
@@ -806,6 +871,10 @@ class AIGateway:
         # Cleared for good the first time an endpoint rejects the thinking-off
         # keys — see `_apply_binding`'s else branch and `_complete_prebuilt`.
         self._suppress_thinking = True
+        # Set once a 400 named an injected generation parameter and that key
+        # was dropped for the retry. Bounds the self-correction to ONE extra
+        # call per gateway: a second refusal is a real request-shaped failure.
+        self._dropped_injected_param: str | None = None
         self._burst_hits = 0
         # Start at the first candidate whose usage window is not already known
         # to be spent, so a fresh gateway does not re-discover the same
@@ -1353,6 +1422,50 @@ class AIGateway:
             candidate=f"{self._candidate_ix + 1}/{len(self._candidates)}",
             session=self._opencode_session_id, native=native)
 
+    def _drop_refused_param(self, kwargs: dict, exc: Exception) -> str:
+        """Drop the parameter a 400 named, if WE are the ones who injected it.
+
+        The thinking-OFF guard in `_complete_prebuilt` cannot serve a role that
+        asked for thinking (it is gated on `not self.enable_thinking`), and it
+        never reads what the refusal actually says — it just assumes the
+        thinking-off keys were the problem. That leaves the mirror-image
+        failure uncovered, and it is the one measured on the worker route: the
+        gateway built with `enable_thinking=True` sends `extra_body:
+        {thinking: {type: enabled}}`, the pool endpoint answers 400
+        ("Unrecognized request argument … thinking"), `BadRequestError` is in
+        neither FAILOVER_EXCEPTIONS nor RETRYABLE_EXCEPTIONS, and the step died
+        with the SSE stream already open — the client saw only "Unexpected end
+        of JSON input".
+
+        So: trust the refusal's own text. If it names a key we injected, remove
+        exactly that key and try this endpoint once more; if it names nothing we
+        injected, the request is genuinely wrong and raises as before. Bounded
+        to one retry per gateway (`_dropped_injected_param`), because a second
+        refusal means the key was not the whole story.
+
+        Returns "" when nothing was dropped, i.e. when the caller must raise.
+        """
+        if self._dropped_injected_param:
+            return ""
+        if not _is_request_shaped(exc):
+            return ""
+        name = _named_injected_param(str(exc))
+        if not name:
+            return ""
+        dropped = _drop_injected_param(kwargs, name)
+        if not dropped:
+            # Named, but this request never carried it — not our 400 to fix.
+            return ""
+        self._dropped_injected_param = name
+        # Loud and once, on the same channel as the other degradations: a step
+        # that suddenly thinks (or stops declaring an effort) has to be
+        # explainable from the log, and `active_model` is the endpoint that
+        # refused it.
+        print(f"[ai_router] {self.active_model} rejected an injected "
+              f"generation parameter ({type(exc).__name__}); dropped "
+              f"{dropped} and retrying once: {str(exc)[:160]}", flush=True)
+        return dropped
+
     def _complete_prebuilt(self, kwargs: dict, *, native: bool = False):
         """One completion, walking this model's candidates on endpoint errors.
 
@@ -1472,6 +1585,18 @@ class AIGateway:
                           f"once without them: {str(e)[:160]}", flush=True)
                     kwargs.pop("extra_body", None)
                     self._apply_binding(kwargs)
+                    continue
+                # ... and the case that guard cannot serve, because it is
+                # gated on thinking being OFF: a role that WANTS thinking has
+                # its own keys refused. There the refusal's TEXT has to decide
+                # which key goes — see `_drop_refused_param`. Left below the
+                # text-blind branch on purpose: the thinking-off path keeps
+                # degrading on ANY 400 (two tests pin that), while a
+                # thinking-ON role is only retried when the 400 names
+                # something AItelier injected. No `_apply_binding` on this
+                # path: the endpoint did not change, and rebinding would
+                # re-inject exactly the key that was just refused.
+                if self._drop_refused_param(kwargs, e):
                     continue
                 raise self._explain_auth(e) from e
             # Stamp WHICH endpoint answered onto the usage record. That record

@@ -1072,7 +1072,7 @@ export interface StewardConnection {
   conn_id: string; label: string; url: string; auth_kind: 'none' | 'header' | 'oauth';
   header_name: string | null; visibility: StewardVisibility; enabled: boolean;
   generation: number; config_version: number; secret: 'set' | 'unset' | 'oauth_needs_consent';
-  auth_identity: string | null; created_at: string; updated_at: string;
+  auth_identity: string | null; identity_confirmed?: boolean; created_at: string; updated_at: string;
   last_probe_at: string | null; last_error: string | null; last_change: string; usable: boolean;
   tool_counts: {all: number; allowed: number; outward: number; changed: number; new: number};
 }
@@ -1095,7 +1095,7 @@ export interface StewardConnectionTools {
   tools: StewardConnectionTool[]; error?: string;
 }
 export interface StewardConnectionInput {
-  conn_id: string; label: string; url: string; auth_kind: 'none' | 'header';
+  conn_id: string; label: string; url: string; auth_kind: 'none' | 'header' | 'oauth';
   header_name?: string | null; visibility: StewardVisibility; enabled: boolean;
 }
 export type StewardToolChange = {raw_name: string} & Partial<Pick<StewardConnectionTool,
@@ -1120,4 +1120,28 @@ export function setStewardConnectionSecret(connId: string, value: string | null)
 }
 export function probeStewardConnection(connId: string): Promise<StewardConnectionTools> {
   return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/probe');
+}
+
+// ── OAuth for a connection and the confirmations of outward actions (step 24.1b,
+//    design 7.8.6, 7.8.9). Owner session only; a client secret is never answered back.
+export interface StewardConfirmation {
+  code: string; conn_id: string; raw_name: string; gw_name: string; requester_kind: 'owner' | 'member';
+  channel: string; status: string; created_at: string; confirmed_at: string | null; consumed_at: string | null;
+  result: {error?: string} | null; message_text: string;
+}
+export function setStewardOAuthClient(connId: string, clientId: string | null, clientSecret: string | null): Promise<unknown> {
+  return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/client',
+    {client_id: clientId, client_secret: clientSecret});
+}
+export function startStewardOAuth(connId: string): Promise<{conn_id: string; authorize_url: string}> {
+  return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/start');
+}
+export function confirmStewardIdentity(connId: string, identity: string): Promise<StewardConnection> {
+  return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/identity', {identity});
+}
+export function signOutStewardOAuth(connId: string): Promise<StewardConnection> {
+  return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/signout');
+}
+export function listStewardConfirmations(): Promise<{confirmations: StewardConfirmation[]}> {
+  return _get('/api/steward/confirmations');
 }

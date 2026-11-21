@@ -1011,8 +1011,11 @@ def test_the_daily_cap_counts_the_owners_day(world, server, monkeypatch):
     # The day is the owner's time zone: 23:30 UTC on one day is the next day in Paris.
     from datetime import datetime, timezone
     monkeypatch.setenv("AITELIER_OWNER_TZ", "Europe/Paris")
-    late = datetime(2026, 11, 21, 23, 30, tzinfo=timezone.utc)
-    assert sc._local_day(late) == "2026-11-22"
+    # A fixed day far from any real run: a hard-coded "today" made this test red
+    # for the whole Paris day it expected to be empty (2026-11-21T23:00Z to
+    # 2026-11-22T23:00Z): the calls above, made at real time, fell on that day.
+    late = datetime(2001, 1, 1, 23, 30, tzinfo=timezone.utc)
+    assert sc._local_day(late) == "2001-01-02"
     with world.db.get_connection() as conn:
         assert sc.calls_today(conn, "media", "web_search", late) == 0
 

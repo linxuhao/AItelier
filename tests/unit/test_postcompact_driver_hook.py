@@ -1237,6 +1237,29 @@ def test_malformed_standing_only_selector_is_not_treated_as_advertised(
     assert "driver_postcompact_guidance" not in json.dumps(StateStub.requests)
 
 
+def test_the_fallback_notice_pins_the_only_reason_a_read_can_reach(tmp_path, state_server):
+    """The fallback notice names the advertisement, verbatim, and nothing dead.
+
+    ``_read_sources`` runs only after ``_authorized_connection`` matched
+    ``driver_whoami`` to this session's binding - it raises otherwise - so the
+    identity half of the retired flag was a literal True and the
+    ``driver identity not established`` text its branch carried was prose no
+    code path could emit. This pins the surviving notice word for word, so the
+    reachable fallback cannot drift, and pins the dead sentence out so a future
+    flag cannot quietly reintroduce a reason the hook never reaches.
+    """
+    StateStub.operations = {"driver_postcompact_guidance": LEGACY_OPERATION}
+    StateStub.guidance = GUIDANCE_V1
+    context = invoke(tmp_path, state_server, tracked=True)["hookSpecificOutput"]["additionalContext"]
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    assert section == (
+        "- own standing driver notices unavailable: server does not advertise the "
+        "standing_only selector; only the bounded project standing below was projected.")
+    assert "driver identity not established" not in context
+    assert "STANDING-ONLY-PROJECT-LINE" not in context
+    assert "list_director_messages" in json.dumps(StateStub.requests)
+
+
 def _large_standing_items(count=8):
     items = []
     for index in range(count):

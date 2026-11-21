@@ -89,7 +89,10 @@ async def lifespan(app: FastAPI):
     if getattr(app.state, "_test_mode", False):
         # The MCP session manager still runs: it starts no backend, and a test app
         # that mounts the endpoint but cannot answer a single call would make the
-        # suite green on an endpoint nobody could use.
+        # suite green on an endpoint nobody could use. The same for the steward
+        # gateway's own listener (only with AITELIER_STEWARD_GATEWAY_PORT set).
+        from api.steward_gateway import start_listener as _steward_listen, stop_listener as _steward_unlisten
+        _steward_listener = await _steward_listen(app)
         try:
             async with _mcp_endpoint.open().session_manager.run():
                 try:
@@ -97,6 +100,7 @@ async def lifespan(app: FastAPI):
                 finally:
                     _mcp_endpoint.close()
         finally:
+            await _steward_unlisten(app, _steward_listener)
             _disarm_loop_stack_watchdog(_loop_stack_watchdog)
         return
 
@@ -316,7 +320,10 @@ async def lifespan(app: FastAPI):
     # (design-steward 7.8.5); without a DSH host (development, tests) the fallback
     # restart markers are executed here every 10 s (core.dsh_driver.fallback_restart).
     from api.steward_gateway import gateway as _steward_gateway
+    from api.steward_gateway import start_listener as _steward_listen, stop_listener as _steward_unlisten
     _steward_gateway(app).start(periodic=True)
+    # Its own listener (4445, published on the host's loopback only; director 487).
+    _steward_listener = await _steward_listen(app)
     _restart_task = None
     if not dsh_runtime.external_host:
         from core.dsh_driver import fallback_restart_loop
@@ -337,6 +344,7 @@ async def lifespan(app: FastAPI):
         try:
             if _restart_task is not None:
                 _restart_task.cancel()
+            await _steward_unlisten(app, _steward_listener)
             await _steward_gateway(app).stop()
             await dsh_runtime.close()
             if hasattr(app.state, "scheduler") and app.state.scheduler:
@@ -697,6 +705,12 @@ async def write_gate(request: Request, call_next):
     if not code:
         return await call_next(request)
     return JSONResponse(authz.denial_body(code), status_code=403)
+
+
+# Step 24.1a (director 487): the steward's gateway answers on its own listener alone
+# and that listener serves nothing else. Added last, so it is the outermost middleware.
+from api.steward_gateway import PortGuard as _StewardPortGuard
+app.add_middleware(_StewardPortGuard)
 
 
 # The godot harness an AUTHORED repository gate imports at run time. That gate's

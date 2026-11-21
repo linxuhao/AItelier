@@ -875,8 +875,25 @@ def test_a_steward_start_writes_no_extra_mcp_entry(runtime, monkeypatch):
     # opens a session on a service it cannot call.
     clients = [e for e in entries if e["name"] == "@deepseek-ai/dsh-mcp-client"]
     assert [e["id"] for e in clients] == ["mcp-sw"], ids
-    assert clients[0]["config"]["url"] == runtime.base_url.rstrip("/") + "/api/steward/mcp"
+    # Its own port, published on the host's loopback alone (director 487), not base_url.
+    assert clients[0]["config"]["url"] == "http://127.0.0.1:4445/api/steward/mcp"
     assert ids[:2] == ["dsh-director", "aitelier-driver"], ids
+
+
+def test_the_steward_gateway_url_is_its_own_setting(tmp_path, monkeypatch):
+    """Not derived from AITELIER_DSH_API_URL: the gateway is on 4445 (director 487)."""
+    monkeypatch.setenv("AITELIER_DSH_API_URL", "http://127.0.0.1:5444")
+    monkeypatch.delenv("AITELIER_STEWARD_GATEWAY_URL", raising=False)
+    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    registry = DriverRegistry(db, "dsh-fixture-pepper-" * 3)
+    registry.seed("fixture-owner-token")
+    assert DshDrivers(db, registry, tmp_path / "d1").steward_gateway_url == "http://127.0.0.1:4445/api/steward/mcp"
+    monkeypatch.setenv("AITELIER_STEWARD_GATEWAY_URL", "http://127.0.0.1:6445/api/steward/mcp")
+    runtime = DshDrivers(db, registry, tmp_path / "d2", command=[sys.executable, "-c", "pass"])
+    steward = _steward_row(runtime)
+    runtime._environment(steward)
+    [entry] = [e for e in _inserted(runtime, steward) if e["id"] == "mcp-sw"]
+    assert entry["config"]["url"] == "http://127.0.0.1:6445/api/steward/mcp"
 
 
 def test_a_director_keeps_all_four_services_and_its_mapped_browser_port(runtime, monkeypatch):

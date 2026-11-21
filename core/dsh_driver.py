@@ -429,6 +429,10 @@ class DshDrivers:
         self.root = Path(root)
         self.command = command or [os.getenv("AITELIER_DSH_BIN", "/opt/aitelier-dsh/node_modules/.bin/dsh")]
         self.base_url = base_url or os.getenv("AITELIER_DSH_API_URL", "http://127.0.0.1:4444")
+        # The steward's gateway is served on its own port, published on the host's
+        # loopback only (api/steward_gateway.py, director 487) - not under base_url.
+        self.steward_gateway_url = (os.getenv("AITELIER_STEWARD_GATEWAY_URL", "").strip()
+                                    or "http://127.0.0.1:4445/api/steward/mcp")
         self.processes = {}
         self.monitors = set()
         self.gateways = {}
@@ -681,7 +685,7 @@ class DshDrivers:
             # count is large because the client gives up for good after it.
             extra.append({"id": "mcp-sw", "name": "@deepseek-ai/dsh-mcp-client", "config": {
                 "serverName": "sw", "transport": "streamable-http",
-                "url": self.base_url.rstrip("/") + "/api/steward/mcp",
+                "url": self.steward_gateway_url,
                 "headers": {"X-AItelier-Driver-Token": "__DRIVER_TOKEN__"},
                 "failOnStartupError": False, "toolCallTimeoutMs": 180000,
                 "reconnect": {"maxAttempts": 1000000}}})

@@ -9,10 +9,17 @@ so a newly allowed tool needs no steward restart. To each registered connection 
 an MCP client: ONE long-lived upstream session per connection (the `mcp` package),
 reopened only when the connection's address, auth or generation changes.
 
+Where it answers (director 487, option B): only on its own listener,
+`AITELIER_STEWARD_GATEWAY_PORT` (4445), a second uvicorn server in this process that
+docker-compose.yml publishes on the host's loopback alone; the backend's 4444 answers
+404 for it, and the 4445 listener serves nothing else (`PortGuard`, by
+`scope["server"]` port).
+
 Who may enter is checked here on every method, whatever the write gate says: a
-steward driver's token, not via Cloudflare, from an allowed source address
-(`AITELIER_STEWARD_GATEWAY_SOURCES`). The token is never sent upstream; arguments,
-results and secrets are never logged.
+loopback Host (and Origin, when sent), a steward driver's token, not via Cloudflare.
+The peer address is logged, never judged. Refusals are logged at most once a minute
+per source. The token is never sent upstream; arguments, results and secrets are
+never logged.
 
 `tools/list` never reaches upstream: it is the effective set from the database
 (core.state_steward_connections.effective), byte for byte the definitions the owner
@@ -26,13 +33,16 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import time
 import uuid
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 
 import httpx
+import uvicorn
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.websockets import WebSocketClose
 
 from api import authz
 from core import state_steward_connections as sc
@@ -63,40 +73,108 @@ def _error(mid, code, text):
     return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": f"{code}: {text}", "data": {"code": code}}}
 
 
-# ------------------------------------------------------------------ who may enter
-def _default_route_gateway() -> str | None:
-    """The container's default gateway (the address a host process arrives from
-    through a published port), read from /proc/net/route."""
-    try:
-        with open("/proc/net/route") as handle:
-            for line in handle.readlines()[1:]:
-                fields = line.split()
-                if len(fields) > 2 and fields[1] == "00000000":
-                    raw = int(fields[2], 16)
-                    return ".".join(str((raw >> s) & 0xFF) for s in (0, 8, 16, 24))
-    except (OSError, ValueError):
+# ------------------------------------------------------------------ where it answers
+PORT_ENV = "AITELIER_STEWARD_GATEWAY_PORT"
+DEFAULT_PORT = 4445
+LISTEN_HOST = "0.0.0.0"  # inside the container; the host publishes it on 127.0.0.1 only
+
+
+def gateway_port() -> int:
+    """The port the gateway alone is served on (a malformed setting falls back to the
+    default rather than break every request through `PortGuard`)."""
+    raw = os.environ.get(PORT_ENV, "").strip()
+    return int(raw) if raw.isdigit() else DEFAULT_PORT
+
+
+def _is_gateway_path(path: str) -> bool:
+    return path == PATH or path.startswith(PATH + "/")
+
+
+class PortGuard:
+    """The gateway's listener serves the gateway alone, and no other listener serves
+    the gateway: the outermost middleware, so nothing else sees such a request."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            server = scope.get("server")
+            on_gateway_port = bool(server) and server[1] == gateway_port()
+            if on_gateway_port != _is_gateway_path(scope.get("path", "")):
+                if scope["type"] == "websocket":
+                    await WebSocketClose()(scope, receive, send)
+                else:
+                    await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+class _Listener(uvicorn.Server):
+    """A second server in the backend's process: the main server owns the signals."""
+
+    @contextmanager
+    def capture_signals(self):
+        yield
+
+
+async def start_listener(app):
+    """With `AITELIER_STEWARD_GATEWAY_PORT` set (docker-compose.yml), serve `app` on
+    0.0.0.0:<port> too, until `stop_listener`. Unset (tests, `aitelier server
+    --no-docker`): no listener. A port that cannot be bound is logged, never fatal."""
+    if not os.environ.get(PORT_ENV, "").strip():
         return None
-    return None
+    port = gateway_port()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((LISTEN_HOST, port))
+    except OSError:
+        sock.close()
+        logger.exception("steward gateway: cannot listen on %s:%d - the steward has no gateway", LISTEN_HOST, port)
+        return None
+    server = _Listener(uvicorn.Config(app, lifespan="off", log_config=None, timeout_graceful_shutdown=2))
+    task = asyncio.create_task(server.serve(sockets=[sock]))
+    while not server.started and not task.done():
+        await asyncio.sleep(0.02)
+    if server.started:
+        logger.info("steward gateway: listening on %s:%d", LISTEN_HOST, port)
+    else:
+        logger.error("steward gateway: the listener on %s:%d did not start", LISTEN_HOST, port)
+    return server, task
 
 
-def allowed_sources() -> set[str]:
-    raw = os.environ.get("AITELIER_STEWARD_GATEWAY_SOURCES", "")
-    if raw.strip():
-        return {s.strip() for s in raw.split(",") if s.strip()}
-    found = {"127.0.0.1", "::1"}
-    gateway = _default_route_gateway()
-    if gateway:
-        found.add(gateway)
-    return found
+async def stop_listener(app, listener):
+    if listener is None:
+        return
+    server, task = listener
+    found = getattr(app.state, "steward_gateway", None)
+    for stream in list(found.streams.values()) if found is not None else []:
+        stream.queue.put_nowait(("close", None))  # open GET streams end now, not at the drain timeout
+    server.should_exit = True
+    with suppress(Exception):
+        await asyncio.wait_for(task, 10)
+
+
+# ------------------------------------------------------------------ who may enter
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+REFUSAL_LOG_SECONDS = 60.0
+_refusals_logged: dict[str, float] = {}  # source -> when its last refusal was logged
+
+
+def _loopback_hosts() -> set[str]:
+    port = gateway_port()
+    return {name for host in LOOPBACK_HOSTS for name in (host, f"{host}:{port}")}
+
+
+def _peer(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def steward_driver(request: Request) -> dict | None:
-    """The steward driver behind this request, or None (-> 403)."""
+    """The steward driver behind this request's token, or None."""
     token = request.headers.get(authz.DRIVER_TOKEN_HEADER, "").strip()
     if not token or authz.is_via_cloudflare(request):
-        return None
-    host = request.client.host if request.client else None
-    if host not in allowed_sources():
         return None
     registry = authz.driver_registry()
     if registry is None:
@@ -106,6 +184,37 @@ def steward_driver(request: Request) -> dict | None:
     if not isinstance(capabilities, dict) or capabilities.get("role") != "steward":
         return None
     return row
+
+
+def admit(request: Request):
+    """(the steward driver, None), or (None, the 403). A Host or Origin naming
+    anything but loopback is refused before the token is looked at (a browser page
+    or a container that dialled the port by another name)."""
+    allowed = _loopback_hosts()
+    origin = request.headers.get("origin")
+    if request.headers.get("host", "").lower() not in allowed:
+        reason = "host"
+    elif origin is not None and origin.lower() not in {"http://" + name for name in allowed}:
+        reason = "origin"
+    else:
+        driver = steward_driver(request)
+        if driver is not None:
+            return driver, None
+        reason = "token"
+    _log_refusal(_peer(request), reason)
+    return None, _forbidden()
+
+
+def _log_refusal(source: str, reason: str):
+    """At most one line per source a minute."""
+    now = time.monotonic()
+    last = _refusals_logged.get(source)
+    if last is not None and now - last < REFUSAL_LOG_SECONDS:
+        return
+    if len(_refusals_logged) >= 1024:
+        _refusals_logged.clear()
+    _refusals_logged[source] = now
+    logger.warning("steward gateway: refused a request from %s (%s)", source, reason)
 
 
 def _forbidden():
@@ -606,9 +715,9 @@ def _sse(item) -> str:
 
 @router.post(PATH)
 async def post(request: Request):
-    driver = steward_driver(request)
-    if driver is None:
-        return _forbidden()
+    driver, refused = admit(request)
+    if refused is not None:
+        return refused
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_BODY:
         return JSONResponse({"detail": "request_too_large"}, status_code=413)
@@ -629,6 +738,7 @@ async def post(request: Request):
     initializing = any(m.get("method") == "initialize" for m in batch)
     if initializing:
         session_id = uuid.uuid4().hex
+        logger.info("steward gateway: a session opened by %s from %s", driver["driver_id"], _peer(request))
     if all(m.get("id") is None for m in batch):
         return Response(status_code=202)
     answers = [a for a in [await gw.handle(m, driver, session_id) for m in batch] if a is not None]
@@ -648,9 +758,9 @@ async def post(request: Request):
 
 @router.get(PATH)
 async def get(request: Request):
-    driver = steward_driver(request)
-    if driver is None:
-        return _forbidden()
+    driver, refused = admit(request)
+    if refused is not None:
+        return refused
     session_id = request.headers.get("mcp-session-id")
     if not session_id:
         return JSONResponse({"detail": "mcp_session_required"}, status_code=400)
@@ -693,8 +803,9 @@ async def get(request: Request):
 
 @router.delete(PATH)
 async def delete(request: Request):
-    if steward_driver(request) is None:
-        return _forbidden()
+    _driver, refused = admit(request)
+    if refused is not None:
+        return refused
     session_id = request.headers.get("mcp-session-id")
     if session_id:
         gateway(request.app).served.pop(session_id, None)

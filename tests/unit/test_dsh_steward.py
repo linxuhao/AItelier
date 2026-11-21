@@ -151,7 +151,7 @@ def test_steward_profile_has_no_state_mcp_and_its_own_compaction(runtime, roles_
             == [e for e in next(p for p in director_patch if "insert" in p)["insert"]
                 if e["id"] not in extras])
     assert [e["config"] for e in steward_inserts if e["id"] == "mcp-sw"] == [{
-        "serverName": "sw", "transport": "streamable-http", "url": runtime.base_url.rstrip("/") + "/api/steward/mcp",
+        "serverName": "sw", "transport": "streamable-http", "url": "http://127.0.0.1:4445/api/steward/mcp",
         "headers": {"X-AItelier-Driver-Token": "process.env.AITELIER_DRIVER_TOKEN"},
         "failOnStartupError": False, "toolCallTimeoutMs": 180000, "reconnect": {"maxAttempts": 1000000}}]
     assert "mcp-sw" not in _inserted_ids(director_patch)

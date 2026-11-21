@@ -881,8 +881,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
              {"project_id": steward_project(), "turn": "t", "audience": "owner"}),
             ("POST", "/api/state/commands/steward_tools_resync_due", {"effective_hash": "a" * 64}),
             ("POST", "/api/state/commands/steward_connection_refresh", {"conn_id": C.STEWARD_CONNECTION}),
-            ("POST", "/api/steward/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
-            ("GET", "/api/steward/mcp", None),
+            # The gateway answers on its own port alone (director 487); a loopback Host.
+            ("POST", "http://127.0.0.1:4445/api/steward/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            ("GET", "http://127.0.0.1:4445/api/steward/mcp", None),
         ]
         results = {}
         try:

@@ -259,7 +259,7 @@ def require_admin(request: Request) -> None:
 _STEWARD_STATE_PREFIXES = ("/api/state/commands/", "/api/state/query/")
 _STEWARD_RUNTIME_ENDPOINTS = ("completion", "heartbeat", "activity")
 # Step 24.1a: the steward's MCP gateway. Its route checks who enters itself, on every
-# method and whatever the gate says (api/steward_gateway.steward_driver).
+# method and whatever the gate says (api/steward_gateway.admit).
 _STEWARD_GATEWAY_PATH = "/api/steward/mcp"
 
 

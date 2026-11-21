@@ -583,8 +583,9 @@ def test_every_write_route_with_a_steward_token(world, client):
             continue
         if klass == "gateway":
             # Past this gate; the gateway's own check refuses a caller it does not admit
-            # (here the test client's source address) with its own 403.
-            r = client.request(method, template, json={}, headers=headers)
+            # (here the test client's Host, not loopback) with its own 403. It answers
+            # on its own port alone (director 487).
+            r = client.request(method, "http://testserver:4445" + template, json={}, headers=headers)
             assert r.status_code == 403 and r.json() == {"detail": "steward_gateway_forbidden"}, (method, r.text)
             continue
         if klass == "runtime":

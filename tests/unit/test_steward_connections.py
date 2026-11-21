@@ -24,6 +24,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -130,7 +131,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(sc, "RESOLVER", resolver)
     monkeypatch.setenv("AITELIER_STEWARD_SECRETS_DIR", str(tmp_path / "secrets"))
     monkeypatch.setenv("AITELIER_STEWARD_HOST_ADDRESSES", "192.168.1.119,100.106.5.46,172.24.0.1")
-    monkeypatch.delenv("AITELIER_STEWARD_GATEWAY_SOURCES", raising=False)
+    monkeypatch.delenv(gw.PORT_ENV, raising=False)
     monkeypatch.setattr(sc, "TOOLS_CHANGED_HOOKS", [])
     monkeypatch.setattr(sc, "PROBER", None)
     db = StateDatabase(str(tmp_path / "state.sqlite"))
@@ -558,12 +559,23 @@ def test_effective_set_and_hash(world):
 
 # --- the gateway, over a real server -------------------------------------------------------------
 
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 class Server:
+    """The backend as deployed: the main listener (`main_url`, 4444 in production) and
+    the gateway's own listener the lifespan opens (`url`, 4445; director 487)."""
+
     def __init__(self):
         self.server = None
 
-    def start(self):
+    def start(self, monkeypatch):
         import uvicorn
+        self.gateway_port = free_port()
+        monkeypatch.setenv(gw.PORT_ENV, str(self.gateway_port))
         config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="on")
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -573,7 +585,8 @@ class Server:
                 break
             time.sleep(0.05)
         self.port = self.server.servers[0].sockets[0].getsockname()[1]
-        self.url = f"http://127.0.0.1:{self.port}"
+        self.main_url = f"http://127.0.0.1:{self.port}"
+        self.url = f"http://127.0.0.1:{self.gateway_port}"
 
     def _run(self):
         self.loop = asyncio.new_event_loop()
@@ -607,7 +620,7 @@ def server(world, upstream, monkeypatch):
         if hasattr(app.state, name):
             delattr(app.state, name)
     running = Server()
-    running.start()
+    running.start(monkeypatch)
     running.call(_start_gateway)
     try:
         yield running
@@ -676,14 +689,124 @@ def test_only_a_steward_token_enters(world, server, monkeypatch):
         via_cf = httpx.request(method, server.url + gw.PATH, headers=headers(world, session="x", **{"Cf-Ray": "abc"}),
                                json={"jsonrpc": "2.0", "id": 1, "method": "ping"} if method == "POST" else None)
         assert via_cf.status_code == 403
-    # A source address that is not the DSH host's (a container on cloudflare_edge).
-    monkeypatch.setenv("AITELIER_STEWARD_GATEWAY_SOURCES", "172.24.0.1")
-    assert rpc(server, world, "ping").status_code == 403
-    monkeypatch.setenv("AITELIER_STEWARD_GATEWAY_SOURCES", "127.0.0.1")
     assert body_of(rpc(server, world, "ping"))[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
     # The feature off (no registry): nobody, whatever the gate says.
     monkeypatch.setattr(authz, "driver_registry", lambda: None)
     assert rpc(server, world, "ping").status_code == 403
+
+
+def test_the_gateway_answers_on_its_own_port_alone(world, server):
+    """Director 487 (B): /api/steward/mcp only on the gateway's listener (4445), which
+    serves nothing else; the main listener (4444) answers 404 for it, every method."""
+    for method in ("POST", "GET", "DELETE"):
+        body = {"jsonrpc": "2.0", "id": 1, "method": "ping"} if method == "POST" else None
+        on_main = httpx.request(method, server.main_url + gw.PATH, json=body, headers=headers(world, session="x"))
+        assert on_main.status_code == 404, (method, on_main.text)
+        assert httpx.request(method, server.main_url + gw.PATH + "/fetch", json=body,
+                             headers=headers(world, session="x")).status_code == 404
+    assert body_of(rpc(server, world, "ping"))[0] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+    assert httpx.get(server.main_url + "/health", timeout=30).status_code != 404
+    for path in ("/health", "/api/steward/connections", "/mcp", "/"):
+        assert httpx.get(server.url + path, headers=headers(world), timeout=30).status_code == 404, path
+    assert httpx.post(server.url + "/api/state/query/list_projects", json={},
+                      headers=headers(world)).status_code == 404
+
+
+def test_the_port_guard_by_the_scopes_server_port(monkeypatch):
+    monkeypatch.setenv(gw.PORT_ENV, "4445")
+    reached = []
+
+    async def inner(scope, receive, send):
+        reached.append(scope.get("path", scope["type"]))
+
+    def status(kind, port, path):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        scope = {"type": kind, "path": path, "server": ("127.0.0.1", port) if port else None,
+                 "method": "GET", "headers": []}
+        asyncio.run(gw.PortGuard(inner)(scope, receive, send))
+        return sent[0] if sent else None
+
+    assert status("http", 4444, gw.PATH)["status"] == 404
+    assert status("http", 4445, "/health")["status"] == 404
+    assert status("http", None, gw.PATH)["status"] == 404
+    assert status("websocket", 4445, "/api/events")["type"] == "websocket.close"
+    assert status("http", 4445, gw.PATH) is None and status("http", 4444, "/health") is None
+    asyncio.run(gw.PortGuard(inner)({"type": "lifespan"}, None, None))
+    assert reached == [gw.PATH, "/health", "lifespan"]
+    monkeypatch.setenv(gw.PORT_ENV, "not-a-port")  # never breaks every request
+    assert gw.gateway_port() == 4445
+
+
+def test_a_host_or_origin_that_is_not_loopback_is_refused(world, server):
+    port = server.gateway_port
+    ok = {"jsonrpc": "2.0", "id": 1, "result": {}}
+    for host in ("127.0.0.1", f"127.0.0.1:{port}", "localhost", f"LOCALHOST:{port}", "[::1]", f"[::1]:{port}"):
+        assert body_of(rpc(server, world, "ping", Host=host))[0] == ok, host
+    for origin in (f"http://127.0.0.1:{port}", "http://localhost", f"http://[::1]:{port}"):
+        assert body_of(rpc(server, world, "ping", Origin=origin))[0] == ok, origin
+    for host in (f"aitelier:{port}", f"172.24.0.3:{port}", f"100.106.5.46:{port}", "localhost:4444",
+                 "127.0.0.1.nip.io", "evil.example"):
+        r = rpc(server, world, "ping", Host=host)
+        assert r.status_code == 403 and r.json() == {"detail": "steward_gateway_forbidden"}, host
+    for origin in ("http://evil.example", "null", f"https://localhost:{port}", "http://localhost:4444",
+                   f"http://127.0.0.1:{port}/x"):
+        assert rpc(server, world, "ping", Origin=origin).status_code == 403, origin
+    for method in ("GET", "DELETE"):
+        r = httpx.request(method, server.url + gw.PATH, headers=headers(world, session="x", Origin="http://evil.example"))
+        assert r.status_code == 403, method
+
+
+def test_refusals_are_logged_once_a_minute_per_source_and_a_session_logs_its_peer(world, server, caplog, monkeypatch):
+    monkeypatch.setattr(gw, "_refusals_logged", {})
+    caplog.set_level(logging.INFO, logger=gw.logger.name)
+    lines = lambda: [r.getMessage() for r in caplog.records if "refused a request" in r.getMessage()]
+    for who in ("director", "director", "steward"):
+        extra = {"Host": "evil.example"} if who == "steward" else {}
+        assert rpc(server, world, "ping", who=who, **extra).status_code == 403
+    assert lines() == ["steward gateway: refused a request from 127.0.0.1 (token)"]
+    gw._refusals_logged["127.0.0.1"] -= gw.REFUSAL_LOG_SECONDS + 1  # a minute later
+    assert rpc(server, world, "ping", Origin="null").status_code == 403
+    gw._log_refusal("10.0.0.9", "token")
+    gw._log_refusal("10.0.0.9", "token")
+    assert lines()[1:] == ["steward gateway: refused a request from 127.0.0.1 (origin)",
+                           "steward gateway: refused a request from 10.0.0.9 (token)"]
+    assert world.tokens["director"] not in caplog.text
+    rpc(server, world, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                      "clientInfo": {"name": "t", "version": "1"}}, session=None)
+    assert f"steward gateway: a session opened by {world.steward_row['driver_id']} from 127.0.0.1" in caplog.text
+
+
+def test_no_listener_without_the_setting_and_a_taken_port_is_not_fatal(monkeypatch, caplog):
+    monkeypatch.delenv(gw.PORT_ENV, raising=False)
+    assert asyncio.run(gw.start_listener(app)) is None
+    with socket.socket() as taken:
+        taken.bind(("0.0.0.0", 0))
+        taken.listen()
+        monkeypatch.setenv(gw.PORT_ENV, str(taken.getsockname()[1]))
+        assert asyncio.run(gw.start_listener(app)) is None
+    assert "cannot listen on" in caplog.text
+
+
+def test_compose_publishes_the_gateway_port_on_the_hosts_loopback_alone():
+    compose = yaml.safe_load((Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text())
+    backend = compose["services"]["aitelier"]
+    assert backend["environment"]["AITELIER_STEWARD_GATEWAY_PORT"] == str(gw.DEFAULT_PORT) == "4445"
+    assert "AITELIER_STEWARD_GATEWAY_SOURCES" not in backend["environment"]
+    published = [p for p in backend["ports"] if "4445" in str(p)]
+    assert published == ["127.0.0.1:4445:4445"]
+    for name, service in compose["services"].items():
+        if name != "aitelier":
+            assert not any("4445" in str(p) for p in service.get("ports", [])), name
+    # The backend's own command is unchanged: the gateway's listener opens in its lifespan.
+    assert backend["command"][:3] == ["uvicorn", "api.main:app", "--host"]
+    assert "4445" not in " ".join(backend["command"])
 
 
 def test_initialize_and_the_methods_it_does_not_serve(world, server, upstream):

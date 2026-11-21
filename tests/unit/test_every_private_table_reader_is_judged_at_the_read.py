@@ -705,10 +705,13 @@ def test_the_in_scope_matrix_over_http(tmp_path, monkeypatch, mode):
 # query and the owner's schedule routes. Step 19 adds the three channel tables:
 # both channel queries, the owner's channel routes and the steward's channel commands;
 # and the channels' status table: the owner's channel list with status, and the report;
-# and the remembered binding attempts, read by the steward's bind and relay commands.
+# and the remembered binding attempts, read by the steward's bind and relay commands;
+# and the owner's requests for a new WeChat login QR: the steward's list query, the
+# owner's channel list and QR route, and the steward's completion command.
 STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "state_steward_schedules",
                   "state_owner_channels", "state_owner_channel_codes", "state_message_sources",
-                  "state_owner_channel_status", "state_owner_channel_bind_attempts")
+                  "state_owner_channel_status", "state_owner_channel_bind_attempts",
+                  "state_owner_channel_login_requests")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -746,6 +749,8 @@ def _steward_calls(svc):
         "list_owner_channels": lambda: svc.channels.list_owner_channels(),
         "list_owner_channels with status": lambda: svc.channels.list_owner_channels(with_status=True),
         "message_sources": lambda: svc.channels.message_sources([C.CHANNEL_MESSAGE]),
+        "execute list_owner_channel_login_requests": lambda: execute(svc, "list_owner_channel_login_requests", {}),
+        "list_login_requests": lambda: svc.channels.list_login_requests(),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -828,6 +833,11 @@ class TestTheStewardReadersRefuseTheAnonymous:
               "message_id": C.CHANNEL_MESSAGE}),
             ("POST", "/api/state/commands/report_channel_status",
              {"project_id": steward_project(), "request_key": "s", "channel": "wechat", "connected": True}),
+            ("POST", "/api/state/query/list_owner_channel_login_requests", {}),
+            ("POST", "/api/steward/channels/wechat/qr", None),
+            ("POST", "/api/state/commands/complete_owner_channel_login_request",
+             {"project_id": steward_project(), "request_key": "q",
+              "request_id": C.canary("state_owner_channel_login_requests"), "result": {"requested": True}}),
             ("POST", "/api/state/query/list_driver_messages", {}),
             ("POST", "/api/state/query/wait_for_state_change",
              {"project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0}),
@@ -861,6 +871,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
                 == [("wechat", 0, C.canary("state_owner_channel_status"))]
             assert [tuple(r) for r in conn.execute("SELECT outcome FROM state_owner_channel_bind_attempts")] \
                 == [("invalid_code",)]
+            assert [tuple(r) for r in conn.execute("SELECT request_id, status FROM "
+                                                   "state_owner_channel_login_requests")] \
+                == [(C.canary("state_owner_channel_login_requests"), "pending")]
 
 
 def _trusted_db(anonymous):

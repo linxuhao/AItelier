@@ -149,7 +149,10 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "relay_owner_message", "bind_owner_channel", "record_channel_delivery",
         # ...and reports each channel's status (a detail line, the WeChat login QR as a
         # checked SVG) into its private status row, which only the owner's dashboard reads.
-        "report_channel_status"}
+        "report_channel_status",
+        # ...and records what the WeChat bridge answered to the owner's request for a new
+        # login QR ({requested} or {refused}; never the QR), run by the host in code.
+        "complete_owner_channel_login_request"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

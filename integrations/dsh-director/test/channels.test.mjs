@@ -5,7 +5,7 @@
  *  host.d.ts `channels` shape. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies } from '../lib/channels.mjs';
+import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies, channelText, MORE } from '../lib/channels.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { PROPOSAL_KINDS } from '../lib/proposals.mjs';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -16,6 +16,10 @@ const BODY = 'SECRET_BODY_TEXT 请帮我看看';
 // A channel time a minute ago: a decision line is never sent more than an hour after the owner
 // wrote (CHANNEL_LIMITS.lineMaxAgeMs), so a test about a line that IS sent dates its message now.
 const RECENT = new Date(Date.now() - 60000).toISOString();
+// The time of a message that must still get the receipt (CHANNEL_LIMITS.receiptMaxAgeMs, five
+// minutes): taken when the test runs, not when this file loads - plugin-boundary.test.mjs
+// imports it after minutes of other suites.
+const NOW = () => new Date().toISOString();
 // The owed store's default path comes from the environment ($DSH_CHANNEL_OWED_FILE). A test
 // must never write where a running director writes, and two tests must never share one store:
 // without this the ambient environment decides what the suite reads and writes.
@@ -51,11 +55,12 @@ function fakeHost({ bindings = { slack: 'U-OWNER' }, defaultChannel = null } = {
   return { host, calls, sources, bindings };
 }
 
-/** A fake channel plugin: what it was asked to send. */
+/** A fake channel plugin: what it was asked to send. `fail` may be changed after it registers. */
 function fakeChannel(name, { fail } = {}) {
   const sent = [];
-  return { sent, channel: { name, status: () => ({ connected: true }),
-    async send(text, options) { sent.push({ text, options }); if (fail) throw new Error(fail); return { ref: `${name}-ref-${sent.length}` }; } } };
+  const fake = { sent, fail, channel: { name, status: () => ({ connected: true }),
+    async send(text, options) { sent.push({ text, options }); if (fake.fail) throw new Error(fake.fail); return { ref: `${name}-ref-${sent.length}` }; } } };
+  return fake;
 }
 
 /** A fresh owed store per setup (the file mode is what a restart reads); pass `owedFile` to
@@ -101,14 +106,15 @@ test('nothing reaches the host before it is ready: a message handed in early wai
   assert.equal(only(fake.calls, 'relay').length, 1);
 });
 
-test('an ordinary message from the bound owner is relayed with its fields, and nothing is answered', async () => {
+test('an ordinary message from the bound owner is relayed with its fields, and answered with the receipt only', async () => {
   const s = setup();
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: '2026-11-18T10:00:00Z' }), { accepted: true });
   // The channel's own time goes along (the host dates an approval phrase by it); none, none.
   assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY }), { accepted: true });
   assert.deepEqual(only(s.calls, 'relay'), [{ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: '2026-11-18T10:00:00Z' },
     { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY }]);
-  assert.equal(s.slack.sent.length, 0);
+  // The first, dated days ago, is no longer news (receiptMaxAgeMs): the undated second gets the receipt.
+  assert.deepEqual(s.slack.sent, [{ text: channelReplies.received, options: { replyToRef: 'ts-2', to: 'U-OWNER' } }]);
 });
 
 test('six digits from an unbound sender bind it, and that sender is told in one line that never echoes the code', async () => {
@@ -501,6 +507,7 @@ test('the plugin-facing service is exactly {register, inbound}; the director-sid
   assert.equal(typeof channels.pollStatus, 'function');
   assert.equal(typeof channels.pollOwed, 'function');
   assert.equal(typeof channels.stop, 'function');
+  assert.equal(typeof channels.login, 'function', 'a new login is the director\'s to ask, not a plugin\'s');
 });
 
 test('a rate_limited answer is kept and asked again - by the channel and, after a restart, from the owed store', async () => {
@@ -572,6 +579,8 @@ test('an approval whose run failed is answered as failed, never as done', () => 
 test('binding attempts are bounded per channel and minute: past the bound, six digits are relayed like any message, and nobody is answered', async () => {
   const s = setup({ bindings: {} });
   s.host.bindResult = { refused: 'invalid_code' };
+  // The real host refuses a sender that is not bound (host.d.ts relay).
+  s.host.next = { refused: 'channel_sender_not_bound' };
   for (let i = 0; i < CHANNEL_LIMITS.bindPerMinute + 3; i++)
     await s.inbound({ channel: 'slack', senderRef: 'U-STRANGER', messageRef: 'b-' + i, text: String(100000 + i) });
   assert.equal(only(s.calls, 'bind').length, CHANNEL_LIMITS.bindPerMinute);
@@ -634,6 +643,85 @@ test('a reply to a channel message goes back on that channel, to that message, e
   assert.deepEqual(await s.channels.ownerMessageSent('m-reply', text, 'm-owner'), { mirrored: false, reason: 'already_mirrored' });
   assert.equal(s.slack.sent.length, 1);
   assert.equal(s.wechat.sent.length, 0);
+});
+
+// The shape of the steward's WeChat reply of 2026-11-20 13:01Z: 1604 characters in 17 lines,
+// bold section titles - more than a phone chat shows well (owner, 2026-11-20).
+const LONG_REPLY = ['两份都把你昨晚那两张卡答了，两位导演都已接走。下面是昨天到今天的变化。', '',
+  '**平台——两天的活几乎全是「把看不见的门修成看得见的」**',
+  ...Array.from({ length: 6 }, (_, i) => `- 第 ${i + 1} 条：${'这一条讲的是一处修好的缺陷和它的见证，'.repeat(9)}已修。`), '',
+  '**武虾传奇——昨天到今天发了五六刀**',
+  ...Array.from({ length: 4 }, (_, i) => `- 第 ${i + 1} 刀：${'玩家能看到的一处变化，'.repeat(8)}已上线。`), '',
+  '两张卡都清了，眼下没有等你裁决的事。'].join('\n');
+
+test('a long steward message reaches the channel cut at a line end, ending in MORE; the host and a replay see the whole text', async () => {
+  assert.ok(LONG_REPLY.length > 1500 && LONG_REPLY.length > CHANNEL_LIMITS.mirrorChars, `${LONG_REPLY.length}`);
+  assert.equal(CHANNEL_LIMITS.mirrorChars, 600);
+  const s = setup();
+  s.sources.set('m-owner', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-reply', LONG_REPLY, 'm-owner'), { mirrored: true, channel: 'slack' });
+  const [{ text: sent }] = s.slack.sent;
+  assert.ok(Array.from(sent).length <= CHANNEL_LIMITS.mirrorChars, `sent ${Array.from(sent).length} characters`);
+  assert.ok(sent.endsWith(MORE), sent.slice(-40));
+  const kept = sent.slice(0, -MORE.length);
+  // Cut at a line end: what is kept is whole lines of the (bold-flattened) original, its first line first.
+  assert.ok(LONG_REPLY.replace(/\*\*/g, '').startsWith(kept + '\n'), 'cut at the end of a line');
+  assert.ok(kept.length > CHANNEL_LIMITS.mirrorChars / 2, 'the cut keeps most of what fits');
+  // The cut is logged with both lengths, never the body.
+  const [cutLog] = s.logs.filter(([event]) => event === 'channel_text_cut').map(([, fields]) => fields);
+  assert.deepEqual(cutLog, { channel: 'slack', message_id: 'm-reply', chars: Array.from(LONG_REPLY).length, sent_chars: Array.from(sent).length });
+  // Delivered once, recorded once; a replay of the same message sends nothing more.
+  assert.equal(only(s.calls, 'recordDelivery').length, 1);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-reply', LONG_REPLY, 'm-owner'), { mirrored: false, reason: 'already_mirrored' });
+  assert.equal(s.slack.sent.length, 1);
+});
+
+test('channelText: a short text goes as written; a blank line beats a line end, so a title is never the last line kept', () => {
+  assert.equal(channelText('slack', 'The answer: build 42 passed.\nNext: nothing.'), 'The answer: build 42 passed.\nNext: nothing.');
+  assert.equal(channelText('wechat', '答案：已经好了。\n明天再看。'), '答案：已经好了。\n明天再看。');
+  const sections = ['结论：都好了。', '', '平台', '- ' + '一处修好的缺陷，'.repeat(5), '', '武虾传奇', '- ' + '一处上线的变化，'.repeat(5)].join('\n');
+  const cut = channelText('wechat', sections, 80);
+  assert.equal(cut, ['结论：都好了。', '', '平台', '- ' + '一处修好的缺陷，'.repeat(5)].join('\n') + MORE);
+});
+
+test('channelText: a long line is cut after a sentence end, never inside a number, version, reference or URL', () => {
+  const paragraph = '这是一句完整的话。'.repeat(200);
+  const cut = channelText('slack', paragraph, 100);
+  assert.ok(cut.endsWith('。' + MORE), cut);
+  assert.ok(Array.from(cut).length <= 100);
+  assert.ok(paragraph.startsWith(cut.slice(0, -MORE.length)));
+  // A dot inside 13.6x or v1.2.3 ends no sentence.
+  const numbers = '提速' + '甲'.repeat(60) + '到 13.6x 版本 v1.2.3 已发布' + '乙'.repeat(60);
+  const kept = channelText('slack', numbers, 80).slice(0, -MORE.length);
+  assert.ok(!/\d\.$/.test(kept) && numbers.startsWith(kept), kept);
+  // A hard cut steps back before the word it would split: never 见 Q1 for 见 Q12, never half a URL.
+  assert.equal(channelText('slack', '甲'.repeat(86) + '见 Q12 的回答' + '乙'.repeat(40), 99), '甲'.repeat(86) + '见' + MORE);
+  assert.equal(channelText('wechat', '甲'.repeat(60) + '详见 https://docs.example.com/a/b?c=1 乙' + '乙'.repeat(40), 80), '甲'.repeat(60) + '详见' + MORE);
+  // No boundary at all: cut at the bound, by code point (a surrogate pair stays whole).
+  const hard = channelText('slack', '\u{1F600}'.repeat(300), 100);
+  assert.equal(Array.from(hard).length, 100);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(hard), 'no lone high surrogate');
+  // A bound too small to hold MORE falls back to the default.
+  assert.equal(channelText('slack', paragraph, 5), channelText('slack', paragraph));
+});
+
+test('channelText: an approval phrase line is never cut and loses only its marks; a binding code text goes as written', () => {
+  const approval = `${LONG_REPLY}\n\n\`同意 proposal prop-123\`\n**拒绝 proposal prop-123**\n结尾一句。`;
+  for (const channel of CHANNEL_NAMES) {
+    const sent = channelText(channel, approval);
+    assert.ok(Array.from(sent).length <= CHANNEL_LIMITS.mirrorChars, `${channel} ${Array.from(sent).length}`);
+    assert.ok(sent.endsWith('\n同意 proposal prop-123\n拒绝 proposal prop-123' + MORE), sent.slice(-80));
+  }
+  const short = '要启动吗？\n`同意 proposal prop-9`\n拒绝 proposal prop-9';
+  for (const channel of CHANNEL_NAMES) assert.equal(channelText(channel, short), '要启动吗？\n同意 proposal prop-9\n拒绝 proposal prop-9');
+  const code = `${LONG_REPLY}\n482913\n`;
+  for (const channel of CHANNEL_NAMES) assert.equal(channelText(channel, code), code);
+});
+
+test('channelText: headings, bold and tables are flattened on both channels; only WeChat loses code marks', () => {
+  const md = '## 进展\n**武虾**：`main` 已合入\n| 项目 | 状态 |\n|---|:---:|\n| 武虾 | 已上线 |';
+  assert.equal(channelText('wechat', md), '进展\n武虾：main 已合入\n项目 · 状态\n武虾 · 已上线');
+  assert.equal(channelText('slack', md), '进展\n武虾：`main` 已合入\n项目 · 状态\n武虾 · 已上线');
 });
 
 test('a reply to a dashboard message stays on the dashboard; an unprompted one goes to the default channel only when set and bound', async () => {
@@ -1403,12 +1491,13 @@ const outage = s => {
 };
 
 for (const [label, text, next, line] of [
-  ['an ordinary message', 'please look at the wuxia build', undefined, null],
+  // Delivered once, so it gets the receipt once, and nothing else.
+  ['an ordinary message', 'please look at the wuxia build', undefined, /^已收到，正在处理…$/],
   ['an approval', '同意 proposal p-1', { message_id: 'm', duplicate: false, approval: EXECUTED }, /^proposal p-1: approved and done/]]) {
   test(`${label} the plugin holds through a backend outage is never answered "send it again", and is delivered once`, async () => {
     const s = setup();
     outage(s);
-    const message = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text, at: RECENT };
+    const message = { channel: 'slack', senderRef: 'U-OWNER', messageRef: 'o-1', text, at: NOW() };
     assert.deepEqual(await s.inbound(message), { accepted: false, reason: 'unavailable' });
     await s.channels.pollOwed();                                  // an owed tick during the outage
     assert.deepEqual(await s.inbound(message), { accepted: false, reason: 'unavailable' });  // the plugin's held retry
@@ -1419,8 +1508,8 @@ for (const [label, text, next, line] of [
     await s.channels.pollOwed();
     const lines = s.slack.sent.map(sent => sent.text);
     assert.ok(!lines.some(sent => SEND_AGAIN.test(sent)), `a delivered message was answered "send it again": ${JSON.stringify(lines)}`);
-    assert.equal(lines.length, line ? 1 : 0, JSON.stringify(lines));
-    if (line) assert.match(lines[0], line);
+    assert.equal(lines.length, 1, JSON.stringify(lines));
+    assert.match(lines[0], line);
     s.channels.stop();
   });
 }
@@ -1553,4 +1642,247 @@ test('a recorded delivery leaves the in-process guard: a second call is answered
   assert.equal(only(s.calls, 'sourceOf').length, asked + 1, 'asked the host, not a set that only grows');
   assert.equal(s.slack.sent.length, 1);
   s.channels.stop();
+});
+
+// The receipt (replies.received): the code's own line that a NEW owner message reached the
+// steward, sent at once, before the steward's answer.
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const RECEIPT = channelReplies.received;
+
+test('receipt: a fresh relay is answered once with the fixed line, on its channel, to the bound account, and nothing reaches the host', async () => {
+  assert.equal(RECEIPT, '已收到，正在处理…');
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-owner' } });
+  assert.deepEqual(await s.inbound({ channel: 'wechat', senderRef: 'wx-owner', messageRef: 'w-1', text: BODY, at: NOW() }), { accepted: true });
+  await tick();
+  assert.deepEqual(s.wechat.sent, [{ text: RECEIPT, options: { replyToRef: 'w-1', to: 'wx-owner' } }]);
+  assert.equal(s.slack.sent.length, 0, 'only on the channel the message came from');
+  // Not a steward message: the host is asked exactly what it was asked before the receipt
+  // existed (the text check and the relay), and no delivery is recorded for it.
+  assert.deepEqual(s.calls.map(([name]) => name), ['codeCheck', 'relay']);
+  assert.deepEqual(owed(s.owedFile), [], 'and nothing is owed');
+  assert.ok(s.logs.some(([event, fields]) => event === 'channel_receipt_sent' && fields.channel === 'wechat'));
+  // The steward's real answer to that message still goes out, mirrored as before.
+  s.sources.set('m-in', { direction: 'in', channel: 'wechat', sender_ref: 'wx-owner', channel_message_ref: 'w-1' });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'wechat' });
+  assert.deepEqual(s.wechat.sent.map(line => line.text), [RECEIPT, 'the answer']);
+  assert.equal(only(s.calls, 'recordDelivery').length, 1, 'only the answer is a delivery');
+  s.channels.stop();
+});
+
+test('receipt: none for a duplicate, a binding code, a stranger, a decision, a decision still running, or a refusal', async () => {
+  const quiet = async (options, next, message, what) => {
+    const s = setup(options);
+    s.host.next = next;
+    await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: NOW(), ...message });
+    await tick();
+    assert.ok(!s.slack.sent.some(line => line.text === RECEIPT), `${what}: ${JSON.stringify(s.slack.sent)}`);
+    s.channels.stop();
+    return s;
+  };
+  await quiet(undefined, { message_id: 'm-in', duplicate: true, approval: null }, {}, 'a redelivery');
+  await quiet(undefined, { message_id: null, duplicate: true, approval: null }, { text: '123456' }, 'the owner\'s code replayed');
+  const bound = await quiet({ bindings: {} }, undefined, { senderRef: 'U-NEW', text: '123456' }, 'a binding code');
+  assert.match(bound.slack.sent[0].text, /^Bound/);
+  await quiet(undefined, { refused: 'channel_sender_not_bound' }, { senderRef: 'U-STRANGER' }, 'a stranger');
+  const decided = await quiet(undefined, { message_id: 'm', duplicate: false, approval: EXECUTED }, { text: '同意 proposal p-1' }, 'a decision');
+  assert.deepEqual(decided.slack.sent.map(line => line.text), [channelReplies.approval(EXECUTED)], 'its own line, at once');
+  await quiet(undefined, { duplicate: true, approval: null, approval_pending: true }, {}, 'a decision still running');
+  for (const refused of ['body_too_long', 'code_sent_to_bound_account', 'rate_limited'])
+    await quiet(undefined, { refused }, {}, refused);
+});
+
+test('receipt: at most one per channel within receiptMs, each channel its own window, and again after it', async t => {
+  // The clock is the test's: how long the three relays take on a loaded host decides nothing.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-owner' } });
+  for (const ref of ['ts-1', 'ts-2', 'ts-3'])
+    assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }), { accepted: true });
+  await s.inbound({ channel: 'wechat', senderRef: 'wx-owner', messageRef: 'w-1', text: BODY });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1'], 'a burst gets one');
+  assert.deepEqual(s.wechat.sent.map(line => line.options.replyToRef), ['w-1']);
+  assert.equal(s.logs.filter(([event]) => event === 'channel_receipt_skipped').length, 2);
+  t.mock.timers.tick(CHANNEL_LIMITS.receiptMs - 1);
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-3b', text: BODY });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1'], 'still inside the window');
+  t.mock.timers.tick(1);
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-4', text: BODY });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-1', 'ts-4']);
+  assert.equal(only(s.calls, 'relay').length, 6, 'every message was relayed');
+  s.channels.stop();
+});
+
+test('receipt: the steward\'s reply sent on a channel ends its window; a failed reply or a receipt does not', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup();
+  const receipts = () => s.slack.sent.filter(line => line.text === RECEIPT).map(line => line.options.replyToRef);
+  const owner = async ref => { await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }); await tick(); };
+  s.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1' });
+  await owner('ts-1');
+  await owner('ts-2');
+  assert.deepEqual(receipts(), ['ts-1'], 'a receipt starts the window, it does not end it');
+  // The reply fails to go out: the owner has heard nothing new, the window stands.
+  s.slack.fail = 'socket closed';
+  assert.deepEqual(await s.channels.ownerMessageSent('m-fail', 'lost answer', 'm-in'), { mirrored: false, reason: 'send_failed', channel: 'slack' });
+  s.slack.fail = undefined;
+  await owner('ts-3');
+  assert.deepEqual(receipts(), ['ts-1'], 'a failed reply starts nothing');
+  // The reply goes out: the owner's next message, still well inside receiptMs, is news again.
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  await owner('ts-4');
+  await owner('ts-5');
+  assert.deepEqual(receipts(), ['ts-1', 'ts-4'], 'the reply starts the window again: ts-4 gets one, ts-5 is inside it');
+  s.channels.stop();
+});
+
+test('receipt: a reply sent on one channel restarts only that channel\'s window', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const s = setup({ bindings: { slack: 'U-OWNER', wechat: 'wx-OWNER' } });
+  const got = ch => s[ch].sent.filter(line => line.text === RECEIPT).map(line => line.options.replyToRef);
+  const owner = async (channel, senderRef, ref) => { await s.inbound({ channel, senderRef, messageRef: ref, text: BODY }); await tick(); };
+  s.sources.set('m-in', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 's-1' });
+  await owner('slack', 'U-OWNER', 's-1');
+  await owner('wechat', 'wx-OWNER', 'w-1');
+  assert.deepEqual([got('slack'), got('wechat')], [['s-1'], ['w-1']]);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'the answer', 'm-in'), { mirrored: true, channel: 'slack' });
+  await owner('slack', 'U-OWNER', 's-2');
+  await owner('wechat', 'wx-OWNER', 'w-2');
+  assert.deepEqual([got('slack'), got('wechat')], [['s-1', 's-2'], ['w-1']], 'the Slack reply leaves the WeChat window standing');
+  s.channels.stop();
+});
+
+test('receipt: none when it would no longer be news, or when the channel is not registered - both logged', async () => {
+  const s = setup();
+  const late = new Date(Date.now() - CHANNEL_LIMITS.receiptMaxAgeMs - 1000).toISOString();
+  assert.deepEqual(await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY, at: late }), { accepted: true });
+  await tick();
+  assert.equal(s.slack.sent.length, 0, 'a message relayed long after it was written');
+  assert.ok(s.logs.some(([event, fields]) => event === 'channel_receipt_skipped' && fields.reason === 'late'));
+  // The window was not spent by it: the next fresh message still gets its receipt.
+  await s.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-2', text: BODY, at: new Date().toISOString() });
+  await tick();
+  assert.deepEqual(s.slack.sent.map(line => line.options.replyToRef), ['ts-2']);
+  s.channels.stop();
+  const fake = fakeHost(), logs = [];
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), owedFile: undefined });
+  channels.ready();
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY }), { accepted: true });
+  assert.ok(logs.some(([event, fields]) => event === 'channel_receipt_skipped' && fields.reason === 'not_registered'));
+  channels.stop();
+});
+
+test('receipt: a send that fails is logged and dropped - no retry, nothing owed, the message still accepted', async () => {
+  const fake = fakeHost(), logs = [];
+  const file = join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json');
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]), owedFile: file });
+  channels.ready();
+  const slack = fakeChannel('slack', { fail: 'socket closed' });
+  channels.service.register(slack.channel);
+  assert.deepEqual(await channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: 'ts-1', text: BODY }), { accepted: true });
+  await tick();
+  assert.equal(slack.sent.length, 1);
+  assert.deepEqual(logs.filter(([event]) => event === 'channel_receipt_failed'), [['channel_receipt_failed', { channel: 'slack', error: 'socket closed' }]]);
+  assert.ok(!logs.some(([event]) => event === 'channel_answer_failed'), 'not the answer path, which retries');
+  assert.deepEqual(owed(file), []);
+  await channels.pollOwed();
+  await new Promise(resolve => setTimeout(resolve, CHANNEL_LIMITS.answerRetryMs + 50));
+  assert.equal(slack.sent.length, 1, 'never tried again');
+  channels.stop();
+});
+
+test('receipt: a send that never answers holds up neither the message nor the next one', async () => {
+  const fake = fakeHost();
+  const channels = createOwnerChannels({ host: fake.host, owedFile: undefined });
+  channels.ready();
+  const sent = [];
+  channels.service.register({ name: 'slack', status: () => ({ connected: true }), send: text => { sent.push(text); return new Promise(() => {}); } });
+  const answered = await Promise.race([
+    Promise.all(['ts-1', 'ts-2'].map(ref => channels.service.inbound({ channel: 'slack', senderRef: 'U-OWNER', messageRef: ref, text: BODY }))),
+    new Promise(resolve => setTimeout(() => resolve('held up'), 200).unref())]);
+  assert.deepEqual(answered, [{ accepted: true }, { accepted: true }]);
+  assert.deepEqual(sent, [RECEIPT]);
+  channels.stop();
+});
+
+test('login: a channel may register an optional login; the handle asks it and passes only {requested} or {refused, retry_after_s}', async () => {
+  const { channels, reports, wechat, logs } = statusSetup({ limits: { fastStatusMs: 20, fastStatusForMs: 200 } });
+  channels.ready();
+  try {
+    assert.throws(() => channels.service.register({ name: 'slack', status: () => ({}), async send() {}, login: 'yes' }),
+      /login, when given, must be a function/);
+    assert.deepEqual(await channels.login('wechat'), { refused: 'not_registered' });
+    const plain = channels.service.register({ name: 'slack', status: () => ({ connected: true }), async send() { return {}; } });
+    assert.deepEqual(await channels.login('slack'), { refused: 'not_supported' }, 'a channel without login');
+    plain();
+    let answer = { requested: true, qr: 'https://login.weixin.qq.com/l/SECRET', qrSvg: '<svg/>' };
+    const asked = [];
+    channels.service.register({ name: 'wechat', status: () => wechat.now, async send() { return {}; },
+      async login() { asked.push('login'); return answer; } });
+    assert.deepEqual(await channels.login('wechat'), { requested: true }, 'nothing but `requested` leaves');
+    // Accepted: the status is reported quickly for a while, so the QR shows up in seconds.
+    wechat.now = { connected: false, detail: 'scan needed', qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"/>' };
+    const until = Date.now() + 2000;
+    while (!reports.some(r => r.qrSvg) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(reports.some(r => r.qrSvg), 'reported by the fast poll, long before statusMs');
+    answer = { refused: 'rate_limited', retry_after_s: 90, qr: 'SECRET' };
+    assert.deepEqual(await channels.login('wechat'), { refused: 'rate_limited', retry_after_s: 90 });
+    answer = { refused: 'qr_waiting' };
+    assert.deepEqual(await channels.login('wechat'), { refused: 'qr_waiting' });
+    answer = undefined;
+    assert.deepEqual(await channels.login('wechat'), { refused: 'refused' });
+    assert.equal(asked.length, 4);
+    assert.ok(!JSON.stringify(logs).includes('SECRET') && !JSON.stringify(logs).includes('<svg'));
+  } finally { channels.stop(); }
+});
+
+test('login: a channel login that throws or never answers is refused as unavailable, never thrown', async () => {
+  const { channels } = statusSetup({ limits: { sendMs: 50 } });
+  channels.ready();
+  try {
+    let behave = 'throw';
+    channels.service.register({ name: 'wechat', status: () => ({ connected: false }), async send() { return {}; },
+      login: () => behave === 'throw' ? Promise.reject(new Error('boom')) : new Promise(() => {}) });
+    assert.deepEqual(await channels.login('wechat'), { refused: 'unavailable' });
+    behave = 'hang';
+    assert.deepEqual(await channels.login('wechat'), { refused: 'unavailable' });
+  } finally { channels.stop(); }
+});
+
+test('login: past loginPerHour or loginPerDay accepted logins the channel is not asked, whatever a bridge restart forgot', async () => {
+  const realNow = Date.now;
+  let clock = Date.parse('2026-11-20T12:00:00Z');
+  Date.now = () => clock;
+  const { channels, logs } = statusSetup({ limits: { loginPerHour: 2, loginPerDay: 3 } });
+  try {
+    channels.ready();
+    let answer = { requested: true };
+    const asked = [];
+    channels.service.register({ name: 'wechat', status: () => ({ connected: false }), async send() { return {}; },
+      async login() { asked.push(clock); return answer; } });
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    clock += 60_000;
+    // A refusal of the channel's own is not counted.
+    answer = { refused: 'qr_waiting' };
+    assert.deepEqual(await channels.login('wechat'), { refused: 'qr_waiting' });
+    answer = { requested: true };
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    clock += 60_000;
+    // Two in the last hour: the third waits until the first is an hour old (the bridge, just
+    // restarted, would have taken it).
+    assert.deepEqual(await channels.login('wechat'), { refused: 'rate_limited', retry_after_s: 3600 - 120 });
+    assert.equal(asked.length, 3, 'the channel was not asked');
+    clock = Date.parse('2026-11-20T13:00:00Z');
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    // Three in 24 hours: the fourth waits until the first is a day old.
+    clock = Date.parse('2026-11-20T15:00:00Z');
+    assert.deepEqual(await channels.login('wechat'), { refused: 'rate_limited', retry_after_s: 21 * 3600 });
+    clock = Date.parse('2026-11-21T12:00:00Z');
+    assert.deepEqual(await channels.login('wechat'), { requested: true });
+    assert.equal(asked.length, 5);
+    assert.ok(logs.some(([event, fields]) => event === 'channel_login_refused' && fields.reason === 'rate_limited'));
+  } finally { Date.now = realNow; channels.stop(); }
 });

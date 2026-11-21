@@ -950,7 +950,10 @@ class DriverInbox:
         driver with the SAME `segments`/`answers` the conversation read projects
         for it - both are built by `citation_fields`. Those two keys appear only
         on a row that carries them: a plain message keeps exactly the shape it
-        had before, with no empty list and no raw `*_json` string.
+        had before, with no empty list and no raw `*_json` string. By the same
+        rule, an owner message relayed from a chat channel carries
+        `source_channel` ('slack' / 'wechat', from the inbound row of
+        `state_message_sources`); a dashboard message has no such key.
         """
         driver_id = driver_id or self.driver_id
         self._authorize(driver_id)
@@ -961,13 +964,15 @@ class DriverInbox:
         with self.store.transaction() as conn:
             self._driver(conn, driver_id)
             high=conn.execute("SELECT COALESCE(MAX(seq),0) FROM driver_inbox_deliveries WHERE target_driver_id=?", (driver_id,)).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,s.channel AS source_channel FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE d.target_driver_id=? AND d.seq>? ORDER BY d.seq LIMIT ?", (driver_id,after,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)
             # The storage columns are not payload: the citation part above is the
             # only shape a reader sees them in.
             del row["segments_json"], row["answers_json"], row["withdraws_json"]
+            if row["source_channel"] is None:
+                del row["source_channel"]
             row.update(citation)
         return {"driver_id":driver_id,"messages":page,"next_after":page[-1]["seq"] if len(rows)>limit else max(after,high),"truncated":len(rows)>limit}
 

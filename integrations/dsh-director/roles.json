@@ -32,7 +32,7 @@
     "presented": ["memory_search", "memory_read", "memory_note", "memory_profile_update", "memory_forget",
                   "portfolio_projects", "portfolio_project", "portfolio_conversation", "portfolio_inbox",
                   "private_inbox", "portfolio_inbox_acknowledge", "private_inbox_acknowledge",
-                  "propose", "withdraw_proposal",
+                  "propose", "withdraw_proposal", "request_wechat_qr",
                   "handoff", "idle_dormant", "ask_owner", "close_question", "grep_chat_history"],
     "presented_only": true,
     "forbidden": ["bash", "read", "write", "edit", "grep", "read_image", "subagent", "subagent_fork", "workflow",

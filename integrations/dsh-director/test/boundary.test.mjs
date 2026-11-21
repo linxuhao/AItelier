@@ -55,6 +55,7 @@ export const SHIPPED = [
   join('lib', 'portfolio.mjs'),
   join('lib', 'proposals.mjs'),
   join('lib', 'channels.mjs'),
+  join('lib', 'channel-tools.mjs'),
   join('lib', 'tool-discovery.mjs'),
   join('lib', 'memory', 'bm25.mjs'),
   join('lib', 'memory', 'git.mjs'),

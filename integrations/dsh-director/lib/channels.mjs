@@ -7,7 +7,11 @@
  *  the two and nothing more. In particular it never interprets a message - an approval
  *  phrase is matched and executed by the host, in code - and it never sends a channel
  *  anything but the steward's own message to its owner or a one-line answer to the sender
- *  about their own message (B2: a channel is a third party's server).
+ *  about their own message (B2: a channel is a third party's server). One such line is the
+ *  receipt (replies.received): when the host has just taken a NEW owner message into the
+ *  conversation, this code - never the model - tells the sender at once that it arrived,
+ *  at most once per channel and limits.receiptMs - a window the steward's own reply sent on
+ *  that channel ends - best effort (see receipt()).
  *
  *  Answers to a sender who is not the bound owner are deliberately few: a binding attempt
  *  gets one line (bound / not bound), anything else gets nothing, so a stranger learns
@@ -46,6 +50,7 @@ const decided = ({ kind, target }) => {
  *  never an echo of what they wrote. */
 export const channelReplies = Object.freeze({
   bound: 'Bound: this account now talks to the steward. 已绑定：这个账号现在可以和管家对话。',
+  received: '已收到，正在处理…',
   bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
   unknowable: 'Not delivered, and it cannot be retried: please send it again. 未送达，且无法重试：请再发一次。',
   body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
@@ -82,6 +87,72 @@ const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_a
  *  is still running. The message is held and asked again; it is never dropped. */
 const RETRYABLE = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 const CODE = /^[0-9]{6}$/;
+/** A phone chat shows a long message badly (owner, 2026-11-20): the steward's message goes to
+ *  a channel cut to at most `mirrorChars` characters, followed by MORE. The cut falls in the
+ *  second half of what fits: before the last blank line (a paragraph's title is never the last
+ *  line kept), else at the last line end, else after the last sentence end (`.` only before a
+ *  space: never inside 13.6x or v1.2.3), else at the bound - stepped back before a run of
+ *  word, number or URL characters it would split (never `见 Q1` for `见 Q12`). Headings, bold
+ *  and table rules render on neither channel and are flattened on both; WeChat also loses
+ *  inline code marks. The owner's record and the dashboard keep the whole text: only the
+ *  channel copy is shaped. An approval phrase line is never cut: it loses only the code or
+ *  bold marks around it (the phrase itself has none, and a copied line must match exactly) and
+ *  stays in place, or, when the text is cut, comes after what is kept, before MORE. A text with
+ *  a line that is a binding code goes exactly as written. */
+export const MORE = '\n…（全文见面板）';
+const MORE_CHARS = Array.from(MORE).length;
+const VERBATIM = /同意 proposal |拒绝 proposal /;
+const CJK_END = /[。！？；]/;
+const LATIN_END = /[.!?;]/;
+const TOKEN = /[A-Za-z0-9_./:#?&=%-]/;
+const TABLE_RULE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+/** One line as a chat shows it well; null drops it (a table's rule row). */
+const flattenLine = (line, channel) => {
+  if (VERBATIM.test(line)) return line.replace(/`|\*\*/g, '');
+  if (TABLE_RULE.test(line)) return null;
+  let flat = line.replace(/^(\s*)#{1,6}\s+/, '$1').replace(/\*\*(.+?)\*\*/g, '$1');
+  if (channel === 'wechat') flat = flat.replace(/`([^`\n]+)`/g, '$1');
+  if (/^\s*\|.*\|\s*$/.test(flat)) flat = flat.trim().slice(1, -1).split('|').map(cell => cell.trim()).join(' · ');
+  return flat;
+};
+/** The first `budget` code points of `points`, cut at the best boundary in their second half. */
+const cutAt = (points, budget) => {
+  const head = points.slice(0, budget);
+  const half = head.length / 2;
+  let end = -1;
+  for (let i = head.length - 1; i >= half && end < 0; i--) {
+    if (head[i] !== '\n') continue;
+    let k = i - 1;
+    while (k >= 0 && (head[k] === ' ' || head[k] === '\t')) k--;
+    if (k >= 0 && head[k] === '\n') end = k;
+  }
+  if (end < 0 && head.lastIndexOf('\n') >= half) end = head.lastIndexOf('\n');
+  for (let i = head.length - 1; end < 0 && i >= half; i--) {
+    if (CJK_END.test(head[i]) || (LATIN_END.test(head[i]) && /^\s?$/.test(points[i + 1] ?? ''))) end = i + 1;
+  }
+  if (end < 0) {
+    end = head.length;
+    if (TOKEN.test(points[end] ?? '')) {
+      let start = end;
+      while (start > 0 && TOKEN.test(head[start - 1])) start--;
+      if (start >= half) end = start;
+    }
+  }
+  return head.slice(0, end).join('').trimEnd();
+};
+export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars) {
+  if (body.split('\n').some(line => CODE.test(line.trim()))) return body;
+  if (!(max > MORE_CHARS)) max = CHANNEL_LIMITS.mirrorChars;
+  const lines = body.split('\n').map(line => flattenLine(line, channel)).filter(line => line !== null);
+  const shaped = lines.join('\n');
+  if (!shaped.trim()) return body;
+  if (Array.from(shaped).length <= max) return shaped;
+  const phrases = lines.filter(line => VERBATIM.test(line));
+  const rest = Array.from(lines.filter(line => !VERBATIM.test(line)).join('\n').trim());
+  const budget = max - MORE_CHARS - phrases.reduce((sum, line) => sum + Array.from(line).length + 1, 0);
+  const kept = budget > 0 ? cutAt(rest, budget) : '';
+  return [kept, ...phrases].filter(Boolean).join('\n') + MORE;
+}
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
 /** A message is owed while its delivery or the line its decision owes has not been
@@ -116,10 +187,15 @@ const within = (promise, ms, what) => {
  *  (1+2+4+8+16 s: a backend restart); an answer line answerAttempts times, answerRetryMs
  *  between tries; the owed store is re-asked every owedMs, at most owedMax messages; a decision
  *  line is never sent more than lineMaxAgeMs after the owner wrote it (the earlier of the
- *  channel's time and when it was first owed here): later, the dashboard alone shows it. */
+ *  channel's time and when it was first owed here): later, the dashboard alone shows it. The
+ *  steward's message reaches a channel as at most mirrorChars characters (channelText).
+ *  A channel login (a new WeChat QR) accepted here at most loginPerHour times in any hour and
+ *  loginPerDay in any 24 hours: the WeChat bridge keeps the same bounds (with its own 2-minute
+ *  gap) in its memory, and this count, in the host's, outlives a bridge restart. */
 export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bindPerMinute: 5, answeredRefs: 1000, statusMs: 30000,
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
-  lineMaxAgeMs: 3600000 });
+  lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000, mirrorChars: 600,
+  fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12 });
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -254,10 +330,11 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   // outage, is not announced as news - and its record is done (handle), so it is not re-asked
   // every owedMs for good. A message still owed its DELIVERY has no such bound: it is relayed
   // whenever the host takes it (the host dates an approval phrase itself).
-  const lineExpired = record => {
+  const olderThan = (record, ms) => {
     const born = Math.min(...[record?.at, record?.owedAt].filter(text).map(Date.parse).filter(Number.isFinite));
-    return Number.isFinite(born) && Date.now() - born > limits.lineMaxAgeMs;
+    return Number.isFinite(born) && Date.now() - born > ms;
   };
+  const lineExpired = record => olderThan(record, limits.lineMaxAgeMs);
   const forget = key => { if (owed.delete(key)) owedSave(); };
   // Which minute a refusal line belongs to: the binding-code line has a minute of its own, so
   // no other line ever holds back the news that a code was retired.
@@ -345,6 +422,35 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     if (!window || now - window.start >= 60000) { binds.set(channel, { start: now, count: 1 }); return true; }
     return ++window.count <= limits.bindPerMinute;
   };
+  // The receipt: when the host has just taken a NEW owner message (a relay that is no
+  // duplicate and carries no decision - a decision already gets its own line at once), the
+  // sender hears at once that it arrived, before the steward's answer, which takes a model turn.
+  // It is this code's fixed line, sent straight to the channel: nothing about it reaches the
+  // host, so it is no steward message, wakes nothing, answers nothing (the unanswered-owner
+  // check and the mirror never see it) and is not remembered. At most one per channel and
+  // receiptMs, the window spent by the attempt, so a burst gets one (the window is this
+  // process's memory: a restart inside it may let one more through). The steward's reply
+  // going out on the channel (mirror(), a send that succeeded) ends its window: the owner's
+  // next message there is news again and gets its receipt. Only while it is news:
+  // a message relayed more than receiptMaxAgeMs after the owner wrote (held through an
+  // outage, drained from the owed store) gets none. Best effort: not
+  // awaited (the channel's next message is not held up by a slow send), a failure is
+  // logged and dropped - no retry, nothing owed.
+  const receipts = new Map();
+  const receipt = (channel, senderRef, messageRef, record) => {
+    const entry = registered.get(channel);
+    if (!entry) { log('channel_receipt_skipped', { channel, reason: 'not_registered' }); return; }
+    if (olderThan(record, limits.receiptMaxAgeMs)) { log('channel_receipt_skipped', { channel, reason: 'late' }); return; }
+    const last = receipts.get(channel);
+    if (last !== undefined && Date.now() - last < limits.receiptMs) { log('channel_receipt_skipped', { channel, reason: 'window' }); return; }
+    receipts.set(channel, Date.now());
+    let sending;
+    try { sending = entry.send(replies.received, { replyToRef: messageRef, to: senderRef }); }
+    catch (error) { sending = Promise.reject(error); }
+    within(Promise.resolve(sending), limits.sendMs, 'send_timeout').then(
+      () => log('channel_receipt_sent', { channel }),
+      error => log('channel_receipt_failed', { channel, error: short(error) }));
+  };
   // The channel's current binding, or undefined when it has none.
   const binding = async (channel, signal) => {
     const listed = await host.list(signal);
@@ -390,8 +496,10 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
       if (!channel || !CHANNEL_NAMES.includes(channel.name)) throw new Error(`ownerChannels.register: name must be one of ${CHANNEL_NAMES.join(', ')}`);
       if (typeof channel.send !== 'function' || typeof channel.status !== 'function')
         throw new Error('ownerChannels.register: send and status must be functions');
+      if (channel.login !== undefined && typeof channel.login !== 'function')
+        throw new Error('ownerChannels.register: login, when given, must be a function');
       if (registered.has(channel.name)) throw new Error(`ownerChannels.register: ${channel.name} is already registered`);
-      const entry = { send: channel.send, status: channel.status };
+      const entry = { send: channel.send, status: channel.status, ...(channel.login ? { login: channel.login } : {}) };
       registered.set(channel.name, entry);
       log('channel_registered', { channel: channel.name });
       void reportStatus(channel.name, statusOf(entry));
@@ -563,6 +671,9 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
         log('channel_relay_pending', { ...seen, message_id: result.message_id });
         return { accepted: false, reason: 'approval_pending' };
       }
+      // A new owner message the steward will now answer: the receipt (relay accepted means the
+      // host found the sender bound to this channel now).
+      if (!result?.duplicate && !result?.approval) receipt(channel, senderRef, messageRef, { at, owedAt: owed.get(owed1)?.owedAt });
       // A decision is answered once per channel message (answer() keeps that within the
       // process). A redelivery of a message whose line went out is not answered again; one
       // whose line never went out is: this process got no answer the first time, the host
@@ -736,8 +847,12 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     let ref, error;
     if (!entry) error = 'channel_not_connected';
     else {
-      try { ref = (await within(entry.send(body, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref; }
-      catch (failure) { error = short(failure); }
+      const sent = channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
+      if (sent.endsWith(MORE) && !body.endsWith(MORE)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
+      try {
+        ref = (await within(entry.send(sent, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
+        receipts.delete(channel);  // the steward has answered here: the next owner message is news again
+      } catch (failure) { error = short(failure); }
     }
     // Recorded once, success or failure (the record retried, a failed send never).
     let recorded, failed = false;
@@ -750,7 +865,8 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
   };
 
   /** The root wrote `body` to its owner as message `messageId` (a reply to `replyTo` when
-   *  given): send the same text where the owner is listening. Never throws. */
+   *  given): send the same text where the owner is listening - shaped for a phone chat by
+   *  channelText (a long one cut, ending in MORE). Never throws. */
   const ownerMessageSent = (messageId, body, replyTo) => {
     if (!text(messageId) || typeof body !== 'string' || !body.trim()) return Promise.resolve({ mirrored: false, reason: 'nothing_to_send' });
     const run = queue.then(() => mirror(messageId, body, text(replyTo) ? replyTo : undefined)).catch(error => {
@@ -761,8 +877,62 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     return run;
   };
 
+  // After an accepted login the status is reported every fastStatusMs for fastStatusForMs,
+  // so the new QR reaches the dashboard in seconds rather than at the next statusMs poll.
+  let fastTimer, fastUntil = 0;
+  const pollFast = () => {
+    if (typeof host.reportStatus !== 'function') return;
+    fastUntil = Date.now() + limits.fastStatusForMs;
+    if (fastTimer) return;
+    fastTimer = setInterval(() => {
+      if (Date.now() >= fastUntil) { clearInterval(fastTimer); fastTimer = undefined; return; }
+      void pollStatus();
+    }, limits.fastStatusMs);
+    fastTimer.unref?.();
+  };
+  // When each channel's logins were accepted (the last 24 hours): loginPerHour/loginPerDay.
+  const logins = new Map();
+  const loginWait = channel => {
+    const at = Date.now(), hour = 3600000, day = 24 * hour;
+    const times = (logins.get(channel) ?? []).filter(time => time > at - day);
+    logins.set(channel, times);
+    const lastHour = times.filter(time => time > at - hour), waits = [0];
+    if (lastHour.length >= limits.loginPerHour) waits.push(lastHour[lastHour.length - limits.loginPerHour] + hour - at);
+    if (times.length >= limits.loginPerDay) waits.push(times[times.length - limits.loginPerDay] + day - at);
+    return Math.max(...waits);
+  };
+  /** A new login (the WeChat QR) on `channel`, for the owner's dashboard button and the
+   *  steward's tool: {requested: true} or {refused, retry_after_s?}. Only these fields
+   *  leave here - whatever else a channel answers (never a QR) is dropped. Past
+   *  loginPerHour/loginPerDay accepted logins the channel is not asked at all. Never throws. */
+  const login = async channel => {
+    const entry = registered.get(channel);
+    if (!entry) return { refused: 'not_registered' };
+    if (!entry.login) return { refused: 'not_supported' };
+    const wait = loginWait(channel);
+    if (wait > 0) {
+      log('channel_login_refused', { channel, reason: 'rate_limited' });
+      return { refused: 'rate_limited', retry_after_s: Math.ceil(wait / 1000) };
+    }
+    let answer;
+    try { answer = await within(Promise.resolve(entry.login()), limits.sendMs, 'channel login timed out'); }
+    catch (error) { log('channel_login_failed', { channel, error: short(error) }); return { refused: 'unavailable' }; }
+    if (answer?.requested === true) {
+      logins.get(channel).push(Date.now());
+      log('channel_login_requested', { channel });
+      pollFast();
+      void pollStatus();
+      return { requested: true };
+    }
+    const retry = Number(answer?.retry_after_s);
+    const refused = { refused: text(answer?.refused) ? answer.refused.slice(0, 40) : 'refused',
+      ...(Number.isInteger(retry) && retry > 0 ? { retry_after_s: retry } : {}) };
+    log('channel_login_refused', { channel, reason: refused.refused });
+    return refused;
+  };
+
   return {
-    service, ownerMessageSent,
+    service, ownerMessageSent, login,
     ready() {
       ready();
       if (!statusTimer && typeof host.reportStatus === 'function') {
@@ -781,6 +951,7 @@ export function createOwnerChannels({ host, log = () => {}, replies = channelRep
     pollOwed: drainOwed,
     stop: () => {
       clearInterval(statusTimer); statusTimer = undefined;
+      clearInterval(fastTimer); fastTimer = undefined;
       clearInterval(owedTimer); owedTimer = undefined;
       stopping.abort();
     },

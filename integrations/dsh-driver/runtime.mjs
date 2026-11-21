@@ -20,6 +20,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, forwardFinalText, openProposals, openThreads, replyToLetter, stewardHostTexts, stewardOps, syncConversation,
   textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
+import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
 import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
@@ -824,15 +825,21 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent, ownerChannelLogin }) {
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       // Plugin step 14: the owner's memory requests from the dashboard run here, in code.
       const ownerRequests = () => steward ? processMemoryRequests({ request, memory, log: line => ctx.logger.warn(line) })
         .catch(error => ctx.logger.warn('memory requests: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
+      // Step 19: the owner's requests for a new WeChat login QR, also run in code; the QR
+      // itself goes only through the channel's status report.
+      const loginRequests = () => steward && ownerChannelLogin ? processChannelLoginRequests({ request,
+        login: channel => ownerChannelLogin(channel), log: line => ctx.logger.warn(line) })
+        .catch(error => ctx.logger.warn('channel login requests: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       await sync();
       await ownerRequests();
+      await loginRequests();
       // Step 16: the reminder clock. Each wake it gives is delivered once per (row, due time).
       if (steward) {
         scheduleTimer = new ScheduleTimer({ request, log: line => ctx.logger.warn(line),
@@ -880,9 +887,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // drop their events from what the steward is woken with.
         const memoryRequest = steward && raw.events?.some(e => MEMORY_REQUEST_EVENTS.has(e.event_type));
         if (memoryRequest) await ownerRequests();
+        if (steward && raw.events?.some(e => CHANNEL_LOGIN_EVENTS.has(e.event_type))) await loginRequests();
         // Schedule changes re-arm the clock and are no model turn either (step 16).
         if (steward) void scheduleTimer?.refresh();
-        const quiet = steward ? new Set([...MEMORY_REQUEST_EVENTS, ...SCHEDULE_EVENTS]) : MEMORY_REQUEST_EVENTS;
+        const quiet = steward ? new Set([...MEMORY_REQUEST_EVENTS, ...SCHEDULE_EVENTS, ...CHANNEL_LOGIN_EVENTS]) : MEMORY_REQUEST_EVENTS;
         const result = steward && raw.events?.some(e => quiet.has(e.event_type))
           ? { ...raw, events: raw.events.filter(e => !quiet.has(e.event_type)) } : raw;
         // Steering starts an idle agent or queues input at the next active step.

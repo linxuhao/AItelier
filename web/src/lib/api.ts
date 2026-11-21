@@ -937,6 +937,15 @@ export interface OwnerChannel {
   status?: {connected: boolean; detail?: string | null; at?: string} | null;
   /** While a WeChat login needs a scan: its QR as an SVG document (the backend checked it). */
   qr_svg?: string | null;
+  /** The newest request for a new login QR on this channel (WeChat only), or null. */
+  login_request?: OwnerChannelLoginRequest | null;
+}
+/** The owner's request for a new WeChat login QR: `pending` until the steward's host runs it,
+ *  `expired` when no host did within 2 minutes, `done` with the bridge's answer. Never the QR. */
+export interface OwnerChannelLoginRequest {
+  request_id: string; channel: OwnerChannelName; status: 'pending' | 'done' | 'expired';
+  requested_at: string; completed_at: string | null;
+  result: {requested?: true; refused?: string; retry_after_s?: number} | null;
 }
 export interface OwnerChannels { channels: OwnerChannel[]; default_channel: OwnerChannelName | null }
 export function listOwnerChannels(): Promise<OwnerChannels> {
@@ -944,6 +953,10 @@ export function listOwnerChannels(): Promise<OwnerChannels> {
 }
 export function createOwnerChannelCode(channel: OwnerChannelName): Promise<{code: string; expires_at: string}> {
   return _post('/api/steward/channels/' + encodeURIComponent(channel) + '/code');
+}
+/** Ask for a new WeChat login QR; a request still pending is answered again, not doubled. */
+export function requestOwnerChannelQr(channel: OwnerChannelName): Promise<OwnerChannelLoginRequest> {
+  return _post('/api/steward/channels/' + encodeURIComponent(channel) + '/qr');
 }
 export function unbindOwnerChannel(channel: OwnerChannelName): Promise<unknown> {
   return _del('/api/steward/channels/' + encodeURIComponent(channel));

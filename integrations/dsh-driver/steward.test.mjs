@@ -203,6 +203,19 @@ test('the steward prompt names the tools it has: both inbox readers where it exp
       assert.ok(table.steward.presented.includes(name), `steward.md names ${name}, which the steward is not presented`);
 });
 
+test('the steward prompt bounds EVERY message to the owner for a phone chat, not only the unprompted ones', () => {
+  const md = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
+  // Owner, 2026-11-20: "管家的回复尽量精简，微信和slack对超长信息的显示都不friendly" - a 1604-character
+  // reply with bold section titles went to WeChat. The rule is its own paragraph, not a clause
+  // of the "unasked" one, so it binds a reply as much as a report.
+  const rule = md.split('\n\n').find(part => part.startsWith('Every message to your owner'));
+  assert.ok(rule, 'steward.md has a paragraph for every message to the owner');
+  assert.ok(!rule.includes('unasked'), 'the rule is not part of the unprompted-messages paragraph');
+  for (const words of ['lead with the answer', 'at most five more short lines', '300 Chinese characters', 'no tables, no headings, no bold',
+    'The approval phrase line is never shortened'])
+    assert.ok(rule.includes(words), `the rule says: ${words}`);
+});
+
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });
@@ -521,6 +534,14 @@ test('the private inbox reader: a letter longer than the injected excerpt comes 
   assert.ok(stated, tool.description);
   assert.deepEqual(answer.limits, { items_per_page: Number(stated[1]), body_chars: Number(stated[2]), answer_chars: Number(stated[3]) });
   assert.deepEqual(answer.limits, INBOX_LIMITS, 'the same INBOX_LIMITS as the project inbox reader');
+});
+
+test('the private inbox reader names the chat channel an owner message came from, and nothing for a dashboard one', async () => {
+  const state = privateDeliveries([privateRow(1, { sender_driver_id: null, source_channel: 'slack' }),
+    privateRow(2, { sender_driver_id: null, source_channel: 'wechat' }), privateRow(3, { sender_driver_id: null })]);
+  const answer = await stewardPrivateInboxTool(state.request).execute({}, toolCall);
+  assert.deepEqual(answer.items.map(item => item.source_channel), ['slack', 'wechat', undefined]);
+  assert.equal('source_channel' in answer.items[2], false, 'a dashboard message carries no source key');
 });
 
 test('the private inbox reader is the steward\'s own box: a letter addressed to another driver is not in the page, one query, no write', async () => {
@@ -1119,6 +1140,33 @@ test('step 17 layer 2: open threads from data - the unanswered owner messages an
   void now;
 });
 
+test('open threads name the chat channel each unanswered owner message came from, and nothing for a dashboard one', async () => {
+  const conversation = [owner('o1', '2026-11-20T12:48:00Z', '测试'), owner('o2', '2026-11-20T12:49:00Z', 'from wechat'),
+    owner('o3', '2026-11-20T12:50:00Z', 'from the dashboard')];
+  const asked = [];
+  let sourcesFail = false;
+  const request = async (path, body) => {
+    if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+    if (path.endsWith('/message_sources')) {
+      asked.push(body.message_ids);
+      if (sourcesFail) throw new Error('state down');
+      return { result: { sources: { o1: { direction: 'in', channel: 'slack', sender_ref: 'U0OWNER', channel_message_ref: 'ts-1' },
+        o2: { direction: 'in', channel: 'wechat', sender_ref: 'wxid', channel_message_ref: 'wx-1' } } } };
+    }
+    throw new Error('unexpected ' + path);
+  };
+  const { openThreads } = await import('./steward-host.mjs');
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  let threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.deepEqual(asked, [['o1', 'o2', 'o3']], 'one sources read for the whole list');
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => m.source_channel), ['slack', 'wechat', undefined]);
+  assert.equal('source_channel' in threads.unanswered_owner_messages[2], false, 'a dashboard message carries no source key');
+  assert.doesNotMatch(JSON.stringify(threads), /U0OWNER|ts-1|wxid|wx-1/, 'only the channel name, never the account or message ref');
+  sourcesFail = true;
+  threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+  assert.deepEqual(threads.unanswered_owner_messages.map(m => m.message_id), ['o1', 'o2', 'o3'], 'a failed sources read keeps the list');
+});
+
 test('review 340 (a): every tool the adapter adds to the steward\'s presented list is one runtime.mjs registers', () => {
   const effective = aitelierRoles(table);
   const added = effective.steward.presented.filter(name => !table.steward.presented.includes(name));
@@ -1126,4 +1174,33 @@ test('review 340 (a): every tool the adapter adds to the steward\'s presented li
   const registered = new Set([...source.matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]));
   assert.ok(added.length >= 5, JSON.stringify(added));
   assert.deepEqual(added.filter(name => !registered.has(name)), [], 'presented to the steward but never registered');
+});
+
+test('owner channel login requests (step 19): each pending request asks the channel once and completes with {requested} or a refusal code, never more', async () => {
+  const { processChannelLoginRequests, CHANNEL_LOGIN_EVENTS } = await import('./channel-login-requests.mjs');
+  assert.ok(CHANNEL_LOGIN_EVENTS.has('owner_channel_login_requested'));
+  const completed = [], asked = [];
+  const answers = [{ requested: true, qr: 'https://login.weixin.qq.com/l/SECRET', qrSvg: '<svg/>' },
+    { refused: 'rate_limited', retry_after_s: 80, qr: 'SECRET' }, { refused: 'Not A Code <svg>' }];
+  let failComplete = false;
+  const request = async (path, body) => {
+    if (path.endsWith('list_owner_channel_login_requests')) return { result: { requests: [
+      { request_id: 'q1', channel: 'wechat' }, { request_id: 'q2', channel: 'wechat' }, { request_id: 'q3', channel: 'wechat' }] } };
+    if (failComplete) throw new Error('HTTP 503');
+    completed.push(body); return { result: { status: 'done' } };
+  };
+  const login = async channel => { asked.push(channel); return answers.shift(); };
+  assert.deepEqual(await processChannelLoginRequests({ request, login }), { pending: 3, done: 3 });
+  assert.deepEqual(asked, ['wechat', 'wechat', 'wechat']);
+  assert.deepEqual(completed, [
+    { request_key: 'channel-login:q1', request_id: 'q1', result: { requested: true } },
+    { request_key: 'channel-login:q2', request_id: 'q2', result: { refused: 'rate_limited', retry_after_s: 80 } },
+    { request_key: 'channel-login:q3', request_id: 'q3', result: { refused: 'refused' } }]);
+  assert.ok(!JSON.stringify(completed).includes('SECRET') && !JSON.stringify(completed).includes('svg'));
+  // A login that throws is an `unavailable` answer; a completion that fails is logged, not thrown.
+  failComplete = true;
+  const logged = [];
+  const out = await processChannelLoginRequests({ request, login: async () => { throw new Error('boom'); }, log: line => logged.push(line) });
+  assert.deepEqual(out, { pending: 3, done: 0 });
+  assert.ok(logged.some(line => /q1: boom/.test(line)) && logged.some(line => /q1: result not written/.test(line)));
 });

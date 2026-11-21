@@ -95,6 +95,8 @@ function privateInboxItem(row) {
     created_at: row?.created_at ?? null,
     status: row?.status ?? null,
     version: row?.version ?? null,
+    // An owner message relayed from Slack or WeChat names its channel; a dashboard one has no key.
+    ...(row?.source_channel ? { source_channel: row.source_channel } : {}),
     ...wholeBody(row?.body),
   };
 }
@@ -373,8 +375,16 @@ export async function recordHandoff(stateDir, row) {
 export async function openThreads({ request, project, me, stateDir, now = Date.now(), signal }) {
   const threads = {};
   try {
-    threads.unanswered_owner_messages = (await unansweredOwnerMessages({ request, project, me, signal }))
-      .map(m => ({ message_id: m.message_id, at: m.created_at, text: textOf(m).slice(0, 300) }));
+    const unanswered = await unansweredOwnerMessages({ request, project, me, signal });
+    // Which chat channel each came from (no inbound source row = the dashboard). Without the
+    // sources read the messages are still listed, only without a channel.
+    const sources = unanswered.length ? await request('/api/state/query/message_sources',
+      { message_ids: unanswered.map(m => m.message_id) }, signal).then(r => (r?.result ?? r)?.sources ?? {}, () => ({})) : {};
+    threads.unanswered_owner_messages = unanswered.map(m => {
+      const source = sources[m.message_id];
+      return { message_id: m.message_id, at: m.created_at, text: textOf(m).slice(0, 300),
+        ...(source?.direction === 'in' && source.channel ? { source_channel: source.channel } : {}) };
+    });
   } catch (error) { threads.unanswered_owner_messages = { error: String(error?.message ?? error).slice(0, 200) }; }
   try {
     const { readFile } = await import('node:fs/promises');

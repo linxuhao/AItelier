@@ -8,6 +8,9 @@
  *  - Bind asks the backend for a one-time code and shows it with a countdown and
  *    the instruction; the code goes away once the list shows a new binding;
  *  - Unbind asks first; the default-channel selector PUTs the choice (or null);
+ *  - "New QR code" (WeChat, while not connected) asks the backend for a new login QR; the
+ *    newest request's state is one line on the card, and the button waits while it is
+ *    pending or while the bridge said to wait;
  *  - message source badges: only the steward's conversation asks for sources, once
  *    per new message id, batched; a director's pane asks for nothing.
  *
@@ -24,10 +27,10 @@ const api = vi.hoisted(() => ({
   dshDriverHistory: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn(),
   listStewardProposals: vi.fn(), stewardProposalImpact: vi.fn(), listStewardSchedules: vi.fn(),
   listOwnerChannels: vi.fn(), createOwnerChannelCode: vi.fn(), unbindOwnerChannel: vi.fn(),
-  setDefaultOwnerChannel: vi.fn(), stewardMessageSources: vi.fn(),
+  setDefaultOwnerChannel: vi.fn(), stewardMessageSources: vi.fn(), requestOwnerChannelQr: vi.fn(),
 }));
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
-import type { DriverConversationEntry, OwnerChannels } from '../../lib/api';
+import type { DriverConversationEntry, OwnerChannelLoginRequest, OwnerChannels } from '../../lib/api';
 import StewardChannels from '../../views/StewardChannels.svelte';
 import StewardPane from '../../views/StewardPane.svelte';
 import DriverConversationPane from '../../views/DriverConversationPane.svelte';
@@ -69,6 +72,132 @@ beforeEach(() => {
   api.stewardMessageSources.mockResolvedValue({});
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
+
+const qrRequest = (over: Partial<OwnerChannelLoginRequest> = {}): OwnerChannelLoginRequest => ({
+  request_id: 'qrreq-1', channel: 'wechat', status: 'pending', requested_at: '2026-11-18T12:00:00Z', completed_at: null,
+  result: null, ...over,
+});
+const withQrRequest = (request: OwnerChannelLoginRequest | null, wechat: object = {}) => {
+  const listed = channels();
+  listed.channels[1] = {...listed.channels[1], login_request: request, ...wechat};
+  return listed;
+};
+const feedback = (container: HTMLElement) => card(container, 'wechat').querySelector('[data-channel-qr-feedback]')?.textContent?.trim();
+const newQr = (container: HTMLElement) => card(container, 'wechat').querySelector('[data-channel-new-qr]') as HTMLButtonElement | null;
+
+describe('a new WeChat login QR', () => {
+  it('shows "New QR code" on the WeChat card only, and only while it is not connected', async () => {
+    const view = render(StewardChannels);
+    await waitFor(() => expect(card(view.container, 'wechat')).not.toBeNull());
+    expect(newQr(view.container)?.textContent?.trim()).toBe('New QR code');
+    expect(card(view.container, 'slack').querySelector('[data-channel-new-qr]')).toBeNull();
+    cleanup();
+    const connected = channels();
+    connected.channels[1] = {...connected.channels[1], status: {connected: true}};
+    api.listOwnerChannels.mockResolvedValue(connected);
+    const again = render(StewardChannels);
+    await waitFor(() => expect(card(again.container, 'wechat').querySelector('[data-channel-status]')?.getAttribute('data-channel-status'))
+      .toBe('connected'));
+    expect(newQr(again.container)).toBeNull();
+  });
+
+  it('pressing it asks the backend once, says it was requested, and waits while the request is pending; the list is re-read quickly', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:00Z'));
+    api.requestOwnerChannelQr.mockResolvedValue(qrRequest());
+    const view = render(StewardChannels);
+    await waitFor(() => expect(newQr(view.container)).not.toBeNull());
+    await fireEvent.click(newQr(view.container)!);
+    expect(api.requestOwnerChannelQr).toHaveBeenCalledTimes(1);
+    expect(api.requestOwnerChannelQr).toHaveBeenCalledWith('wechat');
+    await waitFor(() => expect(feedback(view.container)).toBe('Requested - waiting for the steward\'s host…'));
+    expect(newQr(view.container)!.disabled).toBe(true);
+    // Pending: the list is re-read on the short cadence; the host ran it, a QR is coming.
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(qrRequest({status: 'done', completed_at: '2026-11-18T12:00:03Z',
+      result: {requested: true}}), {status: {connected: false, detail: 'QR requested'}}));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(feedback(view.container)).toBe('The QR is on its way: it shows up here in a few seconds.'));
+    expect(newQr(view.container)!.disabled).toBe(false);
+    // Still re-read quickly until the QR shows; then the line goes, the QR is the news.
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(qrRequest({status: 'done', completed_at: '2026-11-18T12:00:03Z',
+      result: {requested: true}}), {qr_svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>'}));
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(api.listOwnerChannels).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-qr] img')).not.toBeNull());
+    expect(feedback(view.container)).toBeUndefined();
+  });
+
+  it('a request no host ran in time says so; each refusal is one plain line', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:03:00Z'));
+    const cases: Array<[OwnerChannelLoginRequest, string]> = [
+      [qrRequest({status: 'expired'}), 'The steward\'s host did not respond, so no QR was requested.'],
+      [qrRequest({status: 'done', result: {refused: 'qr_waiting'}}), 'A QR is already waiting here: scan that one.'],
+      [qrRequest({status: 'done', result: {refused: 'already_logged_in'}}), 'WeChat is already connected.'],
+      [qrRequest({status: 'done', result: {refused: 'login_starting'}}), 'A QR is already on its way.'],
+      [qrRequest({status: 'done', result: {refused: 'bridge_unreachable'}}), 'The WeChat bridge is not running.'],
+      [qrRequest({status: 'done', result: {refused: 'not_supported'}}), 'The WeChat bridge is too old for this; rebuild it.'],
+      [qrRequest({status: 'done', result: {refused: 'not_registered'}}), 'No QR was requested: not_registered'],
+    ];
+    for (const [request, line] of cases) {
+      cleanup();
+      api.listOwnerChannels.mockResolvedValue(withQrRequest(request));
+      const view = render(StewardChannels);
+      await waitFor(() => expect(feedback(view.container)).toBe(line));
+      expect(newQr(view.container)!.disabled).toBe(false);
+    }
+  });
+
+  it('"on its way" lasts only until the QR could have come: a QR that expired or an attempt that failed leaves the status line alone', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:00:30Z'));
+    const done = qrRequest({status: 'done', completed_at: '2026-11-18T12:00:03Z', result: {requested: true}});
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(done, {status: {connected: false, detail: 'QR requested'}}));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(feedback(view.container)).toBe('The QR is on its way: it shows up here in a few seconds.'));
+    // A minute after the bridge took it no QR is on screen: it failed at once, or came and
+    // expired. The detail line says which; "on its way" would be false.
+    for (const detail of ['no QR (login_failed) - request one on the dashboard', 'no QR (qr_expired) - request one on the dashboard']) {
+      api.listOwnerChannels.mockResolvedValue(withQrRequest(done, {status: {connected: false, detail}}));
+      await vi.advanceTimersByTimeAsync(40_000);
+      await waitFor(() => expect(card(view.container, 'wechat').textContent).toContain(detail));
+      expect(feedback(view.container)).toBeUndefined();
+      expect(newQr(view.container)!.disabled).toBe(false);
+    }
+  });
+
+  it('a request that reads as expired while a QR is on screen says nothing (the host ran it but could not write back)', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:03:00Z'));
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(qrRequest({status: 'expired'}),
+      {qr_svg: '<svg xmlns="http://www.w3.org/2000/svg"></svg>'}));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(card(view.container, 'wechat').querySelector('[data-channel-qr] img')).not.toBeNull());
+    expect(feedback(view.container)).toBeUndefined();
+  });
+
+  it('rate_limited says how many minutes to wait and keeps the button off until then', async () => {
+    vi.useFakeTimers({toFake: ['setInterval', 'clearInterval', 'Date']});
+    vi.setSystemTime(new Date('2026-11-18T12:01:00Z'));
+    api.listOwnerChannels.mockResolvedValue(withQrRequest(qrRequest({status: 'done', completed_at: '2026-11-18T12:00:00Z',
+      result: {refused: 'rate_limited', retry_after_s: 300}})));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(feedback(view.container)).toBe('Too many requests: try again in 4 min.'));
+    expect(newQr(view.container)!.disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    await waitFor(() => expect(newQr(view.container)!.disabled).toBe(false));
+  });
+
+  it('a failed request shows the error and leaves the button usable', async () => {
+    api.requestOwnerChannelQr.mockRejectedValue(new Error('403 owner_session_required'));
+    const view = render(StewardChannels);
+    await waitFor(() => expect(newQr(view.container)).not.toBeNull());
+    await fireEvent.click(newQr(view.container)!);
+    await waitFor(() => expect(view.container.querySelector('.error')?.textContent).toContain('owner_session_required'));
+    expect(newQr(view.container)!.disabled).toBe(false);
+  });
+});
 
 describe('the channels tab', () => {
   it('is one of the steward pane\'s tabs', async () => {

@@ -1242,6 +1242,26 @@ test('alert: a recovery notice is claimed only while its channel\'s current read
   } finally { s.channels.stop(); }
 });
 
+test('alert: a stale `up` is not claimed while that channel\'s current reading, taken by the host, is disconnected', async () => {
+  const clock = { now: T_ALERT }, backend = alertBackend(clock);
+  let stale;  // the host's answer, read while WeChat was still back
+  const s = alertSetup(backend, clock, { host: { dueAlerts: async () => stale ? { due: [stale] } : backend.dueAlerts() } });
+  const claims = () => backend.calls.filter(([what]) => what === 'claim').map(([, key]) => key);
+  try {
+    await s.poll();
+    s.wechat.now = { connected: false, detail: 'bridge unreachable' };
+    await s.poll();
+    const since = backend.rows.get('wechat').downSince;
+    await s.run(10 * MINUTE);
+    assert.equal(s.slack.sent.length, 1, 'the down alert');
+    stale = { channel: 'wechat', kind: 'up', down_since: since, attempt: 1 };
+    await s.poll();
+    assert.equal(backend.rows.get('wechat').connected, false, 'the disconnected reading is the host\'s');
+    assert.deepEqual(claims(), [`channel-alert:wechat:down:${since}:1`], 'the stale up is never claimed');
+    assert.equal(s.slack.sent.length, 1);
+  } finally { s.channels.stop(); }
+});
+
 test('alert: a placeholder channel is neither alerted about nor carries an alert, across a host restart (D10)', async () => {
   const clock = { now: T_ALERT }, backend = alertBackend(clock);
   // Before the restart WeChat was connected; Slack goes down and the host stops at once.

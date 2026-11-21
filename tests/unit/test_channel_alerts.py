@@ -545,6 +545,19 @@ def test_a_late_success_of_the_first_send_before_the_second_claim_ends_it(alerts
     assert a.view()["alert_down"]["state"] == "sent"
 
 
+def test_a_late_result_of_the_first_send_after_the_second_claim_settles_nothing(alerts):
+    a = alerts
+    since = down(a)
+    a.clock.advance(10 * MIN)
+    a.claim("wechat", "down", since)  # never reported: counted as failed (D2)
+    a.clock.advance(30 * MIN)
+    assert a.claim("wechat", "down", since, 2)["granted"] is True
+    assert a.record("wechat", "down", since, 1, error="late")["recorded"] is False
+    assert [(r["state"], r["attempt"]) for r in a.ledger()] == [("claimed", 2)]
+    alert = a.view()["alert_down"]
+    assert (alert["state"], alert["attempt"], alert["error"]) == ("claimed", 2, None), "not given up"
+
+
 @pytest.mark.parametrize("down_attempts", [1, 2])
 def test_a_recovery_notice_gets_two_attempts_whichever_attempt_delivered_the_down(alerts, down_attempts):
     a = alerts

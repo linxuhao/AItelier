@@ -37,7 +37,8 @@
  *  Plugin step 15 (standalone DSH): the owner's commands, registered in DSH's command registry
  *  (ctx.commands; not registered when the process has none) - see local-commands.mjs:
  *  /questions, /answer <id> <text>, /proposals, /approve <id>, /decline <id> [reason], /profile,
- *  /purge <id>. A DSH command carries no user identity, so whatever the owner decides through
+ *  /purge <id>, /forget <id> [reason], /restore <id> (the last two wake the steward with one line,
+ *  inbox/owner-memory-<ms>-<n>.txt). A DSH command carries no user identity, so whatever the owner decides through
  *  them is recorded as owner:local (answered_by, decided_by).
  *  With `projectsDir` (a directory whose every subdirectory is one local host root, its name
  *  the project id) the host also offers the steward `portfolio` (those projects, read-only) and
@@ -256,6 +257,14 @@ export function localHost(options = {}) {
     await writeFile(file + '.tmp', JSON.stringify({ proposal_id: proposal.id, kind: proposal.kind, status: proposal.status,
       decided_by: proposal.decided_by ?? null, ...(proposal.decline_reason ? { reason: proposal.decline_reason } : {}),
       ...(proposal.result ? { result: proposal.result } : {}) }) + '\n');
+    await rename(file + '.tmp', file);
+  };
+  /** An owner's memory command (/forget, /restore) as a wake event: one line in its own inbox file. */
+  let wakes = 0;
+  const wakeLine = async line => {
+    await mkdir(files.inbox, { recursive: true });
+    const file = join(files.inbox, `owner-memory-${Date.now()}-${++wakes}.txt`);
+    await writeFile(file + '.tmp', line + '\n');
     await rename(file + '.tmp', file);
   };
   /** create_project, all or nothing: built in a hidden directory, then renamed into place. */
@@ -521,8 +530,8 @@ export function localHost(options = {}) {
       const commands = ctx.get?.('commands');
       const isRoot = invoked => { const mine = api.agent?.session?.id, theirs = invoked?.session?.id;
         return invoked === api.agent || mine === undefined || theirs === undefined || mine === theirs; };
-      const unregister = commands ? registerOwnerCommands(commands, { questions, answer, isRoot, memory: api.memory,
-        // Memory configured but not open: /profile and /purge say so instead of vanishing.
+      const unregister = commands ? registerOwnerCommands(commands, { questions, answer, isRoot, memory: api.memory, wake: wakeLine,
+        // Memory configured but not open: the memory commands say so instead of vanishing.
         ...(api.memory ? {} : api.memoryError || options.memory ? { memoryError: api.memoryError ?? 'it did not open (see the DSH log)' } : {}),
         ...(projectsDir ? { proposals: proposalList, decide } : {}) }) : [];
       const done = new Promise((resolve, reject) => {

@@ -12,6 +12,9 @@
  *    /purge <id>                purge one memory entry from every version: the first /purge <id>
  *                               only warns; /purge <id> PURGE within 5 minutes of that warning
  *                               purges (with memory only)
+ *    /forget <id> [reason]      forget one memory entry: out of search and reads, recoverable;
+ *                               it wakes the steward with one line (with memory only)
+ *    /restore <id>              bring a forgotten entry back; it wakes the steward (with memory only)
  *
  *  A DSH command carries no user identity (CommandInvocation: commandId, agent, rawInput,
  *  attachments, signal), so every decision taken here is the owner's as owner:local. The
@@ -44,10 +47,11 @@ function proposalLine(id, p) {
  *  @param o questions(): the questions.json map; answer({id, text, by}); proposals(): the
  *    proposals.json map and decide({id, approve, reason, by}), both absent without projectsDir;
  *    memory: the owner's memory store (absent without memory); memoryError: why a configured
- *    memory is not open (then /profile and /purge say so); isRoot(agent): whether a command
+ *    memory is not open (then /profile, /purge, /forget and /restore say so); wake(line): tell
+ *    the steward one line (a wake event; /forget and /restore); isRoot(agent): whether a command
  *    came from the root session's UI (absent: every UI).
  *  @returns the unregister functions. */
-export function registerOwnerCommands(commands, { questions, answer, proposals, decide, memory, memoryError, isRoot }) {
+export function registerOwnerCommands(commands, { questions, answer, proposals, decide, memory, memoryError, wake, isRoot }) {
   const defs = [
     { name: 'questions', description: 'List the open questions your director or steward asked you.',
       async handler() {
@@ -90,6 +94,12 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
         const result = await decide({ id, approve: false, ...(reason ? { reason } : {}), by: OWNER });
         return result.refused ? refusal(`Not declined ${id}`, result) : ok(`Declined ${id}.`);
       } });
+  /** One line to the steward, after the memory changed (whitespace typed in a reason is folded,
+   *  so it stays one line); a failed wake is said, never thrown: the change is already made. */
+  const tell = async line => {
+    try { await wake?.(line.replace(/\s+/g, ' ')); return ''; }
+    catch (error) { return ` Your steward was not told: ${error?.message ?? error}.`; }
+  };
   // id -> until when its confirmation is accepted; filled only by a warning the owner was shown.
   const purgeWarned = new Map();
   if (memory) defs.push(
@@ -114,12 +124,36 @@ export function registerOwnerCommands(commands, { questions, answer, proposals, 
         purgeWarned.delete(id);
         const result = await memory.purge([id], { by: OWNER });
         return result.purged === true ? ok(`Purged ${id}: ${JSON.stringify(result)}`) : fail(`Not purged ${id}: ${JSON.stringify(result)}`);
+      } },
+    { name: 'forget', description: 'Forget one memory entry (recoverable with /restore): /forget <id> [reason]. It tells your steward.',
+      input: { hint: '<id> [reason]' },
+      async handler({ rawInput }) {
+        const [id, given] = split(rawInput);
+        if (!id) return fail('Usage: /forget <id> [reason]');
+        const reason = given || 'no reason given';
+        const result = await memory.forget([id], { reason, by: OWNER });
+        if (result.refused) return refusal(`Not forgotten ${id}`, result);
+        if (result.unknown?.includes(id)) return fail(`Not forgotten ${id}: unknown_id - your memory has no entry ${id}`);
+        if (result.already?.includes(id)) return fail(`Not forgotten ${id}: already_forgotten - /restore ${id} brings it back`);
+        const told = await tell(`The owner forgot memory entry ${id} with /forget (reason: ${reason}); it is out of search and reads until they /restore it.`);
+        return ok(`Forgotten ${id}: it is out of search and reads; /restore ${id} brings it back, /purge ${id} removes it for good (${result.note}; remote: ${result.remote_forget}).${told}`);
+      } },
+    { name: 'restore', description: 'Bring back one forgotten memory entry: /restore <id>. It tells your steward.', input: { hint: '<id>' },
+      async handler({ rawInput }) {
+        const [id] = split(rawInput);
+        if (!id) return fail('Usage: /restore <id>');
+        const result = await memory.restore(id, OWNER);
+        if (result.refused) return refusal(`Not restored ${id}`, result);
+        const told = await tell(`The owner restored memory entry ${id} with /restore; it is back in search and reads.`);
+        return ok(`Restored ${id}: it is back in search and reads.${told}`);
       } });
   else if (memoryError) {
     // Configured but not open: the commands stay, and say why, instead of vanishing.
     const unavailable = async () => fail(`Your memory is not available: ${memoryError}`);
     defs.push({ name: 'profile', description: 'Show your resident profile (your memory is not available now).', handler: unavailable },
-      { name: 'purge', description: 'Purge one memory entry (your memory is not available now).', input: { hint: '<id>' }, handler: unavailable });
+      { name: 'purge', description: 'Purge one memory entry (your memory is not available now).', input: { hint: '<id>' }, handler: unavailable },
+      { name: 'forget', description: 'Forget one memory entry (your memory is not available now).', input: { hint: '<id> [reason]' }, handler: unavailable },
+      { name: 'restore', description: 'Restore one forgotten memory entry (your memory is not available now).', input: { hint: '<id>' }, handler: unavailable });
   }
   const rootOnly = handler => async invocation => isRoot && !isRoot(invocation?.agent)
     ? fail('This command answers only in your director\'s own session, where you talk to it.') : handler(invocation);

@@ -8,7 +8,8 @@
  *    /approve creates the project and wakes the steward, which then sees it in its portfolio;
  *    /profile shows the profile. Commands never reach the model.
  *    boot 2: the commands are registered again; nothing is open any more; the new project is
- *    read; /purge asks for its word, then purges a memory entry. The log loads both times. */
+ *    read; /forget forgets a memory entry and /restore brings it back, each waking the steward
+ *    with one line; /purge asks for its word, then purges it. The log loads both times. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -216,6 +217,17 @@ test('real pinned DSH, two boots: a standalone steward - the owner answers, appr
     await writeFile(join(root, 'inbox', 'wake2.json'), JSON.stringify({ wake: 2 }));
     await until('boot 2 never went dormant', () => result('d2'));
     assert.match(resultText('pc'), /write the README/);
+    const woke = text => events.some(e => e.type === 'user/message' && JSON.stringify(e.data).includes(text));
+    const forgot = await command('/forget t-seed-o not needed');
+    assert.equal(forgot.kind, 'success', JSON.stringify(forgot));
+    assert.match(forgot.text, /^Forgotten t-seed-o: /);
+    await until('the forget never woke the steward', () => woke('The owner forgot memory entry t-seed-o with /forget (reason: not needed)'));
+    assert.match((await command('/forget t-seed-o')).text, /already_forgotten/);
+    const restored = await command('/restore t-seed-o');
+    assert.equal(restored.kind, 'success', JSON.stringify(restored));
+    await until('the restore never woke the steward', () => woke('The owner restored memory entry t-seed-o with /restore'));
+    assert.match((await command('/restore t-seed-o')).text, /not_forgotten/);
+    assert.ok(!requests.some(r => r.text.includes('Forgotten t-seed-o:') || r.text.includes('Restored t-seed-o:')), 'a command answer reached the model');
     const ask = await command('/purge t-seed-o');
     assert.match(ask.text, /^Nothing purged yet\./);
     const purged = await command('/purge t-seed-o PURGE');

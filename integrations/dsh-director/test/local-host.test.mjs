@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
 import { localHost, LOCAL_OWNER } from '../hosts/local.mjs';
-import { PURGE_WORD, PURGE_CONFIRM_MS } from '../hosts/local-commands.mjs';
+import { PURGE_WORD, PURGE_CONFIRM_MS, registerOwnerCommands } from '../hosts/local-commands.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { MemoryStore } from '../lib/memory/store.mjs';
 
@@ -453,7 +453,7 @@ test('local host, step 15: /profile shows the profile and its file; /purge asks 
     await store.recordTurn('t1', [{ role: 'owner', text: 'my account is 4242' }, { role: 'steward', text: 'noted' }]);
     const commands = fakeCommands();
     const events = await localHost({ root, ...required, pollMs: 10 }).events(commandApi(commands, store));
-    assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'profile', 'purge', 'questions']);
+    assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'forget', 'profile', 'purge', 'questions', 'restore']);
     // The owner edits the file directly; /profile reads (and commits) it as the owner's.
     await writeFile(join(memRoot, 'owner', 'profile.md'), 'Likes short replies.');
     const profile = await commands.run('profile');
@@ -483,6 +483,72 @@ test('local host, step 15: /profile shows the profile and its file; /purge asks 
     assert.match((await commands.run('purge', ` t-nope ${PURGE_WORD}`)).text, /unknown_ids/);
     events.stop(); await events.done;
   } finally { await store.close(); }
+});
+
+test('local host, director 471: /forget and /restore - recoverable forgetting by owner:local, every refusal said, one wake line per action', async () => {
+  const root = await freshRoot();
+  const memRoot = join(root, 'memory');
+  const store = await MemoryStore.open({ root: memRoot, userId: 'owner' });
+  try {
+    await store.recordTurn('t1', [{ role: 'owner', text: 'my account is 4242' }, { role: 'steward', text: 'noted' }]);
+    const commands = fakeCommands();
+    const api = commandApi(commands, store);
+    const events = await localHost({ root, ...required, pollMs: 10 }).events(api);
+    const wakes = () => api.notified.filter(text => /^Director event \(owner-memory-\d+-\d+\.txt\):\n/.test(text));
+    // Refusals: no id, an unknown id, an entry that is not forgotten; none changes anything or wakes.
+    for (const [name, input, said] of [['forget', '', /^Usage: \/forget <id> \[reason\]$/], ['restore', '  ', /^Usage: \/restore <id>$/],
+      ['forget', ' t-nope because', /^Not forgotten t-nope: unknown_id/], ['restore', ' t-t1-0', /^Not restored t-t1-0: not_forgotten/],
+      ['restore', ' t-nope', /^Not restored t-nope: not_forgotten/]]) {
+      const out = await commands.run(name, input);
+      assert.equal(out.kind, 'error', `${name}${input}`); assert.match(out.text, said);
+    }
+    assert.deepEqual(store.forgottenList(), []);
+    // /forget with a reason: gone from reads, on the forgotten list as owner:local, and one line wakes the steward.
+    const forgot = await commands.run('forget', ' t-t1-0 it is\nprivate');
+    assert.equal(forgot.kind, 'success', forgot.text);
+    assert.match(forgot.text, /^Forgotten t-t1-0: .*\/restore t-t1-0 brings it back, \/purge t-t1-0 removes it for good/);
+    const gone = await store.read(['t-t1-0']);
+    assert.deepEqual([gone.entries.length, gone.forgotten], [0, ['t-t1-0']]);
+    assert.deepEqual(store.forgottenList().map(r => [r.id, r.by]), [['t-t1-0', LOCAL_OWNER]]);
+    await until('the forget never woke the steward', () => wakes().length === 1);
+    assert.equal(wakes()[0].split('\n').filter(Boolean).length, 2, 'one line after the event header');
+    assert.match(wakes()[0], /\nThe owner forgot memory entry t-t1-0 with \/forget \(reason: it is private\); it is out of search and reads until they \/restore it\.\n$/);
+    // Forgetting it again is refused; without a reason it still forgets.
+    const again = await commands.run('forget', ' t-t1-0');
+    assert.equal(again.kind, 'error'); assert.match(again.text, /^Not forgotten t-t1-0: already_forgotten - \/restore t-t1-0 brings it back$/);
+    assert.equal((await commands.run('forget', ' t-t1-1')).kind, 'success');
+    await until('the second forget never woke the steward', () => wakes().length === 2);
+    assert.match(wakes()[1], /reason: no reason given/);
+    // /restore: back in reads, off the forgotten list, one wake; restoring it twice is refused.
+    const restored = await commands.run('restore', ' t-t1-0');
+    assert.equal(restored.kind, 'success', restored.text);
+    assert.match(restored.text, /^Restored t-t1-0: it is back in search and reads\.$/);
+    assert.deepEqual((await store.read(['t-t1-0'])).entries.map(e => e.id), ['t-t1-0']);
+    assert.deepEqual(store.forgottenList().map(r => r.id), ['t-t1-1']);
+    await until('the restore never woke the steward', () => wakes().length === 3);
+    assert.match(wakes()[2], /\nThe owner restored memory entry t-t1-0 with \/restore; it is back in search and reads\.\n$/);
+    const twice = await commands.run('restore', ' t-t1-0');
+    assert.equal(twice.kind, 'error'); assert.match(twice.text, /^Not restored t-t1-0: not_forgotten/);
+    // Who did it is in the memory's own history.
+    const { execFileSync } = await import('node:child_process');
+    const log = execFileSync('git', ['-C', store.dir, 'log', '--format=%s']).toString();
+    assert.match(log, /restore t-t1-0 \(owner:local\)/); assert.match(log, /forget t-t1-0 \(owner:local\)/);
+    events.stop(); await events.done;
+    assert.equal(wakes().length, 3, 'a refusal never wakes the steward');
+  } finally { await store.close(); }
+});
+
+test('local host, director 471: a wake that cannot be written is said, and the forget still stands', async () => {
+  const commands = fakeCommands();
+  const calls = [];
+  const memory = { forget: async (ids, o) => (calls.push(['forget', ids, o]), { forgotten: ids, already: [], unknown: [], remote_forget: 'local', note: 'n' }),
+    restore: async (id, by) => (calls.push(['restore', id, by]), { restored: id }) };
+  registerOwnerCommands(commands, { questions: async () => ({}), answer: async () => ({}), memory, wake: async () => { throw new Error('disk full'); } });
+  const forgot = await commands.run('forget', ' m-1 old');
+  assert.equal(forgot.kind, 'success'); assert.match(forgot.text, /Your steward was not told: disk full\.$/);
+  const restored = await commands.run('restore', ' m-1');
+  assert.equal(restored.kind, 'success'); assert.match(restored.text, /Your steward was not told: disk full\.$/);
+  assert.deepEqual(calls, [['forget', ['m-1'], { reason: 'old', by: 'owner:local' }], ['restore', 'm-1', 'owner:local']]);
 });
 
 // ---- Review 467 (s15 section 2): bounded portfolio pages, tolerant proposal records,
@@ -649,8 +715,8 @@ test('local host, review 467: /profile and /purge tell the owner when the config
   const commands = fakeCommands();
   const events = await localHost({ root, pollMs: 60000, memory: { userId: 'owner' } })
     .events({ ...commandApi(commands), memoryError: 'unknown time zone Mars/Base' });
-  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'profile', 'purge', 'questions']);
-  for (const name of ['profile', 'purge']) {
+  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'forget', 'profile', 'purge', 'questions', 'restore']);
+  for (const name of ['profile', 'purge', 'forget', 'restore']) {
     const said = await commands.run(name, ' t-1');
     assert.equal(said.kind, 'error');
     assert.match(said.text, /memory is not available: unknown time zone Mars\/Base/);

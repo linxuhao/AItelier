@@ -603,6 +603,10 @@ class SendDirectorMessage(Request):
     delivery_mode: Literal["transient", "standing"] = "transient"
     ack_mode: Literal["at_least_n","broadcast"] | None = None
     ack_quorum: int | None = Field(default=None, ge=1)
+    # Step 24.1c (design-steward 7.8.10a): the steward's handoff names the owner message
+    # it passes on; the backend checks it is one (anyone else: refused).
+    cites_owner_message_id: str | None = Field(default=None, min_length=1, max_length=320, description=(
+        "the steward only: the owner's message in its conversation that this letter passes on"))
 
 
 class ListDirectorMessages(Project):
@@ -1161,12 +1165,20 @@ class CreateStewardProposal(Project):
     its proposals and the owner's memory requests live; it is not the target."""
 
     request_key: str = Field(min_length=1, max_length=320)
-    kind: Literal["create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project"]
+    kind: Literal["create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project",
+                  "connection_change"]
     payload: dict[str, Any] = Field(description=(
         "create_project {project_id, title, goal, seed_nodes: [add_nodes node: {key, goal, acceptance, ...}]}; "
         "start_driver {project_id}; stop_driver {project_id} (what it would interrupt is recorded by the server); "
         "archive_project / unarchive_project {project_id, reason?} (hide a project from the owner's list, or "
-        "list it again; never the steward's own project; the project must currently be listed / archived)."))
+        "list it again; never the steward's own project; the project must currently be listed / archived); "
+        "connection_change {op: add|update|remove|reenable, conn_id, source: {kind: owner_message|director_letter, "
+        "ref}, add: label, url, transport: streamable-http, auth_kind: none|header|oauth, header_name?, "
+        "visibility: private|public; update: conn_uid, expect_config_version and at least one of label, "
+        "visibility, enabled, tools; remove: conn_uid, expect_config_version; reenable: conn_uid, "
+        "expect_config_version, tools; tools: [{raw_name, schema_sha256, allowed?, outward?, egress?, "
+        "blocked_args?, daily_cap?}] (at most 64; a field left out is unchanged); never a secret} - the steward's "
+        "own MCP connections (design-steward 7.8.10a); a widening change is approved on the dashboard only."))
     reason: str = Field(min_length=1, max_length=4000)
     supersedes: str | None = Field(default=None, min_length=1, max_length=200, description=(
         "One of your OPEN proposals that this one replaces; it becomes superseded."))

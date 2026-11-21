@@ -823,8 +823,17 @@ class DshDrivers:
                 # attempted, and relabelling a retryable condition as invalid.
                 raise
             except (OSError, ValueError) as exc:
-                await asyncio.to_thread(self.update, project_id, enabled=0, phase="failed",
-                                        last_error=str(exc))
+                # A start the RUNTIME made on its own (crash recovery, a fallback restart's
+                # respawn) that cannot spawn is a failed start, not the owner's stop: the row
+                # keeps enabled=1 so the host supervisor retries it with its backoff, and the
+                # panel shows phase=failed with the error (design-steward 7.8.10a "起不来").
+                # Writing enabled=0 here turned one transient error into a permanent stop.
+                # A user's start that cannot spawn still answers that request with enabled=0.
+                if actor in RECOVERY_ACTORS:
+                    await asyncio.to_thread(self.update, project_id, phase="failed", last_error=str(exc))
+                else:
+                    await asyncio.to_thread(self.update, project_id, enabled=0, phase="failed",
+                                            last_error=str(exc))
                 raise ValueError(str(exc)) from exc
             return self.public(self.get(project_id))
 

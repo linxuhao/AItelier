@@ -42,8 +42,8 @@ from api import authz
 from api.dsh_driver_routers import manager
 from api.state_graph_routers import get_service
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
-from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, ScheduleConflict, ScheduleInvalid,
-                                impact_is_empty, preview_schedule, stop_impact)
+from core.state_steward import (ARCHIVE_KINDS, CONNECTION_KIND, ProposalConflict, ScheduleConflict,
+                                ScheduleInvalid, impact_is_empty, preview_schedule, stop_impact)
 
 router = APIRouter(prefix="/api/steward", tags=["Steward"])
 
@@ -99,6 +99,9 @@ async def approve(proposal_id: str, body: Approve, service=Depends(get_service),
         raise HTTPException(403 if str(exc) == "owner_session_required" else 422, str(exc)) from exc
     if row["kind"] == "create_project":
         return await asyncio.to_thread(steward.execute_create_project, proposal_id)
+    if row["kind"] == CONNECTION_KIND:
+        # Step 24.1c (7.8.10a): before anything reads a project_id - this kind has none.
+        return await asyncio.to_thread(steward.execute_connection_change, proposal_id)
     if row["kind"] in ARCHIVE_KINDS:
         return await asyncio.to_thread(steward.execute_archive, proposal_id)
     if row["kind"] == "stop_driver":

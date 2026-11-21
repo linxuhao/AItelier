@@ -95,6 +95,8 @@ HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 FORBIDDEN_HEADERS = {"host", "cookie", "content-length", "content-type", "accept", "connection",
                      "transfer-encoding", "mcp-session-id", "mcp-protocol-version",
                      "x-aitelier-driver-token"}
+# Header families no fixed header may name (7.8.10a): the transport's and AItelier's own.
+FORBIDDEN_HEADER_PREFIXES = ("mcp-", "x-aitelier-")
 LABEL_MAX = 40
 # Every auth kind (24.1b: oauth, core.steward_oauth).
 AUTH_KINDS_NOW = ("none", "header", "oauth")
@@ -125,6 +127,23 @@ def tools_changed() -> None:
             hook()
         except Exception:  # noqa: BLE001 - a notifier failure never fails the write
             pass
+
+
+def label_ok(label) -> bool:
+    """A connection's label (7.8.4, 7.8.10a): it is shown in the code-written confirmation
+    header, so at most 40 characters and none that could fake or hide text there: 「」,
+    quotes, a newline or other control, a bidirectional control, a zero-width character."""
+    return isinstance(label, str) and bool(label.strip()) and len(label.strip()) <= LABEL_MAX and not any(
+        ord(c) < 32 or ord(c) == 127 or 0x80 <= ord(c) < 0xA0 or c in "「」\"'“”‘’"
+        or 0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069 or ord(c) in (0x200E, 0x200F, 0x061C)
+        or ord(c) in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF) for c in label)
+
+
+def header_name_ok(name) -> bool:
+    """A fixed header's name (7.8.10a): letters, digits and '-', never a transport or
+    identity header, nor any `Mcp-*` or `X-AItelier-*` header."""
+    return (isinstance(name, str) and bool(HEADER_NAME.match(name)) and name.lower() not in FORBIDDEN_HEADERS
+            and not name.lower().startswith(FORBIDDEN_HEADER_PREFIXES))
 
 
 # ---------------------------------------------------------------- time
@@ -703,9 +722,7 @@ class StateStewardConnections:
         self._owner()
         if not isinstance(conn_id, str) or not CONN_ID.match(conn_id):
             raise StateGraphError("invalid_conn_id: ^[a-z][a-z0-9]{1,19}$")
-        if not isinstance(label, str) or not label.strip() or len(label.strip()) > LABEL_MAX or any(
-                ord(c) < 32 or c in "「」\"'" or 0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069
-                or ord(c) in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF) for c in label):
+        if not label_ok(label):
             raise StateGraphError("invalid_label")
         if auth_kind not in AUTH_KINDS_NOW:
             raise StateGraphError("invalid_auth_kind")
@@ -713,7 +730,7 @@ class StateStewardConnections:
             raise StateGraphError("invalid_visibility")
         if auth_kind == "header":
             header_name = header_name or "Authorization"
-            if not HEADER_NAME.match(header_name) or header_name.lower() in FORBIDDEN_HEADERS:
+            if not header_name_ok(header_name):
                 raise StateGraphError("invalid_header_name")
         else:
             header_name = None
@@ -971,12 +988,25 @@ class StateStewardConnections:
     def refresh(self, conn_id):
         """The steward's re-read of one registered connection: discovery fields only, at
         most once a minute; never allowed, outward, visibility or enabled."""
+        def hashes():
+            with self.store.transaction() as conn:
+                return {r[0]: r[1] for r in conn.execute("SELECT raw_name,schema_sha256 FROM "
+                                                         "state_steward_connection_tools WHERE conn_id=?", (conn_id,))}
         with self.store.transaction() as conn:
             self.steward._steward(conn)
             row = self._row(conn, conn_id)
             if row["last_probe_at"] and _utcnow() - _parse(row["last_probe_at"]) < REFRESH_INTERVAL:
                 raise StateGraphError("refresh_too_soon")
-        return self._discover(conn_id)
+        before = hashes()
+        answer = self._discover(conn_id)
+        if "error" in answer:
+            return answer
+        # Step 24.1c (7.8.10a): what changed, by the server's own tool names (the plugin
+        # marks the turn external before the steward reads them).
+        after = hashes()
+        return {"conn_id": conn_id, "added": sorted(set(after) - set(before)),
+                "changed": sorted(n for n in set(after) & set(before) if after[n] != before[n]),
+                "gone": sorted(set(before) - set(after)), "tools": answer.get("tools", [])}
 
     def _discover(self, conn_id):
         with self.store.transaction() as conn:
@@ -1055,7 +1085,8 @@ class StateStewardConnections:
     def _public(self, conn, row) -> dict:
         tools = conn.execute("SELECT allowed,outward,allowed_sha256,schema_sha256 FROM state_steward_connection_tools "
                              "WHERE conn_id=?", (row["conn_id"],)).fetchall()
-        return {"conn_id": row["conn_id"], "label": row["label"], "url": row["url"], "auth_kind": row["auth_kind"],
+        return {"conn_id": row["conn_id"], "conn_uid": row["conn_uid"], "label": row["label"], "url": row["url"],
+                "auth_kind": row["auth_kind"],
                 "header_name": row["header_name"], "visibility": row["visibility"], "enabled": bool(row["enabled"]),
                 "generation": row["generation"], "config_version": row["config_version"],
                 "secret": secret_status(row), "auth_identity": row["auth_identity"],

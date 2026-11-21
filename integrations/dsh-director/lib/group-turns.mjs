@@ -17,6 +17,7 @@
  *  Nothing here names a backend; the host's `groups` operations do the backend side. */
 import { readFileSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { withoutLeadingClockLines } from './core.mjs';
 
 export const GROUP_SOURCE = 'dsh-director-group';
 export const FOLD_SOURCE = 'dsh-director-group-fold';
@@ -368,4 +369,31 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
     }
   }
   return { step, redeliver, get failures() { return failures; } };
+}
+
+/** A group turn that ended normally is answered in its group by code: the steward's last
+ *  words go to the host (`reply`: exit check, one message, the latest question's group), then
+ *  out through the channel (`sendGroup`). An owner turn's words never go to a group. The system
+ *  clock lines the steward copied to the start of its words are not sent; words that were only
+ *  such lines send nothing (only_clock_text, as the owner's automatic reply). Returns the
+ *  handler of the root session's events. */
+export function groupReplies({ turns, reply, sendGroup, warn }) {
+  let last = '';
+  return event => {
+    if (event.type === 'turn/start') last = '';
+    else if (event.type === 'assistant/message') {
+      const said = (event.data?.message?.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join('').trim();
+      if (said) last = said;
+    } else if (event.type === 'turn/end') {
+      const turn = turns.open(), said = last;
+      last = '';
+      if (turn?.audience.kind !== 'group' || !said || event.data?.reason?.kind !== 'completed' || !turn.questions.length
+        || (turn.turn !== undefined && turn.turn !== String(event.data?.turn))) return;
+      const questions = [...turn.questions], body = withoutLeadingClockLines(said);
+      if (!body) return void warn('group reply not sent ' + JSON.stringify({ reason: 'only_clock_text', question_id: questions.at(-1) }));
+      return reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body })
+        .then(sent => sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused)))
+        .catch(error => warn('group reply: ' + short(error)));
+    }
+  };
 }

@@ -10,9 +10,9 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GroupTurns, GROUP_SOURCE, FOLD_SOURCE, GROUP_TOOLS, PAUSED_TOOLS, groupTurnRefusal, familyRefusal, pausedRefusal,
-  answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup } from '../lib/group-turns.mjs';
+  answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup, groupReplies } from '../lib/group-turns.mjs';
 import { GROUP_LIMITS, CHANNEL_LIMITS, createOwnerChannels, channelReplies } from '../lib/channels.mjs';
-import { ContextInjection } from '../lib/core.mjs';
+import { ContextInjection, clockLine } from '../lib/core.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let ids = 0;
@@ -527,4 +527,34 @@ test('channels: a refused group message is final, its notice goes to the group, 
   failing.ready();
   assert.deepEqual(await failing.service.inbound({ channel: 'wechat', senderRef: 's', messageRef: 'r', text: 't', conversationRef: 'r1' }),
     { accepted: false, reason: 'unavailable' });
+});
+
+// The group reply path strips the system clock lines the steward copied to the start of its
+// last words, with the owner's automatic reply's rule (lib/core.mjs withoutLeadingClockLines).
+function groupReply(lastWords) {
+  const g = turns(), replied = [], sent = [], warned = [];
+  g.split([group('Q1', 'r1', 'gq1'), group('Q2', 'r1', 'gq2')], 1, 7);
+  const watch = groupReplies({ turns: g, warn: line => warned.push(line),
+    reply: async args => { replied.push(args); return { channel: 'wechat', group_ref: 'r1', text: '「Q2」\n' + args.body }; },
+    sendGroup: async (channel, groupRef, text) => { sent.push([channel, groupRef, text]); } });
+  watch({ type: 'turn/start', data: { turn: 7 } });
+  watch({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: lastWords }] } } });
+  return { done: watch({ type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } }), replied, sent, warned };
+}
+
+test('group reply: a system clock line the steward copied to the start of its words never reaches the group', async () => {
+  const clock = clockLine({ now: Date.parse('2026-11-21T10:14:00Z'), tz: 'Europe/Paris' });
+  const r = groupReply(`${clock}\n${clock} (after tool)\n\n周六去公园。`);
+  await r.done;
+  assert.deepEqual(r.replied, [{ questionId: 'gq2', alsoAnswers: ['gq1'], body: '周六去公园。' }]);
+  assert.deepEqual(r.sent, [['wechat', 'r1', '「Q2」\n周六去公园。']]);
+  assert.deepEqual(r.warned, []);
+});
+
+test('group reply: words that are only a system clock line send nothing, recorded as only_clock_text', async () => {
+  const r = groupReply(clockLine({ now: Date.parse('2026-11-21T10:14:00Z') }));
+  await r.done;
+  assert.deepEqual(r.replied, []);
+  assert.deepEqual(r.sent, []);
+  assert.deepEqual(r.warned, ['group reply not sent {"reason":"only_clock_text","question_id":"gq2"}']);
 });

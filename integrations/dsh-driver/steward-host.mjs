@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { CLOCK_TAG, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
+import { withoutLeadingClockLines, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -338,13 +338,11 @@ export function turnWatcher(onFinalText) {
   };
 }
 
-// System clock lines the steward copied to the start of its last words (message-time 3.6).
-const leadingClockLines = new RegExp('^(?:\\s*' + CLOCK_TAG.replace(/[[\]]/g, '\\$&') + '[^\\n]*)+\\s*');
 /** What an automatic reply stores: the steward's last words without the system clock lines
  *  it copied to their start, clipped to what a message holds. The same words always give
  *  the same body, so the reply's key and its channel mirror agree. */
 export const autoReplyBody = text => {
-  const body = text.replace(leadingClockLines, '');
+  const body = withoutLeadingClockLines(text);
   return body.length > 8000 ? body.slice(0, 7990) + '\n[…]' : body;
 };
 

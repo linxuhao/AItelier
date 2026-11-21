@@ -59,6 +59,11 @@ export function defaultTexts() {
 /** The tag every system clock line starts with: the steward's automatic reply strips it
  *  and grep_chat_history skips it by this tag. */
 export const CLOCK_TAG = '[system clock]';
+// System clock lines the steward copied to the start of its last words (message-time 3.6).
+const leadingClockLines = new RegExp('^(?:\\s*' + CLOCK_TAG.replace(/[[\]]/g, '\\$&') + '[^\\n]*)+\\s*');
+/** The steward's last words without the system clock lines it copied to their start (its
+ *  automatic reply to the owner and its reply to a family group). */
+export const withoutLeadingClockLines = text => text.replace(leadingClockLines, '');
 /** A tool result gets a clock line when the last one is at least this old. */
 export const CLOCK_TOOL_GAP_MS = 10 * 60 * 1000;
 

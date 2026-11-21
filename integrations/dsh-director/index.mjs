@@ -32,7 +32,7 @@ import { openMemory, profileSection, registerMemoryTools } from './lib/memory/to
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
 import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
-import { GroupTurns, GROUP_SOURCE, createGroupSetup, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
+import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 
 export const name = 'dsh-director';
@@ -816,28 +816,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       source: { kind: labels.todoBrief } });
     return { ...decision, messages: [...decision.messages, brief] };
   });
-  // Step 23: a group turn that ended normally is answered in its group by code: the steward's
-  // last words go to the host (exit check, one message, the latest question's group), then
-  // out through the channel. An owner turn's words never go to a group.
+  // Step 23: a group turn that ended normally is answered in its group by code (lib/group-turns.mjs
+  // groupReplies). An owner turn's words never go to a group.
   if (groupTurns && channels && host.groups) {
-    let last = '';
-    ctx.on('session/event', (session, event) => {
-      if (session !== agent.session) return;
-      if (event.type === 'turn/start') last = '';
-      else if (event.type === 'assistant/message') {
-        const said = (event.data?.message?.content ?? []).filter(b => b.type === 'text').map(b => b.text ?? '').join('').trim();
-        if (said) last = said;
-      } else if (event.type === 'turn/end') {
-        const turn = groupTurns.open(), body = last;
-        last = '';
-        if (turn?.audience.kind !== 'group' || !body || event.data?.reason?.kind !== 'completed' || !turn.questions.length
-          || (turn.turn !== undefined && turn.turn !== String(event.data?.turn))) return;
-        const questions = [...turn.questions];
-        void host.groups.reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body })
-          .then(sent => sent?.text ? channels.sendGroup(sent.channel, sent.group_ref, sent.text) : ctx.logger.warn('group reply refused: ' + String(sent?.refused)))
-          .catch(error => ctx.logger.warn('group reply: ' + String(error?.message ?? error).slice(0, 300)));
-      }
-    });
+    const watch = groupReplies({ turns: groupTurns, reply: args => host.groups.reply(args),
+      sendGroup: (channel, groupRef, text) => channels.sendGroup(channel, groupRef, text), warn: line => ctx.logger.warn(line) });
+    ctx.on('session/event', (session, event) => { if (session === agent.session) void watch(event); });
     setTimeout(redeliver, 1000).unref?.();
   }
   ctx.on('agent/error', ({ agent: subject, error }) => {

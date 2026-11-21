@@ -289,7 +289,8 @@ export function apply(ctx) {
       const last = options.messages.at(-1);
       let block;
       if (options.purpose === 'compaction' || !options.tools?.length || options.sessionId !== 'grp-root') block = { type: 'text', text: 'Fixture.' };
-      else if (last?.role === 'tool' && last.toolCallId === 'g1') block = { type: 'text', text: 'GROUP_ADAPTER_ANSWER' };
+      // The group answer starts with a system clock line the model copied: the group never gets it.
+      else if (last?.role === 'tool' && last.toolCallId === 'g1') block = { type: 'text', text: '[system clock] now 2026-11-21T10:14Z\nGROUP_ADAPTER_ANSWER' };
       else if (last?.role === 'tool' && last.toolCallId === 'o1') block = once('o2', () => tool('o2', 'grep_chat_history', { pattern: 'GROUP_Q_ADAPT[E]R', regex: true }));
       else if (last?.role === 'tool' && last.toolCallId === 'o2') block = once('o3', () => tool('o3', 'grep_chat_history', { pattern: 'm-owner-[2]', regex: true }));
       else if (last?.role === 'tool' && last.toolCallId === 'o3') block = { type: 'text', text: 'OWNER_ADAPTER_ANSWER' };

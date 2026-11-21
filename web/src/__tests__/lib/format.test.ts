@@ -55,6 +55,15 @@ describe('formatMessageTime', () => {
       expect(formatFullTime(bad, 'en')).toBe('');
     }
   });
+
+  it('falls back to the default locale for a stored language Intl refuses (navigator.language clipped)', () => {
+    withTZ('Europe/Paris', () => {
+      for (const locale of ['ca-ES-vale', 'x']) {
+        expect(formatMessageTime('2026-11-20T10:14:00Z', locale, at('2026-11-20T12:00:00Z'))).toMatch(/11.14/);
+        expect(formatFullTime('2026-11-20T10:14:00Z', locale)).toContain('2026-11-20T10:14:00.000Z');
+      }
+    });
+  });
 });
 
 describe('formatFullTime', () => {

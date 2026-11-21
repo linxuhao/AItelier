@@ -146,7 +146,12 @@ function _messageFmt(locale: string, shape: string, options: Intl.DateTimeFormat
   if (_messageFmtOffset !== offset) { _messageFmts.clear(); _messageFmtOffset = offset; }
   const key = locale + '|' + shape;
   let fmt = _messageFmts.get(key);
-  if (!fmt) _messageFmts.set(key, fmt = new Intl.DateTimeFormat(locale, options));
+  if (!fmt) {
+    // The app language is stored text (navigator.language clipped to 10 characters can
+    // cut a tag in half): a locale Intl refuses falls back to the default one.
+    try { fmt = new Intl.DateTimeFormat(locale, options); } catch { fmt = new Intl.DateTimeFormat(undefined, options); }
+    _messageFmts.set(key, fmt);
+  }
   return fmt;
 }
 

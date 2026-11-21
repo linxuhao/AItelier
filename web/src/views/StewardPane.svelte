@@ -8,7 +8,6 @@
   import StewardProfile from './StewardProfile.svelte';
   import StewardSchedules from './StewardSchedules.svelte';
   import StewardChannels from './StewardChannels.svelte';
-  import StewardChannelAlerts from './StewardChannelAlerts.svelte';
   // The steward's pane is the ordinary conversation pane of its project, plus
   // tabs of its own: proposals, every project's open questions, reminders, chat
   // channels, profile. Only this pane asks where its messages came from (`sources`).
@@ -39,7 +38,6 @@
   }
 </script>
 <DriverConversationPane projects={self} {status} selected={projectId} bind:mode {tabs} {prefill} {onread} {onrefresh} ack sources>
-  {#snippet banner()}<StewardChannelAlerts />{/snippet}
   {#snippet panel(tab: string)}
     {#if tab === 'proposals'}<StewardProposals onchange={onrefresh} onrevise={revise} />
     {:else if tab === 'questions'}<StewardQuestions {questions} {projects} {status} onanswer={answer} onanswered={onrefresh} />

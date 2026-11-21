@@ -424,8 +424,7 @@ describe('the channels tab', () => {
 });
 
 // Step 25 C12 (design 7.9.2): each card shows its alert line (lib/channelAlert.ts, whose tables
-// have their own tests), from the answer's server clock and the owner's zone; the steward's pane
-// carries the lines the owner may have to act on, named, on every tab.
+// have their own tests), from the answer's server clock and the owner's zone.
 describe('the channel-down alert line', () => {
   const NOW = '2026-11-23T11:00:00Z';
   const at = (minutes: number) => new Date(Date.parse(NOW) - minutes * 60_000).toISOString();
@@ -479,27 +478,6 @@ describe('the channel-down alert line', () => {
     const old = render(StewardChannels);
     await waitFor(() => expect(card(old.container, 'wechat')).not.toBeNull());
     expect(old.container.querySelector('[data-channel-alert]')).toBeNull();
-  });
-
-  it('the lines the owner may have to act on are at the top of the steward\'s pane, named, on every tab', async () => {
-    api.dshDriverConversation.mockResolvedValue(page([]));
-    api.listOwnerChannels.mockResolvedValue(down({alert_down: sent}));
-    const view = render(StewardPane, {projectId: 'aitelier-home', status: status('steward', 'aitelier-home'), onanswer: vi.fn()});
-    const top = () => view.container.querySelector('[data-steward-channel-alert="wechat"]');
-    await waitFor(() => expect(top()).not.toBeNull());
-    expect(top()!.textContent).toBe('WeChat: Down 30 min; alerted on Slack at 18:40');
-    expect(view.container.querySelector('[data-steward-channel-alert="slack"]')).toBeNull();
-    await fireEvent.click(view.getByRole('tab', {name: 'Proposals'}));
-    expect(top()).not.toBeNull();
-  });
-
-  it('a channel that only waits for its alert time is not at the top of the pane', async () => {
-    api.dshDriverConversation.mockResolvedValue(page([]));
-    api.listOwnerChannels.mockResolvedValue(down({down_since: at(4)}));
-    const view = render(StewardPane, {projectId: 'aitelier-home', status: status('steward', 'aitelier-home'), onanswer: vi.fn()});
-    await waitFor(() => expect(api.listOwnerChannels).toHaveBeenCalled());
-    await new Promise(resolve => setTimeout(resolve, 20));
-    expect(view.container.querySelector('[data-steward-channel-alert]')).toBeNull();
   });
 });
 

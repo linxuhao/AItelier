@@ -263,6 +263,8 @@ function fakeState(messages, { pageSize, sources = {} } = {}) {
     reads.push(path);
     if (path === '/api/state/query/message_sources') {
       sourceReads.push(body.message_ids);
+      // The backend refuses more than 200 ids in one call (core/state_commands.py MessageSourcesQuery).
+      if (body.message_ids.length > 200) throw new Error('AItelier message_sources: HTTP 422 {"code":"invalid_request"}');
       if (sources.fail) throw new Error('AItelier message_sources: HTTP 503');
       return { result: { sources: Object.fromEntries(body.message_ids.filter(id => sources[id]).map(id => [id, sources[id]])) } };
     }
@@ -351,6 +353,20 @@ test('sync: an owner message relayed from a chat channel is remembered with its 
   assert.match((await store.search('面板')).grep.text, /\] 业主 \{t-o2-o\}: 从面板问一句/, 'a dashboard line is as before');
   assert.equal(store.recentTurns().join('\n\n').split('\n')[0], '[2026-11-20T12:48:00Z] owner (slack): 从 slack 问一句');
   assert.doesNotMatch(JSON.stringify(read) + store.recentTurns().join(''), /U0OWNER|ts-1|ts-2/, 'only the channel name, never the account or message ref');
+  await store.close();
+});
+
+test('sync: more than 200 new owner messages are looked up 200 ids at a time, and every one keeps its channel', async () => {
+  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner' });
+  const at = i => new Date(Date.parse('2026-11-20T00:00:00Z') + i * 1000).toISOString();
+  const conversation = Array.from({ length: 250 }, (_, i) => owner('o' + i, at(i), 'msg ' + i));
+  const sources = Object.fromEntries(conversation.map(m => [m.message_id, { direction: 'in', channel: 'wechat' }]));
+  const state = fakeState(conversation, { sources });
+  assert.deepEqual(await syncConversation({ request: state.request, project: 'aitelier-home', me: 'drv-home', memory: store }), { written: 250 });
+  assert.deepEqual(state.sourceReads.map(ids => ids.length), [200, 50]);
+  const entries = [...store.entries.values()];
+  assert.equal(entries.length, 250);
+  assert.deepEqual(entries.filter(e => e.channel !== 'wechat').map(e => e.id), []);
   await store.close();
 });
 
@@ -1204,6 +1220,28 @@ test('step 17 layer 2: a reply newer than the first 100 deliveries of the stewar
   const threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
   assert.deepEqual(threads.handoffs_last_7_days.map(h => [h.project_id, h.answered]), [['wuxia', true]]);
   assert.deepEqual(pages, [0, 100, 200], 'every page, each from the cursor the last one gave');
+});
+
+test('step 17 layer 2: an inbox page that is empty, or a cursor that does not move, ends the read after one request', async () => {
+  for (const [label, page] of [['an empty page that says there is more', { items: [], has_more: true, next_after: 5 }],
+    ['a cursor that stays where it was', { items: [{ message: { message_id: 'r0' }, delivery: { delivery_id: 'd0', delivery_seq: 0 } }], has_more: true, next_after: 0 }]]) {
+    const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+    const conversation = [owner('o1', '2026-11-18T10:00:00Z', 'tell wuxia to pause'), mine('s1', '2026-11-18T10:01:00Z', 'ok', 'o1')];
+    let inboxReads = 0;
+    const request = async (path) => {
+      if (path.endsWith('/list_user_conversation')) return { messages: conversation, next_cursor: null };
+      if (path.endsWith('/send_director_message')) return { result: { message: { message_id: 'hm1' }, deliveries: [{ delivery_id: 'hd1' }] } };
+      // A reader that does not stop fails here instead of hanging the suite.
+      if (path.endsWith('/list_director_messages')) { if (++inboxReads > 3) throw new Error('inbox read again'); return { result: page }; }
+      throw new Error('unexpected ' + path);
+    };
+    const ops = stewardOps({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+    assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'pause please', citesUserMessageId: 'o1' })).handed_off, true);
+    const { openThreads } = await import('./steward-host.mjs');
+    const threads = await openThreads({ request, project: 'aitelier-home', me: 'drv-home', stateDir });
+    assert.equal(inboxReads, 1, label);
+    assert.deepEqual(threads.handoffs_last_7_days.map(h => [h.project_id, h.answered]), [['wuxia', false]], label);
+  }
 });
 
 test('open threads name the chat channel each unanswered owner message came from, and nothing for a dashboard one', async () => {

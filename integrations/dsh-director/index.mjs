@@ -149,7 +149,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
   // Step 23 (design-steward 7.7): the steward's family-group turns - whose turn it is, what it
   // may call, and that a group turn never stays in the owner's context (lib/group-turns.mjs).
-  const groupTurns = rootRole === 'steward' ? new GroupTurns({ stateDir: config.stateDir, limits: GROUP_LIMITS }) : undefined;
+  const groupTurns = rootRole === 'steward' ? new GroupTurns({ stateDir: config.stateDir, limits: GROUP_LIMITS,
+    pausedTools: Array.isArray(host.groups?.pausedTools) ? host.groups.pausedTools : [] }) : undefined;
   if (groupTurns) {
     // Synchronous, keyed on the caller's session; call_tool reaches the same guard.
     ctx.tools.guard(exec => exec.agent?.session?.id === config.sessionId ? groupTurns.guard(exec.name) : undefined);

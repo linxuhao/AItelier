@@ -42,6 +42,7 @@ from core import state_channels
 from core.state_channels import (BODY_MAX_BYTES, CHANNELS, CODE_TTL, _code_hash, _require_utf8, _written_at,
                                  digit_windows, require_bound)
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
+from core.state_privacy import writer_only_read
 from core.state_steward import _hash
 
 log = logging.getLogger(__name__)
@@ -712,6 +713,7 @@ class StateGroups:
                       "added_by": self._label_of(conn, channel, group, sender, role)}
             return self.steward._record(conn, "note_family_memory", request_key, request_hash, result)
 
+    @writer_only_read("list_family_memory")
     def list_family_memory(self, project_id=None):
         with self.store.transaction() as conn:
             turn = self._family_group(conn)
@@ -726,6 +728,7 @@ class StateGroups:
         return {"family_note": note[0] if note else None, "entries": entries}
 
     # ---------------------------------------------------------------- the host's reads
+    @writer_only_read("list_owner_groups")
     def list_owner_groups(self):
         """The steward's host: each channel's bound account and live group with its @
         prefix (the bridge's whitelist)."""
@@ -738,6 +741,7 @@ class StateGroups:
                       for r in conn.execute("SELECT * FROM state_owner_groups WHERE revoked_at IS NULL")]
         return {"owner_refs": accounts, "groups": groups}
 
+    @writer_only_read("list_group_recent")
     def list_group_recent(self, channel, group_ref, limit=6):
         """The steward's host: the group's last answered questions and the replies that went
         out (a withheld reply as the sentence the group saw), oldest first - a group wake's

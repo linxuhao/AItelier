@@ -588,6 +588,8 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     throw error;
   };
   return {
+    // Step 23 (7.7.5): this adapter's writes that wait, after a group turn, for the owner.
+    pausedTools: ['schedule_set', 'reply_to_director'],
     list: signal => request('/api/state/query/list_owner_groups', {}, signal).then(result),
     bind: ({ channel, groupRef, senderRef, messageRef, prefix, code }, signal) => request('/api/state/commands/bind_owner_group', {
       request_key: `group-bind:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,

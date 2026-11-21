@@ -559,6 +559,24 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
     return rec
 
 
+def declare_isolation(db, run_id: str, project_id: str, config_name: str) -> None:
+    """Record what this run works in, at the moment it is created.
+
+    Every host path that creates a run declares one, including the repo-less
+    ones: resolution treats a run of this deployment with NO record as a
+    declaration that lost its record and refuses it, which is only a safe rule
+    if every creation path writes one.
+    """
+    try:
+        from api.dependencies import get_config_registry
+        manifest = get_config_registry().get(config_name)
+        repo_mode = getattr(manifest, "repo_mode", "code") or "code"
+    except Exception:
+        repo_mode = "code"
+    ensure_for_run(db, run_id=run_id, project_id=project_id,
+                   config_name=config_name, repo_mode=repo_mode)
+
+
 
 
 def _resume_existing(db, existing: dict, run_id: str, project_id: str,
@@ -1406,6 +1424,44 @@ def reconcile_run_lease(db, sf, run_id: str) -> tuple[bool, str]:
     release(db, run_id, disposition="auto_released_terminal_quiet")
     return True, (f"run {run_id} is {status} with no admitted operation; "
                   f"lease on {held['canonical_checkout']} released")
+
+
+def reconcile_lease_after_stop(db, run_id: str) -> None:
+    """Cancel is a supported end of a run, so it is a supported end of a lease.
+
+    Retains on anything unverifiable, including the draining case, where the
+    admitted operations are precisely what must keep the checkout held.
+
+    `db=None` resolves the host database itself: the caller is the MCP stop
+    endpoint, which holds no db.
+    """
+    try:
+        from api.dependencies import get_skillflow, get_db_manager
+        sf = get_skillflow()
+        reconcile_run_lease(db if db is not None else get_db_manager(),
+                            sf, run_id)
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.meta").warning(
+            "lease reconciliation after stop failed for %s", run_id,
+            exc_info=True)
+
+    # stop_run is a supported terminal transition, but it does not know about
+    # AItelier's cached project projection. Sync it here so an immediate stop
+    # cannot leave the dashboard showing running:<old_step> forever. Keep this
+    # separate from lease reconciliation: a lease query may be unavailable
+    # while the terminal run status is still safe to project.
+    try:
+        from core.scheduler import _sync_project_status_to_db
+        run = sf.get_run(run_id) or {}
+        project_id = run.get("project_id")
+        if project_id:
+            _sync_project_status_to_db(project_id)
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.meta").warning(
+            "project status synchronization after stop failed for %s",
+            run_id, exc_info=True)
 
 
 def reconcile_all_leases(db, sf) -> dict:

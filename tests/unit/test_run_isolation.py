@@ -1228,3 +1228,50 @@ def test_an_unknown_isolation_mode_refuses_rather_than_guessing(
                                       admitted_ops=0)
     assert disposable is False and "not a decision" in why
 
+
+
+# ── host hooks: declaring at creation, reconciling after a stop ───────
+
+def test_post_stop_helper_syncs_project_projection(monkeypatch):
+    """The stop helper updates the cached project row after stop_run."""
+    from unittest.mock import MagicMock
+    import api.dependencies as deps
+    import core.scheduler as scheduler
+
+    db = MagicMock()
+    sf = MagicMock()
+    sf.get_run.return_value = {"id": "r1", "project_id": "p1",
+                               "status": "failed",
+                               "current_node": "t_impl"}
+    reconcile = MagicMock()
+    monkeypatch.setattr(ri, "reconcile_run_lease", reconcile)
+    sync = MagicMock()
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    monkeypatch.setattr(scheduler, "_sync_project_status_to_db", sync)
+
+    ri.reconcile_lease_after_stop(db, "r1")
+
+    reconcile.assert_called_once_with(db, sf, "r1")
+    sync.assert_called_once_with("p1")
+
+
+@pytest.mark.parametrize("registry, expected", [
+    (lambda name: type("M", (), {"repo_mode": "none"})(), "none"),
+    (lambda name: type("M", (), {"repo_mode": None})(), "code"),
+    (lambda name: (_ for _ in ()).throw(KeyError(name)), "code"),
+])
+def test_declare_isolation_takes_repo_mode_from_the_config(monkeypatch, registry,
+                                                           expected):
+    """The declared repo_mode is the config's; an unreadable one means code."""
+    import api.dependencies as deps
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(deps, "get_config_registry",
+                        lambda: SimpleNamespace(get=registry))
+    seen = []
+    monkeypatch.setattr(ri, "ensure_for_run", lambda db, **kw: seen.append(kw))
+
+    ri.declare_isolation("db", "run-1", "p1", "cfg")
+
+    assert seen == [{"run_id": "run-1", "project_id": "p1",
+                     "config_name": "cfg", "repo_mode": expected}]

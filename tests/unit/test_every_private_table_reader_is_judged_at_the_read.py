@@ -887,6 +887,7 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "http://127.0.0.1:4445/api/steward/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
             ("GET", "http://127.0.0.1:4445/api/steward/mcp", None),
             ("POST", "/api/state/commands/get_steward_confirmation", {"code": C.STEWARD_CONFIRMATION}),
+            ("POST", "/api/state/commands/cancel_steward_confirmation", {"code": C.STEWARD_CONFIRMATION}),
             ("POST", "/api/state/commands/create_steward_confirmation",
              {"name": f"mcp__sw__{C.STEWARD_CONNECTION}__tool", "arguments": {},
               "requester_message_id": C.canary("state_steward_dashboard_messages")}),

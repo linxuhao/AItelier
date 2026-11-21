@@ -154,14 +154,24 @@ describe('an oauth connection', () => {
     api.listStewardConnections.mockResolvedValue(oauthConn());
     api.startStewardOAuth.mockResolvedValue({conn_id: 'mailpub', authorize_url: 'https://auth.example/authorize?x=1'});
     api.confirmStewardIdentity.mockResolvedValue({});
-    const opened = vi.spyOn(window, 'open').mockImplementation(() => null);
+    // The tab is opened inside the click (before the backend answers), its address set after.
+    const tab = {opener: {} as unknown, location: {href: 'about:blank'}, close: vi.fn()};
+    let answered = false;
+    api.startStewardOAuth.mockImplementation(async () => { answered = true; return {conn_id: 'mailpub', authorize_url: 'https://auth.example/authorize?x=1'}; });
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => { expect(answered).toBe(false); return tab as unknown as Window; });
     const view = render(StewardConnectionsView);
     await waitFor(() => expect(view.container.querySelector('[data-conn-oauth]')).not.toBeNull());
     const box = view.container.querySelector('[data-conn-oauth]') as HTMLElement;
     expect(box.querySelector('[data-conn-identity]')?.textContent).toBe('Authorized as family@example.com');
     expect(box.textContent).toContain('Confirm the account before enabling the connection');
     await fireEvent.click(box.querySelector('[data-conn-authorize]')!);
-    await waitFor(() => expect(opened).toHaveBeenCalledWith('https://auth.example/authorize?x=1', '_blank', 'noopener'));
+    await waitFor(() => expect(tab.location.href).toBe('https://auth.example/authorize?x=1'));
+    expect(opened).toHaveBeenCalledWith('about:blank', '_blank');
+    expect(tab.opener).toBeNull();
+    // A blocked tab: the address is shown as a link instead.
+    opened.mockImplementation(() => null);
+    await fireEvent.click(box.querySelector('[data-conn-authorize]')!);
+    await waitFor(() => expect(box.querySelector('[data-conn-authorize-link]')?.getAttribute('href')).toBe('https://auth.example/authorize?x=1'));
     await fireEvent.click(box.querySelector('[data-conn-confirm-identity]')!);
     await waitFor(() => expect(api.confirmStewardIdentity).toHaveBeenCalledWith('mailpub', 'family@example.com'));
     opened.mockRestore();

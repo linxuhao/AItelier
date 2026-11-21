@@ -1229,15 +1229,29 @@ test('step 24.1b: the requester is the newest owner message the wake carries; th
     if (path.endsWith('/get_steward_confirmation')) throw new Error('AItelier /x: HTTP 404 "unknown_code: no confirmation K0000"');
     return {};
   };
-  const confirm = confirmOps(request, { project: 'aitelier-home', mirror: (...args) => mirrored.push(args) });
+  let mirrorAnswer = { mirrored: true, channel: 'slack' };
+  const confirm = confirmOps(request, { project: 'aitelier-home', mirror: async (...args) => { mirrored.push(args); return mirrorAnswer; } });
   assert.equal((await confirm.create({ name: 'mcp__sw__mailpub__send_message', arguments: { to: 'a' }, requesterMessageId: 'm2',
     audience: 'owner' })).code, 'K7Q2A');
-  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2' }), { message_id: 'm-out' });
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'slack' }), { message_id: 'm-out' });
   assert.deepEqual(calls.map(([path, body]) => [path.split('/').at(-1), body]), [
     ['create_steward_confirmation', { name: 'mcp__sw__mailpub__send_message', arguments: { to: 'a' }, requester_message_id: 'm2', audience: 'owner' }],
     ['send_user_message', { request_key: 'confirm:K7Q2A', project_id: 'aitelier-home', subject: 'Confirmation K7Q2A', body: 'T',
       reply_to_message_id: 'm2' }]]);
   assert.deepEqual(mirrored, [['m-out', 'T', 'm2', { exact: true }]], 'back to the requester\'s own channel, exactly as written');
+  // The channel did not take it: refused (the plugin then cancels); a dashboard requester needs no mirror.
+  for (const reason of ['not_bound', 'send_failed', 'channel_not_connected']) {
+    mirrorAnswer = { mirrored: false, reason, channel: 'slack' };
+    assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'slack' }),
+      { refused: 'not_delivered', reason, message_id: 'm-out' });
+  }
+  mirrored.length = 0;
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'dashboard' }), { message_id: 'm-out' });
+  assert.deepEqual(mirrored, [], 'the dashboard is the conversation itself');
+  assert.deepEqual(await confirmOps(request, { project: 'p' }).deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'wechat' }),
+    { refused: 'not_delivered', reason: 'no_channels', message_id: 'm-out' });
+  await confirm.cancel('K7Q2A');
+  assert.deepEqual(calls.at(-1), ['/api/state/commands/cancel_steward_confirmation', { code: 'K7Q2A' }]);
   assert.equal((await confirm.get('K0000')).refused, 'unknown_code', 'the detail\'s first word');
   assert.equal(stateRefusal(new Error('AItelier /x: HTTP 422 "no_requester: an outward action"')).refused, 'no_requester');
   const ops = catalogOps(request, { confirm });

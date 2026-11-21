@@ -293,7 +293,9 @@ export interface DirectorHost {
    *  - confirm (optional, step 24.1b, design-steward 7.8.9): request_confirmation and
    *    run_confirmed are registered only with it. create stores the exact call and answers
    *    the code and the text (written by code) the requester reads; deliver sends that text
-   *    into the requester's conversation (a reply to their message); get answers the stored
+   *    into the requester's conversation (a reply to their message) and is refused unless it
+   *    reached them (`channel` is the requester's: a chat channel's mirror must take it);
+   *    cancel voids a pending record whose text did not arrive; get answers the stored
    *    record ({status, name, arguments}) run_confirmed runs. Refusals are {refused}.
    *  The catalog writes no audience of its own: the turn's audience is step 23's (groups.audience,
    *  recorded by the group turns before each turn's first step), which the catalog reads to filter
@@ -306,8 +308,10 @@ export interface DirectorHost {
     requesterOf?(text: string): string | undefined;
     confirm?: {
       create(request: { name: string; arguments: object; requesterMessageId: string; audience: string }, signal?: AbortSignal):
-        Promise<{ code: string; text: string; reply_to_message_id: string; expires_at: string } | { refused: string }>;
-      deliver(message: { code: string; text: string; replyTo: string }, signal?: AbortSignal): Promise<unknown>;
+        Promise<{ code: string; text: string; channel: string; reply_to_message_id: string; expires_at: string } | { refused: string }>;
+      deliver(message: { code: string; text: string; replyTo: string; channel: string }, signal?: AbortSignal):
+        Promise<{ message_id: string } | { refused: string; reason?: string }>;
+      cancel(code: string, signal?: AbortSignal): Promise<unknown>;
       get(code: string, signal?: AbortSignal): Promise<{ status: string; name: string; arguments: object } | { refused: string }>;
     };
   };

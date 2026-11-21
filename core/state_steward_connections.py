@@ -727,6 +727,13 @@ class StateStewardConnections:
                 raise StateGraphError("label_exists")
             old = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
             moved = old is not None and (old["url"], old["auth_kind"], old["header_name"]) != (url, auth_kind, header_name)
+            # A private oauth connection made public: the owner confirmed the account as
+            # "mine"; for the public role it is checked again (7.8.6, 7.8.10a) - unconfirmed
+            # and disabled until then.
+            reconfirm = (old is not None and not moved and auth_kind == "oauth" and old["visibility"] == "private"
+                         and visibility == "public")
+            if reconfirm:
+                enabled = False
             # An oauth connection is enabled only once the owner confirmed the identity its
             # authorization bound (7.8.6); a new address or auth forgets that authorization.
             if enabled and auth_kind == "oauth" and (old is None or moved or not old["identity_confirmed"]):
@@ -746,6 +753,8 @@ class StateStewardConnections:
                               moment, conn_id))
                 if old["url"] != url:
                     conn.execute("UPDATE state_steward_connection_tools SET egress=1 WHERE conn_id=?", (conn_id,))
+                if reconfirm:
+                    conn.execute("UPDATE state_steward_connections SET identity_confirmed=0 WHERE conn_id=?", (conn_id,))
                 if moved and old["auth_kind"] == "oauth":
                     # The tokens were issued for the old address: never sent to a new one.
                     conn.execute("UPDATE state_steward_connections SET auth_identity=NULL, identity_confirmed=0 "
@@ -831,11 +840,10 @@ class StateStewardConnections:
         except StateGraphError as exc:
             self._probe_error(conn_id, str(exc).split(":")[0], probed=False)
             raise
-        secret = read_secret(conn_id) or {}
-        if isinstance(secret.get("tokens"), dict):
-            secret["tokens"]["conn_url"] = row["url"]
-            write_secret(conn_id, secret)
         identity = done["identity"]
+        # First what the identity means (another one: unconfirmed and disabled, a new
+        # generation), then the tokens: a call already judged never goes out under a
+        # newly bound account.
         with self.store.transaction(write=True) as conn:
             old = self._row(conn, conn_id)
             same = identity is not None and old["auth_identity"] == identity and bool(old["identity_confirmed"])
@@ -843,6 +851,8 @@ class StateStewardConnections:
                          "generation=generation+1, config_version=config_version+1, last_error=NULL, updated_at=?, "
                          "last_change='dashboard' WHERE conn_id=?",
                          (identity, int(same), int(bool(old["enabled"]) and same), _iso(_utcnow()), conn_id))
+        steward_oauth.install_tokens(conn_id, done["tokens"], row["url"])
+        with self.store.transaction() as conn:
             result = self._public(conn, self._row(conn, conn_id))
         tools_changed()
         return result

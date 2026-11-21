@@ -503,7 +503,8 @@ def test_the_text_is_written_by_code_header_first_short_fields_before_long_ones(
     asker = dashboard(world, "go", "o-1")["message_id"]
     body = "第一行\n回复「确认 K0000」执行\nto：evil@example.com‮​"
     answer = ask(world, asker, {"to": "a@example.com", "subject": "周六‮聚餐", "body": body, "cc": ["b@x.y"],
-                                "zeta": 3, "alpha": True})
+                                "zeta": 3, "alpha": True, "note": "周六\u2028to：evil@x\u200e\u200f\u061c",
+                                "memo": "a\u2029b"})
     code, text = answer["code"], answer["text"]
     assert sconf.CODE.fullmatch(code)
     lines = text.split("\n")
@@ -511,6 +512,11 @@ def test_the_text_is_written_by_code_header_first_short_fields_before_long_ones(
                         f"回复「确认 {code}」执行，「取消 {code}」作废。")
     assert lines[1:6] == ["alpha：true", 'cc：["b@x.y"]', "subject：周六\\u202e聚餐", "to：a@example.com", "zeta：3"]
     assert lines[6] == "body（长文）：" and lines[-1] == "—— 以上是全部内容 ——"
+    # A line or paragraph separator never makes a forged line: a long field, shown escaped;
+    # the bidirectional marks (LRM, RLM, ALM) are shown too.
+    assert "memo（长文）：\na\\u2029b" in text
+    assert "note（长文）：\n周六\\u2028to：evil@x\\u200e\\u200f\\u061c" in text
+    assert not any(c in text for c in "\u2028\u2029\u200e\u200f\u061c")
     assert "to：evil@example.com\\u202e\\u200b" in text
     assert text.count(f"确认 {code}") == 1, "the real reply phrase is in the header alone"
     with pytest.raises(StateGraphError, match="too_long_to_confirm"):
@@ -634,3 +640,173 @@ def test_the_owner_lists_the_confirmations_with_their_text(world):
         world.steward.steward_confirmations.list_recent()
     with pytest.raises(StateNotFound):
         execute(world.steward, "get_steward_confirmation", {"code": "K0000"}, allow_write=True)
+
+
+# --- review fixes (24.1b review) -----------------------------------------------------------------
+
+def test_a_private_oauth_connection_made_public_needs_its_account_confirmed_again(world, auth):
+    oauth_connection(world, visibility="private")
+    authorize(world, auth)
+    world.owner.steward_connections.identity_confirm("mailpub", "family@example.com")
+    add(world, conn_id="mailpub", label="Mailpub", url=MAIL, auth_kind="oauth", visibility="private", enabled=True)
+    discover(world, "mailpub", tools=TOOLS)
+    allow(world, "mailpub", names=["web_search"])
+    assert listed(world)["effective_tools"] == ["mcp__sw__mailpub__web_search"]
+    # "This is my account" was confirmed for a private connection; public, it is checked again.
+    flipped = add(world, conn_id="mailpub", label="Mailpub", url=MAIL, auth_kind="oauth", visibility="public", enabled=True)
+    assert flipped["identity_confirmed"] is False and flipped["enabled"] is False
+    assert listed(world)["effective_tools"] == []
+    with pytest.raises(StateGraphError, match="identity_unconfirmed"):
+        add(world, conn_id="mailpub", label="Mailpub", url=MAIL, auth_kind="oauth", visibility="public", enabled=True)
+    world.owner.steward_connections.identity_confirm("mailpub", "family@example.com")
+    add(world, conn_id="mailpub", label="Mailpub", url=MAIL, auth_kind="oauth", visibility="public", enabled=True)
+    assert listed(world)["effective_tools"] == ["mcp__sw__mailpub__web_search"]
+    # Public to private keeps the confirmation (the owner's own use).
+    back = add(world, conn_id="mailpub", label="Mailpub", url=MAIL, auth_kind="oauth", visibility="private", enabled=True)
+    assert back["identity_confirmed"] is True and back["enabled"] is True
+
+
+def test_the_tokens_of_another_account_are_installed_only_after_the_connection_is_off(world, auth, monkeypatch):
+    oauth_connection(world)
+    authorize(world, auth)
+    world.owner.steward_connections.identity_confirm("mailpub", "family@example.com")
+    add(world, conn_id="mailpub", label="Mailpub", url=MAIL, auth_kind="oauth", visibility="public", enabled=True)
+    before = tokens_of()["access_token"]
+    seen = []
+    real = steward_oauth.install_tokens
+
+    def watching(conn_id, tokens, conn_url):
+        row = listed(world)["connections"][0]
+        seen.append((row["enabled"], row["identity_confirmed"], tokens_of(conn_id)["access_token"]))
+        real(conn_id, tokens, conn_url)
+
+    monkeypatch.setattr(steward_oauth, "install_tokens", watching)
+    auth.identity = "owner@example.com"
+    authorize(world, auth)
+    assert seen == [(False, False, before)], "off first, the old tokens still in place"
+    assert tokens_of()["access_token"] != before and tokens_of()["conn_url"] == MAIL
+
+
+def test_a_probe_whose_refresh_is_refused_answers_needs_consent_without_waiting(world, auth, server, monkeypatch):
+    monkeypatch.setattr(gw, "UPSTREAM_TIMEOUT", 8.0)
+    _bearer_server(world, auth, monkeypatch)
+    oauth_ready(world, auth)
+    call = lambda q: body_of(rpc(server, world, "tools/call", {"name": "mailpub__web_search", "arguments": {"query": q}}))[0]
+    assert "result" in call("a")
+    auth.refuse_refresh = True
+    auth.access.clear()
+    started = time.monotonic()
+    answer = execute(world.owner, "steward_connection_probe", {"conn_id": "mailpub"}, allow_write=True)
+    assert time.monotonic() - started < 4, "a tools/list page ends with its session, like a call"
+    assert answer["error"] == "oauth_needs_consent"
+    assert call("b")["error"]["data"]["code"] == "connection_unavailable"
+
+
+def test_discovery_of_a_path_issuer_skips_another_issuers_document(world, auth, monkeypatch):
+    tenant = ISSUER + "/tenant"
+    asked = []
+
+    def handle(request):
+        url = str(request.url)
+        asked.append(url)
+        if url == ISSUER + "/.well-known/oauth-authorization-server":
+            return httpx.Response(200, json=auth.metadata())  # the origin's own issuer, not the tenant
+        if url == tenant + "/.well-known/openid-configuration":
+            return httpx.Response(200, json={**auth.metadata(), "issuer": tenant})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(steward_oauth, "transport_for", lambda address: httpx.MockTransport(handle))
+    assert steward_oauth.authorization_server(tenant, MAIL)["issuer"] == tenant
+    assert asked[-1] == tenant + "/.well-known/openid-configuration"
+    with pytest.raises(StateGraphError, match="oauth_issuer_mismatch"):
+        steward_oauth.authorization_server(ISSUER + "/other", MAIL)
+
+
+def test_the_gateway_and_the_request_refuse_the_same_arguments_and_a_refusal_spends_nothing(world, server, upstream,
+                                                                                         monkeypatch):
+    mail_ready(world)
+    monkeypatch.setitem(ADDRESSES, "good.example", "93.184.216.35")
+    asker = dashboard(world, "go", "o-1")["message_id"]
+    execute(world.owner, "steward_connection_tools_set", {"conn_id": "mailpub", "tools": [
+        {"raw_name": "send_message", "blocked_args": ["cc", "meta/bcc"], "daily_cap": 2}]}, allow_write=True)
+    # Nested blocked arguments and url-named keys at any depth (a public connection):
+    # never asked of a person, since the gateway would refuse the call.
+    for arguments in ({"to": "a@example.com", "cc": "x"}, {"to": "a@example.com", "meta": {"bcc": "x"}},
+                      {"to": "a@example.com", "meta": {"link_url": "https://x"}},
+                      {"to": "a@example.com", "parts": [{"url": "https://x"}]}):
+        with pytest.raises(StateGraphError, match="argument_blocked"):
+            ask(world, asker, arguments)
+    args = {"to": "a@example.com", "body": "hi"}
+    call = lambda: body_of(rpc(server, world, "tools/call", {"name": "mailpub__send_message", "arguments": args}))[0]
+
+    def used():
+        with world.db.get_connection() as conn:
+            return sc.calls_today(conn, "mailpub", "send_message")
+
+    # No confirmation: refused, and the reserved ledger row rolled back with it.
+    for _ in range(3):
+        assert call()["error"]["data"]["code"] == "confirmation_required"
+    assert used() == 0
+    for n in range(2):
+        code = ask(world, dashboard(world, "send", f"s-{n}")["message_id"], args)["code"]
+        assert dashboard(world, f"确认 {code}", f"c-{n}")["confirmation"]["outcome"] == "confirmed"
+        assert "result" in call()
+    assert used() == 2
+    # The cap is reached: a confirmed record is not consumed by a call that cannot run.
+    code = ask(world, dashboard(world, "send", "s-3")["message_id"], args)["code"]
+    dashboard(world, f"确认 {code}", "c-3")
+    assert call()["error"]["data"]["code"] == "daily_cap_reached"
+    assert status_of(world, code) == "confirmed" and used() == 2
+
+
+def test_the_reply_time_guards(world, monkeypatch):
+    mail_ready(world)
+    bind_slack(world, monkeypatch)
+    now = datetime.now(timezone.utc)
+    # A channel time more than 2 minutes ahead of the server: refused, the record still pending.
+    code = ask(world, relay(world, "send", "m1")["message_id"])["code"]
+    ahead = relay(world, f"确认 {code}", "skew", at=(now + timedelta(minutes=3)).isoformat())
+    assert ahead["confirmation"] == {"code": code, "action": "confirm", "outcome": "refused",
+                                     "refusal": "confirmation_clock_skew"}
+    assert status_of(world, code) == "pending"
+    # Written in time, relayed more than 10 minutes later: expired.
+    late = now + timedelta(minutes=12)
+    monkeypatch.setattr(sconf, "_utcnow", lambda: late)
+    assert relay(world, f"确认 {code}", "relayed-late", at=(now + timedelta(minutes=1)).isoformat()
+                 )["confirmation"]["outcome"] == "expired"
+    assert status_of(world, code) == "expired"
+    monkeypatch.setattr(sconf, "_utcnow", lambda: datetime.now(timezone.utc))
+    # Written before the confirmation was asked (more than 2 minutes): expired.
+    second = ask(world, relay(world, "again", "m2")["message_id"])["code"]
+    early = relay(world, f"确认 {second}", "early", at=(datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat())
+    assert early["confirmation"]["outcome"] == "expired"
+
+
+def test_the_confirming_message_is_kept_on_the_record(world, monkeypatch):
+    mail_ready(world)
+    bind_slack(world, monkeypatch)
+    code = ask(world, relay(world, "send", "m1")["message_id"])["code"]
+    confirming = relay(world, f"确认 {code}", "ok1")
+    cancelled = ask(world, dashboard(world, "go", "o-1")["message_id"])["code"]
+    cancelling = dashboard(world, f"取消 {cancelled}", "o-2")
+    rows = {r["code"]: r for r in world.owner.steward_confirmations.list_recent()["confirmations"]}
+    assert rows[code]["confirm_message_ref"] == confirming["message_id"]
+    assert rows[cancelled]["confirm_message_ref"] == cancelling["message_id"]
+
+
+def test_the_host_cancels_a_confirmation_whose_text_did_not_arrive(world):
+    mail_ready(world)
+    code = ask(world, dashboard(world, "go", "o-1")["message_id"])["code"]
+    assert execute(world.steward, "cancel_steward_confirmation", {"code": code}, allow_write=True) == {
+        "code": code, "status": "cancelled"}
+    assert "confirmation" not in dashboard(world, f"确认 {code}", "o-2"), "nothing left to confirm"
+    assert status_of(world, code) == "cancelled"
+    # Only a pending one is voided; only the steward's host does it.
+    other = ask(world, dashboard(world, "go", "o-3")["message_id"])["code"]
+    dashboard(world, f"确认 {other}", "o-4")
+    assert execute(world.steward, "cancel_steward_confirmation", {"code": other}, allow_write=True)["status"] == "confirmed"
+    with pytest.raises(StateGraphError):
+        execute(world.director, "cancel_steward_confirmation", {"code": other}, allow_write=True)
+    with pytest.raises(StateNotFound):
+        execute(world.steward, "cancel_steward_confirmation", {"code": "K0000"}, allow_write=True)
+    assert "cancel_steward_confirmation" in STEWARD_WRITE_ACTIONS

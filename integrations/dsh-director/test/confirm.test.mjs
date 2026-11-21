@@ -32,10 +32,12 @@ function fixture({ stateDir, turn = { kind: 'owner' } } = {}) {
     audience: () => turn.audience ?? turn });
   const record = { status: 'confirmed', name: SEND, arguments: { to: 'a@example.com', body: 'stored' } };
   const confirm = {
-    create: async (request) => { calls.push(['create', request]); return { code: 'K7Q2A', text: 'TEXT', reply_to_message_id: request.requesterMessageId, expires_at: 'e' }; },
-    deliver: async (message) => { calls.push(['deliver', message]); return { message_id: 'm-out' }; },
+    create: async (request) => { calls.push(['create', request]); return { code: 'K7Q2A', text: 'TEXT', channel: 'slack', reply_to_message_id: request.requesterMessageId, expires_at: 'e' }; },
+    deliver: async (message) => { calls.push(['deliver', message]); return delivery.answer; },
     get: async code => { calls.push(['get', code]); return { code, ...record }; },
+    cancel: async code => { calls.push(['cancel', code]); return { code, status: 'cancelled' }; },
   };
+  const delivery = { answer: { message_id: 'm-out' } };
   const tools = new Map(), executed = [];
   const scope = { tools: { register: tool => tools.set(tool.name, tool) } };
   const ctx = { tools: { execute: async request => { executed.push(request); return { value: { sent: true }, content: [{ type: 'text', text: 'sent' }] }; } } };
@@ -43,7 +45,7 @@ function fixture({ stateDir, turn = { kind: 'owner' } } = {}) {
   registerConfirmTools(scope, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError, confirm, catalog });
   const run = (name, args, session = 'root') => tools.get(name).execute(args, { agent: { session: { id: session } }, signal: undefined,
     callId: 'c1', rootCallId: 'r1', token: 'tok-1' });
-  return { catalog, calls, record, run, executed, dir };
+  return { catalog, calls, record, run, executed, dir, delivery };
 }
 
 test('request_confirmation: no person\'s message in the turn is no_requester; the newest one is the requester', async () => {
@@ -56,7 +58,7 @@ test('request_confirmation: no person\'s message in the turn is no_requester; th
   const answer = await f.run('request_confirmation', { name: SEND, arguments: { to: 'a@example.com' } });
   assert.deepEqual(answer, { code: 'K7Q2A', status: 'pending', expires_at: 'e' });
   assert.deepEqual(f.calls, [['create', { name: SEND, arguments: { to: 'a@example.com' }, requesterMessageId: 'm-2', audience: 'owner' }],
-    ['deliver', { code: 'K7Q2A', text: 'TEXT', replyTo: 'm-2' }]]);
+    ['deliver', { code: 'K7Q2A', text: 'TEXT', replyTo: 'm-2', channel: 'slack' }]]);
   // A new turn woken by something else has none again; the record survives a restart.
   const again = new StewardCatalog({ host: f.catalog.host, stateDir: f.dir, rootSession: 'root', registryNames: () => [] });
   assert.equal(again.requester, 'm-2');
@@ -104,4 +106,20 @@ test('run_confirmed runs the stored name and arguments, never the model\'s, and 
     assert.deepEqual(await f.run('run_confirmed', { code: 'K7Q2A' }), { refused: 'not_confirmed', status });
   }
   assert.equal(f.executed.length, 1);
+});
+
+test('request_confirmation: a text that did not reach the person gives no code, and its record is cancelled', async () => {
+  const f = fixture();
+  await f.catalog.preStep();
+  f.catalog.observe({ type: 'turn/start', seq: 1 });
+  f.catalog.observe(userMessage(wake('m-1')));
+  for (const answer of [{ refused: 'credential_in_body' }, { refused: 'not_delivered', reason: 'not_bound', message_id: 'm-out' }, undefined]) {
+    f.calls.length = 0;
+    f.delivery.answer = answer;
+    const out = await f.run('request_confirmation', { name: SEND, arguments: { to: 'a@example.com' } });
+    assert.equal(out.refused, 'confirmation_not_delivered');
+    assert.equal(out.code, undefined, 'no code the model could pass on');
+    assert.ok(!JSON.stringify(out).includes('K7Q2A'), JSON.stringify(out));
+    assert.deepEqual(f.calls.at(-1), ['cancel', 'K7Q2A']);
+  }
 });

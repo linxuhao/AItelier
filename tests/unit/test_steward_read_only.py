@@ -176,7 +176,7 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         # Step 24.1b (design-steward 7.8.9, 7.8.18): the host asks for a confirmation of an
         # outward action (the text written by code) and reads the stored call back for
         # run_confirmed; only the requester's own reply confirms (tests/unit/test_steward_oauth_confirm.py).
-        "create_steward_confirmation", "get_steward_confirmation"}
+        "create_steward_confirmation", "get_steward_confirmation", "cancel_steward_confirmation"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

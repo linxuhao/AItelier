@@ -874,7 +874,7 @@ class StateChannels:
         # Step 24.1b (design-steward 7.8.9): the requester's exact `确认 <code>` / `取消 <code>`
         # for a confirmation of theirs is decided here, in the transaction that writes it.
         confirmation = confirmations.match_reply(conn, body, channel=channel, sender_ref=sender_ref,
-                                                 written_at=written_at)
+                                                 written_at=written_at, message_id=message_id)
         if confirmation is not None:
             result["confirmation"] = confirmation
         if matched is not None and written_at is None:
@@ -1505,7 +1505,7 @@ class StateChannels:
                 # (the dashboard is its conversation) and can confirm one, by server time.
                 confirmations.record_dashboard_message(conn, message_id)
                 decided = confirmations.match_reply(conn, body, channel=confirmations.DASHBOARD, sender_ref=None,
-                                                    written_at=_now())
+                                                    written_at=_now(), message_id=message_id)
                 if decided is not None:
                     confirmed.update(decided)
                 found = match_phrase(conn, body)

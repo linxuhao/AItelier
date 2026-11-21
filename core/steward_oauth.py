@@ -237,14 +237,19 @@ def authorization_server(issuer: str, conn_url: str) -> dict:
     judge_endpoint(issuer, conn_url)
     if urlsplit(issuer).query:
         raise OAuthError("oauth_endpoint_refused: an issuer has no query")
-    candidates = (_well_known(issuer, "oauth-authorization-server") + _well_known(issuer, "openid-configuration"))
+    # RFC 8414 (path inserted after /.well-known/), OIDC Discovery 1.0 (path appended).
+    candidates = (_well_known(issuer, "oauth-authorization-server") + _well_known(issuer, "openid-configuration")
+                  + [issuer.rstrip("/") + "/.well-known/openid-configuration"])
+    mismatch = False
     for url in dict.fromkeys(candidates):
         response = _request("GET", url, conn_url)
         if response.status_code != 200:
             continue
         metadata = _json(response, "oauth_discovery_failed")
         if metadata.get("issuer") != issuer:
-            raise OAuthError("oauth_issuer_mismatch: the metadata names another issuer")
+            # Another issuer's document (an origin-root one for a path issuer): try the next.
+            mismatch = True
+            continue
         for key in ("authorization_endpoint", "token_endpoint"):
             if not isinstance(metadata.get(key), str):
                 raise OAuthError(f"oauth_discovery_failed: no {key}")
@@ -255,6 +260,8 @@ def authorization_server(issuer: str, conn_url: str) -> dict:
         if "S256" not in (metadata.get("code_challenge_methods_supported") or []):
             raise OAuthError("oauth_pkce_unsupported: the server does not offer S256 PKCE")
         return metadata
+    if mismatch:
+        raise OAuthError("oauth_issuer_mismatch: the metadata names another issuer")
     raise OAuthError("oauth_discovery_failed: no authorization server metadata")
 
 
@@ -432,7 +439,10 @@ def _tokens_of(answer: dict, previous: dict | None = None) -> dict:
 
 
 def complete(row, pending: dict, code: str, iss: str | None) -> dict:
-    """Exchange the code; keep the tokens; read the identity. Returns {identity}."""
+    """Exchange the code and read the identity. Returns {identity, tokens}: the tokens are
+    NOT installed here - the caller first records what the identity means for the
+    connection (unconfirmed, disabled), then installs them (`install_tokens`), so no call
+    already judged goes out under a newly bound account."""
     issuer = pending["issuer"]
     if iss is not None and iss != issuer:
         raise OAuthError("oauth_issuer_mismatch: the answer names another issuer")
@@ -453,14 +463,20 @@ def complete(row, pending: dict, code: str, iss: str | None) -> dict:
         raise OAuthError(f"oauth_token_failed: {response.status_code}")
     tokens = _tokens_of(_json(response, "oauth_token_failed"))
     identity = _identity(row["url"], tokens, pending["metadata"])
-    with _lock(row["conn_id"]):
-        secret = _secret(row["conn_id"])
-        secret["tokens"] = {**tokens, "token_endpoint": endpoint, "issuer": issuer, "resource": pending["resource"],
-                            "revocation_endpoint": pending["metadata"].get("revocation_endpoint")}
+    return {"identity": identity,
+            "tokens": {**tokens, "token_endpoint": endpoint, "issuer": issuer, "resource": pending["resource"],
+                       "revocation_endpoint": pending["metadata"].get("revocation_endpoint")}}
+
+
+def install_tokens(conn_id: str, tokens: dict, conn_url: str) -> None:
+    """The tokens of a finished authorization, with the address they were issued for, in
+    one write under the connection's lock (a concurrent refresh is never overwritten)."""
+    with _lock(conn_id):
+        secret = _secret(conn_id)
+        secret["tokens"] = {**tokens, "conn_url": conn_url}
         secret["needs_consent"] = False
         secret.pop("consent_noticed", None)
-        sc.write_secret(row["conn_id"], secret)
-    return {"identity": identity}
+        sc.write_secret(conn_id, secret)
 
 
 # ---------------------------------------------------------------- refresh

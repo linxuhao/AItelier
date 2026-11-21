@@ -61,8 +61,10 @@ CODE = re.compile(r"K[0-9A-HJKMNP-TV-Z]{4}")
 CONFIRM, CANCEL = "确认 ", "取消 "
 DASHBOARD = "dashboard"
 # Shown as an escape wherever they occur: C0/C1 controls and DEL, the bidirectional
-# controls, the zero-width characters. A newline stays a newline only inside a long field.
-_HIDDEN = re.compile("[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩​-‍⁠﻿]")
+# controls and marks (LRM, RLM, ALM), the zero-width characters, the line and paragraph
+# separators. A newline stays a newline only inside a long field.
+_BREAKS = ("\n", "\r", "\u2028", "\u2029")  # a field with one of these is never a one-line field
+_HIDDEN = re.compile("[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060\u2066-\u2069\ufeff]")
 
 
 def _utcnow() -> datetime:
@@ -121,11 +123,11 @@ def confirmation_text(code: str, label: str, raw_name: str, arguments: dict) -> 
     short, long = [], []
     for key in sorted(arguments):
         text = _value_text(arguments[key])
-        if "\n" not in text and "\r" not in text and len(text) <= SHORT_MAX:
+        if not any(b in text for b in _BREAKS) and len(text) <= SHORT_MAX:
             short.append(f"{_shown(key)}：{_shown(text)}")
         else:
             long.append(f"{_shown(key)}（长文）：\n{_shown(text, keep_newlines=True)}")
-    header = (f"请确认（{code}，10 分钟内有效）：用「{label}」执行 {_shown(raw_name)}。"
+    header = (f"请确认（{code}，10 分钟内有效）：用「{_shown(label)}」执行 {_shown(raw_name)}。"
               f"回复「{CONFIRM}{code}」执行，「{CANCEL}{code}」作废。")
     return "\n".join([header, *short, *long, "—— 以上是全部内容 ——"])
 
@@ -189,12 +191,13 @@ def _requester_key(record) -> tuple:
 
 
 # ---------------------------------------------------------------- matching a reply
-def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | None):
+def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | None, message_id: str | None = None):
     """In the transaction that writes a person's message: when the whole message (ends
     stripped) is `确认 <code>` / `取消 <code>` for a PENDING record of this very requester
     (channel and sender; the dashboard: the owner's browser session, server time), decide
     it. None for an ordinary message - also a code of someone else, of another channel,
-    or no longer pending. `written_at` is the channel's time (None: undated)."""
+    or no longer pending. `written_at` is the channel's time (None: undated); `message_id`
+    the reply being written, kept as the record's confirm_message_ref when it decides."""
     if not isinstance(body, str) or not _has_tables(conn):
         return None
     phrase = body.strip()
@@ -211,7 +214,8 @@ def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | 
     out = {"code": code, "action": action}
     now = _utcnow()
     if action == "cancel":
-        conn.execute("UPDATE state_steward_confirmations SET status='cancelled' WHERE code=? AND status='pending'", (code,))
+        conn.execute("UPDATE state_steward_confirmations SET status='cancelled', confirm_message_ref=? WHERE code=? "
+                     "AND status='pending'", (message_id, code))
         return {**out, "outcome": "cancelled"}
     if written_at is None:
         return {**out, "outcome": "refused", "refusal": "confirmation_undated"}
@@ -221,8 +225,8 @@ def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | 
     if written_at > created + TTL or now - written_at > TTL or written_at < created - CLOCK_SKEW:
         conn.execute("UPDATE state_steward_confirmations SET status='expired' WHERE code=? AND status='pending'", (code,))
         return {**out, "outcome": "expired"}
-    conn.execute("UPDATE state_steward_confirmations SET status='confirmed', confirmed_at=? WHERE code=? "
-                 "AND status='pending'", (_iso(now), code))
+    conn.execute("UPDATE state_steward_confirmations SET status='confirmed', confirmed_at=?, confirm_message_ref=? "
+                 "WHERE code=? AND status='pending'", (_iso(now), message_id, code))
     return {**out, "outcome": "confirmed"}
 
 
@@ -341,6 +345,22 @@ class StateStewardConfirmations:
                 "arguments": json.loads(row["args_json"]), "created_at": row["created_at"],
                 "confirmed_at": row["confirmed_at"]}
 
+    def cancel(self, code):
+        """The host voids a PENDING record whose text never reached the requester (the
+        message refused, the chat channel did not take it): nobody can confirm it then."""
+        if not isinstance(code, str) or not CODE.fullmatch(code):
+            raise StateGraphError("invalid_code")
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn)
+            row = conn.execute("SELECT status FROM state_steward_confirmations WHERE code=?", (code,)).fetchone() \
+                if _has_tables(conn) else None
+            if row is None:
+                raise StateNotFound(f"unknown_code: no confirmation {code}")
+            conn.execute("UPDATE state_steward_confirmations SET status='cancelled' WHERE code=? AND status='pending'",
+                         (code,))
+            status = conn.execute("SELECT status FROM state_steward_confirmations WHERE code=?", (code,)).fetchone()[0]
+        return {"code": code, "status": status}
+
     def list_recent(self):
         """The owner's panel (its own route, no State query): the last 30 days, with the
         text that went out. The owner's browser session alone (`_owner` refuses an
@@ -350,7 +370,8 @@ class StateStewardConfirmations:
             if not _has_tables(conn):
                 return {"confirmations": []}
             rows = conn.execute("SELECT code,conn_id,raw_name,gw_name,requester_kind,channel,status,created_at,"
-                                "confirmed_at,consumed_at,result,message_text FROM state_steward_confirmations "
+                                "confirmed_at,confirm_message_ref,consumed_at,result,message_text "
+                                "FROM state_steward_confirmations "
                                 "WHERE created_at>=? ORDER BY created_at DESC LIMIT 200",
                                 (_iso(_utcnow() - KEPT),)).fetchall()
         return {"confirmations": [{**dict(r), "result": json.loads(r["result"]) if r["result"] else None} for r in rows]}

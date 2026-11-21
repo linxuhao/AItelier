@@ -790,23 +790,31 @@ export function stateRefusal(error) {
 /** The confirmation operations (step 24.1b, design-steward 7.8.9) over the steward's State
  *  commands: the backend stores the call and writes the text by code; the host sends that
  *  text into the requester's conversation as a reply to their message (a chat channel's
- *  message goes back to that channel, exactly as written - `exact`, never shaped or cut). */
+ *  message goes back to that channel, exactly as written - `exact`, never shaped or cut).
+ *  deliver is refused unless the text reached the requester: the message written, and for a
+ *  chat channel's requester the channel took it (the mirror is awaited, not fired). */
 export function confirmOps(request, { project, mirror = () => {} }) {
   return {
     create: ({ name, arguments: args, requesterMessageId, audience }, signal) =>
       request('/api/state/commands/create_steward_confirmation', { name, arguments: args,
         requester_message_id: requesterMessageId, audience }, signal).then(r => r?.result ?? r, stateRefusal),
-    async deliver({ code, text, replyTo }, signal) {
+    async deliver({ code, text, replyTo, channel }, signal) {
       let sent;
       try {
         sent = await request('/api/state/commands/send_user_message', { request_key: `confirm:${code}`, project_id: project,
           subject: `Confirmation ${code}`, body: text, reply_to_message_id: replyTo }, signal);
       } catch (error) { return stateRefusal(error); }
-      const messageId = (sent?.result ?? sent)?.message_id;
-      if (!messageId) return { refused: 'not_delivered' };
-      void mirror(messageId, text, replyTo, { exact: true });
+      const written = sent?.result ?? sent;
+      const messageId = written?.message_id;
+      if (!messageId) return { refused: typeof written?.refused === 'string' ? written.refused : 'not_delivered' };
+      if (channel === undefined || channel === 'dashboard') return { message_id: messageId };
+      let mirrored;
+      try { mirrored = await mirror(messageId, text, replyTo, { exact: true }); } catch { mirrored = undefined; }
+      if (mirrored?.mirrored !== true) return { refused: 'not_delivered', reason: String(mirrored?.reason ?? 'no_channels'), message_id: messageId };
       return { message_id: messageId };
     },
+    cancel: (code, signal) => request('/api/state/commands/cancel_steward_confirmation', { code }, signal)
+      .then(r => r?.result ?? r, stateRefusal),
     get: (code, signal) => request('/api/state/commands/get_steward_confirmation', { code }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };

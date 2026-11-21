@@ -87,6 +87,26 @@ describe('one conversation, both directions', () => {
       .toHaveBeenCalledWith('alpha', 'hello', {replyToMessageId: undefined, targetDriverId: undefined}));
   });
 
+  it('shows the code-written line of a confirmation the message decided (step 24.1b, 7.8.9 step 4)', async () => {
+    const view = render(DriverConversation, {projectId: 'aitelier-home'});
+    await view.findByText('Second report');
+    const send = async (body: string, answer: unknown) => {
+      api.sendDriverConversationMessage.mockResolvedValueOnce(answer);
+      await fireEvent.input(view.getByRole('textbox', {name: 'Write a message'}), {target: {value: body}});
+      await fireEvent.click(view.getByRole('button', {name: 'Send'}));
+      await waitFor(() => expect(
+        (view.getByRole('textbox', {name: 'Write a message'}) as HTMLTextAreaElement).value).toBe(''));
+      return view.container.querySelector('[data-confirmation-line]')?.textContent ?? null;
+    };
+    expect(await send('确认 K7Q2A', {result: {message_id: 'm', confirmation: {code: 'K7Q2A', action: 'confirm', outcome: 'confirmed'}}}))
+      .toBe('Confirmed K7Q2A; running it.');
+    expect(await send('取消 K7Q2B', {message_id: 'm', confirmation: {code: 'K7Q2B', action: 'cancel', outcome: 'cancelled'}}))
+      .toBe('Cancelled K7Q2B; it will not run.');
+    expect(await send('确认 K7Q2C', {result: {confirmation: {code: 'K7Q2C', action: 'confirm', outcome: 'expired'}}}))
+      .toBe('K7Q2C expired; nothing was done - ask again.');
+    expect(await send('hello', {result: {message_id: 'm'}})).toBeNull();
+  });
+
   it('loads older pages with the cursor, prepending them and stating the end of history', async () => {
     // Served by CURSOR and not by call order: the pane reads page 1 for the
     // thread, then reads the rest of the conversation behind it for the rail, so

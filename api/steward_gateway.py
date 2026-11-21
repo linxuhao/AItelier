@@ -603,7 +603,9 @@ class Gateway:
         longer than 20 pages is a failed read, never a partial one."""
         tools, cursor = [], None
         for _ in range(20):
-            page = await asyncio.wait_for(upstream.session.list_tools(cursor=cursor), UPSTREAM_TIMEOUT)
+            # Like a call, a page ends with its session: a refused OAuth refresh inside the
+            # request is not left to the timeout.
+            page = await Gateway._within_session(upstream, upstream.session.list_tools(cursor=cursor))
             tools += [t.model_dump(mode="json", by_alias=True, exclude_none=True) for t in page.tools]
             cursor = page.nextCursor
             if not cursor:
@@ -620,7 +622,14 @@ class Gateway:
 
     async def probe(self, row: dict) -> dict:
         """The tool list of one connection: through its open session when it has one
-        (a second `initialize` would evict a browser's), else a short-lived client."""
+        (a second `initialize` would evict a browser's), else a short-lived client. A
+        refused OAuth refresh is `oauth_needs_consent` (the dashboard asks to authorize)."""
+        try:
+            return await self._probe(row)
+        except steward_oauth.RefreshRefused:
+            raise sc.ProbeFailed("oauth_needs_consent") from None
+
+    async def _probe(self, row: dict) -> dict:
         if row["enabled"]:
             upstream = await self.upstream(row)
             return {"tools": await self._list(upstream), "instructions": upstream.instructions}

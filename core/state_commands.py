@@ -1368,6 +1368,10 @@ class GetStewardConfirmation(Request):
     code: str = Field(min_length=5, max_length=5)
 
 
+class CancelStewardConfirmation(Request):
+    code: str = Field(min_length=5, max_length=5)
+
+
 class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
@@ -1673,6 +1677,7 @@ WRITE_REQUESTS = {
     "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
     "steward_tools_resync_due": StewardToolsResyncDue,
     "create_steward_confirmation": CreateStewardConfirmation, "get_steward_confirmation": GetStewardConfirmation,
+    "cancel_steward_confirmation": CancelStewardConfirmation,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -2070,6 +2075,7 @@ def _handlers(service) -> dict:
         "steward_tools_resync_due": service.steward_connections.tools_resync_due,
         "create_steward_confirmation": service.steward_confirmations.create,
         "get_steward_confirmation": service.steward_confirmations.get,
+        "cancel_steward_confirmation": service.steward_confirmations.cancel,
     }
 
 
@@ -2178,7 +2184,8 @@ def _driver_defaults(service, action, arguments):
 # Step 24.1b (design-steward 7.8.9): create_steward_confirmation and get_steward_confirmation
 # are the HOST's too: the first stores the exact call and writes, by code, the text the
 # requester reads (the requester derived from the owner message it names); the second
-# hands run_confirmed the STORED name and arguments. Neither confirms anything: only the
+# hands run_confirmed the STORED name and arguments; cancel_steward_confirmation voids a
+# PENDING record whose text did not reach the requester. None confirms anything: only the
 # requester's own exact reply does (core.state_channels), and the gateway consumes it.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
@@ -2197,7 +2204,7 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
     "note_family_memory",
     "steward_tools_resync_due", "steward_connection_refresh",
-    "create_steward_confirmation", "get_steward_confirmation",
+    "create_steward_confirmation", "get_steward_confirmation", "cancel_steward_confirmation",
     # Step 25 (design-steward 7.9.4, 7.9.5): post_group_notice is the HOST's, called in code
     # with the schedule row that fired (the model has no tool for it); the three list writes are
     # the family list tools (add and check from a group turn too, remove in an owner turn only).

@@ -83,6 +83,8 @@
   // box) never resets it for the life of the mounted pane.
   let questionsOpen = $state(true);
   let text = $state(''), sending = $state(false), sendError = $state('');
+  // Step 24.1b (7.8.9 step 4): the code-written line for a confirmation this send decided.
+  let decision = $state('');
   let input = $state<HTMLTextAreaElement | null>(null);
   let selectedQuestion = $state('');
   let draftReady = $state(false);
@@ -225,7 +227,7 @@
   async function send() {
     const body = text.trim();
     if (!body || sending) return;
-    sending = true; sendError = '';
+    sending = true; sendError = ''; decision = '';
     const replying = replyTo;
     // A rail reply closes exactly the question it is bound to. The cited message
     // is never modified; the link lives on this reply's row.
@@ -233,9 +235,10 @@
     try {
       // `answers` is passed only when a question is bound, so an ordinary send is
       // the same options object it always was.
-      await sendDriverConversationMessage(projectId, body, {
+      const sent = await sendDriverConversationMessage(projectId, body, {
         replyToMessageId: answering?.message_id ?? replying?.message_id, targetDriverId: driverId || undefined,
         ...(cited ? {answers: cited} : {})});
+      decision = confirmationLine(sent);
       text = ''; replyTo = null; answering = null;
       // A response can finish after switching projects. Preserve newer text
       // if the user returned and started another draft in the meantime.
@@ -246,6 +249,15 @@
     } catch (e) { sendError = String(e instanceof Error ? e.message : e); }
     finally { sending = false; }
   }
+  function confirmationLine(sent: unknown): string {
+    const answer = sent as {result?: {confirmation?: Decided}; confirmation?: Decided} | null;
+    const decided = answer?.result?.confirmation ?? answer?.confirmation;
+    if (!decided?.code) return '';
+    const key = decided.outcome === 'confirmed' ? 'confirmationConfirmed' : decided.outcome === 'cancelled'
+      ? 'confirmationCancelled' : decided.outcome === 'expired' ? 'confirmationExpired' : 'confirmationRefused';
+    return st(key).replace('{code}', decided.code).replace('{refusal}', decided.refusal ?? decided.outcome ?? '');
+  }
+  type Decided = {code: string; action?: string; outcome?: string; refusal?: string};
   function focusComposer() {
     const width = thread?.parentElement?.clientWidth ?? 0;
     // On compact layouts the question drawer shares the vertical space with
@@ -579,6 +591,7 @@
     <div class="composer-footer"><span>{st('driverConversationShortcut')}</span>
       <button type="submit" disabled={sending || !text.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
     </div>
+    {#if decision}<p role="status" data-confirmation-line>{decision}</p>{/if}
     {#if sendError}<p role="alert">{sendError}</p>{/if}
   </form>
 </section>

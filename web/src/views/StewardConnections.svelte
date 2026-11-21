@@ -86,11 +86,19 @@
   }
   // OAuth (7.8.6): the browser signs in at the service in a new tab and comes back to the
   // callback; the account it bound is shown and must be confirmed before enabling.
+  // The tab opens in the click itself (a popup blocker allows only that); the address
+  // follows once the backend answers it. A blocked tab leaves the address as a link.
+  let authorizeLink = $state<{conn: string; url: string} | null>(null);
   async function authorize(connId: string) {
     if (busy) return;
-    busy = 'oauth'; error = '';
-    try { const {authorize_url} = await startStewardOAuth(connId); window.open(authorize_url, '_blank', 'noopener'); }
-    catch (e) { failed(e); }
+    busy = 'oauth'; error = ''; authorizeLink = null;
+    const tab = window.open('about:blank', '_blank');
+    try {
+      const {authorize_url} = await startStewardOAuth(connId);
+      if (tab) { tab.opener = null; tab.location.href = authorize_url; }
+      else authorizeLink = {conn: connId, url: authorize_url};
+    }
+    catch (e) { tab?.close(); failed(e); }
     finally { busy = ''; }
   }
   async function confirmIdentity(c: StewardConnection) {
@@ -161,6 +169,8 @@
             {/if}
             <button type="button" class="outline inline" disabled={busy !== ''} data-conn-authorize
               onclick={() => void authorize(c.conn_id)}>{t('steward.connAuthorize')}</button>
+            {#if authorizeLink?.conn === c.conn_id}<a href={authorizeLink.url} target="_blank" rel="noopener noreferrer"
+              data-conn-authorize-link>{t('steward.connAuthorize')} ↗</a>{/if}
             {#if c.auth_identity || c.secret === 'set'}<button type="button" class="outline inline" disabled={busy !== ''}
               data-conn-signout onclick={() => void signOut(c.conn_id)}>{t('steward.connSignOut')}</button>{/if}
           </p>

@@ -9,6 +9,9 @@
  *   turn's input (lib/catalog.mjs). No such message - a letter, a reminder, a runtime
  *   event woke the turn - is refused `no_requester`. The host stores the exact call and
  *   writes, by code, the text the person reads; it is sent into that person's conversation.
+ *   When the text did not reach them (the message refused, their chat channel did not take
+ *   it), the record is cancelled and no code is returned: nobody can confirm a text they
+ *   never received (7.8.9).
  * - run_confirmed({code}): after the person replied with the code, the host's record gives
  *   the STORED name and arguments, and the call runs with them (never with arguments the
  *   model copies again) through the same guards as any call; the backend's gateway then
@@ -16,7 +19,7 @@
  */
 
 /** @param confirm host.catalog.confirm: { create({name, arguments, requesterMessageId, audience}, signal),
- *    deliver({code, text, replyTo}, signal), get(code, signal) }
+ *    deliver({code, text, replyTo, channel}, signal), get(code, signal), cancel(code, signal) }
  *  @param catalog the StewardCatalog of this process. */
 export function registerConfirmTools(scope, { ctx, defineTool, jsonOutput, HarnessError, confirm, catalog }) {
   const outcomes = new Map();
@@ -38,8 +41,16 @@ export function registerConfirmTools(scope, { ctx, defineTool, jsonOutput, Harne
       const created = await confirm.create({ name: args.name, arguments: args.arguments, requesterMessageId: requester,
         audience: kind === 'owner' ? 'owner' : 'group' }, exec.signal);
       if (!created || created.refused || !created.code) return created?.refused ? created : { refused: 'confirmation_failed' };
-      const sent = await confirm.deliver({ code: created.code, text: created.text, replyTo: created.reply_to_message_id }, exec.signal);
-      if (sent?.refused) return { refused: sent.refused, code: created.code };
+      let sent;
+      try {
+        sent = await confirm.deliver({ code: created.code, text: created.text, replyTo: created.reply_to_message_id,
+          channel: created.channel }, exec.signal);
+      } catch (error) { sent = { refused: 'not_delivered', reason: String(error?.message ?? error).slice(0, 200) }; }
+      if (!sent || sent.refused) {
+        // Never a code for a text the person did not get: the record is voided.
+        await Promise.resolve(confirm.cancel?.(created.code, exec.signal)).catch(() => {});
+        return { refused: 'confirmation_not_delivered', reason: `the confirmation text did not reach the person (${sent?.refused ?? 'not_delivered'}${sent?.reason ? ': ' + String(sent.reason).slice(0, 200) : ''}); nothing will run - tell them, or ask again later` };
+      }
       return { code: created.code, status: 'pending', expires_at: created.expires_at };
     },
   }));

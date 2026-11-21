@@ -417,6 +417,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n', clock,
         // Step 23: never in a group turn (7.7.6).
         ...(groupTurns ? { audience: () => groupTurns.audience().kind } : {}) });
+    // Boundary (director, 2026-11-21, iss-9edcdf8c664640fe): the CLOCK LINE is not suppressed
+    // in a group turn, so the model there sees the owner's local time (lib/core.mjs clockLine).
+    // That is deliberate: family scheduling needs it ("明早七点" must land on a time), and
+    // withoutLeadingClockLines already keeps the literal line out of a group reply. The premise
+    // is that a bound group's members are household; if a group can hold a non-household member,
+    // pass this audience into Clock and give group turns UTC only (one argument, above).
     // The director prompt section and the snapshot hooks are the director's own; a
     // host that registers sections of its own calls these at the point it wants them
     // (the backend adapter: after its goal and protocol sections and its model selection), and

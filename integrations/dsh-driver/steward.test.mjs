@@ -56,6 +56,8 @@ test('presented_only: the steward has exactly its presented tools; everything el
     'schedule_list', 'schedule_set', 'schedule_delete', 'relay_answer'],
     'the adapter adds only the owner message, the letter reply, the reminders and the answer relay');
   assert.ok(table.steward.presented.includes('grep_chat_history'), 'the steward recovers exact words after compaction too');
+  assert.ok(readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8').includes('grep_chat_history(pattern) searches your own complete conversation log'),
+    'steward.md tells the steward what grep_chat_history searches');
   // The inbox reader is the steward's own and nobody else's.
   assert.ok(table.steward.presented.includes('portfolio_inbox'), 'roles.json presents the inbox reader to the steward');
   assert.equal(refusal(steward, exec('portfolio_inbox')), undefined);

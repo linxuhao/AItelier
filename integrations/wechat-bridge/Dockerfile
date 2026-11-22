@@ -2,10 +2,60 @@
 #
 #   docker build -t aitelier-wechat-bridge:local integrations/wechat-bridge
 #
+# The puppet this image runs is a fork of wechaty-puppet-neo: neo-fork/pin.json names
+# the upstream commit and the sha256 of every file the patch touches,
+# neo-fork/0001-incoming-message-types.patch is the change, and the native stage below
+# rebuilds both from those two files. The fork's source is not committed here.
+#
 # puppet-neo's native addon needs glibc >= 2.38. node:24-bookworm-slim (the stage
 # AItelier's own Dockerfile uses) has 2.36, so only its node binary is taken; the
 # image itself is python:3.12-slim (Debian trixie, glibc 2.41).
 FROM node:24-bookworm-slim AS node
+
+# Native stage: the fork, built from the pin. Rust 1.93.1 is the pin's
+# rust-toolchain.toml channel; node comes from the stage above so the same npm and tsc
+# the image uses compile the patched TypeScript.
+FROM rust:1.93.1-bookworm AS native
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+# npm run scripts call `npm` by name; the package's own `npm test` needs it on PATH.
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+COPY --chmod=0444 neo-fork/pin.json neo-fork/0001-incoming-message-types.patch /fork-input/
+WORKDIR /fork/repo
+# The pin is fetched by commit, never by branch, and what arrived is checked against the
+# commit pin.json names before anything is read out of it.
+RUN git init -q . \
+    && git remote add origin https://github.com/wechaty/puppet-neo \
+    && git fetch -q --depth 1 origin ddfa5ecd53ba1303d7e424acb47f86989715af89 \
+    && git checkout -q --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = ddfa5ecd53ba1303d7e424acb47f86989715af89
+# pin.json is the authority: every file it names must be the pinned blob, the patch must
+# be the patch whose sha256 it carries, and the patch must apply to those bytes.
+RUN node --input-type=module -e " \
+      import { readFileSync } from 'node:fs'; \
+      import { createHash } from 'node:crypto'; \
+      const sha256 = bytes => createHash('sha256').update(bytes).digest('hex'); \
+      const pin = JSON.parse(readFileSync('/fork-input/pin.json', 'utf8')); \
+      if (!/^[0-9a-f]{40}$/.test(pin.upstream.commit)) throw new Error('pin.json names no commit'); \
+      for (const file of pin.files) { \
+        const bytes = readFileSync(file.path); \
+        if (bytes.length !== file.size) throw new Error(file.path + ': ' + bytes.length + ' bytes, not the pinned ' + file.size); \
+        if (sha256(bytes) !== file.sha256) throw new Error(file.path + ' is not the pinned blob'); } \
+      const patch = readFileSync('/fork-input/0001-incoming-message-types.patch'); \
+      if (sha256(patch) !== pin.patch.sha256) throw new Error('the patch is not the pinned patch'); \
+      console.log('neo-fork: ' + pin.files.length + ' pinned blobs match ' + pin.upstream.commit);" \
+    && git apply --check /fork-input/0001-incoming-message-types.patch \
+    && git apply /fork-input/0001-incoming-message-types.patch
+RUN cargo build --release --locked --manifest-path native/Cargo.toml --target-dir native/target
+# dist/ is not committed upstream, so rebuild it from the patched TypeScript. The addon is
+# put where the package's own tests look for it, then those tests run against this stage's
+# addon: the fork is the thing the image later ships, and it is tested before it is copied.
+RUN node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci --no-audit --no-fund \
+    && mkdir -p native/linux-x64 \
+    && cp native/target/release/libpuppet_neo_native.so native/linux-x64/neo.node \
+    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js test \
+    && sha256sum native/linux-x64/neo.node
 
 # Build stage: npm is here only. Dependencies come from the committed package-lock
 # (exact pins). --ignore-scripts: puppet-neo has no install scripts (its neo.node is in
@@ -19,6 +69,13 @@ WORKDIR /opt/wechat-bridge
 # not read main.mjs (EACCES at start). The files are read-only for everyone instead.
 COPY --chmod=0444 package.json package-lock.json ./
 RUN node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev --ignore-scripts --no-audit --no-fund
+# The fork replaces the npm tarball's compiled package: its addon and the dist/ rebuilt
+# from its TypeScript. Exactly these two paths, nothing else, and read-only like the rest.
+COPY --chmod=0444 --from=native /fork/repo/native/target/release/libpuppet_neo_native.so node_modules/wechaty-puppet-neo/native/linux-x64/neo.node
+COPY --from=native /fork/repo/dist/ node_modules/wechaty-puppet-neo/dist/
+RUN chmod -R a-w,a+rX node_modules/wechaty-puppet-neo/dist \
+    && sha256sum node_modules/wechaty-puppet-neo/native/linux-x64/neo.node \
+    && grep -q messageType node_modules/wechaty-puppet-neo/dist/puppet-neo.js
 # The addon's libraries resolve here, and the newest glibc symbol it asks for.
 RUN ldd --version | head -n 1 \
     && ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node \

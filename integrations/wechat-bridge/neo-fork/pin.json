@@ -1,0 +1,49 @@
+{
+  "upstream": {
+    "repository": "https://github.com/wechaty/puppet-neo",
+    "commit": "ddfa5ecd53ba1303d7e424acb47f86989715af89",
+    "version": "0.1.1",
+    "license": "Apache-2.0"
+  },
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358
+    },
+    {
+      "path": "native/src/lib.rs",
+      "sha256": "aa9b0bf20c3a3f6be6a4048e8fea3f124efaedc6625c9e1553c98ad65acdef84",
+      "size": 26608
+    },
+    {
+      "path": "package.json",
+      "sha256": "0247b6ccf057a24acd351b65b283b03686d0e6e74d9278143902739d7b935bd1",
+      "size": 1288
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "sha256": "02dee3b2b81f2c5e7064c6bb118cf19e859100fcc33c220e5ec52ce4b0586b12",
+      "size": 66
+    },
+    {
+      "path": "src/native.ts",
+      "sha256": "a9e63194b09b6a836194a7a45de8dc082cd03c468ccb42c361c85cdafb5f3784",
+      "size": 2987
+    },
+    {
+      "path": "src/puppet-neo.ts",
+      "sha256": "d3912836a4b02bd17a560c0ff6be3cf1afbf6f9ea669b4b4c6fa26b645bbec19",
+      "size": 9206
+    },
+    {
+      "path": "test/ding-dong.test.ts",
+      "sha256": "d5beb46581e82d514b30bf92fc48a5b5e05105df39805466e5ea37e662fc4429",
+      "size": 12384
+    }
+  ],
+  "patch": {
+    "path": "integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch",
+    "sha256": "5c376513f12cc36dba996c2ef3fad4deaa3bf238118d22a7444511f75fece90b"
+  }
+}

@@ -21,10 +21,10 @@ them out.
       workers, so LIST is ignored for such a log, with a warning. A log run with
       --durations=0 --durations-min=0 lists every row and needs no LIST.
 
-The committed tools/test_durations.json holds the default tier only (plain
-`pytest`, which deselects `slow`), measured 2026-11-22 after the State template
-change with -n 4 --dist loadfile --durations=0 --durations-min=0 on a loaded
-host. Files with no default-tier row are absent and so charged the median.
+The committed tools/test_durations.json holds the fast run only (everything
+but `slow`), measured 2026-11-22 after the State template change with -n 4
+--dist loadfile --durations=0 --durations-min=0 on a loaded host. Files with
+no row outside `slow` are absent and so charged the median.
 Regenerate it when the suite shifts.
 """
 from __future__ import annotations

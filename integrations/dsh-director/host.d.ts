@@ -333,7 +333,7 @@ export interface DirectorHost {
     };
   };
   /** Step 24.2 (design-steward 7.8.12, 7.8.12a): the host's media library - one writer of
-   *  `<media root>/<userId>/` (the root from AITELIER_MEDIA_ROOT), lib/media.mjs. Declared, the
+   *  `<media root>/<userId>/` (the root is the host's setting), lib/media.mjs. Declared, the
    *  plugin's ownerChannels.storeMedia stores into it and the steward gets media_call and
    *  send_media; undeclared (the built-in local host), neither tool is registered and
    *  storeMedia answers {refused: 'unsupported'}.
@@ -346,7 +346,7 @@ export interface DirectorHost {
    *  - resolve: a ref's row with its absolute `path`, `kind` and `ext` (undefined: unknown or gone).
    *  - read: a ref's bytes (media_call fills them in as base64, host-side).
    *  - fetch: a file a connection's tool result named, through the backend gateway's
-   *    /api/steward/mcp/{conn_id}/fetch (the plugin passes only a url it saw in this turn's
+   *    file route (the plugin passes only a url it saw in this turn's
    *    results, with the conn_id that returned it), stored as `generated` under `audience`.
    *  - postGroup (optional): record one send_media file for the group of the recorded turn -
    *    group_send_budget, caption exit-checked - {posted, channel, group_ref, caption?} or {refused}.
@@ -525,7 +525,7 @@ export interface OwnerChannels {
 }
 
 /** What `createOwnerChannels` returns: `service` is the whole plugin-facing surface (it is
- *  what the host provides as `ownerChannels`, so `register`/`inbound` and nothing else), and
+ *  what the host provides as `ownerChannels`, so `register`/`inbound`/`storeMedia` and nothing else), and
  *  the rest is the director's own control of it. `ready()` hands the host's handle in and
  *  starts the status and owed polls; `pollStatus()`/`pollOwed()` are those polls' own steps;
  *  `ownerMessageSent` mirrors the root's message to the owner; `stop()` ends both timers. */

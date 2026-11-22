@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
+import { zstdDecompressSync } from 'node:zlib';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 
 const PROVIDER = String.raw`
@@ -118,12 +119,20 @@ test('step 0 item 2 (real pinned DSH): a nested tool call\'s arguments are not w
     assert.ok(files.length > 0, 'nothing was written');
     const sessionFiles = files.filter(f => /session|\.jsonl$/i.test(f));
     t.diagnostic(`searched ${files.length} file(s), ${sessionFiles.length} session-looking: ${sessionFiles.map(f => f.slice(directory.length)).join(', ').slice(0, 600)}`);
+    // The session log is zstd-compressed (session.v4.jsonl.zstd): every .zstd file is read
+    // decompressed, so the search sees what DSH logged, not compressed bytes.
+    const plain = async file => {
+      const bytes = await readFile(file);
+      return file.endsWith('.zstd') ? zstdDecompressSync(bytes) : bytes;
+    };
+    const logs = files.filter(f => f.endsWith('.zstd'));
+    assert.ok(logs.length > 0, 'a compressed session log was written: ' + files.map(f => f.slice(directory.length)).join(', '));
     const logged = [];
-    for (const file of files) if ((await readFile(file)).includes(marker)) logged.push(file.slice(directory.length));
-    // The model's own call is in the log (proof the log was searched at all).
+    for (const file of files) if ((await plain(file)).includes(marker)) logged.push(file.slice(directory.length));
+    // The model's own call is in the decompressed session log (proof the log itself was searched).
     let modelCall = false;
-    for (const file of files) if ((await readFile(file)).includes('probe_outer')) modelCall = true;
-    assert.ok(modelCall, 'the model\'s own call_tool call is in what DSH wrote');
+    for (const file of logs) if ((await plain(file)).includes('probe_outer')) modelCall = true;
+    assert.ok(modelCall, 'the model\'s own call_tool call is in the decompressed session log');
     assert.deepEqual(logged, [], 'the nested call\'s arguments were written to: ' + logged.join(', '));
     assert.ok(!events.some(e => JSON.stringify(e).includes(marker)), 'no session event carries the nested arguments');
   } finally {

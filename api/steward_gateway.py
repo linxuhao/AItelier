@@ -1026,7 +1026,9 @@ async def fetch(conn_id: str, request: Request, url: str = ""):
         return _fetch_refused(403, "other_origin")
     cap = media_types.limits()["outbound_bytes"]
     try:
-        address = await asyncio.to_thread(sc.checked_address, url)
+        # The url's origin is the connection's own (checked above), so the address is the one the
+        # connection's own host resolves to - judged the same way as its upstream session's.
+        address = await asyncio.to_thread(sc.checked_address, row["url"])
     except (StateGraphError, sc.ProbeFailed) as exc:
         return _fetch_refused(403, getattr(exc, "code", None) or str(exc).split(":")[0])
     # No upstream credential: no header, no oauth token, no cookie - a bare client.

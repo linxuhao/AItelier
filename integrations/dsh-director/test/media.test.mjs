@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, chmodSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMediaLibrary, sniff, imageSize, covers, placeholder, attachmentLine, mediaRootFrom, MEDIA_LIMITS, REF_PATTERN }
+import { createMediaLibrary, sniff, imageSize, covers, placeholder, attachmentLine, MEDIA_LIMITS, REF_PATTERN }
   from '../lib/media.mjs';
 import { createOwnerChannels } from '../lib/channels.mjs';
 import { registerMediaTools, UrlLedger } from '../lib/media-tools.mjs';
@@ -41,7 +41,7 @@ function counted(head, total, chunk = MiB) {
   return state;
 }
 const fakeProbe = (dir, seconds) => {
-  const path = join(dir, `ffprobe-${seconds}`);
+  const path = join(dir, `ffprobe-${String(seconds).replace(/[^0-9a-z.]/gi, '_')}`);
   writeFileSync(path, `#!/bin/sh\necho ${seconds}\n`); chmodSync(path, 0o755);
   return path;
 };
@@ -74,10 +74,7 @@ test('library: files 0600 under 0700 directories, random m_ refs, an index row w
   assert.equal(again.lookup('m_' + 'f'.repeat(16)), undefined);
 });
 
-test('library: the media root comes from AITELIER_MEDIA_ROOT (absolute) or there is none', () => {
-  assert.equal(mediaRootFrom({ AITELIER_MEDIA_ROOT: '/srv/media' }), '/srv/media');
-  assert.equal(mediaRootFrom({ AITELIER_MEDIA_ROOT: 'relative' }), undefined);
-  assert.equal(mediaRootFrom({}), undefined);
+test('library: a root is required and the writer\'s subdirectory is a plain name', () => {
   assert.throws(() => createMediaLibrary({ userId: 'owner' }), /root is required/);
   assert.throws(() => createMediaLibrary({ root: root(), userId: '../x' }), /bad userId/);
 });
@@ -352,19 +349,21 @@ function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels
   const w = channelWorld();
   const turn = { audience, turn: 't1' };
   const executed = [], fetched = [], posted = [];
+  let out;
   const ledger = new UrlLedger();
   const catalog = { rootSession: 'root', requester,
     catalog: () => new Set([OCR, DRAW, SEND]), outward: name => name === SEND };
   const media = { ...w.media,
     fetch: async request => { fetched.push(request); return w.library.ingest({ channel: 'generated', audience: request.audience, source: 'generated' }, async () => png(64, 64)); },
-    postGroup: async request => { posted.push(request); return w.postAnswer ?? { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1', ...(request.caption ? { caption: request.caption } : {}) }; } };
+    postGroup: async request => { posted.push(request); return out?.postAnswer ?? { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1', ...(request.caption ? { caption: request.caption } : {}) }; } };
   const tools = new Map();
   const ctx = { tools: { execute: async request => { executed.push(request); return { value: { text: 'OCR: 你好' }, content: [{ type: 'text', text: 'OCR: 你好' }] }; } } };
   class HarnessError extends Error {}
   registerMediaTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError,
     media, catalog, turns: { audience: () => turn.audience, open: () => turn }, channels: channels ?? w.handle, ledger });
   const run = (name, args, session = 'root') => tools.get(name).execute(args, { agent: { session: { id: session } }, callId: 'c1', rootCallId: 'r1', token: 'tok' });
-  return { ...w, media, turn, executed, fetched, posted, ledger, tools, run };
+  out = { ...w, media, turn, executed, fetched, posted, ledger, tools, run };
+  return out;
 }
 
 test('media_call: the host fills the base64 in, the call goes through ctx.tools.execute as a nested call, and the base64 never comes back', async () => {
@@ -423,7 +422,7 @@ test('send_media: a dashboard turn is dashboard_no_media; no requester is no_req
   assert.equal((await t.run('send_media', { ref })).refused, 'dashboard_no_media');
   assert.equal((await t.run('send_media', { ref, url: 'http://x/y' })).refused, 'invalid_request');
   assert.equal((await t.run('send_media', {})).refused, 'invalid_request');
-  const none = toolWorld({ requester: undefined });
+  const none = toolWorld({ requester: null });
   assert.equal((await none.run('send_media', { ref })).refused, 'no_requester');
   assert.equal(t.calls.files.length + none.calls.files.length, 0);
 });

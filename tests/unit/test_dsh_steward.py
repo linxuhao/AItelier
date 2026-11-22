@@ -245,7 +245,9 @@ def test_start_passes_the_role_only_to_the_steward(runtime, roles_file, monkeypa
                   "AITELIER_DSH_PROJECT", "AITELIER_DSH_SESSION", "AITELIER_DSH_MODEL", "AITELIER_DSH_STATE_DIR"}
     assert ({k: v for k, v in steward_env.items() if k not in per_driver}
             == {**{k: v for k, v in director_env.items() if k not in per_driver},
-                "AITELIER_DSH_ROLE": "steward", "AITELIER_DSH_MEMORY_USER": "owner"})
+                "AITELIER_DSH_ROLE": "steward", "AITELIER_DSH_MEMORY_USER": "owner",
+                # Step 24.2 (7.8.12): the gateway its media fetch goes through.
+                "AITELIER_STEWARD_GATEWAY_URL": runtime.steward_gateway_url})
 
 
 def test_start_defaults_the_steward_to_its_own_route_and_directors_to_theirs(runtime, roles_file):

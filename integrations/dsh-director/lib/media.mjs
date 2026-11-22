@@ -2,8 +2,8 @@
  *  "24.2 要为复用交出的四件").
  *
  *  One writer per subdirectory: `<root>/<userId>/` holds this writer's files and its own
- *  `index.jsonl`. The root comes from the host (AITELIER_MEDIA_ROOT, set by the DSH host for
- *  every driver process; a driver's own `~` is under ~/.AItelier and is not used). Files are
+ *  `index.jsonl`. The root comes from the host (its own setting, given to every driver process;
+ *  never the process's own `~`, which a host may keep elsewhere). Files are
  *  `<root>/<userId>/<YYYY-MM>/<sha256>.<ext>`, directories 0700 and files 0600, deduplicated
  *  by sha256: a second copy of the same bytes gets its own row and ref but points at the file
  *  the first one wrote (`file`, relative to the root, is therefore in every row - the month
@@ -160,10 +160,10 @@ const asIterable = source => {
   throw new Error('open() gave no byte stream');
 };
 
-/** @param root the media root (AITELIER_MEDIA_ROOT); @param userId this writer's subdirectory.
- *  @param ffprobe the ffprobe command (default $AITELIER_MEDIA_FFPROBE, else `ffprobe` on PATH).
+/** @param root the media root the host gives; @param userId this writer's subdirectory.
+ *  @param ffprobe the ffprobe command (the host's setting; default `ffprobe` on PATH).
  *  @param protect () => refs that must outlive cleanup (a relay not committed yet). */
-export function createMediaLibrary({ root, userId = 'owner', ffprobe = process.env.AITELIER_MEDIA_FFPROBE || 'ffprobe',
+export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe',
   limits = MEDIA_LIMITS, now = () => Date.now(), log = () => {}, protect = () => [], random = n => randomBytes(n) } = {}) {
   if (typeof root !== 'string' || !root) throw new Error('media library: root is required');
   if (typeof userId !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(userId) || userId.startsWith('.')) throw new Error('media library: bad userId');
@@ -377,11 +377,4 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = process.e
     },
     stop() { clearInterval(timer); timer = undefined; },
   };
-}
-
-/** Where the library reads its things from the host's environment: the root the DSH host
- *  gives (AITELIER_MEDIA_ROOT), or undefined - then there is no library and no media tool. */
-export function mediaRootFrom(env = process.env) {
-  const root = env.AITELIER_MEDIA_ROOT;
-  return typeof root === 'string' && root.startsWith('/') ? root : undefined;
 }

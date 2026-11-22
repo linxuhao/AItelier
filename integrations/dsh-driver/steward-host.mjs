@@ -882,6 +882,15 @@ export function mediaOps({ request, library, gatewayFetch }) {
   };
 }
 
+/** Step 24.2 (design-steward 7.8.12a piece 3): the media root the DSH host gives every driver
+ *  process (AITELIER_MEDIA_ROOT, core/dsh_driver.py), absolute; else undefined - then the steward
+ *  has no media library and no media tool. Never the process's own `~` (DSH_HOME is under
+ *  ~/.AItelier). */
+export function mediaRootFrom(env = process.env) {
+  const root = env.AITELIER_MEDIA_ROOT;
+  return typeof root === 'string' && root.startsWith('/') ? root : undefined;
+}
+
 /** Step 24.2 (7.8.12 "模型怎么用"): a wake shows each owner message's attachments as one line
  *  each ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB]) - read from the message's source row,
  *  never from its text. A failed read leaves the wake as it was (its body has the placeholders). */

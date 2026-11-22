@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aitelierHost } from './runtime.mjs';
-import { channelOps, groupOps, mediaOps, withAttachmentLines } from './steward-host.mjs';
+import { channelOps, groupOps, mediaOps, mediaRootFrom, withAttachmentLines } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 
@@ -29,6 +29,12 @@ test('the media capability: a steward with a media root has it (and validates); 
   assert.ok(!bare.capabilities.includes('media')); assert.equal(bare.media, undefined);
   const director = aitelierHost(env({ AITELIER_MEDIA_ROOT: root }));
   assert.ok(!director.capabilities.includes('media'), 'the director gets the root (24.2b uses it), not the steward\'s tools');
+});
+
+test('the media root comes from AITELIER_MEDIA_ROOT (absolute) or there is none', () => {
+  assert.equal(mediaRootFrom({ AITELIER_MEDIA_ROOT: '/srv/media' }), '/srv/media');
+  assert.equal(mediaRootFrom({ AITELIER_MEDIA_ROOT: 'relative' }), undefined);
+  assert.equal(mediaRootFrom({}), undefined);
 });
 
 test('fetch: what the gateway answered is stored as generated under the turn\'s audience; a refusal is passed on', async () => {

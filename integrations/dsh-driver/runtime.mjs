@@ -18,8 +18,9 @@ import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './mod
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
-  replyToLetter, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines } from './steward-host.mjs';
-import { createMediaLibrary, mediaRootFrom } from '../dsh-director/lib/media.mjs';
+  replyToLetter, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
+  mediaRootFrom } from './steward-host.mjs';
+import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -549,8 +550,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // media root (core/dsh_driver.py _environment); without one there is no `media` capability.
   let mediaLog = () => {}, gatewayToken;
   const mediaRoot = steward ? mediaRootFrom(env) : undefined;
+  // The voice length is measured with ffprobe: AITELIER_MEDIA_FFPROBE names it (default `ffprobe`
+  // on PATH); one that is missing refuses every voice `unsupported` (fail closed).
   const library = mediaRoot ? createMediaLibrary({ root: mediaRoot, userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
-    log: (event, fields) => mediaLog(event, fields) }) : undefined;
+    ffprobe: env.AITELIER_MEDIA_FFPROBE || 'ffprobe', log: (event, fields) => mediaLog(event, fields) }) : undefined;
   const gatewayFetch = (connId, url, signal) => fetch(`${String(env.AITELIER_STEWARD_GATEWAY_URL ?? 'http://127.0.0.1:4445/api/steward/mcp').replace(/\/+$/, '')}/${encodeURIComponent(connId)}/fetch?url=${encodeURIComponent(url)}`,
     { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal: signal ?? AbortSignal.timeout(180000) });
   const host = {

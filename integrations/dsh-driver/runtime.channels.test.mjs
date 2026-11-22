@@ -9,7 +9,9 @@
  *  A director's runtime declares no channels: the same plugin never loads there. And (6) the
  *  owner's request for a new WeChat login QR (owner_channel_login_requested) is run by the
  *  runtime in code - the channel's login asked once, its answer completed - without a model
- *  turn. The State here is a fake HTTP server; nothing reaches a real chat service. */
+ *  turn. And (7) a director's question elsewhere (owner_question_changed) makes the push clock
+ *  look at once, without a model turn. The State here is a fake HTTP server; nothing reaches a
+ *  real chat service. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -110,6 +112,12 @@ async function run(t, { steward, mode = 'tool' }) {
       // The QR mode: the owner pressed "新二维码" - nothing for the model.
       if (mode === 'qr') return send({ events: [{ seq: 2, event_type: 'owner_channel_login_requested',
         payload: { request_id: 'qrreq-1', channel: 'wechat' } }], next_after: 2 });
+      // The question mode (step 22): a director asked a question elsewhere - nothing for the
+      // model. It comes once the start's look is over, so the look it causes is its own.
+      if (mode === 'question') {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        return send({ events: [{ seq: 2, event_type: 'owner_question_changed', payload: { change: 'asked' } }], next_after: 2 });
+      }
       return send({ events: [{ seq: 2, event_type: 'user_message_created', payload: { message_id: 'm-in-1' } }], next_after: 2 });
     }
     if (url.startsWith('/api/state/commands/')) {
@@ -132,6 +140,8 @@ async function run(t, { steward, mode = 'tool' }) {
         return send({ result: { default_channel: 'slack', unmirrored: [], messages: first
           ? [{ message_id: 'm-push-1', body: '【待你回答】1 个新问题。\n\nQ7 · 武侠存档\n问：\n｜PUSH_QUESTION_TEXT' }] : [] } });
       }
+      // The question mode: nothing is due yet (the backend holds a new question for WAIT).
+      if (name === 'sync_owner_questions' && mode === 'question') return send({ result: { default_channel: 'slack', messages: [], unmirrored: [] } });
       return send({ detail: 'unexpected ' + name }, 422);
     }
     if (url.startsWith('/api/state/query/')) {
@@ -291,6 +301,21 @@ test('real pinned DSH, the steward (step 22): the push clock runs in events(), a
       [{ text: '【待你回答】1 个新问题。\n\nQ7 · 武侠存档\n问：\n｜PUSH_QUESTION_TEXT', options: { to: 'U-OWNER' } }], 'unprompted: the default channel');
     assert.deepEqual(command('record_channel_delivery').filter(b => b.message_id === 'm-push-1').map(({ request_key }) => request_key),
       ['delivery:m-push-1:slack']);
+  } finally { await r.close(); }
+});
+
+test('real pinned DSH, the steward (step 22): a question asked elsewhere (owner_question_changed) makes the push clock look at once, in code, no model turn', { timeout: 120000 }, async (t) => {
+  const r = await run(t, { steward: true, mode: 'question' });
+  if (!r) return;
+  const { seen } = r;
+  try {
+    const looks = () => seen.commands.filter(([n]) => n === 'sync_owner_questions').length;
+    await r.until('the start\'s look never ran', () => looks() >= 1);
+    // The second look is the event's, well before the 60 s poll.
+    await r.until('the event made no look', () => looks() === 2, 15000);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(looks(), 2, 'one look for one event (the follow-up comes only after WAIT)');
+    assert.equal(seen.rootRequests, 0, 'the event woke no model turn');
   } finally { await r.close(); }
 });
 

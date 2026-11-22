@@ -626,8 +626,17 @@ export const CHANNEL_REFUSALS = new Set(['invalid_channel', 'empty_body', 'inval
  *  the tool as {refused: code}; anything else (a 5xx, the network, an auth failure) is thrown. */
 export const RELAY_REFUSALS = new Set(['not_from_channel', 'no_code', 'no_recipients', 'channel_sender_not_bound',
   'code_sent_to_bound_account', 'invalid_request']);
-/** How often the host asks the backend for due pushes, reminders and notices. */
+/** How often the host asks the backend for due pushes, reminders and notices: the fallback
+ *  when no question event arrives. */
 export const OWNER_QUESTIONS_MS = 60 * 1000;
+/** How long the backend holds a new question (core/state_owner_questions.py WAIT), and the
+ *  look the host takes once that has passed since the latest question event (a little after,
+ *  so the backend's clock has passed it too). */
+export const OWNER_QUESTIONS_WAIT_MS = 30 * 1000;
+export const OWNER_QUESTIONS_FOLLOW_UP_MS = OWNER_QUESTIONS_WAIT_MS + 2 * 1000;
+/** The State event a director's question asked, withdrawn or answered in any project writes in
+ *  the steward's project (core.state_owner_questions.question_changed); payload {change}. */
+export const OWNER_QUESTION_EVENTS = new Set(['owner_question_changed']);
 
 /** The steward's relay_answer tool: ONE owner message id. The backend reads the codes from
  *  that message, copies its words unchanged into each named question's conversation and
@@ -663,14 +672,33 @@ export async function relayAnswer({ request, project, ownerMessageId, mirror, si
   return { ...rest, ...(receipt ? { receipt_message_id: receipt } : {}) };
 }
 
-/** The steward's push clock (design-steward 7.6.2): every OWNER_QUESTIONS_MS it asks the
- *  backend for what is due (sync_owner_questions writes the messages and their ledger rows
- *  in one transaction) and mirrors each message - and each one written earlier but never
- *  mirrored - to the owner's default channel, awaited, one at a time. No model turn. */
+/** The steward's push clock (design-steward 7.6.2): on each question event, once more
+ *  OWNER_QUESTIONS_FOLLOW_UP_MS after the latest event that asked one, and every
+ *  OWNER_QUESTIONS_MS as the fallback, it asks the backend for what is due
+ *  (sync_owner_questions writes the messages and their ledger rows in one transaction) and
+ *  mirrors each message - and each one written earlier but never mirrored - to the owner's
+ *  default channel, awaited, one at a time. No model turn. */
 export class OwnerQuestionsTimer {
-  constructor({ request, mirror, log = () => {}, intervalMs = OWNER_QUESTIONS_MS, setTimer = setInterval, clearTimer = clearInterval }) {
-    Object.assign(this, { request, mirror, log, intervalMs, setTimer, clearTimer });
-    this.timer = undefined; this.running = undefined; this.closed = false;
+  constructor({ request, mirror, log = () => {}, intervalMs = OWNER_QUESTIONS_MS, followUpMs = OWNER_QUESTIONS_FOLLOW_UP_MS,
+    setTimer = setInterval, clearTimer = clearInterval, setOnce = setTimeout, clearOnce = clearTimeout }) {
+    Object.assign(this, { request, mirror, log, intervalMs, followUpMs, setTimer, clearTimer, setOnce, clearOnce });
+    this.timer = undefined; this.followUp = undefined; this.running = undefined; this.closed = false;
+  }
+  /** A question event: look now. The backend holds a new question for WAIT, so when one was
+   *  asked, look once more just after WAIT from this event - one pending follow-up at most,
+   *  moved by each later ask, so a burst within WAIT goes out as one push. */
+  changed({ asked = false } = {}) {
+    if (this.closed) return Promise.resolve();
+    if (asked) {
+      this.clearOnce(this.followUp);
+      this.followUp = this.setOnce(() => {
+        this.followUp = undefined;
+        // A look begun before the questions were due does not answer this one: wait it out.
+        void Promise.resolve(this.running).then(() => this.tick());
+      }, this.followUpMs);
+      this.followUp?.unref?.();
+    }
+    return this.tick();
   }
   /** One look; a look still running is the answer to a second call. Never throws. */
   tick() {
@@ -693,7 +721,10 @@ export class OwnerQuestionsTimer {
     this.timer?.unref?.();
     return this;
   }
-  close() { this.closed = true; this.clearTimer(this.timer); this.timer = undefined; }
+  close() {
+    this.closed = true; this.clearTimer(this.timer); this.timer = undefined;
+    this.clearOnce(this.followUp); this.followUp = undefined;
+  }
 }
 
 export function channelOps(request) {

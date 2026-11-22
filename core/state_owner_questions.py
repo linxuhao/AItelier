@@ -1,7 +1,8 @@
 """Step 22 (design-steward 7.6): the directors' open questions pushed to the owner's
 default chat channel, reminded, and answered there.
 
-`sync_owner_questions` (steward only; its host calls it every minute, never its model)
+`sync_owner_questions` (steward only; its host calls it on each QUESTION_EVENT, once more
+just after WAIT, and every minute as the fallback - never its model)
 reads the open questions of every project but the steward's own (the one rule,
 core.driver_questions), and - when a default channel is set and it is not the quiet hours
 (23:00-08:00 in core.state_steward.default_tz()) - writes at most one push (split into
@@ -66,7 +67,9 @@ RECEIPT_SUBJECT = "转达回执"
 # CHANNEL_LIMITS.mirrorChars): a push is split between two questions to stay under it.
 PUSH_CHARS = 600
 CONTINUED = "【待你回答】（续）"
-WAIT = timedelta(minutes=2)          # a new question waits this long (an asker often asks several)
+WAIT = timedelta(seconds=30)         # a new question waits this long (an asker often asks several);
+#                                      the host's OWNER_QUESTIONS_WAIT_MS (steward-host.mjs) is this
+QUESTION_EVENT = "owner_question_changed"   # in the steward's project: a question asked, withdrawn or answered
 OLDER = timedelta(hours=24)          # never pushed and open longer: one line in 「较早的问题」, no reminder
 NEW_MAX, OLDER_MAX = 15, 20          # per sync
 REMINDERS = (timedelta(hours=4), timedelta(hours=24))
@@ -82,6 +85,19 @@ CHANNEL_NAMES = {"wechat": "WeChat", "slack": "Slack"}
 # last line say so. Neither names the phrase itself: the mirror moves such a line (VERBATIM).
 APPROVAL_PHRASE_PUSH = "授权类问题（合并、重启、花钱）也这样答：「Q{code} 同意」。批准提议的那句口令是另一回事，不关问题，提醒照发。"
 APPROVAL_PHRASE_NOTE = "授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。"
+
+def question_changed(store, conn, project_id, change):
+    """Tell the steward's host that a director's question in `project_id` was `change`d
+    ('asked', 'withdrawn' or 'answered'), on the writer's own connection: one QUESTION_EVENT
+    in the steward's project, so its runtime calls sync_owner_questions without a model turn
+    (design 7.6.2). The payload names the change only - no project, id or text. The steward's
+    own questions are never pushed, so its project writes none; nor does a database without
+    the steward's project."""
+    home = steward_project()
+    if project_id == home or not conn.execute("SELECT 1 FROM state_projects WHERE project_id=?", (home,)).fetchone():
+        return
+    store._event(conn, home, None, QUESTION_EVENT, {"change": change})
+
 
 # ---------------------------------------------------------------- the numbering rule (7.6.5)
 # NOT MEASURED - design 7.6.11 step 0 (before merge, owner present): how a WeChat quote of

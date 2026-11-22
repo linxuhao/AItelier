@@ -46,8 +46,9 @@ const libraries = await resolveDshLibraries();
 if (libraries.status === 'refused') throw new Error(libraries.reason);
 
 test('the director presents every runtime tool but the workspace-only project_work; the adapter adds its State write', () => {
-  // The runtime's tools are registered by the adapter (runtime.mjs) and the director plugin (dsh-director/index.mjs).
-  const registered = ['./runtime.mjs', '../dsh-director/index.mjs'].flatMap(file => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]));
+  // The runtime's tools are registered by the adapter (runtime.mjs) and the director plugin (dsh-director/index.mjs,
+  // its family-group tools in lib/group-tools.mjs).
+  const registered = ['./runtime.mjs', '../dsh-director/index.mjs', '../dsh-director/lib/group-tools.mjs'].flatMap(file => [...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(/defineTool\(\{ name: '([a-z_]+)'/g)].map(m => m[1]));
   assert.ok(registered.length >= 14, 'could not read the registrations: ' + registered.length);
   // reply_to_director is registered for the steward only.
   // family_memory_note / family_memory_show are the steward's, registered only with a family group (step 23);

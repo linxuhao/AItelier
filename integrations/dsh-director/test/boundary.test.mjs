@@ -58,6 +58,7 @@ export const SHIPPED = [
   join('lib', 'channels.mjs'),
   join('lib', 'group-turns.mjs'),
   join('lib', 'channel-tools.mjs'),
+  join('lib', 'group-tools.mjs'),
   join('lib', 'catalog.mjs'),
   join('lib', 'confirm.mjs'),
   join('lib', 'connections.mjs'),

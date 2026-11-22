@@ -51,6 +51,7 @@ import secrets
 import unicodedata
 from datetime import datetime, timedelta
 from types import MappingProxyType
+from uuid import uuid4
 
 from core.message_body_guard import refuse_credential_body
 from core import media_types, state_channels
@@ -60,7 +61,7 @@ from core.state_channels import (BODY_MAX_BYTES, CHANNELS, CODE_TTL, _code_hash,
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_privacy import writer_only_read
 from core.state_schema_migration import add_column_if_missing
-from core.state_steward import _hash
+from core.state_steward import _hash, steward_project
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,9 @@ GROUP_LIMITS = MappingProxyType({
     # Step 23.1 (design-steward 7.7.24, owner 2026-11-22): a channel binds at most this many
     # groups (the bridge takes at most 10 rooms); each its own family memory, lists and reminders.
     "groups_per_channel": 3,
+    # r44w (design-steward 7.7.7, director 583): the owner-conversation lines telling the owner
+    # a group reply was withheld; further withholds that hour stay in the group record only.
+    "withheld_owner_lines_per_hour": 3,
 })
 # A group's name (7.7.9): required, at most this many characters after NFKC, unlike every bound
 # group's on any channel; a group bound before names were required is given DEFAULT_GROUP_LABEL.
@@ -147,6 +151,13 @@ WITHHELD_TEXT = "这个我在群里答不了。"
 WITHHELD_REASONS = MappingProxyType({"live_code": "a live binding code", "private_project":
                                      "the name or id of a project that is not public",
                                      "host_path": "a path on the host"})
+# r44w (7.7.7 「业主那一侧也要知道」): the same kinds, as the owner's conversation reads them in
+# the one line code writes there when a group reply is withheld - never the reply, never what
+# it named. WITHHELD_OWNER_SUBJECT is that message's subject.
+WITHHELD_OWNER_REASONS = MappingProxyType({"live_code": "含有绑定码", "private_project": "涉及私有项目",
+                                           "host_path": "含有主机上的路径"})
+WITHHELD_OWNER_LINE = "{group}里有一条回答没发出去：{reason}。要问可以私聊我。"
+WITHHELD_OWNER_SUBJECT = "群里没发出的回答"
 QUOTA_NOTICE = "问得太多了，过一会儿再问。"
 # The line a group gets when the requester's reply decided a confirmation (7.8.9 step 4):
 # code's words, never the model's.
@@ -250,6 +261,8 @@ class StateGroups:
                 # turn that took it (post_group_reply answers it only in that turn, 7.7.7).
                 conn.execute("DROP INDEX IF EXISTS state_owner_groups_one_live")
                 add_column_if_missing(conn, "state_group_messages", "turn", "TEXT")
+                # r44w (7.7.7): a withheld reply's row names the owner-conversation line it caused.
+                add_column_if_missing(conn, "state_group_messages", "owner_notice", "TEXT")
                 for (channel, group_ref) in conn.execute(
                         "SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL AND "
                         "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
@@ -808,7 +821,10 @@ class StateGroups:
         not_this_turns_question and nothing is posted (7.7.7, review P3: with two groups a
         wrong question id would send B's answer into A). The exit check runs here, in
         this transaction; a withheld reply keeps its original for the owner and the group
-        gets WITHHELD_TEXT. Formatted as one WeChat message: 「first 20 characters of the
+        gets WITHHELD_TEXT. In the same transaction the owner's conversation gets one line
+        code writes (WITHHELD_OWNER_LINE: this group's name and the kind, never the reply),
+        a steward message the host mirrors like any other (`owner_notice`), at most
+        withheld_owner_lines_per_hour per group (r44w). Formatted as one WeChat message: 「first 20 characters of the
         question」 on the first line, at most reply_chars in all, cut with '…'. Answered
         once per request_key: the replay returns the first answer."""
         _require_utf8("body", body, "invalid_body")
@@ -838,17 +854,39 @@ class StateGroups:
             text = quote + "\n" + (text if len(text) <= room else text[:room - 1] + "…")
             message_id = self._out_row(conn, channel, group, "reply", text, moment, reply_to=question_id,
                                        original=body if reason else None, reason=reason, request_key=request_key)
+            notice = self._withheld_owner_notice(conn, channel, group, message_id, reason, moment) if reason else None
             for other in [question_id, *others]:
                 conn.execute("UPDATE state_group_messages SET answered_by=? WHERE message_id=? AND channel=? AND "
                              "group_ref=? AND direction='in' AND answered_by IS NULL AND turn=?",
                              (message_id, other, channel, group, str(turn)))
             result = {"message_id": message_id, "channel": channel, "group_ref": group, "text": text,
-                      "withheld": bool(reason)}
+                      "withheld": bool(reason), **({"owner_notice": notice} if notice else {})}
             self._retain(conn, moment)
             out = self.steward._record(conn, "post_group_reply", request_key, request_hash, result)
         if reason:
             self._log("reply withheld " + reason, channel, group, None, len(body.encode("utf-8")))
         return out
+
+    def _withheld_owner_notice(self, conn, channel, group, message_id, reason, moment):
+        """The owner's half of a withheld group reply (r44w, 7.7.7): one steward message in
+        the owner's conversation naming this group and the kind (WITHHELD_OWNER_REASONS), in
+        the caller's transaction, recorded on the withheld row; None once this group has had
+        withheld_owner_lines_per_hour of them this hour. Never sent into the group."""
+        hour = (moment - timedelta(hours=1)).isoformat()
+        if self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
+                       "direction='out' AND owner_notice IS NOT NULL AND at>?",
+                       (channel, group, hour)) >= GROUP_LIMITS["withheld_owner_lines_per_hour"]:
+            return None
+        label = self._live_group(conn, channel, group)["label"] or DEFAULT_GROUP_LABEL
+        body = WITHHELD_OWNER_LINE.format(group=label, reason=WITHHELD_OWNER_REASONS[reason])
+        notice_id = str(uuid4())
+        conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,kind,"
+                     "delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience) "
+                     "VALUES(?,?,?,?,'note','transient',?,?,'{}',NULL,?,'user')",
+                     (notice_id, notice_id, self.driver_id, steward_project(), WITHHELD_OWNER_SUBJECT, body,
+                      moment.isoformat()))
+        conn.execute("UPDATE state_group_messages SET owner_notice=? WHERE message_id=?", (notice_id, message_id))
+        return {"message_id": notice_id, "body": body}
 
     def post_group_notice(self, project_id, request_key, schedule_id, due_at):
         """A group reminder that fired, posted by the steward's HOST (step 25 C11, 7.9.4). The

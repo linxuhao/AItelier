@@ -434,9 +434,10 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
  *  words go to the host (`reply`: exit check, one message, the latest question's group), then
  *  out through the channel (`sendGroup`). An owner turn's words never go to a group. The system
  *  clock lines the steward copied to the start of its words are not sent; words that were only
- *  such lines send nothing (only_clock_text, as the owner's automatic reply). Returns the
- *  handler of the root session's events. */
-export function groupReplies({ turns, reply, sendGroup, warn }) {
+ *  such lines send nothing (only_clock_text, as the owner's automatic reply). A withheld
+ *  reply's line for the owner (`owner_notice`, r44w 7.7.7) goes to `mirror`, the owner's
+ *  channel mirror, never into the group. Returns the handler of the root session's events. */
+export function groupReplies({ turns, reply, sendGroup, warn, mirror }) {
   let last = '';
   return event => {
     if (event.type === 'turn/start') last = '';
@@ -452,7 +453,10 @@ export function groupReplies({ turns, reply, sendGroup, warn }) {
       if (!body) return void warn('group reply not sent ' + JSON.stringify({ reason: 'only_clock_text', question_id: questions.at(-1) }));
       // The turn is named: the backend answers only a question this turn took (step 23.1, 7.7.7).
       return reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body, turn: String(event.data?.turn ?? turn.turn) })
-        .then(sent => sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused)))
+        .then(sent => {
+          if (sent?.owner_notice?.message_id && mirror) void mirror(sent.owner_notice.message_id, sent.owner_notice.body);
+          return sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused));
+        })
         .catch(error => warn('group reply: ' + short(error)));
     }
   };

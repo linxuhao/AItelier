@@ -94,7 +94,9 @@ def test_group_limits_are_pinned_code_constants_that_no_environment_variable_cha
                                         # Step 24 (7.8.9): confirmation texts and their lines, apart.
                                         "group_sends_per_hour": 20,
                                         # Step 23.1 (7.7.24, owner 2026-11-22): groups per channel.
-                                        "groups_per_channel": 3}
+                                        "groups_per_channel": 3,
+                                        # r44w (7.7.7, director 583): owner lines per group and hour.
+                                        "withheld_owner_lines_per_hour": 3}
     with pytest.raises(TypeError):
         fresh.GROUP_LIMITS["group_per_hour"] = 1
     assert dict(fresh.FAMILY_LIMITS) == {"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000}
@@ -442,6 +444,87 @@ def test_exit_check_arm_one_a_body_with_a_code_a_private_project_and_a_path_send
     # The code that leaked into a reply is not secret any more: retired.
     assert rows(world, "SELECT COUNT(*) FROM state_owner_channel_codes WHERE kind='account' AND used_at IS NULL "
                        "AND retired_at IS NULL") == [(0,)]
+
+
+def owner_lines(world):
+    """The owner's conversation lines about withheld group replies (r44w), oldest first."""
+    return rows(world, "SELECT message_id, body, audience, sender_driver_id, project_id, reply_to_message_id "
+                       "FROM driver_inbox_messages WHERE subject=? ORDER BY created_at, rowid",
+                (state_groups.WITHHELD_OWNER_SUBJECT,))
+
+
+def test_a_withheld_reply_tells_the_owner_in_one_line_that_names_the_group_and_the_kind_never_the_reply(
+        world, projects, monkeypatch):
+    """r44w (7.7.7 「业主那一侧也要知道」, director 583): the family group asked about a private
+    project and got only the fixed line; the owner's conversation now gets one line code
+    writes - this group's name and the kind - in the same transaction, never the reply."""
+    from core import state_owner_questions as oq
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    world.owner.channels.set_default("wechat")
+    body = "secret-plan（家庭账本）做到第 3 步了，见 /srv/family/notes.md"
+    question = ask(world, "m1", "爸爸的项目进度如何")
+    sent = reply(world, question["message_id"], body)
+    # The group: only the fixed line, the same exit check.
+    assert sent["withheld"] is True and sent["text"] == "「爸爸的项目进度如何」\n" + state_groups.WITHHELD_TEXT
+    assert rows(world, "SELECT kind, body, withheld_reason FROM state_group_messages WHERE direction='out' "
+                       "AND kind='reply'") == [("reply", sent["text"], "private_project")]
+    # The owner: one steward message in the owner's conversation, this group's name and the kind.
+    line = "家庭群里有一条回答没发出去：涉及私有项目。要问可以私聊我。"
+    lines = owner_lines(world)
+    assert [(b, a, d, p, r) for _, b, a, d, p, r in lines] == \
+        [(line, "user", world.steward.driver_id, "aitelier-home", None)]
+    assert sent["owner_notice"] == {"message_id": lines[0][0], "body": line}
+    for leaked in ("secret-plan", "家庭账本", "/srv/", "notes.md", "第 3 步"):
+        assert leaked not in line
+    # Never posted into the group: the only outbound rows are the bind notices and the reply.
+    assert rows(world, "SELECT kind FROM state_group_messages WHERE direction='out' ORDER BY kind") == \
+        [("bind_notice",), ("bind_notice",), ("reply",)]
+    # A live code is named only as a kind: the code itself is never in the line.
+    monkeypatch.setattr(state_channels.secrets, "randbelow", lambda _n: 482913)
+    world.owner.channels.issue_code("wechat")
+    coded = ask(world, "m2", "码是多少")
+    reply(world, coded["message_id"], "码是 482913")
+    assert owner_lines(world)[-1][1] == "家庭群里有一条回答没发出去：含有绑定码。要问可以私聊我。"
+    assert "482913" not in owner_lines(world)[-1][1]
+    # Mirrored like other steward messages: written, never mirrored, it is handed back to the
+    # host's mirror like a push; mirrored (a delivery row), it is not.
+    monkeypatch.setattr(oq, "is_quiet", lambda _moment: False)
+    real = oq._now
+    monkeypatch.setattr(oq, "_now", lambda: real() + timedelta(minutes=3))
+    unmirrored = execute(world.steward, "sync_owner_questions", {}, allow_write=True)["unmirrored"]
+    assert unmirrored == [{"message_id": m, "body": b} for m, b, *_ in owner_lines(world)]
+    for message_id, *_ in owner_lines(world):
+        execute(world.steward, "record_channel_delivery", {"request_key": "d-" + message_id,
+                                                           "message_id": message_id, "channel": "wechat",
+                                                           "channel_message_ref": "wx-" + message_id},
+                allow_write=True)
+    assert execute(world.steward, "sync_owner_questions", {}, allow_write=True)["unmirrored"] == []
+
+
+def test_withheld_owner_lines_are_at_most_three_per_group_per_hour_and_each_group_counts_its_own(world, projects):
+    """r44w: a 4th withhold in the same hour for the same group writes no line (it stays in the
+    group record, withheld as ever); another group still gets its own line, with its own name."""
+    assert state_groups.GROUP_LIMITS["withheld_owner_lines_per_hour"] == 3
+    assert set(state_groups.WITHHELD_OWNER_REASONS) == set(state_groups.WITHHELD_REASONS)
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    for n in range(4):
+        question = ask(world, f"a{n}", f"问题{n}", sender=OWNER_WX)
+        sent = reply(world, question["message_id"], "secret-plan 的进度", turn=f"t-a{n}")
+        assert sent["withheld"] is True and sent["text"].endswith(state_groups.WITHHELD_TEXT)
+        assert ("owner_notice" in sent) is (n < 3), n
+    assert [b for _, b, *_ in owner_lines(world)] == ["家庭群里有一条回答没发出去：涉及私有项目。要问可以私聊我。"] * 3
+    assert rows(world, "SELECT COUNT(*), COUNT(owner_notice) FROM state_group_messages WHERE group_ref=? AND "
+                       "kind='reply' AND withheld_reason='private_project'", (ROOM,)) == [(4, 3)]
+    other = ask(world, "b0", "家里账本", sender="wxid_b", room=ROOM2)
+    sent = reply(world, other["message_id"], "家庭账本还在做", turn="t-b0")
+    assert sent["owner_notice"]["body"] == "老家群里有一条回答没发出去：涉及私有项目。要问可以私聊我。"
+    assert len(owner_lines(world)) == 4
+    # The replay of a withheld reply answers as the first time and writes no second line.
+    again = reply(world, other["message_id"], "家庭账本还在做", turn="t-b0", stamp=False)
+    assert again["duplicate"] is True and again["owner_notice"] == sent["owner_notice"]
+    assert len(owner_lines(world)) == 4
 
 
 def test_exit_check_arm_two_a_body_with_only_a_public_project_id_goes_out_as_written(world, projects):

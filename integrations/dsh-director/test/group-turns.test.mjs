@@ -675,6 +675,31 @@ test('group reply: words that are only a system clock line send nothing, recorde
   assert.deepEqual(r.warned, ['group reply not sent {"reason":"only_clock_text","question_id":"gq2"}']);
 });
 
+test('group reply (r44w, 7.7.7): a withheld reply\'s owner line goes to the owner\'s mirror, the group gets only the fixed line', async () => {
+  const g = turns(), sent = [], mirrored = [];
+  g.split([group('Q1', 'r1', 'gq1')], 1, 7);
+  const line = '家庭群里有一条回答没发出去：涉及私有项目。要问可以私聊我。';
+  const answers = [{ channel: 'wechat', group_ref: 'r1', text: '「Q1」\n这个我在群里答不了。', withheld: true,
+    owner_notice: { message_id: 'm-owner-1', body: line } },
+  { channel: 'wechat', group_ref: 'r1', text: '「Q1」\n这个我在群里答不了。', withheld: true }];
+  const watch = groupReplies({ turns: g, warn: () => {}, reply: async () => answers.shift(),
+    sendGroup: async (channel, groupRef, text) => { sent.push([channel, groupRef, text]); },
+    mirror: async (id, body) => { mirrored.push([id, body]); } });
+  const end = () => {
+    watch({ type: 'turn/start', data: { turn: 7 } });
+    watch({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'secret-plan 在 /home/x' }] } } });
+    return watch({ type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } });
+  };
+  await end();
+  assert.deepEqual(sent, [['wechat', 'r1', '「Q1」\n这个我在群里答不了。']]);
+  assert.deepEqual(mirrored, [['m-owner-1', line]]);
+  // No owner line in the answer (the group's hourly lines are spent): nothing is mirrored.
+  g.split([group('Q1', 'r1', 'gq1')], 1, 7);
+  await end();
+  assert.equal(sent.length, 2);
+  assert.deepEqual(mirrored, [['m-owner-1', line]]);
+});
+
 
 // --- step 23.1: several groups (design-steward 7.7.24) ----------------------------------------
 

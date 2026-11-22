@@ -140,7 +140,9 @@ class StateSubagents:
         self.driver_id = driver_id
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
-            initialize(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "subagents", initialize, store.db)
 
     def register_subagent(self, project_id, attempt_id, label, workspace):
         if not self.driver_id:

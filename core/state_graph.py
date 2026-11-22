@@ -482,7 +482,7 @@ def initialize_graph_schema(db) -> None:
         conn.commit()
 
 
-def initialize_state_schema(db) -> None:
+def initialize_state_schema(db, once=None) -> bool:
     """Create or migrate EVERY State table on ``db``, the caller's own handle.
 
     A leaf built on a store with a real handle creates its own tables, as it
@@ -491,25 +491,31 @@ def initialize_state_schema(db) -> None:
     before it drops it: an ``UntrustedDatabase`` refuses schema changes, so the
     leaves built on it could not, and no untrusted object carries a way to run
     DDL.
+
+    With ``once`` (``core.state_schema_setup.once``) each part runs once per
+    process per database file, under the name its leaf uses for the same setup.
+    Returns whether the attempt part ran in this call.
     """
-    initialize_graph_schema(db)
+    run = once or (lambda _db, _name, setup, *args: setup(*args) or True)
+    run(db, "graph", initialize_graph_schema, db)
     from core.state_attempts import SCHEMA as ATTEMPT_SCHEMA
     from core.state_attempt_schema import initialize as initialize_attempts
-    initialize_attempts(db, ATTEMPT_SCHEMA)
+    attempts_ran = run(db, "attempts", initialize_attempts, db, ATTEMPT_SCHEMA)
     from core.state_design import initialize as initialize_design
-    initialize_design(db)
+    run(db, "design", initialize_design, db)
     from core.state_driver_notes import initialize as initialize_notes
-    initialize_notes(db)
+    run(db, "driver_notes", initialize_notes, db)
     from core.state_issues import initialize as initialize_issues
-    initialize_issues(db)
+    run(db, "issues", initialize_issues, db)
     from core.director_messaging import initialize as initialize_messaging
-    initialize_messaging(db)
+    run(db, "director_messaging", initialize_messaging, db)
     from core.state_claims import initialize as initialize_claims
-    initialize_claims(db)
+    run(db, "claims", initialize_claims, db)
     from core.state_subagents import initialize as initialize_subagents
-    initialize_subagents(db)
+    run(db, "subagents", initialize_subagents, db)
     from core.state_handoffs import initialize as initialize_handoffs
-    initialize_handoffs(db)
+    run(db, "handoffs", initialize_handoffs, db)
+    return attempts_ran
 
 
 class StateGraphStore:
@@ -532,11 +538,17 @@ class StateGraphStore:
             return
         # Only an explicit True is trusted; silence is not trust.
         self.project_read_trusted = project_read_trusted is True
+        # Schema setup runs once per process per database file (core.state_schema_setup).
+        from core.state_schema_setup import once
         if self.project_read_trusted:
-            initialize_graph_schema(db)
+            once(db, "graph", initialize_graph_schema, db)
             self.db = db
         else:
-            initialize_state_schema(db)
+            if not initialize_state_schema(db, once):
+                # The attempt foreign-key verification stays per request (iss-5de9f15b64f54027).
+                from core.state_attempts import SCHEMA as ATTEMPT_SCHEMA
+                from core.state_attempt_schema import initialize as initialize_attempts
+                initialize_attempts(db, ATTEMPT_SCHEMA, references_only=True)
             self.db = UntrustedDatabase(db.db_path)
 
     @contextmanager

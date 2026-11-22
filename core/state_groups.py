@@ -225,6 +225,15 @@ def _now():
     return state_channels._now()
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        # Step 24.2 (7.8.12): a group message's attachments as metadata (core.media_types).
+        add_column_if_missing(conn, "state_group_messages", "attachments_json", "TEXT")
+        conn.commit()
+
+
 class StateGroups:
     def __init__(self, store, actor, driver_id=None, steward=None, channels=None, public_view=False):
         self.store, self.actor, self.driver_id = store, actor, driver_id
@@ -233,11 +242,9 @@ class StateGroups:
         self.public_view = public_view
         from core.state_privacy import UntrustedDatabase
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                # Step 24.2 (7.8.12): a group message's attachments as metadata (core.media_types).
-                add_column_if_missing(conn, "state_group_messages", "attachments_json", "TEXT")
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "groups", _initialize_schema, store.db)
 
     # ---------------------------------------------------------------- helpers
     @staticmethod

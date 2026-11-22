@@ -11,9 +11,11 @@ and runs inside one write transaction; corrupt or partial input fails without
 touching the original rows. Referenced evidence and immutable receipts stay
 byte-for-byte intact. No production path is resolved.
 
-The upgrade gate is on the REQUEST path: every StateService - one per MCP/REST
-request, reads included - asks ``initialize`` whether anything is pending, and
-``_current`` answers from one read transaction. One upgrade is neither additive
+The upgrade gate runs once per process per database file
+(``core.state_schema_setup``); after that every StateService - one per MCP/REST
+request, reads included - asks ``initialize(..., references_only=True)`` only
+for the foreign-key verdict below. The full gate's ``_current`` answers from one
+read transaction. One upgrade is neither additive
 nor a rebuild: the bundle store's DELETE guard was unconditional and is now
 narrowed to "refuse unless a release row names this digest"
 (``_store_delete_guard_stale``/``_replace_store_delete_guard``), which
@@ -389,10 +391,11 @@ def _foreign_key_violation(conn, table: str) -> bool:
 # the event loop itself was provably healthy.
 #
 # WHAT may be reused is that ONE answer, at most once per bounded window per
-# database file per process. Nothing cheap is covered: a dropped column, a
-# missing CREATE, a widened CHECK, a stale store cap or an external attempt
-# without its owner is still judged on every call, so a schema mutation is seen
-# by the very next one.
+# database file per process. Nothing cheap is covered by THIS memo. (The cheap
+# structural checks - a dropped column, a missing CREATE, a widened CHECK, a
+# stale store cap, an external attempt without its owner - now run once per
+# process per file with the rest of the schema setup, core.state_schema_setup;
+# the foreign-key pass below is the one part that stays on every request.)
 #
 # WHY the reuse is still honest:
 #  * The answer is filed under the FILE - its st_dev/st_ino, not the path
@@ -635,26 +638,54 @@ def _current(conn, existing_schema: str, db_path=None, identity=None) -> bool:
         # A violation is reported by the locked path, exactly as before. The
         # answer may be one this process already found, for at most one window
         # (_ForeignKeyScanMemo): the structural checks above are never reused.
-        window = _window_seconds()
-        if window <= 0 or db_path is None or identity is None:
-            return not _attempt_foreign_key_violation(conn, objects)
-        kept = _SCAN_MEMO.verdict(db_path, identity)
-        if kept is not None:
-            return kept
-        return _SCAN_MEMO.scan(db_path, identity, window,
-                               lambda: not _attempt_foreign_key_violation(conn, objects))
+        return _references_intact(conn, objects, db_path, identity)
     finally:
         conn.rollback()
 
 
-def initialize(db, existing_schema: str) -> None:
+def _references_intact(conn, objects, db_path, identity) -> bool:
+    """The foreign-key half of ``_current``, on the caller's read transaction."""
+    window = _window_seconds()
+    if window <= 0 or db_path is None or identity is None:
+        return not _attempt_foreign_key_violation(conn, objects)
+    kept = _SCAN_MEMO.verdict(db_path, identity)
+    if kept is not None:
+        return kept
+    return _SCAN_MEMO.scan(db_path, identity, window,
+                           lambda: not _attempt_foreign_key_violation(conn, objects))
+
+
+def _references_current(conn, db_path, identity) -> bool:
+    """Only the foreign-key verdict, in one READ transaction of its own."""
+    conn.execute('BEGIN')
+    try:
+        objects = {(r['type'], r['name']) for r in conn.execute('SELECT type,name FROM sqlite_master')}
+        return _references_intact(conn, objects, db_path, identity)
+    finally:
+        conn.rollback()
+
+
+def initialize(db, existing_schema: str, references_only: bool = False) -> None:
+    """Create or migrate the attempt tables, or with ``references_only`` only
+    verify the attempt foreign keys.
+
+    ``references_only`` is the per-request call once this process has set the
+    file up (core.state_schema_setup): the structural checks of ``_current`` are
+    skipped, the foreign-key verdict is exactly ``_current``'s (same pass, same
+    memo and window), and a violation takes the same locked path, which reports
+    it loudly. A kept verdict is read without opening a connection.
+    """
     path = _database_path(db)
     # Measured BEFORE the handle is opened, so a kept verdict can only ever be
     # filed under the file this pass could have read.
     identity = _file_identity(path)
+    if references_only and path is not None and identity is not None and _window_seconds() > 0 \
+            and _SCAN_MEMO.verdict(path, identity):
+        return
     with db.get_connection() as conn:
         conn.execute('PRAGMA busy_timeout=10000')
-        if _current(conn, existing_schema, path, identity):
+        if (_references_current(conn, path, identity) if references_only
+                else _current(conn, existing_schema, path, identity)):
             return
         # Everything below writes through THIS connection, and a kept verdict's
         # baseline follows OTHER connections - so it is dropped here rather than

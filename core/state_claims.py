@@ -297,7 +297,9 @@ class StateClaims:
     def __init__(self, store, actor: str, driver_id: str | None = None, is_admin: bool = False):
         self.store = store
         if not isinstance(store.db, UntrustedDatabase):
-            initialize(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "claims", initialize, store.db)
         self.actor = text(actor, "authenticated actor", 320)
         self.driver_id = driver_id
         self.is_admin = is_admin is True

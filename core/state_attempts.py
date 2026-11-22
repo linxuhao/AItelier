@@ -165,10 +165,14 @@ class StateAttempts:
         if not isinstance(store.db, UntrustedDatabase):
             # A real handle: create or migrate the attempt tables now. An
             # untrusted store made them before it dropped its real handle.
+            # Once per process per file (core.state_schema_setup); after that
+            # only the foreign-key verification runs per request (iss-5de9f15b64f54027).
             from core.state_attempt_schema import initialize
-            initialize(store.db, SCHEMA)
+            from core.state_schema_setup import once
+            if not once(store.db, "attempts", initialize, store.db, SCHEMA):
+                initialize(store.db, SCHEMA, references_only=True)
             from core.state_design import initialize as initialize_design
-            initialize_design(store.db)
+            once(store.db, "design", initialize_design, store.db)
 
     @staticmethod
     def _attempt(conn, attempt_id):

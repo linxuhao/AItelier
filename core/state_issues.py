@@ -128,7 +128,9 @@ class StateIssues:
     def __init__(self, store, actor: str):
         self.store = store
         if not isinstance(store.db, UntrustedDatabase):
-            initialize(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "issues", initialize, store.db)
         self.actor = text(actor, "authenticated actor", 320)
 
     # -- helpers ---------------------------------------------------------

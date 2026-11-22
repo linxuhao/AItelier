@@ -696,7 +696,9 @@ class StateStewardConnections:
         self.store, self.actor, self.driver_id, self.steward = store, actor, driver_id, steward
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
-            ensure_schema(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "steward_connections", ensure_schema, store.db)
 
     # -- identity
     def _owner(self):

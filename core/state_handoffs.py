@@ -95,7 +95,9 @@ class StateHandoffs:
         self.driver_id, self.is_admin, self.recovery = driver_id, is_admin is True, recovery
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
-            initialize(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "handoffs", initialize, store.db)
 
     def _require_driver(self) -> str:
         if not self.driver_id:

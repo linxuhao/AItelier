@@ -85,6 +85,13 @@ def forget_group_senders(conn, refs) -> None:
                  f"done_by_role='member' THEN NULL ELSE done_by_label END WHERE done_by_ref IN ({marks})", refs)
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+
 class StateLists:
     def __init__(self, store, actor, driver_id=None, steward=None, groups=None, public_view=False):
         self.store, self.actor, self.driver_id = store, actor, driver_id
@@ -92,9 +99,9 @@ class StateLists:
         self.project_read_trusted = store.project_read_trusted
         self.public_view = public_view
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "lists", _initialize_schema, store.db)
 
     # ---------------------------------------------------------------- who is writing
     def _caller(self, conn, turn, as_owner, project_id=None):

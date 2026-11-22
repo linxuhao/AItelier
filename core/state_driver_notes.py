@@ -188,7 +188,9 @@ class StateDriverNotes:
         self.project_read_trusted = bool(project_read_trusted)
         self.actor = text(actor, "authenticated actor", 320)
         if not isinstance(store.db, UntrustedDatabase):
-            initialize(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "driver_notes", initialize, store.db)
 
     def for_driver(self, driver_id, caller_driver_id=None, break_glass_reason=None):
         return type(self)(self.store, self.actor, self.project_read_trusted,

@@ -833,7 +833,7 @@ class StateGroups:
             self._log("notice posted", channel, group, None, len(body.encode("utf-8")))
         return out
 
-    def post_group_media(self, project_id, request_key, turn, kind, caption=None):
+    def post_group_media(self, project_id, request_key, turn, kind=None, caption=None, check_only=False):
         """Step 24.2 (design-steward 7.8.12, 7.8.9): one file the steward's send_media sends
         into the group of the turn its HOST names (the recorded audience; never a group the
         call names). In one transaction: the turn is the recorded one and its group is bound
@@ -842,8 +842,15 @@ class StateGroups:
         group_send_budget / group_quota_account). Then one outbound row of kind 'media' (a
         GROUP_SEND_KINDS kind) whose body is the caption or the placeholder; no State event.
         The host sends the file through the channel after this answer. Answered once per
-        request_key."""
-        if kind not in media_types.KINDS:
+        request_key.
+
+        check_only (review F2): the same judgement - recorded turn, caption exit check, send
+        budget - answered {may_post: true} or {refused}, BEFORE the host fetches or stores a
+        file: no outbound row, no budget used, nothing recorded for request_key (the send
+        itself is judged again, authoritatively, by the call without check_only). kind may be
+        omitted (a url's type is known only once fetched). A live code in the caption is
+        retired here as by every exit check: the model has already seen it."""
+        if not (check_only and kind is None) and kind not in media_types.KINDS:
             raise StateGraphError("invalid_request: kind is image, voice or file")
         if caption is not None:
             _require_utf8("caption", caption, "invalid_request")
@@ -852,14 +859,16 @@ class StateGroups:
         moment = _now()
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
-            replay = self.steward._replay(conn, "post_group_media", request_key, request_hash)
+            replay = None if check_only else self.steward._replay(conn, "post_group_media", request_key, request_hash)
             if replay is not None:
                 return {**replay, "duplicate": True}
             row = self.group_turn(conn, turn, "media_group_turn_only")
             channel, group = row["channel"], row["group_ref"]
             reason = self.exit_check(conn, caption, moment) if caption else None
             refused = "withheld" if reason else self.send_refusal(conn, channel, group, moment)
-            if refused is not None:
+            if check_only:
+                out = {"refused": refused, **({"reason": reason} if reason else {})} if refused else {"may_post": True}
+            elif refused is not None:
                 result = {"refused": refused, **({"reason": reason} if reason else {})}
             else:
                 body = caption or {"image": "[图片]", "voice": "[语音]", "file": "[文件]"}[kind]
@@ -867,8 +876,10 @@ class StateGroups:
                 self._retain(conn, moment)
                 result = {"posted": True, "message_id": message_id, "channel": channel, "group_ref": group,
                           **({"caption": caption} if caption else {})}
-            out = self.steward._record(conn, "post_group_media", request_key, request_hash, result)
-        self._log("media " + (refused or "posted"), channel, group, None)
+            if not check_only:
+                out = self.steward._record(conn, "post_group_media", request_key, request_hash, result)
+        self._log("media " + ("check " if check_only else "") + (refused or ("may post" if check_only else "posted")),
+                  channel, group, None)
         return out
 
     def set_steward_turn_audience(self, project_id, turn, audience, group=None, sender_refs=None):

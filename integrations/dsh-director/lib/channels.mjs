@@ -1299,7 +1299,9 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
      *  {groupRef} for a group; kind, mime, name, path, caption?): {sent, channel, ref?} or
      *  {refused: channel_no_media | send_failed}. */
     sendFile: sendFileVia,
-    canSendFile: (channel, kind) => Boolean(registered.get(channel)?.sendFile && registered.get(channel).mediaKinds.includes(kind)),
+    /** Whether `channel` can send a file of `kind` - or, kind undefined, of any kind. */
+    canSendFile: (channel, kind) => Boolean(registered.get(channel)?.sendFile
+      && (kind === undefined ? registered.get(channel).mediaKinds.length > 0 : registered.get(channel).mediaKinds.includes(kind))),
     /** Step 23: who steers an accepted group question into the steward (the director, once
      *  its session exists). */
     setGroupWake: fn => { groupWake = fn; },

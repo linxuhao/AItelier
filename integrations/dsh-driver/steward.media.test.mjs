@@ -65,6 +65,11 @@ test('postGroup: post_group_media with the turn, the kind and the caption; a Sta
   const refusing = mediaOps({ library: createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) }), gatewayFetch: async () => {},
     request: async () => { throw new Error('AItelier /x: HTTP 422 "group_send_budget"'); } });
   assert.equal((await refusing.postGroup({ turn: 't7', kind: 'image' })).refused, 'group_send_budget');
+  // checkOnly (review F2): the dry run before a fetch - check_only, its own key, kind optional.
+  await ops.postGroup({ turn: 't7', caption: '猫', checkOnly: true });
+  assert.equal(sent[1][1].check_only, true); assert.ok(!('kind' in sent[1][1]));
+  assert.match(sent[1][1].request_key, /^group-media-check:t7:/);
+  assert.ok(!('check_only' in sent[0][1]), 'the real record carries no check_only');
 });
 
 test('the relays carry attachments only when there are some; storeMedia\'s binding read', async () => {

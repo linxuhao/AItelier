@@ -328,7 +328,7 @@ test('placeholders and wake lines', () => {
 
 // --- ownerChannels: storeMedia, attachments, sendFile, with a fake channel ------------------
 
-function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now } = {}) {
+function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now, mediaKinds = ['image', 'file'] } = {}) {
   const dir = root();
   const library = createMediaLibrary({ root: join(dir, 'media'), ...(now ? { now } : {}) });
   const media = { ingest: (m, o) => library.ingest(m, o), resolve: async ref => library.lookup(ref), read: ref => library.read(ref),
@@ -346,7 +346,7 @@ function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now } = {})
   };
   const handle = createOwnerChannels({ host, media, ...(owedFile ? { owedFile } : {}) });
   const unregister = handle.service.register({ name: 'wechat', send: async (text, options) => { calls.sent.push([text, options]); return { ref: 'out' }; },
-    status: () => ({ connected: true }), sendFile: async file => { calls.files.push(file); return { ref: 'file-out' }; }, mediaKinds: ['image', 'file'] });
+    status: () => ({ connected: true }), sendFile: async file => { calls.files.push(file); return { ref: 'file-out' }; }, mediaKinds });
   handle.ready();
   return { dir, library, media, calls, host, handle, sources, unregister, service: handle.service };
 }
@@ -475,24 +475,26 @@ test('sendFile target: a dashboard message is dashboard_no_media; a channel with
 
 const OCR = 'mcp__sw__media__ocr_image', DRAW = 'mcp__sw__media__generate_image', SEND = 'mcp__sw__mailpub__send_message';
 
-function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels } = {}) {
-  const w = channelWorld();
+function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels, mediaKinds } = {}) {
+  const w = channelWorld(mediaKinds ? { mediaKinds } : {});
   const turn = { audience, turn: 't1' };
-  const executed = [], fetched = [], posted = [];
+  const executed = [], fetched = [], posted = [], checked = [];
   let out;
   const ledger = new UrlLedger();
   const catalog = { rootSession: 'root', requester,
     catalog: () => new Set([OCR, DRAW, SEND]), outward: name => name === SEND };
   const media = { ...w.media,
     fetch: async request => { fetched.push(request); return w.library.ingest({ channel: 'generated', audience: request.audience, source: 'generated' }, async () => png(64, 64)); },
-    postGroup: async request => { posted.push(request); return out?.postAnswer ?? { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1', ...(request.caption ? { caption: request.caption } : {}) }; } };
+    postGroup: async request => {
+      if (request.checkOnly) { checked.push(request); return out?.postAnswer?.refused ? out.postAnswer : { may_post: true }; }
+      posted.push(request); return out?.postAnswer ?? { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1', ...(request.caption ? { caption: request.caption } : {}) }; } };
   const tools = new Map();
   const ctx = { tools: { execute: async request => { executed.push(request); return { value: { text: 'OCR: 你好' }, content: [{ type: 'text', text: 'OCR: 你好' }] }; } } };
   class HarnessError extends Error {}
   registerMediaTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError,
     media, catalog, turns: { audience: () => turn.audience, open: () => turn }, channels: channels ?? w.handle, ledger });
   const run = (name, args, session = 'root') => tools.get(name).execute(args, { agent: { session: { id: session } }, callId: 'c1', rootCallId: 'r1', token: 'tok' });
-  out = { ...w, media, turn, executed, fetched, posted, ledger, tools, run };
+  out = { ...w, media, turn, executed, fetched, posted, checked, ledger, tools, run };
   return out;
 }
 
@@ -578,6 +580,32 @@ test('send_media in a group turn: only this group, through the backend\'s budget
   const refused = await t.run('send_media', { ref: v.ref });
   assert.equal(refused.refused, 'channel_no_media');
   assert.equal(t.posted.length, before);
+});
+
+test('send_media(url) in a group turn: a kind the channel cannot send and an exhausted budget refuse before anything is fetched or stored', async () => {
+  // Review F2: the turn is judged first - the channel's kinds (a url's guessed from its name),
+  // then the backend's budget and caption check as a dry run - and only then is the url fetched.
+  const group = { kind: 'group', channel: 'wechat', group_ref: 'r1' };
+  const url = 'http://mcp_server:9003/files/cat.png?sig=1';
+  const fileOnly = toolWorld({ audience: group, mediaKinds: ['file'] });
+  fileOnly.ledger.record(DRAW, { value: { url } });
+  assert.deepEqual(await fileOnly.run('send_media', { url }), { refused: 'channel_no_media' });
+  assert.equal(fileOnly.fetched.length, 0, 'nothing fetched');
+  assert.equal(fileOnly.library.rows.length, 0, 'nothing stored');
+  assert.equal(fileOnly.checked.length + fileOnly.posted.length, 0, 'the backend is not asked either');
+  const spent = toolWorld({ audience: group });
+  spent.ledger.record(DRAW, { value: { url } });
+  spent.postAnswer = { refused: 'group_send_budget' };
+  assert.deepEqual(await spent.run('send_media', { url, caption: '猫' }), { refused: 'group_send_budget' });
+  assert.equal(spent.fetched.length, 0, 'nothing fetched');
+  assert.equal(spent.library.rows.length, 0, 'nothing stored');
+  assert.deepEqual(spent.checked, [{ turn: 't1', kind: 'image', caption: '猫', checkOnly: true }]);
+  assert.equal(spent.posted.length, 0, 'the dry run is all the backend was asked');
+  // Allowed: checked, fetched, then posted for real (the authoritative record) and sent.
+  spent.postAnswer = undefined;
+  assert.equal((await spent.run('send_media', { url })).sent, true);
+  assert.equal(spent.fetched.length, 1);
+  assert.deepEqual(spent.posted, [{ turn: 't1', kind: 'image', caption: undefined }]);
 });
 
 test('GROUP_TOOLS holds media_call and send_media (7.8.8)', () => {

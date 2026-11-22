@@ -876,8 +876,11 @@ export function mediaOps({ request, library, gatewayFetch }) {
       }
       return library.ingest({ channel: 'generated', audience, source: 'generated' }, () => response.body, { signal });
     },
-    postGroup: ({ turn, kind, caption }, signal) => request('/api/state/commands/post_group_media', {
-      request_key: `group-media:${turn}:${randomUUID()}`, turn, kind, ...(caption ? { caption } : {}) }, signal)
+    // checkOnly (review F2): the same judgement as a dry run before the file is fetched -
+    // {may_post: true} or {refused}; no budget used, no row, nothing recorded for the key.
+    postGroup: ({ turn, kind, caption, checkOnly }, signal) => request('/api/state/commands/post_group_media', {
+      request_key: `group-media${checkOnly ? '-check' : ''}:${turn}:${randomUUID()}`, turn, ...(kind ? { kind } : {}),
+      ...(caption ? { caption } : {}), ...(checkOnly ? { check_only: true } : {}) }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };
 }

@@ -354,6 +354,8 @@ export interface DirectorHost {
    *    results, with the conn_id that returned it), stored as `generated` under `audience`.
    *  - postGroup (optional): record one send_media file for the group of the recorded turn -
    *    group_send_budget, caption exit-checked - {posted, channel, group_ref, caption?} or {refused}.
+   *    With checkOnly, the same judgement as a dry run before anything is fetched (kind may be
+   *    omitted): {may_post: true} or {refused}, no budget used and no row written.
    *  - setProtected (optional): refs the library must not clean (a relay not committed yet). */
   media?: {
     ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
@@ -364,8 +366,9 @@ export interface DirectorHost {
       size: number; durationMs?: number; audience: string; sha256: string; file: string }>;
     read(ref: string): Promise<undefined | { row: object; bytes: Uint8Array }>;
     fetch(request: { connId: string; url: string; audience: string }, signal?: AbortSignal): Promise<{ ref: string } | { refused: string; reason?: string }>;
-    postGroup?(request: { turn: string; kind: 'image' | 'voice' | 'file'; caption?: string }, signal?: AbortSignal):
-      Promise<{ posted: true; message_id: string; channel: string; group_ref: string; caption?: string } | { refused: string; reason?: string }>;
+    postGroup?(request: { turn: string; kind?: 'image' | 'voice' | 'file'; caption?: string; checkOnly?: boolean }, signal?: AbortSignal):
+      Promise<{ posted: true; message_id: string; channel: string; group_ref: string; caption?: string } | { may_post: true }
+        | { refused: string; reason?: string }>;
     setProtected?(refs: () => Iterable<string>): void;
   };
   channels?: {
@@ -549,7 +552,8 @@ export interface OwnerChannelsHandle {
   ownerMediaTarget(replyTo: string, kind?: string): Promise<{ channel: string; to: string; replyToRef?: string } | { refused: string }>;
   /** Step 24.2: one file through `channel`'s sendFile: {sent, channel, ref?} or {refused}. */
   sendFile(channel: string, file: object): Promise<{ sent: true; channel: string; ref?: string } | { refused: string; reason?: string }>;
-  canSendFile(channel: string, kind: string): boolean;
+  /** Whether `channel` can send a file of `kind` - or, kind omitted, of any kind. */
+  canSendFile(channel: string, kind?: string): boolean;
   ready(): void;
   pollStatus(): Promise<void>;
   /** Every message the director still owes an answer asks again now (the 30 s poll's own step). */

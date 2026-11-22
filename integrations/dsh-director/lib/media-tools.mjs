@@ -18,12 +18,25 @@
  *    (`UrlLedger`, recorded as (conn_id, url) when the result came back); the host fetches it
  *    through the gateway's /fetch with that conn_id and stores it (source generated, audience
  *    this turn). A dashboard turn is refused dashboard_no_media (24.2). A group's file is one
- *    of the group's sends (group_send_budget, with the confirmation texts).
+ *    of the group's sends (group_send_budget, with the confirmation texts). Everything that
+ *    can refuse the send is judged before a url is fetched (review F2): the destination, the
+ *    channel's kinds, and for a group the backend's budget and caption check as a dry run
+ *    (postGroup checkOnly); postGroup without checkOnly stays the authoritative record at send.
  */
-import { covers, audienceLabel, REF_PATTERN } from './media.mjs';
+import { covers, audienceLabel, REF_PATTERN, MEDIA_TYPES } from './media.mjs';
 
 const URL_IN_TEXT = /https?:\/\/[^\s"'<>\\`)\]}]+/g;
 const CAPTION_CHARS = 1000;
+const KIND_BY_EXT = new Map(MEDIA_TYPES.map(type => [type.ext, type.kind]));
+
+/** The kind a url's file name says (its extension in the shared media-types table), or
+ *  undefined. Only a guess, used to refuse before fetching; the fetched file's first bytes decide. */
+export function kindOfUrl(url) {
+  try {
+    const name = new URL(url).pathname.split('/').pop() ?? '', dot = name.lastIndexOf('.');
+    return dot > 0 ? KIND_BY_EXT.get(name.slice(dot + 1).toLowerCase()) : undefined;
+  } catch { return undefined; }
+}
 
 /** The urls this turn's connection tools returned, each with its connection: what send_media
  *  may fetch. Cleared at every turn's start; a restart forgets them (fail closed). */
@@ -116,28 +129,39 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         return { refused: 'invalid_request', reason: `caption is text of at most ${CAPTION_CHARS} characters` };
       const turn = audience(), label = audienceLabel(turn);
       if (!label) return { refused: 'no_conversation', reason: 'this turn\'s conversation cannot be named' };
-      // Where it goes is decided first: nothing is fetched for a turn that cannot be answered with a file.
-      let target;
+      // Whether this turn can be answered with this file is decided first - where it goes, that
+      // its channel can send the kind (a ref's is known; a url's is guessed from its name, or
+      // any kind will do), and for a group the backend's budget and caption check (a dry run:
+      // no budget used, no row written). Only then is a url fetched and stored.
       if (turn.kind === 'owner') {
-        const requester = catalog.requester;
-        if (!requester) return { refused: 'no_requester', reason: 'a file goes back only to a person\'s message in this turn' };
+        if (!catalog.requester) return { refused: 'no_requester', reason: 'a file goes back only to a person\'s message in this turn' };
         if (!channels) return { refused: 'dashboard_no_media' };
-        target = await channels.ownerMediaTarget(requester);
-        if (target?.refused) return target;
       } else if (typeof media.postGroup !== 'function' || !channels) return { refused: 'channel_no_media' };
       let row;
+      if (hasRef) {
+        if (!REF_PATTERN.test(args.ref)) return { refused: 'unknown_ref' };
+        row = await media.resolve(args.ref);
+        if (!row) return { refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' };
+        if (!covers(turn, row)) return { refused: 'not_visible_in_this_turn', reason: `${args.ref} is not usable in this conversation` };
+      }
+      const connId = hasUrl ? ledger.lookup(args.url) : undefined;
+      if (hasUrl && !connId) return { refused: 'url_not_seen', reason: 'that address did not come back from one of your connection tools in this turn' };
+      const kind = row?.kind ?? kindOfUrl(args.url);
+      let target;
+      if (turn.kind === 'owner') {
+        target = await channels.ownerMediaTarget(catalog.requester);
+        if (target?.refused) return target;
+      } else {
+        if (!channels.canSendFile(turn.channel, kind)) return { refused: 'channel_no_media' };
+        const check = await media.postGroup({ turn: turns.open()?.turn, ...(kind ? { kind } : {}), caption: args.caption, checkOnly: true }, exec.signal);
+        if (!check?.may_post) return { refused: check?.refused ?? 'not_posted', ...(check?.reason ? { reason: check.reason } : {}) };
+      }
       if (hasUrl) {
-        const connId = ledger.lookup(args.url);
-        if (!connId) return { refused: 'url_not_seen', reason: 'that address did not come back from one of your connection tools in this turn' };
         const fetched = await media.fetch({ connId, url: args.url, audience: label }, exec.signal);
         if (!fetched?.ref) return { refused: fetched?.refused ?? 'fetch_failed', ...(fetched?.reason ? { reason: fetched.reason } : {}) };
         row = await media.resolve(fetched.ref);
-      } else {
-        if (!REF_PATTERN.test(args.ref)) return { refused: 'unknown_ref' };
-        row = await media.resolve(args.ref);
-        if (row && !covers(turn, row)) return { refused: 'not_visible_in_this_turn', reason: `${args.ref} is not usable in this conversation` };
+        if (!row) return { refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' };
       }
-      if (!row) return { refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' };
       const file = { kind: row.kind, mime: row.mime, name: `${row.kind}-${row.ref.slice(2, 10)}.${row.ext}`, path: row.path,
         ...(args.caption ? { caption: args.caption } : {}) };
       if (turn.kind === 'owner') {
@@ -145,7 +169,8 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         return sent.sent ? { sent: true, ref: row.ref, kind: row.kind, channel: target.channel } : sent;
       }
       // A group's file: the backend counts it among the group's sends and checks the caption -
-      // only once the group's channel can send this kind at all.
+      // only once the group's channel can send this kind at all (a url's real kind: when its name
+      // said nothing, its bytes are fetched and stored by now, kept as any generated file, not sent).
       if (!channels.canSendFile(turn.channel, row.kind)) return { refused: 'channel_no_media' };
       const open = turns.open();
       const posted = await media.postGroup({ turn: open?.turn, kind: row.kind, caption: args.caption }, exec.signal);

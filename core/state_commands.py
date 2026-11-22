@@ -1427,8 +1427,9 @@ class RelayGroupMessage(Project):
 class PostGroupMedia(Project):
     request_key: str = Field(min_length=1, max_length=320)
     turn: str = Field(min_length=1, max_length=64)
-    kind: Literal["image", "voice", "file"]
+    kind: Literal["image", "voice", "file"] | None = None
     caption: str | None = Field(default=None, max_length=1000)
+    check_only: bool = False
 
 
 class PostGroupReply(Project):

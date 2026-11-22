@@ -194,6 +194,38 @@ def test_a_group_files_caption_is_exit_checked_and_only_the_recorded_turns_group
         execute(world.director, "post_group_media", {"request_key": "x", "turn": "gt1", "kind": "image"}, allow_write=True)
 
 
+def test_a_check_only_post_judges_like_the_post_but_uses_no_budget_and_records_nothing(world, monkeypatch):
+    """Review F2: send_media asks this dry run before it fetches a file - the recorded turn, the
+    caption exit check and the budget, answered without an outbound row or a recorded key."""
+    group_ready_plain(world, monkeypatch)
+    gask(world, "q1")
+    group_turn(world)
+
+    def check(caption=None, kind=None, turn="gt1"):
+        return execute(world.steward, "post_group_media", {"request_key": "chk", "turn": turn, "check_only": True,
+                       **({"kind": kind} if kind else {}), **({"caption": caption} if caption else {})}, allow_write=True)
+
+    assert check() == {"may_post": True}
+    assert check(kind="image", caption="一只猫") == {"may_post": True}
+    assert check(caption="见 /home/example/secret.png") == {"refused": "withheld", "reason": "host_path"}
+    with pytest.raises(StateGraphError, match="media_group_turn_only"):
+        check(turn="not-the-recorded-turn")
+    assert out_rows(world, "media") == []
+    # Nothing was recorded for its key: the real post with the same key is judged afresh.
+    assert post_media(world, key="chk")["posted"]
+    with pytest.raises(StateGraphError, match="invalid_request"):
+        execute(world.steward, "post_group_media", {"request_key": "nokind", "turn": "gt1"}, allow_write=True)
+    moment = state_channels._now().isoformat()
+    with world.db.get_connection() as conn:
+        for n in range(19):
+            conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,body,at) "
+                         "VALUES(?,'wechat',?,'out','confirmation',1,'x',?)", (f"c{n}", ROOM, moment))
+        conn.commit()
+    before = len(out_rows(world, "media"))
+    assert check() == {"refused": "group_send_budget"}
+    assert len(out_rows(world, "media")) == before
+
+
 # --- the one media-types table ---------------------------------------------------------------
 
 def test_python_reads_the_same_media_types_table_as_the_host():

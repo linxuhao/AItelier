@@ -181,19 +181,31 @@ def test_actual_entry_timeout_reaps_the_owned_group_when_the_direct_child_dies(t
     assert survivor != direct_pid, (
         f"the polled pid must be the GRANDCHILD's: survivor={survivor} "
         f"direct child={direct_pid}")
-    try:
-        os.kill(survivor,0)
-        alive = True
-    except ProcessLookupError:
-        alive = False
-    if alive:
+    # Read the kernel's own state instead of sampling `os.kill(survivor, 0)`:
+    # a ZOMBIE answers signal 0, and this grandchild is reparented to PID 1
+    # when the direct child dies, so its corpse can still exist here even
+    # though the group kill reached it (measured on kernel 6.8: /proc state Z,
+    # os.kill(pid, 0) succeeds; iss-c0dd52cd4ad94dbf). The 2 s bound is far
+    # below the survivor's own 20 s life, so a genuinely live `sleep 20`
+    # (state S) cannot satisfy it; only a kill, then a reap, can.
+    import time
+    deadline = time.monotonic() + 2.0
+    state = _grandchild_state(survivor)
+    while state not in _REAPED_STATES and time.monotonic() < deadline:
+        time.sleep(0.02)
+        state = _grandchild_state(survivor)
+    if state not in _REAPED_STATES:
         # Never leave a survivor holding this tmp_path for the rest of the
         # suite when the entry did not kill the group it owns.
-        os.kill(survivor,signal.SIGKILL)
-    assert alive is False, (
+        try:
+            os.kill(survivor,signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert state in _REAPED_STATES, (
         f"the surviving grandchild {survivor} (process group {direct_pid}) "
-        f"outlived the timeout: proc.kill() addresses the already-dead direct "
-        f"child, so only the group kill can reach it: {result!r}")
+        f"outlived the timeout: /proc/{survivor}/stat still reports state "
+        f"{state!r} after the 2 s bound; proc.kill() addresses the already-dead "
+        f"direct child, so only the group kill can reach it: {result!r}")
 
 
 def _grandchild_state(pid):

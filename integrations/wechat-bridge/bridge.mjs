@@ -67,6 +67,20 @@ const MiB = 1024 * 1024;
 export const MEDIA_LIMITS = Object.freeze({ image: 20 * MiB, file: 25 * MiB, voiceSource: 2 * MiB, voiceMs: 125_000,
   voiceWavMax: 12 * MiB, voiceWavUnknown: 6 * MiB, sendBody: 25 * MiB });
 const WAV_HEADER_SLACK = 4096;
+/** GET /media/:media_id's own deadlines, the host's (design 7.8.12 "入库的时限"): the puppet must
+ *  hand over a first byte within firstByteMs and the whole file within totalMs, or the fetch is
+ *  abandoned (the lock released, the partial deleted) and answered 503; so is one whose client
+ *  went away. A failure that is not a recognised refusal is transient (503), until a media_id has
+ *  failed `attempts` times: then it is gone (410), so one file never holds the owner's later
+ *  messages forever. */
+export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
+/** A puppet error that says this message will never be handed over (neo's refusal of a peer it
+ *  has not observed, an expired or unknown message): 410 gone at once. `createBridge({isGone})`
+ *  replaces it should the fork name its refusals otherwise. */
+export const isGoneError = error => /observed peer|expired|not found/i.test(String(error?.message ?? error));
+/** Whether a voice's bytes are something the fork can encode as a voice bar (a WAV). Anything
+ *  else goes straight out as a file; `createBridge({voiceEncodable})` replaces the rule. */
+export const isWav = bytes => wavByteRate(bytes.subarray(0, 4096)) !== undefined;
 /** The FileBox name decides what the fork sends (the platform director's interface): `.silk` a
  *  voice bar (the addon encodes), one of these an image, anything else a file attachment. */
 export const IMAGE_EXTENSIONS = Object.freeze(['jpg', 'jpeg', 'png', 'gif', 'webp']);
@@ -103,6 +117,14 @@ export function bindHost(value, inContainer) {
 const digest = value => createHash('sha256').update(String(value)).digest();
 // An error as one log line (never a QR: neither neo nor Wechaty puts one in an error).
 const short = error => String(error?.message ?? error?.data ?? error).slice(0, 200);
+/** `promise`, or a rejection with the signal's reason as soon as it aborts (the promise is left to settle). */
+const raced = (promise, signal) => new Promise((resolve, reject) => {
+  if (signal.aborted) return reject(signal.reason);
+  const stop = () => reject(signal.reason);
+  signal.addEventListener('abort', stop, { once: true });
+  Promise.resolve(promise).then(value => { signal.removeEventListener('abort', stop); resolve(value); },
+    error => { signal.removeEventListener('abort', stop); reject(error); });
+});
 
 /** The room a message was posted in, or undefined for a 1:1 message: the message payload's
  *  own `roomId`, the field Wechaty's `message.room()` reads before it loads a Room. Never
@@ -136,21 +158,23 @@ const count = value => {
  *  size?, too_large?} - or undefined when it is not one of the kinds 24.2 takes (design
  *  7.8.12 "收的白名单与引用回复"): an image (WeChat type 3), a voice (34) or a file (49 with
  *  appmsg type 6). Wechaty's type decides; the fork's raw `messageType`, when the payload has
- *  one, must agree, and a file whose XML the payload carries must say appmsg type 6 and quote
- *  nothing - a quoted reply (49/57) is never let in. Sizes and the file name are what WeChat's
+ *  one, must agree (a 49 the fork files as Unknown is taken by its raw type). A file is let in
+ *  only when the payload carries its XML and that says appmsg type 6 and quotes nothing: a
+ *  quoted reply (49/57), or a 49 whose XML cannot be read, is never let in. Sizes and the file name are what WeChat's
  *  XML reports (not trusted: GET /media/:media_id counts the real bytes). */
 export function mediaOf(message, types, limits = MEDIA_LIMITS) {
   const type = message.type();
   const kinds = [['image', types.Message?.Image, 3], ['voice', types.Message?.Audio, 34], ['file', types.Message?.Attachment, 49]];
-  const found = kinds.find(([, value]) => value !== undefined && value === type);
+  const payload = message.payload ?? {};
+  let found = kinds.find(([, value]) => value !== undefined && value === type);
+  // The fork's patch files WeChat's 49 under Unknown: its raw type and the XML checks below decide.
+  if (!found && types.Message?.Unknown !== undefined && type === types.Message.Unknown && payload.messageType === 49) found = kinds[2];
   if (!found) return undefined;
   const [kind, , raw] = found;
-  const payload = message.payload ?? {};
   if (payload.messageType !== undefined && payload.messageType !== raw) return undefined;
   const xml = contentXml(payload.content);
-  if (kind === 'file' && xml !== undefined) {
-    if (/<refermsg[\s>]/.test(xml) || element(xml.slice(xml.indexOf('<appmsg')), 'type') !== '6') return undefined;
-  }
+  if (kind === 'file' && (xml === undefined || /<refermsg[\s>]/.test(xml)
+    || element(xml.slice(xml.indexOf('<appmsg')), 'type') !== '6')) return undefined;
   const described = { kind };
   let size;
   if (xml !== undefined) {
@@ -213,8 +237,9 @@ const splitName = name => {
  *  under an image extension (its own, or the one its mime names); a voice first as `.silk` (a
  *  voice bar), then - should that be refused or fail - the same bytes under its own name as a
  *  file; a file under its own name, with `.bin` added when that name would make the fork send
- *  it as an image or a voice bar. Undefined when an image has no image extension or mime. */
-export function sendNames({ kind, mime, name, durationMs }, voiceName = voiceFileName) {
+ *  it as an image or a voice bar. A voice the fork cannot encode (`encodable` false: not a WAV)
+ *  goes only as a file. Undefined when an image has no image extension or mime. */
+export function sendNames({ kind, mime, name, durationMs, encodable = true }, voiceName = voiceFileName) {
   const clean = cleanName(name) || kind;
   const [stem, extension] = splitName(clean);
   const asFile = IMAGE_EXTENSIONS.includes(extension) || extension === 'silk' ? `${clean}.bin` : clean;
@@ -223,7 +248,8 @@ export function sendNames({ kind, mime, name, durationMs }, voiceName = voiceFil
     const fromMime = IMAGE_MIME_EXTENSIONS[String(mime ?? '').toLowerCase()];
     return fromMime ? [{ as: 'image', name: `${stem}.${fromMime}` }] : undefined;
   }
-  if (kind === 'voice') return [{ as: 'voice', name: voiceName({ stem, durationMs }) }, { as: 'file', name: asFile }];
+  if (kind === 'voice') return encodable ? [{ as: 'voice', name: voiceName({ stem, durationMs }) }, { as: 'file', name: asFile }]
+    : [{ as: 'file', name: asFile }];
   return [{ as: 'file', name: asFile }];
 }
 
@@ -272,7 +298,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS,
   groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, voiceName = voiceFileName }) {
+  mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, voiceName = voiceFileName, fetchLimits = MEDIA_FETCH,
+  isGone = isGoneError, voiceEncodable = isWav }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
@@ -567,42 +594,56 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     return message.toFileBox();
   };
 
-  /** The FileBox's bytes into `file` (tmpfs), counted as they come: {size} or {too_large} at the
-   *  kind's bound (a voice: 2 min 5 s of WAV by its header's rate); the caller deletes the file. */
-  const spool = async (box, file, kind) => {
-    const source = typeof box?.toStream === 'function' ? await box.toStream()
-      : typeof box?.toBuffer === 'function' ? [await box.toBuffer()] : undefined;
-    if (!source) throw new Error('the puppet gave no file');
-    const handle = await open(file, 'wx', 0o600);
-    let size = 0, head = Buffer.alloc(0), cap = kind === 'voice' ? undefined : mediaLimits[kind];
+  /** A local (tmpfs) failure: never the media's fault, so never counted against it. */
+  const local = error => Object.assign(error instanceof Error ? error : new Error(String(error)), { local: true });
+
+  /** The live attachment's bytes into `file` (tmpfs), counted as they come: {size, mime} or
+   *  {too_large} at the kind's bound (a voice: 2 min 5 s of WAV by its header's rate). `signal`
+   *  abandons it at once (the source destroyed); `firstByte` is called with each chunk. The
+   *  file is opened before the puppet is asked; the caller deletes it. */
+  const spool = async (entry, file, signal, firstByte) => {
+    const { kind } = entry;
+    let handle, source;
+    try { handle = await open(file, 'wx', 0o600); } catch (error) { throw local(error); }
     try {
-      for await (const chunk of source) {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const box = await raced(fetchBox(entry), signal);
+      source = typeof box?.toStream === 'function' ? await raced(box.toStream(), signal)
+        : typeof box?.toBuffer === 'function' ? [await raced(box.toBuffer(), signal)] : undefined;
+      if (!source) throw new Error('the puppet gave no file');
+      const chunks = source[Symbol.asyncIterator]?.() ?? source[Symbol.iterator]();
+      let size = 0, head = Buffer.alloc(0), cap = kind === 'voice' ? undefined : mediaLimits[kind];
+      for (;;) {
+        const { value, done } = await raced(chunks.next(), signal);
+        if (done) break;
+        firstByte();
+        const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
         size += bytes.length;
         if (cap === undefined) {
           head = Buffer.concat([head, bytes]).subarray(0, 4096);
           if (head.length >= 512) cap = wavByteCap(head, mediaLimits);
         }
         if (size > (cap ?? mediaLimits.voiceWavMax)) return { too_large: true };
-        await handle.write(bytes);
+        try { await handle.write(bytes); } catch (error) { throw local(error); }
       }
       if (cap === undefined && size > wavByteCap(head, mediaLimits)) return { too_large: true };
       return { size, mime: kind === 'voice' ? 'audio/wav' : box.mediaType };
     } finally {
-      await handle.close();
-      // Leaving the loop early (the cut) stops the source.
-      source.destroy?.();
+      await handle.close().catch(error => log('media file not closed: ' + short(error)));
+      // Leaving early (the cut, a deadline, the client gone) stops the source.
+      source?.destroy?.();
     }
   };
 
   /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out. 404:
-   *  not live (never was, or its event left the ring); 410 gone: another login's message, or the
-   *  puppet refused it; 503 busy: another fetch is running (one at a time); 413 too_large: more
-   *  bytes than its bound. The bytes sit in tmpfs only while this answer runs. */
+   *  not live (never was, or its event left the ring); 410 gone: another login's message, a
+   *  refusal `isGone` recognises, or one that failed fetchLimits.attempts times; 503: another
+   *  fetch is running (busy, one at a time), or this one failed, ran out of time or lost its
+   *  client (unavailable, transient); 413 too_large: more bytes than its bound. The bytes sit in
+   *  tmpfs only while this answer runs. */
   async function serveMedia(mediaId, response) {
     const entry = live.get(mediaId);
     if (!entry) return reply(response, 404, { error: 'not_found' });
-    if (entry.generation !== generation || !bot) return reply(response, 410, { error: 'gone' });
+    if (entry.generation !== generation || !bot || entry.gone) return reply(response, 410, { error: 'gone' });
     if (fetching) return reply(response, 503, { error: 'busy' });
     fetching = true;
     const file = join(tmpDir, `wechat-media-${randomBytes(8).toString('hex')}`);
@@ -615,13 +656,29 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       try { rmSync(file, { force: true }); } catch (error) { log('media file not deleted: ' + short(error)); }
       fetching = false;
     };
+    const abandon = new AbortController();
+    const timeout = what => () => abandon.abort(new Error(`media fetch timed out: ${what}`));
+    const firstTimer = setTimeout(timeout(`no first byte in ${fetchLimits.firstByteMs} ms`), fetchLimits.firstByteMs);
+    const totalTimer = setTimeout(timeout(`not whole in ${fetchLimits.totalMs} ms`), fetchLimits.totalMs);
+    const left = () => { if (!response.writableFinished) abandon.abort(new Error('the client went away')); };
+    response.on('close', left);
     try {
       let spooled;
-      try { spooled = await spool(await fetchBox(entry), file, entry.kind); }
+      try { spooled = await spool(entry, file, abandon.signal, () => clearTimeout(firstTimer)); }
       catch (error) {
-        log(`media ${entry.kind} not fetched: ${short(error)}`);
         release();
-        return reply(response, 410, { error: 'gone' });
+        let status = 503;
+        if (!error?.local && (isGone(error) || (entry.failures = (entry.failures ?? 0) + 1) >= fetchLimits.attempts)) {
+          entry.gone = true;
+          status = 410;
+        }
+        log(`media ${entry.kind} not fetched (${status === 410 ? 'gone' : 'held'}): ${short(error)}`);
+        if (response.destroyed) return;
+        return reply(response, status, { error: status === 410 ? 'gone' : 'unavailable' });
+      } finally {
+        clearTimeout(firstTimer);
+        clearTimeout(totalTimer);
+        response.off('close', left);
       }
       if (spooled.too_large) { release(); return reply(response, 413, { error: 'too_large' }); }
       response.writeHead(200, { 'content-type': typeof spooled.mime === 'string' && spooled.mime ? spooled.mime : 'application/octet-stream',
@@ -724,7 +781,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         return reply(response, 200, await events(cursor, Math.min(wait, maxWaitSeconds), response));
       }
       const mediaPath = /^\/media\/([^/]+)$/.exec(url.pathname);
-      if (request.method === 'GET' && mediaPath) return await serveMedia(decodeURIComponent(mediaPath[1]), response);
+      // A media_id is '<seq>.<index>', as the bridge made it; anything else is not one.
+      if (request.method === 'GET' && mediaPath) return /^\d+\.\d+$/.test(mediaPath[1])
+        ? await serveMedia(mediaPath[1], response) : reply(response, 404, { error: 'not_found' });
       if (request.method === 'POST' && url.pathname === '/send-file') {
         // Step 24.2: ?to= (the bound owner) or ?room= (a bound group), kind, mime, name; the body
         // is the file's bytes, at most mediaLimits.sendBody.
@@ -733,7 +792,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         const to = query.get('to') ?? '', room = query.get('room') ?? '', kind = query.get('kind') ?? '';
         const mime = query.get('mime') ?? '', name = query.get('name') ?? '';
         const names = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
-          ? sendNames({ kind, mime, name, durationMs: kind === 'voice' ? wavDurationMs(bytes) : undefined }, voiceName) : undefined;
+          ? sendNames({ kind, mime, name, durationMs: kind === 'voice' ? wavDurationMs(bytes) : undefined,
+            encodable: kind !== 'voice' || voiceEncodable(bytes) }, voiceName) : undefined;
         if (!names || !bytes.length || Boolean(to) === Boolean(room)) return reply(response, 400, { error: 'bad_request' });
         if (typeof makeFileBox !== 'function') return reply(response, 501, { error: 'not_supported' });
         const [status, result] = await sendFile({ to, room }, bytes, names);

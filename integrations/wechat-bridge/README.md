@@ -209,18 +209,23 @@ director gave it: `messageFile`/`messageImage`/`messageVoice` → FileBox, a voi
   kind, mime?, name?, size?}]` - a description only, nothing is fetched on arrival. Over the
   size WeChat reports (image 20 MiB, file 25 MiB, the voice's SILK 2 MiB): `too_large:
   true` and no `media_id`. In the stranger buffer (`owner_ref` set, another sender):
-  `gone: true` and no `media_id`. Group messages stay text only.
-- `GET /media/<media_id>` → the bytes (a voice as `audio/wav`), fetched from WeChat now
-  and held in `/tmp` only while answering. `404 not_found` (its event left the ring, or
-  never was), `410 gone` (another login's message, or the puppet refused it), `503 busy`
-  (another fetch is running), `413 too_large` (more bytes than the bound; a voice over 2
-  min 5 s of WAV by its header's rate).
+  `gone: true` and no `media_id`. Group messages stay text only. A file (49) is let in only
+  when its appmsg XML is in the payload and says type 6 with no quote; the fork filing 49
+  under Wechaty's `Unknown` is accepted by the raw type.
+- `GET /media/<media_id>` (`<seq>.<index>`; anything else is `404`) → the bytes (a voice as
+  `audio/wav`), fetched from WeChat now and held in `/tmp` only while answering. `404
+  not_found` (its event left the ring, or never was), `410 gone` (another login's message,
+  a puppet refusal the bridge recognises - `observed peer`, `expired`, `not found` - or the
+  5th failed fetch of the same media_id), `503 busy` (another fetch is running), `503
+  unavailable` (any other failure: the puppet, `/tmp`, no first byte in 30 s, not whole in
+  120 s, or the client went away - the lock is released and the partial deleted), `413
+  too_large` (more bytes than the bound; a voice over 2 min 5 s of WAV by its header's rate).
 - `POST /send-file?to=<wxid>|room=<room>&kind=image|voice|file&mime=&name=` with the
   file's bytes as the body (at most 25 MiB, `413 body_too_large`) → `{ref, sent_as}`. An
   image goes under an image extension, a file under its own name (`.bin` added when that
-  name would read as an image or a voice); a voice first as `<stem>.silk` (a voice bar),
-  and when that is refused or fails, the same bytes again under its own name as a file
-  (`sent_as: "file"`). Group sends share the group queue and its backstop.
+  name would read as an image or a voice); a voice that is a WAV first as `<stem>.silk` (a
+  voice bar), and when that is refused or fails, the same bytes again under its own name as
+  a file (`sent_as: "file"`); a voice in any other format goes as a file at once. Group sends share the group queue and its backstop.
 
 Message texts are never logged.
 

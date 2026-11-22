@@ -5,15 +5,17 @@ What it runs: two ``node --test`` invocations, each from its own suite directory
 nothing else.
 
 * ``integrations/dsh-director`` -- argv ``[<node>, "--test", <every test/*.test.mjs>]``,
-  which is exactly the suite's own ``node --test test/*.test.mjs`` discovery. When this
-  row was written the suite printed ``ℹ tests 164`` / ``ℹ pass 164`` / ``ℹ fail 0`` /
-  ``ℹ duration_ms 57636`` in the shipped image (2026-11-19, tree 9678b68e08, node
-  v24.22.3), and this row asserts that exact summary as the suite's floor.
+  which is exactly the suite's own ``node --test test/*.test.mjs`` discovery. The floor is
+  ``ℹ tests 463`` / ``ℹ pass 463`` / ``ℹ fail 0``, measured in the shipped image on
+  2026-11-22 (tree ebc3447ed98e, node v24.22.3, this row's own timer 116.9 s). It replaces
+  164: the director suite grew after the row was written on 2026-11-19, and neither branch
+  merged into that tree touches ``integrations/dsh-director``, so the old floor was stale
+  rather than this branch's count.
 * ``integrations/dsh-channel-wechat`` -- argv ``[<node>, "--test", "index.test.mjs"]``,
   the suite's own npm-script argv, the file named explicitly because it sits at the suite
-  root rather than under a ``test/`` directory. When this row was written it printed
-  ``ℹ tests 17`` / ``ℹ pass 17`` / ``ℹ fail 0`` / ``ℹ duration_ms 1866`` in the same
-  image and tree, and that exact summary is the floor asserted here too.
+  root rather than under a ``test/`` directory. The floor is ``ℹ tests 33`` /
+  ``ℹ pass 33`` / ``ℹ fail 0``, measured in the same image and tree on the same day
+  (3.0 s on that timer): 17 until this branch's media interface tests landed.
 
 The counts are floors, not guesses: a run that prints fewer ``tests`` or fewer ``pass``
 than the numbers above has silently dropped cases, and this row goes RED and says so.
@@ -108,15 +110,15 @@ SUITES = (
         name="dsh-director",
         files=None,
         test_dir="test",
-        expected_tests=164,
-        expected_pass=164,
+        expected_tests=463,
+        expected_pass=463,
     ),
     Suite(
         name="dsh-channel-wechat",
         files=("index.test.mjs",),
         test_dir=None,
-        expected_tests=17,
-        expected_pass=17,
+        expected_tests=33,
+        expected_pass=33,
     ),
 )
 

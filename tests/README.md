@@ -94,3 +94,29 @@ N shards by measured seconds from `tools/test_durations.json`. Files the
 durations file does not name are charged its median. Regenerate the file from
 `--durations=0` logs with `tools/shard_by_duration.py measure LOG[:LIST] ...`.
 The committed file was seeded from the 2026-11-21 full-suite audit shards.
+
+## State database templates
+
+Building State schema on a fresh SQLite file costs about 2 s under load (each
+DDL statement and each last close is an fsync in WAL mode). A fixture that
+needs an empty State world copies a template instead:
+
+```python
+from tests.support import state_template
+
+@pytest.fixture
+def world(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
+    ...  # the same constructors as before; on an existing schema they are cheap
+```
+
+`state_db_copy(recipe, dest)` (tests/conftest.py) builds the recipe's template
+once per session (per xdist worker), copies it to `dest` and returns the path.
+Every test gets its own file. Pick the recipe in tests/support/state_template.py
+whose constructors match the fixture's (`state`, `state_registry`,
+`state_registry_dsh`, `dbm`, `dbm_graph`, `dbm_graph_attempts`, `dbm_state`).
+There is no universal template: product code branches on whether a table such
+as `drivers` exists, so a template with extra tables would change what a test
+exercises. Tests whose subject is schema creation, migration or write-lock
+behaviour keep building fresh files. The conftest `db_manager` and `client`
+fixtures use the `dbm` template.

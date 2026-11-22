@@ -7,6 +7,7 @@ import pytest
 
 from core.db_manager import DBManager
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore, StateNotFound
+from tests.support import state_template
 
 
 def node(k, deps=None, priority=0):
@@ -15,8 +16,9 @@ def node(k, deps=None, priority=0):
 
 
 @pytest.fixture
-def store(tmp_path):
-    result = StateGraphStore(DBManager(str(tmp_path / "state.sqlite")), project_read_trusted=True)
+def store(tmp_path, state_db_copy):
+    result = StateGraphStore(DBManager(state_db_copy(state_template.dbm_graph, tmp_path / "state.sqlite")),
+                             project_read_trusted=True)
     result.create_project("shrimp", "Shrimp game")
     return result
 

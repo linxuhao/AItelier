@@ -6,6 +6,7 @@ from core.state_commands import execute, PUBLIC_READS
 from core.state_graph import StateGraphError
 from core.drivers import DriverRegistry
 from core.director_messaging_protocol import DirectorMessageError
+from tests.support import state_template
 
 # The pre-ack mailbox the migration row replays. It is read out of the git object
 # store, so the row needs a checkout WITH history, not a docker daemon.
@@ -26,8 +27,8 @@ def _git_object_present(revision_path):
   return False
 
 @pytest.fixture
-def peers(tmp_path):
- db=StateDatabase(str(tmp_path/"state.sqlite"))
+def peers(tmp_path, state_db_copy):
+ db=StateDatabase(state_db_copy(state_template.state_registry, tmp_path/"state.sqlite"))
  seed=StateService(db,actor="fixture",project_read_trusted=True)
  seed.create_project("alpha","alpha");seed.create_project("beta","beta")
  registry=DriverRegistry(db,"test-only-pepper-not-a-production-secret")

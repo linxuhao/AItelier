@@ -29,6 +29,7 @@ from core.state_service import StateService
 import sqlite3
 
 from core.state_steward import INTERRUPTED, OLD_KIND_CHECK, SCHEMA, ProposalConflict
+from tests.support import state_template
 
 HOME = "aitelier-home"
 OWNER = "owner@example.com"
@@ -45,8 +46,8 @@ CREATE = {"project_id": "gamma", "title": "Gamma", "goal": "a new project", "see
 
 
 @pytest.fixture
-def world(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def world(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, PEPPER)
     registry.seed("steward-proposal-owner-cli-token")
     seeder = StateService(db, actor="fixture", project_read_trusted=True)

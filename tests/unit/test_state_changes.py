@@ -9,11 +9,13 @@ from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.state_commands import execute
 from core.state_changes import _waiters
+from tests.support import state_template
 
 
 @pytest.fixture
-def service(tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), project_read_trusted=True)
+def service(tmp_path, state_db_copy):
+    service = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")),
+                           project_read_trusted=True)
     service.create_project("p", "Project")
     service.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": [
         {"id": "check", "kind": "test", "description": "Test"}]}])

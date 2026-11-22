@@ -24,6 +24,7 @@ from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
 from core.state_steward import EXPIRED
+from tests.support import state_template
 
 HOME = "aitelier-home"
 OWNER = "owner@example.com"
@@ -33,8 +34,8 @@ NODE = {"key": "n1", "goal": HOME_TEXT, "acceptance": [{"id": "a", "kind": "test
 
 
 @pytest.fixture
-def world(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def world(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, "steward-home-pepper-" * 3)
     registry.seed("steward-home-owner-cli-token")
     seeder = StateService(db, actor="fixture", project_read_trusted=True)

@@ -438,8 +438,9 @@ def test_the_press_witness_one_run_real_backend_real_dsh_adapter_and_recording(w
 
 # --- 6. two groups (step 23.1, design-steward 7.7.16 end item 4) ---------------------------------
 
-# The scripted model of the two-group run: group A's turn notes a family-memory marker and asks
-# for a one-time reminder to A (its words another marker, due tomorrow); group B's turn reads its
+# The scripted model of the two-group run: group A's turn notes a family-memory marker, asks
+# for a one-time reminder to A (its words another marker, due tomorrow) and adds a list item (a
+# third marker, director 602 claim 6: the list arm of the witness); group B's turn reads its
 # family memory and lists and asks for a reminder to B due in 45 s; the owner's turn reads the
 # reminder list. Every request body is recorded.
 PROVIDER_TWO = r"""
@@ -463,7 +464,8 @@ export function apply(ctx) {
       if (options.purpose === 'compaction' || !options.tools?.length || options.sessionId !== process.env.AITELIER_DSH_SESSION)
         block = { type: 'text', text: 'Fixture.' };
       else if (phase === 1) block = after === 'a1' ? once('a2', 'group_reminder_set', { at: soon(86400000), text: process.env.W231_REMINDER_A })
-        : after === 'a2' ? { type: 'text', text: 'A_W231_ANSWER' } : once('a1', 'family_memory_note', { text: process.env.W231_MARKER });
+        : after === 'a2' ? once('a3', 'list_add', { list: 'shopping', items: [process.env.W231_LIST_A] })
+        : after === 'a3' ? { type: 'text', text: 'A_W231_ANSWER' } : once('a1', 'family_memory_note', { text: process.env.W231_MARKER });
       else if (phase === 2) block = after === 'b1' ? once('b2', 'list_show', {})
         : after === 'b2' ? once('b3', 'group_reminder_set', { at: soon(45000), text: process.env.W231_REMINDER_B })
         : after === 'b3' ? { type: 'text', text: 'B_W231_ANSWER' } : once('b1', 'family_memory_show', {});
@@ -524,10 +526,11 @@ export function apply(ctx) {
 
 def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder_goes_to_its_group(
         world, http, served, monkeypatch):
-    """Design-steward 7.7.16 end item 4 (step 23.1): group A's turn writes a family-memory marker
-    and asks for a reminder to A (its words a second marker); group B's turn right after reads its
-    family memory and lists and asks for a reminder to B. No request body of B's turn, nor B's
-    family_memory_show answer, carries A's marker, A's question or A's name; A's reply went only
+    """Design-steward 7.7.16 end item 4 (step 23.1): group A's turn writes a family-memory marker,
+    asks for a reminder to A (its words a second marker) and adds a list item (a third marker,
+    director 602 claim 6); group B's turn right after reads its family memory and lists and asks
+    for a reminder to B. No request body of B's turn, nor B's family_memory_show and list_show
+    answers, carries A's markers, A's question or A's name; A's reply went only
     to A and B's only to B; B's reminder is sent only into B when due; the owner's next turn
     (it reads schedule_list) carries neither the family marker nor either reminder's words."""
     node = shutil.which("node")
@@ -541,6 +544,7 @@ def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder
     monkeypatch.setattr(world.runtime, "running", lambda project_id: project_id == "aitelier-home")
     marker, reminder_a, reminder_b = ("FAMILY-" + str(uuid.uuid4()), "REMIND-A-" + str(uuid.uuid4())[:8],
                                       "REMIND-B-" + str(uuid.uuid4())[:8])
+    list_a = "LISTA-" + uuid.uuid4().hex[:10]
     driver_id = world.steward_row["driver_id"]
     directory = Path(tempfile.mkdtemp(prefix="w231-witness-", dir=Path.home()))
     proc = None
@@ -569,7 +573,7 @@ def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder
             "AITELIER_SECRETS_DIR": str(directory / "no-secrets"), "AITELIER_DSH_ROLE": "steward",
             "AITELIER_DSH_MEMORY_USER": "owner", "AITELIER_DSH_MEMORY_ROOT": str(directory / "memory"),
             "W231_RECORD": str(record), "W231_CHANNEL": str(channel), "W231_MARKER": marker,
-            "W231_REMINDER_A": reminder_a, "W231_REMINDER_B": reminder_b,
+            "W231_REMINDER_A": reminder_a, "W231_REMINDER_B": reminder_b, "W231_LIST_A": list_a,
             "W231_OWNER": OWNER_WX, "W231_MEMBER": MEMBER, "W231_ROOM_A": ROOM, "W231_ROOM_B": ROOM2})
         log = (directory / "dsh.log").open("wb")
         proc = subprocess.Popen([node, str(DSH_ENTRY), "--profile", "driver"], cwd=directory, env=env,
@@ -592,13 +596,16 @@ def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder
         # its title); B's turn a reminder to B.
         with world.db.get_connection() as conn:
             assert [tuple(r) for r in conn.execute("SELECT group_ref, text FROM state_family_memory")] == [(ROOM, marker)]
+            # Director 602 claim 6: A's turn put an item on A's list - the list arm has something to keep from B.
+            assert [tuple(r) for r in conn.execute("SELECT group_ref, list, text FROM state_steward_list_items "
+                                                   "WHERE deleted_at IS NULL")] == [(ROOM, "shopping", list_a)]
             made = {r[0]: r[1:] for r in conn.execute("SELECT instruction, target_group_ref, created_via, title "
                                                       "FROM state_steward_schedules")}
         assert made[reminder_a][:2] == (ROOM, "group") and made[reminder_a][2].startswith("家人建的提醒 · " + label_a)
         assert made[reminder_b][:2] == (ROOM2, "group")
         # B's turn: no byte of A's marker, question, reminder words or name - in any request body ...
         for r in turn(2):
-            for secret in (marker, "A_W231_QUESTION", "A_W231_ANSWER", reminder_a, label_a):
+            for secret in (marker, "A_W231_QUESTION", "A_W231_ANSWER", reminder_a, label_a, list_a):
                 assert secret not in r["body"] and escaped(secret) not in r["body"], (secret, r["after"])
         assert any("B_W231_QUESTION" in r["body"] for r in turn(2))
         # ... nor in what B's family_memory_show and list_show answered (the backend's bytes).
@@ -610,6 +617,7 @@ def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder
         for c in shown:
             assert c["read_as"] == "public" and c["status"] == 200, c
             assert marker.encode() not in c["answer"] and label_a.encode() not in c["answer"]
+            assert list_a.encode() not in c["answer"]
             assert escaped(label_a).encode() not in c["answer"]
         # Each reply went to its own group only; B's reminder only into B.
         groups_out = [(n["room"], n["text"]) for n in notes if n["kind"] == "group"]
@@ -622,7 +630,7 @@ def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder
                   and c["read_as"] is None and c["status"] == 200]
         assert listed
         for r in turn(3):
-            for secret in (marker, reminder_a, reminder_b, "A_W231_QUESTION", "B_W231_QUESTION"):
+            for secret in (marker, reminder_a, reminder_b, list_a, "A_W231_QUESTION", "B_W231_QUESTION"):
                 assert secret not in r["body"] and escaped(secret) not in r["body"], (secret, r["after"])
         assert any(r["after"] == "o1" and "家人建的提醒" in r["body"] for r in turn(3)), "schedule_list showed the titles"
     finally:

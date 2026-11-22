@@ -377,14 +377,20 @@ fits a task, add one that way; never improvise items.
 The plugin ships a default set in `integrations/dsh-director/todo/todo_templates/`,
 used when the host names no directory: `change_files` (change named files inside
 a scope) and `cost_audit`. `cost_audit` is the read-only audit director.md asks
-for when checks get slower or after every 20 delivered work items: the child
-times the project's check commands (given as data in `measure_commands`, any
-language or runner, or none) and writes one JSON report (`report_path`, default
-`cost-audit.json`) with `measured_commands`, `baseline`, `costliest`, `findings`
-(each with category, where, cost, evidence, proposed change, what still guards
-it, risk) and `recommendations`. It proposes; nothing waits on it. This
-repository's `todo_templates/cost_audit.yaml` is a symlink to the plugin's file,
-so both sets carry one source.
+for when the owner asks, a reported slowdown, or every 20 delivered work items:
+the child times the project's check commands once (given as data in
+`measure_commands`, any language or runner, or none), judges them against
+`limits` (default: a single test under 10 s, the full check under 10 min) and
+writes one JSON report (`report_path`, default `cost-audit.json`) with
+`measured_commands`, `baseline`, `costliest`, `findings` (each with category,
+where, cost, evidence, proposed change, what still guards it, risk) and
+`recommendations`. The child never sees the template's description, so the item
+title carries the rules that matter and the director passes the description as
+the plan's goal. It proposes; nothing waits on it. A host that names its own
+template directory replaces the default set, so it copies or links
+`cost_audit.yaml` into that directory; this repository's
+`todo_templates/cost_audit.yaml` is a symlink to the plugin's file, so both sets
+carry one source.
 
 Director only, registered on the root agent's scope (children never see them):
 

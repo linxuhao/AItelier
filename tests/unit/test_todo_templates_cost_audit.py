@@ -57,7 +57,8 @@ def test_it_loads_and_binds_only_predicates_the_library_has():
 @pytest.mark.parametrize("commands", [["npm test"], ["go test ./...", "go vet ./..."], None],
                          ids=["node", "go", "no-test-command"])
 def test_it_expands_for_any_project_with_its_commands_as_data(commands):
-    params = {"report_path": "audit/cost.json", "scope": ["audit/"], "previous_report": "audit/old.json"}
+    params = {"report_path": "audit/cost.json", "scope": ["audit/"], "previous_report": "audit/old.json",
+              "limits": "a single test under 2 s, the full check under 90 s"}
     if commands is not None:
         params["measure_commands"] = commands
     audit = expand(params)
@@ -65,6 +66,15 @@ def test_it_expands_for_any_project_with_its_commands_as_data(commands):
         "files_changed": {"paths": ["audit/cost.json"]},
         "report_json": {"path": "audit/cost.json", "require_keys": KEYS}}
     assert ", ".join(commands or []) in audit["title"] and "audit/old.json" in audit["title"]
+    assert params["limits"] in audit["title"], "the project's own limits reach the child"
+
+
+def test_the_child_sees_the_rules_that_matter_in_its_item_title():
+    # The child sees the plan's goal, item titles and predicates, never the template description.
+    title = expand({})["title"]
+    assert "Read-only" in title and "change nothing but cost-audit.json" in title
+    assert "once" in title and "still_guarded_by" in title and "owner decides" in title
+    assert "a single test under 10 s, the full check under 10 min" in title, "the default limits"
 
 
 def test_its_defaults_alone_make_a_plan():
@@ -124,3 +134,7 @@ def test_the_repository_template_set_carries_the_same_file():
 def test_the_shipped_director_prompt_names_it():
     director = (REPO_ROOT / "integrations" / "dsh-director" / "director.md").read_text()
     assert "cost_audit template" in director and (PLUGIN_TEMPLATES / "cost_audit.yaml").is_file()
+    # It tells the director to bind "check commands and limits": both are declared params.
+    params = load_template("cost_audit", builtin_library(), PLUGIN_TEMPLATES).params
+    assert "check commands and limits as its params" in " ".join(director.split())
+    assert {"measure_commands", "limits"} <= set(params)

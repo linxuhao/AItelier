@@ -13,6 +13,8 @@ Five names are the host's to supply, because they are policy the host already ow
   refuses with (`report_rejected`). Any exception is the CLI's `internal` refusal.
 * `TEMPLATES_DIR` - where the host keeps its reviewed templates, or None for the package's own
   `todo_templates/` beside `dsh_todo/`. The TEMPLATES setting still overrides it (templates.py).
+  Either replaces the package's set, so the host's directory also carries the package's
+  `cost_audit.yaml` (copy or link it): director.md tells every director to dispatch it.
 * `setting(name) -> str | None` - the package's three settings, STATE_DIR (the plan store's
   parent), TEMPLATES (a template directory) and CLOCK_OVERRIDE ("1" lets `--now` move the
   clock). The default reads DSH_TODO_<name>; a host may also honour names of its own.

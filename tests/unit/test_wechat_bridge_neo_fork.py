@@ -256,6 +256,9 @@ def test_the_native_stage_builds_the_pinned_commit_with_the_pinned_patch(pin: di
     assert "cargo build --release --locked" in native
     assert "git apply" in native
     assert re.search(r"npm-cli\.js test", native), "the native stage does not test what it built"
+    assert re.search(r"cargo test --release --locked --lib", native), (
+        "the native stage builds the fork but never runs its own tests"
+    )
 
 
 def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin: dict) -> None:

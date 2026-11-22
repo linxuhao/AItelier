@@ -18,6 +18,9 @@
 # not Docker's default bridge: inside, the bridge listens on 0.0.0.0, and on the
 # default bridge every other container on docker0 could reach it, the token being
 # the only guard. On its own network no other container shares its segment.
+#
+# /tmp is a 32 MiB tmpfs (step 24.2): GET /media/:media_id holds one fetched file there while
+# it answers (at most 25 MiB, one at a time) and deletes it after.
 set -eu
 
 token="$HOME/.aitelier-secrets/wechat-bridge-token"
@@ -32,7 +35,7 @@ docker network inspect "$network" >/dev/null 2>&1 || docker network create "$net
 exec docker run --detach --name aitelier-wechat-bridge \
   --network "$network" \
   --restart unless-stopped \
-  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m \
   --cap-drop ALL --security-opt no-new-privileges \
   --memory 512m --memory-swap 512m --cpus 1 --pids-limit 256 \
   --publish "127.0.0.1:${WECHAT_BRIDGE_PORT:-18741}:18731" \

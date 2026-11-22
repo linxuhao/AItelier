@@ -1,50 +1,46 @@
-"""Run the director's and the WeChat channel's node test suites from pytest, and fail the
-gate if either one is red.
+"""Run the WeChat channel's node test suite from pytest, and fail the gate if it is red.
 
-What it runs: two ``node --test`` invocations, each from its own suite directory, and
-nothing else.
+What it runs: one ``node --test`` invocation from the suite directory, and nothing else.
 
-* ``integrations/dsh-director`` -- argv ``[<node>, "--test", <every test/*.test.mjs>]``,
-  which is exactly the suite's own ``node --test test/*.test.mjs`` discovery. The floor is
-  ``ℹ tests 463`` / ``ℹ pass 463`` / ``ℹ fail 0``, measured in the shipped image on
-  2026-11-22 (tree ebc3447ed98e, node v24.22.3, this row's own timer 116.9 s). It replaces
-  164: the director suite grew after the row was written on 2026-11-19, and neither branch
-  merged into that tree touches ``integrations/dsh-director``, so the old floor was stale
-  rather than this branch's count.
 * ``integrations/dsh-channel-wechat`` -- argv ``[<node>, "--test", "index.test.mjs"]``,
   the suite's own npm-script argv, the file named explicitly because it sits at the suite
   root rather than under a ``test/`` directory. The floor is ``ℹ tests 33`` /
-  ``ℹ pass 33`` / ``ℹ fail 0``, measured in the same image and tree on the same day
-  (3.0 s on that timer): 17 until this branch's media interface tests landed.
+  ``ℹ pass 33`` / ``ℹ fail 0``, measured in the shipped image on 2026-11-22 (tree
+  ebc3447ed98e, node v24.22.3, 3.0 s on this row's own timer): 17 until the WeChat media
+  interface tests landed.
 
 The counts are floors, not guesses: a run that prints fewer ``tests`` or fewer ``pass``
 than the numbers above has silently dropped cases, and this row goes RED and says so.
-Growth is allowed -- when a suite deliberately grows, raise the two numbers in the same
+Growth is allowed -- when the suite deliberately grows, raise the two numbers in the same
 commit, because the counts node prints are the record.
 
-Why: nothing else executes either suite. ``tests/integration/test_driver_node_suite_runs.py``
-runs the driver's suite; these two were shipped and were run by nobody, so a red director
-or WeChat channel suite could stay red without the repository gate noticing. This row is
-the one that runs both and makes any failure of either a failure of the gate.
+Why: nothing else executes this suite, so a red WeChat channel suite could stay red
+without the repository gate noticing.
 
-Dependencies: both suites resolve only the node standard library and files inside this
-repository. The director suite imports its own ``lib/``, ``hosts/``, ``conformance/``
-modules; the WeChat suite imports ``integrations/wechat-bridge/bridge.mjs``, whose HTTP
-layer takes its puppeteer/puppet dependencies as arguments instead of requiring them. So
-neither suite needs a ``node_modules`` tree of its own, an npm install, or the pinned
-``@deepseek-ai/dsh`` install under ``/opt/aitelier-dsh`` -- that install is the driver
-row's dependency, not this row's. ``node`` is expected at ``/usr/local/bin/node`` in the
-image.
+The director suite (``integrations/dsh-director``) used to be a second row here. It was
+removed because ``tests/integration/test_driver_node_suite_runs.py`` already runs every
+one of its tests: the driver suite's ``plugin-boundary.test.mjs`` imports all 20
+director test files (and its third test fails when the director's npm script names a
+file it does not import), so the driver row's ``pass == tests`` check is red whenever a
+director test is. Measured 2026-11-22: the director suite alone ran 403 tests, and all
+403 test names (with their nesting) appear among the driver run's 693.
 
-The third shipped suite, ``integrations/dsh-channel-slack``, is deliberately NOT included.
+Dependencies: the suite resolves only the node standard library and files inside this
+repository. It imports ``integrations/wechat-bridge/bridge.mjs``, whose HTTP layer takes
+its puppeteer/puppet dependencies as arguments instead of requiring them. So it needs no
+``node_modules`` tree of its own, no npm install, and not the pinned
+``@deepseek-ai/dsh`` install under ``/opt/aitelier-dsh``. ``node`` is expected at
+``/usr/local/bin/node`` in the image.
+
+The other shipped channel suite, ``integrations/dsh-channel-slack``, is deliberately NOT included.
 Its own witness test, ``the pinned Slack SDK resolves from the DSH runtime install and has
 what this plugin uses``, fails with MODULE_NOT_FOUND because the image's
 ``/opt/aitelier-dsh/node_modules`` carries no ``@slack``. It joins this row once the image
 installs the pinned ``@slack/socket-mode`` 3.1.1 and ``@slack/web-api`` 8.3.0, which makes
 that witness green; until then running it would only measure a missing install.
 
-Never a skip: where ``node`` is missing, where a suite directory or one of its test files
-is missing, where a suite exits 0 having run nothing, or where node's own summary lines
+Never a skip: where ``node`` is missing, where the suite directory or its test file
+is missing, where the suite exits 0 having run nothing, or where node's own summary lines
 cannot be parsed, the row FAILS, because the suite is then UNMEASURED and a skip would
 look like a pass. The verdict is taken from the counts node itself prints (its ``ℹ``
 summary lines), never from an assumption about them.
@@ -81,13 +77,8 @@ class Suite:
     """One shipped node suite: where it lives, which files its runner names, its floor."""
 
     name: str
-    # Files node is told to run, relative to the suite directory. ``None`` means the suite
-    # discovers its own files under ``test_dir``: every ``*.test.mjs`` there, which is what
-    # the suite's npm script's ``test/*.test.mjs`` glob expands to.
-    files: tuple[str, ...] | None
-    # Where ``files=None`` discovers from, relative to the suite directory (or ``None``
-    # when the suite sits at its own root).
-    test_dir: str | None
+    # Files node is told to run, relative to the suite directory.
+    files: tuple[str, ...]
     # The ``ℹ tests`` / ``ℹ pass`` counts this row measured when it was written. A run
     # below either is a run that dropped cases; growth is allowed but must be recorded
     # here in the same commit.
@@ -98,28 +89,12 @@ class Suite:
     def directory(self) -> Path:
         return ROOT / "integrations" / self.name
 
-    @property
-    def discovery_dir(self) -> Path:
-        if self.test_dir is None:
-            return self.directory
-        return self.directory / self.test_dir
 
-
-SUITES = (
-    Suite(
-        name="dsh-director",
-        files=None,
-        test_dir="test",
-        expected_tests=463,
-        expected_pass=463,
-    ),
-    Suite(
-        name="dsh-channel-wechat",
-        files=("index.test.mjs",),
-        test_dir=None,
-        expected_tests=33,
-        expected_pass=33,
-    ),
+WECHAT = Suite(
+    name="dsh-channel-wechat",
+    files=("index.test.mjs",),
+    expected_tests=33,
+    expected_pass=33,
 )
 
 
@@ -149,15 +124,6 @@ def _failing_names(output: str) -> list[str]:
 
 def _tail(output: str) -> str:
     return "\n".join(output.splitlines()[-TAIL_LINES:])
-
-
-def _files(suite: Suite) -> list[str]:
-    if suite.files is not None:
-        return list(suite.files)
-    return sorted(
-        str(path.relative_to(suite.directory))
-        for path in suite.discovery_dir.glob("*.test.mjs")
-    )
 
 
 def _run(suite: Suite, argv: list[str], home: Path) -> tuple[int, str, float]:
@@ -206,7 +172,7 @@ def _assert_suite_green(suite: Suite, home: Path) -> None:
             f"not skipped. This row expects {EXECUTOR}, where the suite ships with the "
             f"repository; a tree that drops the directory needs a decision, not a silent pass."
         )
-    files = _files(suite)
+    files = list(suite.files)
     missing = [name for name in files if not (suite.directory / name).is_file()]
     if missing:
         pytest.fail(
@@ -215,13 +181,6 @@ def _assert_suite_green(suite: Suite, home: Path) -> None:
             f"This row asserts the summary of {suite.expected_tests} tests; check the "
             f"suite's own runner and update the file list here if the suite legitimately moved."
         )
-    if not files:
-        pytest.fail(
-            f"suite {suite.name} has no test file to run: {suite.discovery_dir} holds no "
-            f"*.test.mjs, so discovery is broken or the suite is empty. UNMEASURED, not "
-            f"passing and not skipped."
-        )
-
     argv = [str(NODE), "--test", *files]
     rc, output, wall = _run(suite, argv, home)
     counts = _summary(output)
@@ -289,10 +248,5 @@ def _assert_suite_green(suite: Suite, home: Path) -> None:
     )
 
 
-@pytest.mark.slow
-def test_director_node_suite_passes_under_node_test(tmp_path: Path) -> None:
-    _assert_suite_green(SUITES[0], tmp_path)
-
-
 def test_channel_wechat_node_suite_passes_under_node_test(tmp_path: Path) -> None:
-    _assert_suite_green(SUITES[1], tmp_path)
+    _assert_suite_green(WECHAT, tmp_path)

@@ -884,6 +884,8 @@ def recorded_turn(conn) -> str | None:
 
 
 def _origin(url: str):
+    """(scheme, host, port) of an http(s) url, or None; a malformed url (a port out of range, an
+    unclosed [ ) raises ValueError - the caller refuses it as a bad url, never a 500."""
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return None
@@ -1022,7 +1024,11 @@ async def fetch(conn_id: str, request: Request, url: str = ""):
     if not url or (conn_id, url) not in gw.seen_urls or gw.seen_urls[(conn_id, url)] != turn or turn is None:
         return _fetch_refused(403, "url_not_seen")
     origin = _origin(row["url"])
-    if origin is None or _origin(url) != origin:
+    try:
+        asked = _origin(url)
+    except ValueError:
+        return _fetch_refused(400, "bad_url")
+    if origin is None or asked != origin:
         return _fetch_refused(403, "other_origin")
     cap = media_types.limits()["outbound_bytes"]
     try:
@@ -1039,8 +1045,12 @@ async def fetch(conn_id: str, request: Request, url: str = ""):
             for _hop in range(FETCH_REDIRECTS + 1):
                 async with client.stream("GET", target) as response:
                     if response.status_code in (301, 302, 303, 307, 308):
-                        target = urljoin(target, response.headers.get("location", ""))
-                        if _origin(target) != origin:
+                        try:
+                            target = urljoin(target, response.headers.get("location", ""))
+                            moved = _origin(target)
+                        except ValueError:
+                            return _fetch_refused(502, "redirect_bad_url")
+                        if moved != origin:
                             return _fetch_refused(502, "redirect_other_origin")
                         continue
                     if response.status_code != 200:

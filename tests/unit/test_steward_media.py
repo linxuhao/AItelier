@@ -268,6 +268,8 @@ class MediaUpstream(FakeUpstream):
             Route("/files/cat.png", self.png), Route("/files/big.png", self.big), Route("/files/doc.zip", self.zip),
             Route("/files/here", lambda r: RedirectResponse("/files/cat.png", status_code=302)),
             Route("/files/away", lambda r: RedirectResponse("http://example.com/files/cat.png", status_code=302)),
+            Route("/files/badport", lambda r: RedirectResponse("http://mcp_server:99999/files/cat.png", status_code=302)),
+            Route("/files/badhost", lambda r: Response(status_code=302, headers={"location": "http://[::1/files/cat.png"})),
         ])
 
     async def png(self, request):
@@ -335,6 +337,22 @@ def test_fetch_refuses_a_url_not_seen_in_this_turn_another_origin_or_connection_
     # A new turn: what the last turn's results named is not this turn's.
     execute(world.steward, "set_steward_turn_audience", {"turn": "t2", "audience": "owner"}, allow_write=True)
     assert fetch(server, world, CAT).json()["detail"] == "url_not_seen"
+
+
+def test_fetch_refuses_a_malformed_url_or_redirect_location_as_a_bad_url_not_a_500(world, server, upstream):
+    """Review F1: a url a result named that urlsplit cannot take (port out of range, an unclosed
+    [ ) - asked for, or met as a redirect's Location - is a JSON refusal, never a 500."""
+    bad = ["http://mcp_server:99999/files/cat.png", "http://[::1/files/cat.png"]
+    media_ready(world, server, upstream, *bad, "http://mcp_server:9003/files/badport", "http://mcp_server:9003/files/badhost")
+    for url in bad:
+        got = fetch(server, world, url)
+        assert (got.status_code, got.json()["detail"]) == (400, "bad_url"), (url, got.status_code, got.text)
+    got = fetch(server, world, "http://mcp_server:9003/files/badport")
+    assert (got.status_code, got.json()["detail"]) == (502, "redirect_bad_url"), (got.status_code, got.text)
+    # An unclosed [ in the Location: httpx itself refuses the response (it parses the Location even
+    # without following it) - an upstream error, still a JSON refusal.
+    got = fetch(server, world, "http://mcp_server:9003/files/badhost")
+    assert (got.status_code, got.json()["detail"]) == (502, "upstream_unavailable"), (got.status_code, got.text)
 
 
 def test_fetch_from_a_private_connection_only_in_an_owner_turn(world, server, upstream):

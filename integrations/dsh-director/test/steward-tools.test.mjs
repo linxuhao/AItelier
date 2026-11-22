@@ -141,3 +141,20 @@ test('proposals, review 467: a host that can execute none of the kinds is offere
   const tools = collect(registerProposalTools, { proposals });
   assert.deepEqual([...tools.keys()], ['withdraw_proposal']);
 });
+
+test('steward.md (step 24 7.8.9 group confirmations, 25.3 calendar 7.9.6): the lines that tell the steward how', () => {
+  const flat = readFileSync(new URL('../steward.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+  // A group turn reaches the public connections, and an outward action is confirmed in the group by its asker.
+  for (const words of ['In a group turn you find and call only the public connections', 'confirmed in the group by that same person',
+    'they reply there with the @ line it shows', 'only when one person asked in that turn', 'refused ambiguous_requester',
+    'If request_confirmation answers withheld, nothing was sent: answer exactly 「这个我在群里答不了。」', 'group_send_budget'])
+    assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
+  // 25.3: reads are free; every write and invitation is outward on either calendar; the owner's
+  // own calendar is private, a family one public; say what will be written; the owner's time zone.
+  const calendar = flat.slice(flat.indexOf('Calendars:'));
+  assert.ok(flat.includes('Calendars:'), 'steward.md has the calendar lines');
+  for (const words of ['a connected calendar is read freely', "your owner's own calendar is private, a family calendar public",
+    'in a group you see only the family one', 'sending or answering an invitation is outward, on either calendar',
+    'before you ask for the confirmation, say exactly what you will write', "calendar times in your owner's time zone"])
+    assert.ok(calendar.includes(words), `the calendar lines lack: ${words}`);
+});

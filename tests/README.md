@@ -10,7 +10,7 @@ production container.
 
 | Marker | Default run | What it marks |
 |---|---|---|
-| `slow` | deselected | Rows that take minutes of wall time: the node/vitest suites run from pytest (`tests/integration/test_driver_node_suite_runs.py`, the director row of `test_director_and_channel_node_suites_run.py`, `test_web_suite_runs.py`), the skillflow absence-gate modules (`tests/skillflow/test_coding_impl_gate_absence.py`, `test_coding_impl_absence_needs_nothing_else_red.py`) and the prose guard's round-9/10 self-proof poles (`test_truncation_is_not_a_formatting_mistake.py`, `test_prose_corruption_catalog.py`). |
+| `slow` | deselected | Rows that take minutes of wall time: the node/vitest suites run from pytest (`tests/integration/test_driver_node_suite_runs.py`, which also runs the director suite, and `test_web_suite_runs.py`), the skillflow absence-gate modules (`tests/skillflow/test_coding_impl_gate_absence.py`, `test_coding_impl_absence_needs_nothing_else_red.py`) and the prose guard's round-9/10 self-proof poles (`test_truncation_is_not_a_formatting_mistake.py`, `test_prose_corruption_catalog.py`). |
 | `meta` | selected | Guards over test sources or hand-kept lists rather than product behaviour: `test_no_verbatim_previous_line_dup.py`, `test_state_wait_bounds.py`, `test_driver_suite_lists_its_files.py`, the prose-constant accounting row, the private-ack-table union row and the steward write whitelist row. |
 | `gate` | selected | Registered for integration gates that need a real clock or real subprocesses. No row carries it yet. |
 | `serial` | selected | Rows that break under pytest-xdist; see "Parallel runs" below. |
@@ -42,6 +42,22 @@ run as a gate must run `-m slow` as a second job. The platform's repository gate
 yet: until one exists, a gate run of this repository does not run the driver,
 director and web JS suites, the skillflow
 absence gate or the prose self-proof poles.
+
+The director suite has no row of its own. The driver row's discovery includes
+`integrations/dsh-driver/plugin-boundary.test.mjs`, which imports all 20 director test
+files, so the driver row runs every director test (measured 2026-11-22: the 403 tests
+of the director suite run alone all appear, by name, among the driver run's 693). The
+driver row runs node with `--test-concurrency=2`; in a 2-CPU container node's default
+is 1, which took about twice as long.
+
+The skillflow absence-gate rows spend their time in real `test`-step re-runs (each a
+nested pytest plus the `run_tests.sh` gate), not in sleeps: the clock is injected. So
+each row drives only as many laps as its assertion needs. The laps row sets the
+absence edge's `max_loop` to 5 on the loaded graph (`_wire(absence_max_loop=...)`)
+instead of driving the shipped 100, and asserts separately that
+`configs/coding_impl.yaml` still ships 100 and that 100 laps of the measured lap length
+fit inside its 10800 s ceiling. Measured 2026-11-22 in a 2-CPU container, the two
+modules went from 12 rows in 367 s to 11 rows in 121 s.
 
 The node suites need `integrations/dsh-driver/node_modules` to resolve. In the
 image that is `/opt/aitelier-dsh/node_modules`; a worktree mounted into a test
@@ -117,6 +133,10 @@ after the State template change, measured 2026-11-22 under `-n 4`; files with no
 default-tier row are absent and charged the median.
 `tests/unit/test_write_opening_coverage.py` was re-measured alone (serial, 2 CPUs)
 after its mutation rows moved in-process and into the default tier.
+Slow-tier rows are not in it, so dropping the director row and trimming the skillflow
+absence rows changed no entry: the default tier of
+`tests/integration/test_director_and_channel_node_suites_run.py` was always the WeChat
+row alone (re-measured 2026-11-22 at 2.8 s, against the recorded 2.7 s).
 
 ## State database templates
 

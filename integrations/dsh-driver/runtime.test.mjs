@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DriverRuntime, IdleReview, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal, projectInboxDigest, listProjectInbox, INBOX_EXCERPT_CHARS, INBOX_SUPERSEDED_EXCERPT_CHARS, INBOX_CEILING_CHARS } from './runtime.mjs';
+import { DriverRuntime, IdleReview, stateRequest, endsDormancy, dormancyRefusal, watchRefusal, Continuation, continueSource, continuationQuestion, reviewInstruction, NOTHING_LEFT, MAX_AUTO_CONTINUE, processSession, processAlive, backgroundProcesses, StateInjection, stateInjectionSource, runtimeEventSource, eventCarriesSomething, ownEchoOnly, grepHistory, connectionErrorMessage, driverGoal, projectInboxDigest, listProjectInbox, INBOX_EXCERPT_CHARS, INBOX_SUPERSEDED_EXCERPT_CHARS, INBOX_CEILING_CHARS } from './runtime.mjs';
 import { bindDriverGoal, driverGoalSection } from './goal.mjs';
 
 // The director's runtime instructions since plugin step 4: the generic director.md, then AItelier's state.md
@@ -782,3 +782,55 @@ test('a scan that cannot reach the end of the matches says so instead of guessin
   assert.equal(digest.items[0].delivery_id, 'dlv_0100', 'newest of what the scan could see');
 });
 
+
+// The driver-exit loop of 2026-11-22: a State read that missed its 30 s deadline exited the driver
+// (38 restarts in 90 minutes, no line naming the read). A read now gets one more attempt with a
+// longer budget; a write, and a read whose caller set its own signal, keep their single attempt.
+test('a State read that misses its deadline is retried once, a write and a caller-bounded read are not', async () => {
+  const timeout = () => { const error = new Error('AItelier /x: timed out'); error.name = 'TimeoutError'; return error; };
+  const lines = [], log = { warn: line => lines.push(line), info: line => lines.push(line) };
+  const calls = [];
+  let attempt = 0;
+  const request = stateRequest(async (path, body, signal, readAs) => {
+    calls.push({ path, body, readAs, hasSignal: signal !== undefined });
+    attempt += 1;
+    if (attempt === 1) throw timeout();
+    return { path, attempt };
+  }, { log, retryMs: 5000 });
+
+  assert.deepEqual(await request('/api/state/query/get', undefined, undefined, { readAs: 'public' }),
+    { path: '/api/state/query/get', attempt: 2 });
+  assert.equal(calls.length, 2, 'exactly one retry');
+  assert.equal(calls[0].hasSignal, false, 'the first attempt keeps the request its own default deadline');
+  assert.equal(calls[1].hasSignal, true, 'the retry carries an explicit deadline of its own');
+  assert.equal(calls[1].path, '/api/state/query/get', 'the retry asks the same question');
+  assert.equal(calls[1].readAs, 'public', 'and keeps its read scope');
+  assert.match(lines[0], /^state request failed .*"kind":"read".*"name":"TimeoutError"/,
+    'the failure names the read, its duration and the error, so a restart is diagnosable');
+  assert.match(lines[0], /"ms":\d+/);
+  assert.match(lines[1], /^state read retried after a timeout .*"first_ms":\d+.*"retry_ms":\d+/);
+
+  // Three shapes that must not retry: an answer that arrived (HTTP failure) is not a deadline
+  // miss, a caller that supplied a signal owns that deadline, and a write's replay belongs to
+  // State's request_key, not to the transport.
+  const shapes = [
+    { name: 'an HTTP failure', error: () => { const error = new Error('AItelier /x: HTTP 500'); error.status = 500; return error; } },
+    { name: 'a caller-bounded read', error: timeout, signal: AbortSignal.timeout(60000) },
+    { name: 'a write that timed out', error: timeout, body: { action: 'record_evidence' } },
+  ];
+  for (const shape of shapes) {
+    const seen = [];
+    const once = stateRequest(async () => { seen.push(1); throw shape.error(); }, { log });
+    await assert.rejects(once('/x', shape.body, shape.signal));
+    assert.equal(seen.length, 1, shape.name + ' must not be retried');
+  }
+
+  // A retry that fails too is reported as such and raised: the driver exits on the second failure
+  // rather than on the first, and the log names both durations.
+  const both = [];
+  lines.length = 0;
+  const dead = stateRequest(async () => { both.push(1); throw timeout(); }, { log });
+  await assert.rejects(dead('/y', undefined), /timed out/);
+  assert.equal(both.length, 2, 'one retry, then the retry error is the one raised');
+  assert.match(lines.at(-1), /^state read retry failed .*"retry_ms":\d+/);
+});

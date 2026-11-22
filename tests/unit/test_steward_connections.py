@@ -420,9 +420,14 @@ def test_every_docker_gateway_is_reserved_without_the_setting(world, monkeypatch
     assert sc.route_gateways() == set()
 
 
-def test_oauth_arrives_with_24_1b(world):
-    with pytest.raises(StateGraphError, match="auth_kind_unavailable"):
-        add(world, auth_kind="oauth")
+def test_an_oauth_connection_is_added_but_never_enabled_before_its_account_is_confirmed(world):
+    # 24.1b (7.8.6): registered off; enabling waits for an authorization whose bound
+    # account the owner confirmed (tests/unit/test_steward_oauth_confirm.py has the flow).
+    with pytest.raises(StateGraphError, match="identity_unconfirmed"):
+        add(world, conn_id="mailpub", url="https://good.example/mcp", auth_kind="oauth")
+    added = add(world, conn_id="mailpub", url="https://good.example/mcp", auth_kind="oauth", enabled=False)
+    assert added["secret"] == "oauth_needs_consent" and added["identity_confirmed"] is False
+    assert added["usable"] is False
 
 
 @pytest.mark.parametrize("header", ["Host", "Cookie", "X-AItelier-Driver-Token", "Mcp-Session-Id", "Bad Header"])

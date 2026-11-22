@@ -202,10 +202,15 @@ async function ownerMessageById({ request, project, id, signal }) {
 /** A State refusal as a tool answer: the error text, bounded. */
 const refusedBy = error => ({ refused: 'state_refused', reason: String(error?.message ?? error).slice(0, 500) });
 
-/** The steward's open proposals, for its snapshot. */
+/** The steward's open proposals, for its snapshot. A connection_change keeps only op,
+ *  conn_id and widens: its stored payload carries the card's snapshot (each tool's whole
+ *  definition, written by the upstream server) and tool names, the server's own text,
+ *  which reaches the model only through connection_tools / connection_refresh, where
+ *  the turn is marked external (7.8.4). */
 export async function openProposals(request, signal) {
   const listed = await request('/api/state/query/list_steward_proposals', { status: 'open', limit: 50 }, signal);
-  return (listed.result ?? listed).proposals ?? [];
+  return ((listed.result ?? listed).proposals ?? []).map(p => p.kind !== 'connection_change' ? p
+    : { ...p, payload: { op: p.payload?.op, conn_id: p.payload?.conn_id, widens: p.payload?.widens } });
 }
 
 // ---- letters: replying to a director and marking a letter read (owner 2026-11-17) ----
@@ -858,16 +863,88 @@ export function humanInput(text) {
   } catch { return false; }
 }
 
-/** The steward's catalog operations over its State reads and host writes (step 24.1a). The turn
- *  audience is not one of them: it is step 23's record (groupOps.audience). */
-export function catalogOps(request) {
+/** The id of the newest message the owner wrote that one wake text carries (an AItelier
+ *  runtime event's driver inbox, sender_kind user), else undefined. Parsed, never matched
+ *  as text: a letter quoting those words names no message (step 24.1b, 7.8.9). */
+export function requesterOf(text) {
+  const prefix = 'AItelier runtime event:\n';
+  if (typeof text !== 'string' || !text.startsWith(prefix)) return undefined;
+  try {
+    const inbox = JSON.parse(text.slice(prefix.length))?.driver_inbox;
+    if (!Array.isArray(inbox)) return undefined;
+    const owners = inbox.filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string' && m.message_id);
+    return owners.length ? owners[owners.length - 1].message_id : undefined;
+  } catch { return undefined; }
+}
+
+/** A State refusal as {refused: code, reason}: the code is the detail's first word. */
+export function stateRefusal(error) {
+  const message = String(error?.message ?? error);
+  const code = /HTTP \d+ "([a-z_]+)/.exec(message)?.[1] ?? 'state_refused';
+  return { refused: code, reason: message.slice(0, 500) };
+}
+
+/** The confirmation operations (step 24.1b, design-steward 7.8.9) over the steward's State
+ *  commands: the backend stores the call and writes the text by code; the host sends that
+ *  text into the requester's conversation as a reply to their message (a chat channel's
+ *  message goes back to that channel, exactly as written - `exact`, never shaped or cut).
+ *  deliver is refused unless the text reached the requester: the message written, and for a
+ *  chat channel's requester the channel took it (the mirror is awaited, not fired). */
+export function confirmOps(request, { project, mirror = () => {} }) {
   return {
+    create: ({ name, arguments: args, requesterMessageId, audience }, signal) =>
+      request('/api/state/commands/create_steward_confirmation', { name, arguments: args,
+        requester_message_id: requesterMessageId, audience }, signal).then(r => r?.result ?? r, stateRefusal),
+    async deliver({ code, text, replyTo, channel }, signal) {
+      let sent;
+      try {
+        sent = await request('/api/state/commands/send_user_message', { request_key: `confirm:${code}`, project_id: project,
+          subject: `Confirmation ${code}`, body: text, reply_to_message_id: replyTo }, signal);
+      } catch (error) { return stateRefusal(error); }
+      const written = sent?.result ?? sent;
+      const messageId = written?.message_id;
+      if (!messageId) return { refused: typeof written?.refused === 'string' ? written.refused : 'not_delivered' };
+      if (channel === undefined || channel === 'dashboard') return { message_id: messageId };
+      let mirrored;
+      try { mirrored = await mirror(messageId, text, replyTo, { exact: true }); } catch { mirrored = undefined; }
+      if (mirrored?.mirrored !== true) return { refused: 'not_delivered', reason: String(mirrored?.reason ?? 'no_channels'), message_id: messageId };
+      return { message_id: messageId };
+    },
+    cancel: (code, signal) => request('/api/state/commands/cancel_steward_confirmation', { code }, signal)
+      .then(r => r?.result ?? r, stateRefusal),
+    get: (code, signal) => request('/api/state/commands/get_steward_confirmation', { code }, signal)
+      .then(r => r?.result ?? r, stateRefusal),
+  };
+}
+
+/** The steward's catalog operations over its State reads and host writes (step 24.1a),
+ *  and its confirmations (24.1b) when `confirm` is given. The turn audience is not one of
+ *  them: it is step 23's record (groupOps.audience). */
+export function catalogOps(request, { confirm } = {}) {
+  return {
+    requesterOf,
+    ...(confirm ? { confirm } : {}),
     connections: signal => request('/api/state/query/list_steward_connections', {}, signal).then(r => r?.result ?? r),
     resyncDue: (effectiveHash, signal) => request('/api/state/commands/steward_tools_resync_due',
       { effective_hash: effectiveHash }, signal),
     humanInput,
     // This host's own writing tools (runtime.mjs) and the State writes behind them.
     writes: ['reply_to_director', 'schedule_set', 'schedule_delete', 'send_director_message', 'send_driver_message'],
+    // Step 24.1c (design-steward 7.8.10a): the steward reads its connections and proposes
+    // changes; the owner approves and the backend executes. It writes no registry row itself.
+    manage: {
+      tools: (connId, signal) => request('/api/state/query/list_steward_connection_tools', { conn_id: connId }, signal)
+        .then(r => r?.result ?? r, stateRefusal),
+      refresh: (connId, signal) => request('/api/state/commands/steward_connection_refresh', { conn_id: connId }, signal)
+        .then(r => r?.result ?? r, stateRefusal),
+      propose({ payload, reason, supersedes }, signal) {
+        const body = { kind: 'connection_change', payload, reason, ...(supersedes ? { supersedes } : {}) };
+        // The proposal's digest: a retried call is State's replay, not a second card.
+        const key = 'proposal:' + createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0, 40);
+        return request('/api/state/commands/create_steward_proposal', { request_key: key, ...body }, signal)
+          .then(r => r?.result ?? r, stateRefusal);
+      },
+    },
   };
 }
 
@@ -1035,6 +1112,9 @@ export function stewardOps({ request, rawRequest = request, project, me, stateDi
       const result = await request('/api/state/commands/send_director_message', {
         sender_project_id: project, director_identity: me, target_project_id: projectId,
         request_key: `handoff:${citesUserMessageId}:${projectId}`, subject: 'From your owner, via the steward',
+        // Step 24.1c (7.8.10a): the owner message this letter passes on, checked by the backend,
+        // so a director's reply to it can be the source of a connection proposal.
+        cites_owner_message_id: citesUserMessageId,
         body: markExternal(`${text.trim()}\n\nYour owner wrote (message ${citesUserMessageId}, ${cited.created_at}):\n${quoted}`, externalContent()) }, signal)
         .catch(error => ({ error: String(error?.message ?? error) }));
       if (result.error) return /idempotency_conflict/.test(result.error)

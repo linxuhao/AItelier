@@ -288,6 +288,21 @@ export interface DirectorHost {
    *  - humanInput: whether one input text carries a person's message (synchronous).
    *  - writes (optional): the names of the host's own writing tools (letters, reminders) that,
    *    like the plugin's, need a person's message in a turn that read outside content.
+   *  - requesterOf (optional, step 24.1b): the id of the newest person's message one input
+   *    text carries (synchronous) - the only requester an outward action can have.
+   *  - confirm (optional, step 24.1b, design-steward 7.8.9): request_confirmation and
+   *    run_confirmed are registered only with it. create stores the exact call and answers
+   *    the code and the text (written by code) the requester reads; deliver sends that text
+   *    into the requester's conversation (a reply to their message) and is refused unless it
+   *    reached them (`channel` is the requester's: a chat channel's mirror must take it);
+   *    cancel voids a pending record whose text did not arrive; get answers the stored
+   *    record ({status, name, arguments}) run_confirmed runs. Refusals are {refused}.
+   *  - manage (optional, step 24.1c, design-steward 7.8.10a): connections_list,
+   *    connection_tools, connection_refresh and propose_connection_change are registered only
+   *    with it. tools reads one connection's tools (descriptions are the server's words);
+   *    refresh re-reads its server's list (new, changed and gone names) and never changes a
+   *    permission; propose records one open proposal of kind connection_change and answers
+   *    {proposal_id, version, status, needs_dashboard}. Refusals are {refused}.
    *  The catalog writes no audience of its own: the turn's audience is step 23's (groups.audience,
    *  recorded by the group turns before each turn's first step), which the catalog reads to filter
    *  and the host's MCP gateway reads to judge a private connection's call. */
@@ -296,6 +311,22 @@ export interface DirectorHost {
     resyncDue(effectiveHash: string, signal?: AbortSignal): Promise<unknown>;
     humanInput(text: string): boolean;
     writes?: string[];
+    requesterOf?(text: string): string | undefined;
+    confirm?: {
+      create(request: { name: string; arguments: object; requesterMessageId: string; audience: string }, signal?: AbortSignal):
+        Promise<{ code: string; text: string; channel: string; reply_to_message_id: string; expires_at: string } | { refused: string }>;
+      deliver(message: { code: string; text: string; replyTo: string; channel: string }, signal?: AbortSignal):
+        Promise<{ message_id: string } | { refused: string; reason?: string }>;
+      cancel(code: string, signal?: AbortSignal): Promise<unknown>;
+      get(code: string, signal?: AbortSignal): Promise<{ status: string; name: string; arguments: object } | { refused: string }>;
+    };
+    manage?: {
+      tools(connId: string, signal?: AbortSignal): Promise<{ conn_id: string; tools: object[] } | { refused: string }>;
+      refresh(connId: string, signal?: AbortSignal):
+        Promise<{ conn_id: string; added: string[]; changed: string[]; gone: string[] } | { conn_id: string; error: string } | { refused: string }>;
+      propose(proposal: { payload: object; reason: string; supersedes?: string }, signal?: AbortSignal):
+        Promise<{ proposal_id: string; version: number; status: 'open'; needs_dashboard: boolean } | { refused: string; reason?: string }>;
+    };
   };
   channels?: {
     relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):

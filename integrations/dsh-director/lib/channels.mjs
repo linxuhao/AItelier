@@ -52,6 +52,7 @@ const DECIDED = Object.freeze({
   stop_driver: t => [`stop director of ${t}`, `停止 ${t} 项目的导演`],
   archive_project: t => [`archive project ${t}`, `归档 ${t} 项目`],
   unarchive_project: t => [`unarchive project ${t}`, `取消归档 ${t} 项目`],
+  connection_change: t => [`change the steward's connection ${t}`, `修改管家的连接 ${t}`],
 });
 const cut = (value, max) => { const s = String(value ?? ''); return s.length > max ? s.slice(0, max - 1) + '…' : s; };
 const decided = ({ kind, target }) => {
@@ -83,7 +84,19 @@ export const channelReplies = Object.freeze({
     }
     if (refusal === 'approval_undated') return `proposal ${id}: not done - the message carried no time, so it cannot decide; use the dashboard. 未执行：消息没有时间，不能用来决定，请在面板上操作。`;
     if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;
+    // Step 24.1c (design-steward 7.8.10a): a change that widens a connection's permissions has
+    // no chat approval - its card is on the dashboard (there is no box to tick).
+    if (refusal === 'needs_dashboard_approval') return `proposal ${id}: not done - approve it on the dashboard card. 未执行：这条要在面板的卡片上批准。`;
     return `proposal ${id}: not done (${refusal ?? 'refused'}). 未执行（${refusal ?? 'refused'}）。`;
+  },
+  /** Step 24.1b (design-steward 7.8.9): the host decided the sender's `确认 <code>` /
+   *  `取消 <code>` for an outward action they asked for; the line is code's, never the model's. */
+  confirmation({ code, outcome, refusal }) {
+    if (outcome === 'confirmed') return `已确认 ${code}，正在执行。 (Confirmed ${code}; running it.)`;
+    if (outcome === 'cancelled') return `已取消 ${code}，不会执行。 (Cancelled ${code}.)`;
+    if (outcome === 'expired') return `${code} 已过期，未执行；请重新请求。 (${code} expired; nothing was done.)`;
+    if (refusal === 'confirmation_undated') return `${code} 未执行：消息没有时间，不能用来确认。 (${code}: not done - the message carried no time.)`;
+    return `${code} 未执行（${refusal ?? 'refused'}）。 (${code}: not done.)`;
   },
 });
 
@@ -883,15 +896,18 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       }
       // A new owner message the steward will now answer: the receipt (relay accepted means the
       // host found the sender bound to this channel now).
-      if (!result?.duplicate && !result?.approval) receipt(channel, senderRef, messageRef, { at, owedAt: owed.get(owed1)?.owedAt });
+      // An approval's or a confirmation's line (each decided by the host) is the one line owed.
+      const decision = result?.approval ? replies.approval(result.approval)
+        : result?.confirmation ? (replies.confirmation ?? channelReplies.confirmation)(result.confirmation) : undefined;
+      if (!result?.duplicate && !decision) receipt(channel, senderRef, messageRef, { at, owedAt: owed.get(owed1)?.owedAt });
       // A decision is answered once per channel message (answer() keeps that within the
       // process). A redelivery of a message whose line went out is not answered again; one
       // whose line never went out is: this process got no answer the first time, the host
       // says it decided only now (decided_on_replay), or the owed store still says so - so
       // a line a restart inherited is sent too. Only a successful send clears it.
       const key = channel + '\n' + messageRef, lost = unanswered.has(key);
-      if (result?.approval || !result?.duplicate) unanswered.delete(key);
-      if (result?.approval && (!result.duplicate || lost || result.decided_on_replay === true || carried)) {
+      if (decision || !result?.duplicate) unanswered.delete(key);
+      if (decision && (!result.duplicate || lost || result.decided_on_replay === true || carried)) {
         // A redelivery's line goes only to the account bound NOW (the backend replays a
         // channel message's answer before it checks the binding), and never long after the
         // owner wrote: an unbound account never learns the decision, and a decision made
@@ -900,7 +916,7 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
         if (expired || (result.duplicate && (await binding(channel))?.sender_ref !== senderRef)) {
           log('channel_line_dropped', { ...seen, reason: expired ? 'expired' : 'not_bound' });
           forget(owed1);
-        } else if (await answer(channel, replies.approval(result.approval), { replyToRef: messageRef, to: senderRef })) forget(owed1);
+        } else if (await answer(channel, decision, { replyToRef: messageRef, to: senderRef })) forget(owed1);
         else remember(message, { judged: true });
       } else {
         forget(owed1);
@@ -1033,7 +1049,7 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       }
     }
   };
-  const mirror = async (messageId, body, replyTo) => {
+  const mirror = async (messageId, body, replyTo, exact = false) => {
     await hostReady();
     // Once per message, also across a restart: a delivery row means it was sent (or failed) before.
     if (mirroring.has(messageId) || await host.sourceOf(messageId)) return { mirrored: false, reason: 'already_mirrored' };
@@ -1057,7 +1073,9 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
     let ref, error;
     if (!entry) error = 'channel_not_connected';
     else {
-      const sent = channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
+      // A confirmation the requester must read whole (step 24.1b) goes exactly as written:
+      // never shaped for a phone, never cut (the host bounds its length).
+      const sent = exact ? body : channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
       if (sent.endsWith(MORE) && !body.endsWith(MORE)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
       try {
         ref = (await within(entry.send(sent, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
@@ -1077,9 +1095,9 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
   /** The root wrote `body` to its owner as message `messageId` (a reply to `replyTo` when
    *  given): send the same text where the owner is listening - shaped for a phone chat by
    *  channelText (a long one cut, ending in MORE). Never throws. */
-  const ownerMessageSent = (messageId, body, replyTo) => {
+  const ownerMessageSent = (messageId, body, replyTo, { exact = false } = {}) => {
     if (!text(messageId) || typeof body !== 'string' || !body.trim()) return Promise.resolve({ mirrored: false, reason: 'nothing_to_send' });
-    const run = queue.then(() => mirror(messageId, body, text(replyTo) ? replyTo : undefined)).catch(error => {
+    const run = queue.then(() => mirror(messageId, body, text(replyTo) ? replyTo : undefined, exact === true)).catch(error => {
       log('channel_mirror_failed', { message_id: messageId, error: short(error) });
       return { mirrored: false, reason: 'unavailable' };
     });

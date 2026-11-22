@@ -18,6 +18,8 @@ const api = vi.hoisted(() => ({
   listStewardConnections: vi.fn(), saveStewardConnection: vi.fn(), deleteStewardConnection: vi.fn(),
   stewardConnectionTools: vi.fn(), setStewardConnectionTools: vi.fn(), setStewardConnectionSecret: vi.fn(),
   probeStewardConnection: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn(),
+  listStewardConfirmations: vi.fn(), startStewardOAuth: vi.fn(), confirmStewardIdentity: vi.fn(),
+  signOutStewardOAuth: vi.fn(), setStewardOAuthClient: vi.fn(),
 }));
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
 import type { StewardConnectionTools, StewardConnections } from '../../lib/api';
@@ -48,6 +50,7 @@ beforeEach(() => {
   api.probeStewardConnection.mockResolvedValue(tools());
   api.stewardConnectionTools.mockResolvedValue(tools());
   api.setStewardConnectionTools.mockImplementation(async () => tools());
+  api.listStewardConfirmations.mockResolvedValue({confirmations: []});
 });
 afterEach(() => cleanup());
 
@@ -137,5 +140,66 @@ describe('the connections tab', () => {
     await fireEvent.click(view.container.querySelector('[data-restart-pending] button')!);
     await waitFor(() => expect(api.startDshDriver).toHaveBeenCalledWith('aitelier-home'));
     expect(api.stopDshDriver).toHaveBeenCalledWith('aitelier-home');
+  });
+});
+
+// Step 24.1b (design 7.8.6, 7.8.9, 7.8.10): OAuth with the account check, and the
+// confirmations of outward actions with the text that went out.
+const oauthConn = (over: Record<string, unknown> = {}) => listed({connections: [{...listed().connections[0], conn_id: 'mailpub',
+  label: 'Family mail', url: 'https://mail.example/mcp', auth_kind: 'oauth', enabled: false, usable: false,
+  auth_identity: 'family@example.com', identity_confirmed: false, ...over}]});
+
+describe('an oauth connection', () => {
+  it('authorizes in a new tab, shows the bound account and asks to confirm it', async () => {
+    api.listStewardConnections.mockResolvedValue(oauthConn());
+    api.startStewardOAuth.mockResolvedValue({conn_id: 'mailpub', authorize_url: 'https://auth.example/authorize?x=1'});
+    api.confirmStewardIdentity.mockResolvedValue({});
+    // The tab is opened inside the click (before the backend answers), its address set after.
+    const tab = {opener: {} as unknown, location: {href: 'about:blank'}, close: vi.fn()};
+    let answered = false;
+    api.startStewardOAuth.mockImplementation(async () => { answered = true; return {conn_id: 'mailpub', authorize_url: 'https://auth.example/authorize?x=1'}; });
+    const opened = vi.spyOn(window, 'open').mockImplementation(() => { expect(answered).toBe(false); return tab as unknown as Window; });
+    const view = render(StewardConnectionsView);
+    await waitFor(() => expect(view.container.querySelector('[data-conn-oauth]')).not.toBeNull());
+    const box = view.container.querySelector('[data-conn-oauth]') as HTMLElement;
+    expect(box.querySelector('[data-conn-identity]')?.textContent).toBe('Authorized as family@example.com');
+    expect(box.textContent).toContain('Confirm the account before enabling the connection');
+    await fireEvent.click(box.querySelector('[data-conn-authorize]')!);
+    await waitFor(() => expect(tab.location.href).toBe('https://auth.example/authorize?x=1'));
+    expect(opened).toHaveBeenCalledWith('about:blank', '_blank');
+    expect(tab.opener).toBeNull();
+    // A blocked tab: the address is shown as a link instead.
+    opened.mockImplementation(() => null);
+    await fireEvent.click(box.querySelector('[data-conn-authorize]')!);
+    await waitFor(() => expect(box.querySelector('[data-conn-authorize-link]')?.getAttribute('href')).toBe('https://auth.example/authorize?x=1'));
+    await fireEvent.click(box.querySelector('[data-conn-confirm-identity]')!);
+    await waitFor(() => expect(api.confirmStewardIdentity).toHaveBeenCalledWith('mailpub', 'family@example.com'));
+    opened.mockRestore();
+  });
+
+  it('a confirmed account has no confirm button; the form offers OAuth and a client id', async () => {
+    api.listStewardConnections.mockResolvedValue(oauthConn({identity_confirmed: true, enabled: true, usable: true}));
+    api.saveStewardConnection.mockResolvedValue({});
+    api.setStewardOAuthClient.mockResolvedValue({});
+    const view = render(StewardConnectionsView);
+    await waitFor(() => expect(view.container.querySelector('[data-conn-oauth]')).not.toBeNull());
+    expect(view.container.querySelector('[data-conn-confirm-identity]')).toBeNull();
+    await fireEvent.click(view.container.querySelector('[data-conn-add]')!);
+    const form = view.container.querySelector('[data-conn-form]') as HTMLFormElement;
+    const select = form.querySelector('select') as HTMLSelectElement;
+    expect([...select.options].map(o => o.value)).toEqual(['none', 'header', 'oauth']);
+    await fireEvent.change(select, {target: {value: 'oauth'}});
+    await waitFor(() => expect(form.querySelector('[data-oauth-client-id]')).not.toBeNull());
+  });
+
+  it('lists the confirmations with the text that went out, as plain text', async () => {
+    api.listStewardConfirmations.mockResolvedValue({confirmations: [{code: 'K7Q2A', conn_id: 'mailpub', raw_name: 'send_message',
+      gw_name: 'send_message', requester_kind: 'owner', channel: 'slack', status: 'done', created_at: '2026-11-21T10:00:00Z',
+      confirmed_at: null, consumed_at: null, result: {}, message_text: '请确认（K7Q2A）<b>x</b>'}]});
+    const view = render(StewardConnectionsView);
+    await waitFor(() => expect(view.container.querySelector('[data-confirmation="K7Q2A"]')).not.toBeNull());
+    const item = view.container.querySelector('[data-confirmation="K7Q2A"]') as HTMLElement;
+    expect(item.textContent).toContain('请确认（K7Q2A）<b>x</b>');
+    expect(item.querySelector('b')).toBeNull();
   });
 });

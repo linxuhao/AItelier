@@ -603,6 +603,10 @@ class SendDirectorMessage(Request):
     delivery_mode: Literal["transient", "standing"] = "transient"
     ack_mode: Literal["at_least_n","broadcast"] | None = None
     ack_quorum: int | None = Field(default=None, ge=1)
+    # Step 24.1c (design-steward 7.8.10a): the steward's handoff names the owner message
+    # it passes on; the backend checks it is one (anyone else: refused).
+    cites_owner_message_id: str | None = Field(default=None, min_length=1, max_length=320, description=(
+        "the steward only: the owner's message in its conversation that this letter passes on"))
 
 
 class ListDirectorMessages(Project):
@@ -1161,12 +1165,20 @@ class CreateStewardProposal(Project):
     its proposals and the owner's memory requests live; it is not the target."""
 
     request_key: str = Field(min_length=1, max_length=320)
-    kind: Literal["create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project"]
+    kind: Literal["create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project",
+                  "connection_change"]
     payload: dict[str, Any] = Field(description=(
         "create_project {project_id, title, goal, seed_nodes: [add_nodes node: {key, goal, acceptance, ...}]}; "
         "start_driver {project_id}; stop_driver {project_id} (what it would interrupt is recorded by the server); "
         "archive_project / unarchive_project {project_id, reason?} (hide a project from the owner's list, or "
-        "list it again; never the steward's own project; the project must currently be listed / archived)."))
+        "list it again; never the steward's own project; the project must currently be listed / archived); "
+        "connection_change {op: add|update|remove|reenable, conn_id, source: {kind: owner_message|director_letter, "
+        "ref}, add: label, url, transport: streamable-http, auth_kind: none|header|oauth, header_name?, "
+        "visibility: private|public; update: conn_uid, expect_config_version and at least one of label, "
+        "visibility, enabled, tools; remove: conn_uid, expect_config_version; reenable: conn_uid, "
+        "expect_config_version, tools; tools: [{raw_name, schema_sha256, allowed?, outward?, egress?, "
+        "blocked_args?, daily_cap?}] (at most 64; a field left out is unchanged); never a secret} - the steward's "
+        "own MCP connections (design-steward 7.8.10a); a widening change is approved on the dashboard only."))
     reason: str = Field(min_length=1, max_length=4000)
     supersedes: str | None = Field(default=None, min_length=1, max_length=200, description=(
         "One of your OPEN proposals that this one replaces; it becomes superseded."))
@@ -1351,6 +1363,25 @@ class StewardConnectionSecretSet(Request):
 
 class StewardToolsResyncDue(Request):
     effective_hash: str = Field(min_length=64, max_length=64)
+
+
+# Step 24.1b (design-steward 7.8.9): outward actions confirmed by the person who asked.
+# Both are the steward HOST's (code, never the model): the requester and the conversation
+# come from the owner message named, and the text the person reads is written by code.
+class CreateStewardConfirmation(Request):
+    name: str = Field(min_length=1, max_length=100, description="the tool's public name mcp__sw__<conn_id>__<gw_name>")
+    arguments: dict[str, Any] = Field(description="the exact arguments the tool will run with")
+    requester_message_id: str = Field(min_length=1, max_length=100, description=(
+        "the newest owner message of this turn (a chat channel's or the dashboard's)"))
+    audience: str = Field(default="owner", min_length=1, max_length=260)
+
+
+class GetStewardConfirmation(Request):
+    code: str = Field(min_length=5, max_length=5)
+
+
+class CancelStewardConfirmation(Request):
+    code: str = Field(min_length=5, max_length=5)
 
 
 class MessageSources(Request):
@@ -1673,6 +1704,8 @@ WRITE_REQUESTS = {
     "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
     "steward_tools_resync_due": StewardToolsResyncDue,
     "sync_owner_questions": SyncOwnerQuestions, "relay_owner_answer": RelayOwnerAnswer,
+    "create_steward_confirmation": CreateStewardConfirmation, "get_steward_confirmation": GetStewardConfirmation,
+    "cancel_steward_confirmation": CancelStewardConfirmation,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -2071,6 +2104,9 @@ def _handlers(service) -> dict:
         "sync_owner_questions": service.owner_questions.sync,
         "relay_owner_answer": service.owner_questions.relay_answer,
         "list_pushed_owner_questions": service.owner_questions.list_pushed,
+        "create_steward_confirmation": service.steward_confirmations.create,
+        "get_steward_confirmation": service.steward_confirmations.get,
+        "cancel_steward_confirmation": service.steward_confirmations.cancel,
     }
 
 
@@ -2183,6 +2219,12 @@ def _driver_defaults(service, action, arguments):
 # names. relay_owner_answer is triggered by the model through the host's relay_answer tool,
 # which passes ONE message id: the codes are read by code, the words copied by code, and the
 # sender's binding checked again by the command.
+# Step 24.1b (design-steward 7.8.9): create_steward_confirmation and get_steward_confirmation
+# are the HOST's too: the first stores the exact call and writes, by code, the text the
+# requester reads (the requester derived from the owner message it names); the second
+# hands run_confirmed the STORED name and arguments; cancel_steward_confirmation voids a
+# PENDING record whose text did not reach the requester. None confirms anything: only the
+# requester's own exact reply does (core.state_channels), and the gateway consumes it.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -2200,6 +2242,7 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "bind_owner_group", "relay_group_message", "post_group_reply", "set_steward_turn_audience",
     "note_family_memory",
     "steward_tools_resync_due", "steward_connection_refresh",
+    "create_steward_confirmation", "get_steward_confirmation", "cancel_steward_confirmation",
     # Step 25 (design-steward 7.9.4, 7.9.5): post_group_notice is the HOST's, called in code
     # with the schedule row that fired (the model has no tool for it); the three list writes are
     # the family list tools (add and check from a group turn too, remove in an owner turn only).

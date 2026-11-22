@@ -24,20 +24,26 @@ The steward's own MCP connections (step 24.1a, design-steward 7.8.10): the owner
 changes and deletes connections, ticks their tools, sets a header secret (written to a
 file, never answered back) and reads a connection's tools here (owner session only);
 the steward reaches them only through its gateway (api/steward_gateway.py).
+
+OAuth (step 24.1b, design-steward 7.8.6): the owner starts an authorization here (the
+answer is the URL the browser goes to), the authorization server sends the browser back
+to the callback (the same owner session; the state is single use), the owner confirms
+the account the authorization bound, and can sign out. The confirmations of outward
+actions (7.8.9) are listed here for the owner, with the text that went out.
 """
 import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from api import authz
 from api.dsh_driver_routers import manager
 from api.state_graph_routers import get_service
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
-from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, ScheduleConflict, ScheduleInvalid,
-                                impact_is_empty, preview_schedule, stop_impact)
+from core.state_steward import (ARCHIVE_KINDS, CONNECTION_KIND, ProposalConflict, ScheduleConflict,
+                                ScheduleInvalid, impact_is_empty, preview_schedule, stop_impact)
 
 router = APIRouter(prefix="/api/steward", tags=["Steward"])
 
@@ -93,6 +99,9 @@ async def approve(proposal_id: str, body: Approve, service=Depends(get_service),
         raise HTTPException(403 if str(exc) == "owner_session_required" else 422, str(exc)) from exc
     if row["kind"] == "create_project":
         return await asyncio.to_thread(steward.execute_create_project, proposal_id)
+    if row["kind"] == CONNECTION_KIND:
+        # Step 24.1c (7.8.10a): before anything reads a project_id - this kind has none.
+        return await asyncio.to_thread(steward.execute_connection_change, proposal_id)
     if row["kind"] in ARCHIVE_KINDS:
         return await asyncio.to_thread(steward.execute_archive, proposal_id)
     if row["kind"] == "stop_driver":
@@ -530,3 +539,73 @@ async def probe_connection(conn_id: str, request: Request, service=Depends(get_s
     from api.steward_gateway import gateway
     gateway(request.app)
     return await asyncio.to_thread(_connection_call, service.steward_connections.probe, conn_id)
+
+
+# --- OAuth for a connection (step 24.1b, design-steward 7.8.6) ---------------------------------
+
+class OAuthClient(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_id: str | None = Field(default=None, max_length=500)
+    client_secret: str | None = Field(default=None, max_length=2000)
+
+
+class IdentityConfirm(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    identity: str = Field(min_length=1, max_length=200)
+
+
+@router.put("/connections/{conn_id}/oauth/client", dependencies=[Depends(authz.require_writer)])
+def set_oauth_client(conn_id: str, body: OAuthClient, service=Depends(get_service)):
+    """The owner's own registered client (written to the secret file, never answered back)."""
+    _owner(service)
+    return _connection_call(service.steward_connections.oauth_client_set, conn_id, body.client_id, body.client_secret)
+
+
+@router.post("/connections/{conn_id}/oauth/start", dependencies=[Depends(authz.require_writer)])
+async def start_oauth(conn_id: str, service=Depends(get_service)):
+    """{authorize_url}: where the owner's browser signs in at the connection's service."""
+    _owner(service)
+    return await asyncio.to_thread(_connection_call, service.steward_connections.oauth_start, conn_id)
+
+
+def _oauth_page(title: str, detail: str, status: int) -> HTMLResponse:
+    import html
+    return HTMLResponse(f"<!doctype html><meta charset=utf-8><title>{html.escape(title)}</title>"
+                        f"<p>{html.escape(title)}</p><p>{html.escape(detail)}</p>"
+                        "<p><a href=\"/\">AItelier</a></p>", status_code=status,
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@router.get("/connections/oauth/callback", dependencies=[Depends(authz.require_writer)])
+async def oauth_callback(state: str = "", code: str | None = None, iss: str | None = None,
+                         error: str | None = None, service=Depends(get_service)):
+    """The authorization server's redirect: the owner session that started it, once."""
+    _owner(service)
+    try:
+        result = await asyncio.to_thread(service.steward_connections.oauth_complete, state, code, iss, error)
+    except StateNotFound:
+        return _oauth_page("授权未完成 Not authorized", "unknown connection", 404)
+    except StateGraphError as exc:
+        return _oauth_page("授权未完成 Not authorized", str(exc).split(":")[0], 400)
+    who = result.get("auth_identity") or "?"
+    return _oauth_page("已授权 Authorized", f"{result['conn_id']}: {who} - 请回到面板确认这个账号 "
+                       "(confirm this account on the dashboard)", 200)
+
+
+@router.post("/connections/{conn_id}/identity", dependencies=[Depends(authz.require_writer)])
+def confirm_identity(conn_id: str, body: IdentityConfirm, service=Depends(get_service)):
+    _owner(service)
+    return _connection_call(service.steward_connections.identity_confirm, conn_id, body.identity)
+
+
+@router.post("/connections/{conn_id}/oauth/signout", dependencies=[Depends(authz.require_writer)])
+async def oauth_sign_out(conn_id: str, service=Depends(get_service)):
+    _owner(service)
+    return await asyncio.to_thread(_connection_call, service.steward_connections.oauth_sign_out, conn_id)
+
+
+@router.get("/confirmations", dependencies=[Depends(authz.require_reader)])
+def list_confirmations(service=Depends(get_service)):
+    """The last 30 days of confirmations of outward actions, with the text that went out (7.8.10)."""
+    _owner(service)
+    return _connection_call(service.steward_confirmations.list_recent)

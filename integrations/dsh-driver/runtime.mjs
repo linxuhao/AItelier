@@ -17,8 +17,8 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, catalogOps, forwardFinalText, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer, replyToLetter,
-  stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
+import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
+  replyToLetter, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -1018,8 +1018,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // director's host does not have them (implemented-but-undeclared is refused).
   if (steward) Object.assign(host, stewardOps({ request: (...args) => toolRequest(...args), rawRequest: (...args) => request(...args),
     project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR, groupTurn, externalContent: () => externalContent() }),
-  // Step 24.1a: the steward's own catalog (its connections through the backend's gateway).
-  { catalog: catalogOps((...args) => request(...args)) });
+  // Step 24.1a: the steward's own catalog (its connections through the backend's gateway);
+  // 24.1b: and confirmations of outward actions, the text sent back to the requester.
+  { catalog: catalogOps((...args) => request(...args), { confirm: confirmOps((...args) => request(...args), { project,
+    mirror: (...args) => mirrorOwnerMessage?.(...args) }) }) });
   return host;
 }
 

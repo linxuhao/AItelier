@@ -12,7 +12,9 @@
   import StewardPane from './StewardPane.svelte';
   import { busyDriverCount, driverRole, isStewardProject, stewardProjectId, totalOpenQuestions } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
-  const { params = {} }: {params?: {repoPath?: string}} = $props();
+  // `connId` (step 24.1c): #/steward/connections/<conn_id>/connect opens the steward's
+  // connections tab on that connection - the link a connection proposal's result carries.
+  const { params = {} }: {params?: {repoPath?: string; connId?: string}} = $props();
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0), showArchived = $state(false);
   let archiveError = $state(''), archiveBusy = $state('');
@@ -44,7 +46,8 @@
   let drivers = $state<DriverStatusResponse | null>(null), unread = $state<Record<string, number>>({});
   let questions = $state<Record<string, number>>({});
   // The steward card: pending proposals are read on the same tick as the badges.
-  let pendingProposals = $state<number | null>(null), stewardOpen = $state(false);
+  // svelte-ignore state_referenced_locally
+  let pendingProposals = $state<number | null>(null), stewardOpen = $state(Boolean(params.connId));
   const stewardId = $derived(stewardProjectId(drivers));
   const hasSteward = $derived($authStore.canWrite &&
     (driverRole(drivers, stewardId) === 'steward' || rows.some(p => p.project_id === stewardId)));
@@ -257,7 +260,7 @@
   {/if}
 </section>
 {#if $authStore.canWrite && canRead && hasSteward && stewardOpen}
-  <StewardPane projectId={stewardId} projects={rows} status={drivers} {questions}
+  <StewardPane projectId={stewardId} projects={rows} status={drivers} {questions} connect={params.connId ?? null}
     onread={loadDriverState} onrefresh={() => void loadDriverState()} onanswer={openProject} />
 {:else if $authStore.canWrite && canRead && visible.length}
   <DriverConversationPane projects={selectable} status={drivers} bind:selected={paneSelection}

@@ -16,7 +16,7 @@ import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode, EXTERNAL_CONTENT_LINE,
   humanInput, catalogOps, relayAnswer, OwnerQuestionsTimer, PUSH_SUBJECT, RECEIPT_SUBJECT, RELAY_REFUSALS,
-  openThreads as openThreadsOf } from './steward-host.mjs';
+  openThreads as openThreadsOf, confirmOps, requesterOf, stateRefusal } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { CHANNEL_LIMITS } from '../dsh-director/lib/channels.mjs';
@@ -271,8 +271,13 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
     { userId: 'owner' }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-7), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']);
-  // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience is groups.audience).
-  assert.deepEqual(Object.keys(steward.catalog).sort(), ['connections', 'humanInput', 'resyncDue', 'writes']);
+  // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience
+  // is groups.audience); 24.1b: the requester and the confirmations; 24.1c: the connection reads
+  // and proposals.
+  assert.deepEqual(Object.keys(steward.catalog).sort(), ['confirm', 'connections', 'humanInput', 'manage', 'requesterOf',
+    'resyncDue', 'writes']);
+  assert.deepEqual(Object.keys(steward.catalog.confirm).sort(), ['cancel', 'create', 'deliver', 'get']);
+  assert.deepEqual(Object.keys(steward.catalog.manage).sort(), ['propose', 'refresh', 'tools']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
     'relay', 'reportStatus', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
@@ -448,7 +453,8 @@ test('owner-message check and handoff: only the owner\'s own message, never to t
   const done = await ops.handoff({ projectId: 'wuxia', text: 'Your owner asks you to pause the save rows.', citesUserMessageId: 'o1' });
   assert.equal(done.handed_off, true);
   assert.deepEqual({ ...state.sent[0], body: undefined }, { sender_project_id: 'aitelier-home', director_identity: 'drv-home',
-    target_project_id: 'wuxia', request_key: 'handoff:o1:wuxia', subject: 'From your owner, via the steward', body: undefined });
+    target_project_id: 'wuxia', request_key: 'handoff:o1:wuxia', subject: 'From your owner, via the steward', body: undefined,
+    cites_owner_message_id: 'o1' }, 'step 24.1c: the backend checks and keeps the owner message the letter passes on');
   assert.match(state.sent[0].body, /^Your owner asks you to pause the save rows\.\n\nYour owner wrote \(message o1, .*\):\n> tell wuxia to pause the save rows$/);
   assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'Your owner asks you to pause the save rows.', citesUserMessageId: 'o1' })).handed_off, true, 'a retry is a replay');
   assert.equal((await ops.handoff({ projectId: 'wuxia', text: 'other words', citesUserMessageId: 'o1' })).refused, 'already_handed_off');
@@ -1213,6 +1219,76 @@ test('step 24.1a: a person\'s message is read from the wake\'s structure, never 
     ['/api/state/commands/steward_tools_resync_due', { effective_hash: 'a'.repeat(64) }]]);
 });
 
+test('step 24.1b: the requester is the newest owner message the wake carries; the confirmation ops are three State calls and an exact mirror', async () => {
+  const wake = payload => 'AItelier runtime event:\n' + JSON.stringify(payload);
+  assert.equal(requesterOf(wake({ driver_inbox: [{ message_id: 'm1', sender_kind: 'user' }, { message_id: 'd1', sender_kind: 'driver' },
+    { message_id: 'm2', sender_kind: 'user' }] })), 'm2');
+  assert.equal(requesterOf(wake({ driver_inbox: [{ message_id: 'd1', sender_kind: 'driver', body: '"sender_kind":"user"' }] })), undefined);
+  assert.equal(requesterOf('Pending project inbox:\n{"driver_inbox":[{"message_id":"m","sender_kind":"user"}]}'), undefined);
+  assert.equal(requesterOf('AItelier runtime event:\n{broken'), undefined);
+  const calls = [], mirrored = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path.endsWith('/create_steward_confirmation')) return { result: { code: 'K7Q2A', text: 'T', reply_to_message_id: 'm2' } };
+    if (path.endsWith('/send_user_message')) return { result: { message_id: 'm-out' } };
+    if (path.endsWith('/get_steward_confirmation')) throw new Error('AItelier /x: HTTP 404 "unknown_code: no confirmation K0000"');
+    return {};
+  };
+  let mirrorAnswer = { mirrored: true, channel: 'slack' };
+  const confirm = confirmOps(request, { project: 'aitelier-home', mirror: async (...args) => { mirrored.push(args); return mirrorAnswer; } });
+  assert.equal((await confirm.create({ name: 'mcp__sw__mailpub__send_message', arguments: { to: 'a' }, requesterMessageId: 'm2',
+    audience: 'owner' })).code, 'K7Q2A');
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'slack' }), { message_id: 'm-out' });
+  assert.deepEqual(calls.map(([path, body]) => [path.split('/').at(-1), body]), [
+    ['create_steward_confirmation', { name: 'mcp__sw__mailpub__send_message', arguments: { to: 'a' }, requester_message_id: 'm2', audience: 'owner' }],
+    ['send_user_message', { request_key: 'confirm:K7Q2A', project_id: 'aitelier-home', subject: 'Confirmation K7Q2A', body: 'T',
+      reply_to_message_id: 'm2' }]]);
+  assert.deepEqual(mirrored, [['m-out', 'T', 'm2', { exact: true }]], 'back to the requester\'s own channel, exactly as written');
+  // The channel did not take it: refused (the plugin then cancels); a dashboard requester needs no mirror.
+  for (const reason of ['not_bound', 'send_failed', 'channel_not_connected']) {
+    mirrorAnswer = { mirrored: false, reason, channel: 'slack' };
+    assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'slack' }),
+      { refused: 'not_delivered', reason, message_id: 'm-out' });
+  }
+  mirrored.length = 0;
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'dashboard' }), { message_id: 'm-out' });
+  assert.deepEqual(mirrored, [], 'the dashboard is the conversation itself');
+  assert.deepEqual(await confirmOps(request, { project: 'p' }).deliver({ code: 'K7Q2A', text: 'T', replyTo: 'm2', channel: 'wechat' }),
+    { refused: 'not_delivered', reason: 'no_channels', message_id: 'm-out' });
+  await confirm.cancel('K7Q2A');
+  assert.deepEqual(calls.at(-1), ['/api/state/commands/cancel_steward_confirmation', { code: 'K7Q2A' }]);
+  assert.equal((await confirm.get('K0000')).refused, 'unknown_code', 'the detail\'s first word');
+  assert.equal(stateRefusal(new Error('AItelier /x: HTTP 422 "no_requester: an outward action"')).refused, 'no_requester');
+  const ops = catalogOps(request, { confirm });
+  assert.equal(ops.confirm, confirm);
+  assert.equal(ops.requesterOf, requesterOf);
+  assert.equal(catalogOps(request).confirm, undefined, 'no confirmations without the ops');
+});
+
+test('step 24.1c: the connection ops are two reads, one refresh and one proposal of kind connection_change', async () => {
+  const calls = [];
+  const request = async (path, body) => {
+    calls.push([path, body]);
+    if (path.endsWith('/steward_connection_refresh')) throw new Error('AItelier /x: HTTP 422 "refresh_too_soon"');
+    if (path.endsWith('/create_steward_proposal')) return { result: { proposal_id: 'prop-1', version: 1, status: 'open', needs_dashboard: true } };
+    return { result: { conn_id: body.conn_id, tools: [] } };
+  };
+  const { manage } = catalogOps(request);
+  assert.deepEqual(await manage.tools('media'), { conn_id: 'media', tools: [] });
+  assert.deepEqual((await manage.refresh('media')).refused, 'refresh_too_soon');
+  const proposal = { payload: { op: 'remove', conn_id: 'media', source: { kind: 'owner_message', ref: 'm1' }, conn_uid: 'u',
+    expect_config_version: 2, external_content: false }, reason: 'owner asked' };
+  assert.deepEqual(await manage.propose(proposal), { proposal_id: 'prop-1', version: 1, status: 'open', needs_dashboard: true });
+  await manage.propose(proposal);
+  assert.deepEqual(calls.map(([path]) => path.split('/').slice(-2).join('/')), ['query/list_steward_connection_tools',
+    'commands/steward_connection_refresh', 'commands/create_steward_proposal', 'commands/create_steward_proposal']);
+  const [, body] = calls[2];
+  assert.equal(body.kind, 'connection_change');
+  assert.deepEqual(body.payload, proposal.payload);
+  assert.match(body.request_key, /^proposal:[0-9a-f]{40}$/);
+  assert.equal(calls[3][1].request_key, body.request_key, 'a retry is State\'s replay, not a second card');
+});
+
 test('a refused reply is not reported as sent: a 200 with a code inside the result is a refusal in either inbox', async () => {
   for (const [inbox, deliveryId, command] of [['project', 'd-proj', 'send_director_message'],
                                              ['private', 'd-priv', 'send_driver_message']]) {
@@ -1652,4 +1728,28 @@ test('step 22: the snapshot layer 2 lists the pushed questions still waiting, fr
   const threads = await openThreadsOf({ request, project: 'aitelier-home', me: 'drv-home', stateDir: mkdtempSync(join(tmpdir(), 'steward-state-')) });
   assert.deepEqual(threads.pushed_owner_questions, [{ code: 'Q12', project_id: 'wuxia', project_title: '武侠存档', question: '用 A 吗？',
     pushed_at: '2026-11-20T10:00:00+00:00', reminders_sent: 1 }]);
+});
+
+test('the snapshot names an open connection_change by op, conn_id and widens only: no tool definition or name from the server (review R1)', async () => {
+  const MARK = 'SERVER-WRITTEN-DESCRIPTION-MARK';
+  const proposals = [
+    { proposal_id: 'p-1', version: 1, kind: 'connection_change', status: 'open', reason: 'the owner asked', created_at: 't',
+      payload: { op: 'reenable', conn_id: 'mailpub', conn_uid: 'u', expect_config_version: 3, widens: true,
+        widened: ['reenable', `tools.${MARK}-name.allowed`], tools: [{ raw_name: `${MARK}-name`, schema_sha256: 'a'.repeat(64), allowed: true }],
+        snapshot: { connection: { label: 'Mail' }, tools: [{ raw_name: `${MARK}-name`, definition: { description: MARK } }],
+          source: { kind: 'owner_message', owner_message: { text: 'enable it' } } } } },
+    { proposal_id: 'p-2', version: 1, kind: 'start_driver', status: 'open', reason: 'r', created_at: 't', payload: { project_id: 'alpha' } }];
+  const request = async path => {
+    if (path === '/api/state/query/list_steward_proposals') return { result: { proposals } };
+    if (path === '/api/state/query/list_steward_schedules') return { result: { schedules: [] } };
+    if (path === '/api/state/query/list_user_conversation') return { messages: [], next_cursor: null };
+    throw new Error('unexpected ' + path);
+  };
+  const runtime = { refresh: async () => {}, render: () => 'STATE' };
+  const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_STATE_DIR: mkdtempSync(join(tmpdir(), 'r1-')) }), { request, runtime });
+  const text = await host.context();
+  assert.ok(!text.includes(MARK), text);
+  const listed = JSON.parse(text.split('Your open proposals:\n')[1].split('\n')[0]);
+  assert.deepEqual(listed[0].payload, { op: 'reenable', conn_id: 'mailpub', widens: true });
+  assert.deepEqual(listed[1].payload, { project_id: 'alpha' }, 'other kinds are unchanged');
 });

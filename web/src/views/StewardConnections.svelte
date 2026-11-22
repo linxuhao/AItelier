@@ -1,19 +1,25 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { deleteStewardConnection, listStewardConnections, probeStewardConnection, saveStewardConnection,
-    setStewardConnectionSecret, setStewardConnectionTools, startDshDriver, stewardConnectionTools, stopDshDriver,
-    type StewardConnection, type StewardConnectionInput, type StewardConnectionTool, type StewardConnections,
-    type StewardToolChange } from '../lib/api';
+  import { confirmStewardIdentity, deleteStewardConnection, listStewardConfirmations, listStewardConnections,
+    probeStewardConnection, saveStewardConnection, setStewardConnectionSecret, setStewardConnectionTools,
+    setStewardOAuthClient, signOutStewardOAuth, startDshDriver, startStewardOAuth, stewardConnectionTools, stopDshDriver,
+    type StewardConfirmation, type StewardConnection, type StewardConnectionInput, type StewardConnectionTool,
+    type StewardConnections, type StewardToolChange } from '../lib/api';
   import { STEWARD_PROJECT_ID } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  // Step 24.1c: a connection to open for its secret / sign-in (a proposal's "set the secret").
+  const { focus = null }: {focus?: string | null} = $props();
+  let focused = '';
   // The steward's own MCP connections (design 7.8.10): add / edit / delete a server, read
   // its tools, tick each one (allowed, outward, egress, blocked arguments, daily cap).
   // Saving takes effect at once - the gateway tells the steward its tool list changed, no
   // restart. Descriptions and server texts come from someone else's server: plain text only.
   let data = $state<StewardConnections | null>(null);
   let error = $state(''), notice = $state(''), busy = $state('');
-  let editing = $state<(StewardConnectionInput & {isNew: boolean; secret: string}) | null>(null);
+  let editing = $state<(StewardConnectionInput & {isNew: boolean; secret: string; clientId: string; clientSecret: string}) | null>(null);
+  // Step 24.1b: the confirmations of outward actions, with the text that went out.
+  let confirmations = $state<StewardConfirmation[]>([]);
   let open = $state<string | null>(null);
   let tools = $state<StewardConnectionTool[]>([]), toolsError = $state(''), instructions = $state<string | null>(null);
   // `cap` is bound to a number input: Svelte stores a number, or null when it is cleared.
@@ -23,22 +29,27 @@
   async function load() {
     try { data = await listStewardConnections(); error = ''; }
     catch (e) { failed(e); }
+    const target = data?.connections.find(c => c.conn_id === focus);
+    if (target && focused !== target.conn_id) { focused = target.conn_id; edit(target); }
+    try { confirmations = (await listStewardConfirmations()).confirmations; } catch { confirmations = []; }
   }
   function blank() {
     editing = {isNew: true, conn_id: '', label: '', url: '', auth_kind: 'none', header_name: 'Authorization',
-      visibility: 'private', enabled: false, secret: ''};
+      visibility: 'private', enabled: false, secret: '', clientId: '', clientSecret: ''};
   }
   function edit(c: StewardConnection) {
-    editing = {isNew: false, conn_id: c.conn_id, label: c.label, url: c.url, auth_kind: c.auth_kind === 'header' ? 'header' : 'none',
-      header_name: c.header_name ?? 'Authorization', visibility: c.visibility, enabled: c.enabled, secret: ''};
+    editing = {isNew: false, conn_id: c.conn_id, label: c.label, url: c.url, auth_kind: c.auth_kind,
+      header_name: c.header_name ?? 'Authorization', visibility: c.visibility, enabled: c.enabled, secret: '',
+      clientId: '', clientSecret: ''};
   }
   async function save() {
     if (!editing || busy) return;
     busy = 'save'; error = ''; notice = '';
-    const {isNew: _isNew, secret, ...input} = editing;
+    const {isNew: _isNew, secret, clientId, clientSecret, ...input} = editing;
     try {
       await saveStewardConnection({...input, header_name: input.auth_kind === 'header' ? input.header_name : null});
       if (input.auth_kind === 'header' && secret) await setStewardConnectionSecret(input.conn_id, secret);
+      if (input.auth_kind === 'oauth' && clientId) await setStewardOAuthClient(input.conn_id, clientId, clientSecret || null);
       editing = null; notice = t('steward.connSaved');
       await load();
     } catch (e) { failed(e); }
@@ -78,6 +89,37 @@
     } catch (e) { toolsError = String(e instanceof Error ? e.message : e); }
     finally { busy = ''; }
   }
+  // OAuth (7.8.6): the browser signs in at the service in a new tab and comes back to the
+  // callback; the account it bound is shown and must be confirmed before enabling.
+  // The tab opens in the click itself (a popup blocker allows only that); the address
+  // follows once the backend answers it. A blocked tab leaves the address as a link.
+  let authorizeLink = $state<{conn: string; url: string} | null>(null);
+  async function authorize(connId: string) {
+    if (busy) return;
+    busy = 'oauth'; error = ''; authorizeLink = null;
+    const tab = window.open('about:blank', '_blank');
+    try {
+      const {authorize_url} = await startStewardOAuth(connId);
+      if (tab) { tab.opener = null; tab.location.href = authorize_url; }
+      else authorizeLink = {conn: connId, url: authorize_url};
+    }
+    catch (e) { tab?.close(); failed(e); }
+    finally { busy = ''; }
+  }
+  async function confirmIdentity(c: StewardConnection) {
+    if (busy || !c.auth_identity) return;
+    busy = 'identity'; error = '';
+    try { await confirmStewardIdentity(c.conn_id, c.auth_identity); await load(); }
+    catch (e) { failed(e); }
+    finally { busy = ''; }
+  }
+  async function signOut(connId: string) {
+    if (busy) return;
+    busy = 'signout'; error = '';
+    try { await signOutStewardOAuth(connId); await load(); }
+    catch (e) { failed(e); }
+    finally { busy = ''; }
+  }
   function askDelete(connId: string) { target = connId; deleteAsk = true; }
   async function remove() {
     if (!target) return;
@@ -111,7 +153,7 @@
   {/each}
   {#if data}
     {#each data.connections as c (c.conn_id)}
-      <article class="connection" data-conn={c.conn_id} data-usable={c.usable ? '1' : '0'}>
+      <article class="connection" data-conn={c.conn_id} data-usable={c.usable ? '1' : '0'} data-focus={c.conn_id === focus ? '1' : undefined}>
         <header>
           <strong>{c.label}</strong> <code>{c.conn_id}</code>
           <span class="mark" class:off={c.visibility === 'private'}>{c.visibility === 'private' ? t('steward.connPrivate') : t('steward.connPublic')}</span>
@@ -122,6 +164,22 @@
           .replace('{outward}', String(c.tool_counts.outward)).replace('{all}', String(c.tool_counts.all))}
           {#if c.tool_counts.changed}<span class="changed"> · {t('steward.connChangedCount').replace('{n}', String(c.tool_counts.changed))}</span>{/if}
           {#if c.tool_counts.new}<span> · {t('steward.connNewCount').replace('{n}', String(c.tool_counts.new))}</span>{/if}</p>
+        {#if c.auth_kind === 'oauth'}
+          <p class="detail" data-conn-oauth>
+            {#if c.auth_identity}<span data-conn-identity>{t('steward.connAuthorizedAs').replace('{who}', c.auth_identity)}</span>{/if}
+            {#if c.auth_identity && !c.identity_confirmed}
+              <span class="changed"> · {t('steward.connIdentityUnconfirmed')}</span>
+              <button type="button" class="outline inline" disabled={busy !== ''} data-conn-confirm-identity
+                onclick={() => void confirmIdentity(c)}>{t('steward.connConfirmIdentity')}</button>
+            {/if}
+            <button type="button" class="outline inline" disabled={busy !== ''} data-conn-authorize
+              onclick={() => void authorize(c.conn_id)}>{t('steward.connAuthorize')}</button>
+            {#if authorizeLink?.conn === c.conn_id}<a href={authorizeLink.url} target="_blank" rel="noopener noreferrer"
+              data-conn-authorize-link>{t('steward.connAuthorize')} ↗</a>{/if}
+            {#if c.auth_identity || c.secret === 'set'}<button type="button" class="outline inline" disabled={busy !== ''}
+              data-conn-signout onclick={() => void signOut(c.conn_id)}>{t('steward.connSignOut')}</button>{/if}
+          </p>
+        {/if}
         {#if c.last_probe_at || c.last_error}
           <p class="detail">{c.last_probe_at ? t('steward.connProbedAt').replace('{at}', new Date(c.last_probe_at).toLocaleString()) : ''}
             {#if c.last_error}<span class="error"> {c.last_error}</span>{/if}</p>
@@ -162,6 +220,16 @@
       </article>
     {/each}
     <button type="button" class="outline" data-conn-add onclick={blank}>{t('steward.connAdd')}</button>
+    <details class="confirmations" data-confirmations>
+      <summary>{t('steward.connConfirmations')}</summary>
+      {#each confirmations as item (item.code)}
+        <details class="confirmation" data-confirmation={item.code}>
+          <summary><code>{item.code}</code> · {item.conn_id} · {item.raw_name} · {item.channel} · {item.status}
+            · {new Date(item.created_at).toLocaleString()}</summary>
+          <pre class="plain">{item.message_text}</pre>
+        </details>
+      {:else}<p class="hint">{t('steward.connConfirmationsEmpty')}</p>{/each}
+    </details>
   {/if}
   {#if editing}
     <form class="edit" data-conn-form onsubmit={(event) => { event.preventDefault(); void save(); }}>
@@ -172,10 +240,15 @@
         <select bind:value={editing.auth_kind}>
           <option value="none">{t('steward.connAuthNone')}</option>
           <option value="header">{t('steward.connAuthHeader')}</option>
+          <option value="oauth">{t('steward.connAuthOauth')}</option>
         </select></label>
       {#if editing.auth_kind === 'header'}
         <label>{t('steward.connHeaderName')} <input type="text" bind:value={editing.header_name} /></label>
         <label>{t('steward.connHeaderValue')} <input type="password" autocomplete="off" bind:value={editing.secret} /></label>
+      {/if}
+      {#if editing.auth_kind === 'oauth'}
+        <label>{t('steward.connClientId')} <input type="text" autocomplete="off" bind:value={editing.clientId} data-oauth-client-id /></label>
+        <label>{t('steward.connClientSecret')} <input type="password" autocomplete="off" bind:value={editing.clientSecret} /></label>
       {/if}
       <label>{t('steward.connVisibility')}
         <select bind:value={editing.visibility}>
@@ -215,4 +288,6 @@
   .ticks input[type=text],.ticks input[type=number]{width:120px;margin:0;padding:2px 6px;font-size:12px;height:auto;}
   .edit{margin:12px 0 0;padding:12px 14px;border:1px solid var(--pico-muted-border-color);border-radius:8px;}
   .notice{color:var(--pico-primary);}.error{color:var(--pico-del-color);}
+  button.inline{width:auto;margin:0 0 0 6px;padding:2px 8px;font-size:12px;}
+  .confirmations{margin:12px 0 0;}.confirmation summary{font-size:12px;}
 </style>

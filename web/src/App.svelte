@@ -38,6 +38,8 @@
     '/state-projects/for-repo/:repoPath': StateProjects,
     '/state-projects/:id/nodes/:nodeKey': StateProject,
     '/state-projects/:id': StateProject,
+    // Step 24.1c: a connection proposal's "set the secret / sign in" link.
+    '/steward/connections/:connId/connect': StateProjects,
     '/state-runs/:runId': StateRun,
     '/projects/:id': Project,
     // Project-level trace: no runId -> Trace targets the project id (the

@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
+import { registerConfirmTools } from './lib/confirm.mjs';
+import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
 import { defaultLabels, defaultTexts, Clock, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
@@ -356,7 +358,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     /** Step 23: whose turn the steward is in ({kind: 'owner'} or {kind: 'group', ...}); unknown
      *  reads as a group. undefined for a director. */
     turnAudience: () => groupTurns?.audience(),
-    ownerMessageSent: (messageId, text, replyTo) => channels ? channels.ownerMessageSent(messageId, text, replyTo)
+    ownerMessageSent: (messageId, text, replyTo, options) => channels ? channels.ownerMessageSent(messageId, text, replyTo, options)
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     /** Step 25 C11: one line into a bound group (a group reminder the host posted), through the
      *  same channel send and bridge queue as a group reply: true when the channel took it. */
@@ -689,6 +691,14 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (host.portfolio || host.handoff) registerPortfolioTools(scope, { defineTool, jsonOutput, portfolio: host.portfolio, handoff: host.handoff });
     // Plugin step 13: proposals the owner decides on.
     if (host.proposals) registerProposalTools(scope, { defineTool, jsonOutput, proposals: host.proposals });
+    // Step 24.1b (design-steward 7.8.9): outward actions confirmed by the person who asked,
+    // when the host's catalog provides confirmations.
+    if (stewardCatalog && catalogHost.confirm) registerConfirmTools(scope, { ctx, defineTool, jsonOutput,
+      HarnessError: llm.HarnessError, confirm: catalogHost.confirm, catalog: stewardCatalog });
+    // Step 24.1c (design-steward 7.8.10a): the steward reads its connections and proposes
+    // changes to them, when the host's catalog provides those operations.
+    if (stewardCatalog && catalogHost.manage) registerConnectionTools(scope, { defineTool, jsonOutput,
+      manage: catalogHost.manage, catalog: stewardCatalog, host: catalogHost });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
     // Step 23: the family memory, a store of its own on the host, for group turns only (the

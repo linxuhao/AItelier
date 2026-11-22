@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -55,7 +56,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS state_steward_proposals (
  proposal_id TEXT PRIMARY KEY,
  version INTEGER NOT NULL CHECK(version>0),
- kind TEXT NOT NULL CHECK(kind IN ('create_project','start_driver','stop_driver','archive_project','unarchive_project')),
+ kind TEXT NOT NULL CHECK(kind IN ('create_project','start_driver','stop_driver','archive_project','unarchive_project','connection_change')),
  payload_json TEXT NOT NULL, reason TEXT NOT NULL,
  status TEXT NOT NULL CHECK(status IN ('open','executing','done','failed','declined','withdrawn','superseded')),
  created_by TEXT NOT NULL, created_at TEXT NOT NULL, supersedes TEXT,
@@ -90,14 +91,19 @@ TARGET_COLUMNS = (
     # The due time the row last fired for (last_run_at is the moment of the fire, never equal).
     ("last_due_at", "TEXT"))
 
-KINDS = ("create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project")
+KINDS = ("create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project", "connection_change")
 # Owner 2026-11-18: the steward may PROPOSE archiving / unarchiving a project; the
 # owner approves on the card and the backend writes it as that owner. The steward
 # itself keeps no archive permission (archive_project is not on its whitelist).
 ARCHIVE_KINDS = ("archive_project", "unarchive_project")
-# The kind CHECK a database created before the archive kinds carries; `_migrate_kinds`
-# rebuilds such a table once with SCHEMA's CHECK.
+# Step 24.1c (design-steward 7.8.10a): the steward proposes changes to its own MCP
+# connections; the backend executes the frozen payload (core.state_steward_connection_proposals).
+CONNECTION_KIND = "connection_change"
+# The kind CHECK a database created before the archive kinds carries. `_migrate_kinds`
+# rebuilds a table whose kind CHECK is not SCHEMA's (this one, or the five kinds before
+# connection_change) once with SCHEMA's CHECK.
 OLD_KIND_CHECK = "CHECK(kind IN ('create_project','start_driver','stop_driver'))"
+_KIND_CHECK = re.compile(r"CHECK\s*\(\s*kind\s+IN\s*\([^)]*\)\s*\)")
 MEMORY_KINDS = ("profile_read", "profile_update", "forgotten_list", "forget", "restore", "purge")
 # The payload keys each memory request kind may carry (memory-requests.mjs).
 _MEMORY_KEYS = {"profile_read": set(), "profile_update": {"text", "expected_version", "reason"},
@@ -435,14 +441,20 @@ class StateSteward:
         self.groups = None
 
     def _migrate_kinds(self):
-        """A proposals table created with OLD_KIND_CHECK refuses the archive kinds:
-        rebuild it with SCHEMA's own CREATE TABLE (old table set aside, new one
-        created, rows copied, old dropped, index recreated) in ONE write transaction.
-        Checked again under the write lock; a table already migrated is never touched."""
+        """A proposals table whose kind CHECK is not SCHEMA's (made before the archive
+        kinds, or before connection_change) refuses the newer kinds: rebuild it with
+        SCHEMA's own CREATE TABLE (old table set aside, new one created, rows copied, old
+        dropped, index recreated) in ONE write transaction. Checked again under the write
+        lock; a table already migrated is never touched."""
+        current = _KIND_CHECK.search(SCHEMA).group(0)
+
         def old(conn):
             row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' "
                                "AND name='state_steward_proposals'").fetchone()
-            return row is not None and OLD_KIND_CHECK in row[0]
+            if row is None:
+                return False
+            found = _KIND_CHECK.search(row[0])
+            return found is not None and found.group(0) != current
         with self.store.db.get_connection() as conn:
             if not old(conn):
                 return
@@ -566,16 +578,28 @@ class StateSteward:
         """Record one OPEN proposal by the steward. Executes nothing."""
         if kind not in KINDS:
             raise StateGraphError(f"unknown_kind: kind must be one of {', '.join(KINDS)}")
-        payload = self._validate(kind, payload)
+        connection = kind == CONNECTION_KIND
+        if connection:
+            from core import state_steward_connection_proposals as ccp
+            payload = ccp.validate(payload)
+        else:
+            payload = self._validate(kind, payload)
         reason = reason.strip()
         if not reason:
             raise StateGraphError("reason must be nonempty")
         request_hash = _hash([kind, payload, reason, supersedes])
+        if connection:
+            ccp.check_address(payload)
         with self.store.transaction(write=True) as conn:
             self._steward(conn, project_id)
             replay = self._replay(conn, "create_steward_proposal", request_key, request_hash)
             if replay is not None:
                 return replay
+            if connection:
+                # No project: checked against the registry now, the card's snapshot frozen.
+                payload = ccp.prepare(conn, payload, steward_project())
+                return self._insert_proposal(conn, request_key, request_hash, kind, payload, reason, supersedes,
+                                             {"needs_dashboard": payload["widens"]})
             target = payload["project_id"]
             if kind in ARCHIVE_KINDS and target == steward_project():
                 raise StateGraphError(f"invalid_project: {target} is the steward's own project")
@@ -593,20 +617,24 @@ class StateSteward:
                     raise StateConflict(f"already_archived: {target} is already archived")
                 if kind == "unarchive_project" and not archived:
                     raise StateConflict(f"not_archived: {target} is not archived")
-            stamp, proposal_id = now(), "prop-" + uuid4().hex[:20]
-            if supersedes is not None:
-                old = self._get(conn, supersedes)
-                if old["status"] != "open" or old["created_by"] != self.actor:
-                    raise StateConflict("supersedes must name one of your open proposals")
-                conn.execute("UPDATE state_steward_proposals SET status='superseded',version=version+1,"
-                             "decided_at=?,decided_by=?,result_json=? WHERE proposal_id=?",
-                             (stamp, self.actor, canonical({"superseded_by": proposal_id}), supersedes))
-            conn.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,"
-                         "status,created_by,created_at,supersedes) VALUES(?,1,?,?,?,'open',?,?,?)",
-                         (proposal_id, kind, _bounded_json(payload, "payload"), reason, self.actor, stamp,
-                          supersedes))
-            return self._record(conn, "create_steward_proposal", request_key, request_hash,
-                                {"proposal_id": proposal_id, "version": 1, "status": "open"})
+            return self._insert_proposal(conn, request_key, request_hash, kind, payload, reason, supersedes)
+
+    def _insert_proposal(self, conn, request_key, request_hash, kind, payload, reason, supersedes, extra=None):
+        """Insert one open proposal on the caller's transaction (superseding the named one)."""
+        stamp, proposal_id = now(), "prop-" + uuid4().hex[:20]
+        if supersedes is not None:
+            old = self._get(conn, supersedes)
+            if old["status"] != "open" or old["created_by"] != self.actor:
+                raise StateConflict("supersedes must name one of your open proposals")
+            conn.execute("UPDATE state_steward_proposals SET status='superseded',version=version+1,"
+                         "decided_at=?,decided_by=?,result_json=? WHERE proposal_id=?",
+                         (stamp, self.actor, canonical({"superseded_by": proposal_id}), supersedes))
+        conn.execute("INSERT INTO state_steward_proposals(proposal_id,version,kind,payload_json,reason,"
+                     "status,created_by,created_at,supersedes) VALUES(?,1,?,?,?,'open',?,?,?)",
+                     (proposal_id, kind, _bounded_json(payload, "payload"), reason, self.actor, stamp,
+                      supersedes))
+        return self._record(conn, "create_steward_proposal", request_key, request_hash,
+                            {"proposal_id": proposal_id, "version": 1, "status": "open", **(extra or {})})
 
     def withdraw_proposal(self, project_id, request_key, proposal_id, reason):
         """The steward takes back one of its own OPEN proposals."""
@@ -632,8 +660,16 @@ class StateSteward:
                                 {"proposal_id": proposal_id, "version": result["version"],
                                  "status": "withdrawn"})
 
+    def _owner_or_steward(self):
+        # A connection_change's stored payload copies connection facts (auth_identity, url,
+        # header_name, whole tool definitions) the connection reads give only these two
+        # (7.8.4): a proposal read is judged the same way (review R2).
+        if not (self.is_owner_session() or self.is_steward()):
+            raise StateGraphError("owner_or_steward_required")
+
     @writer_only_read("list_steward_proposals")
     def list_proposals(self, status="open", limit=50):
+        self._owner_or_steward()
         where = "" if status == "all" else "WHERE status='open'"
         with self.store.transaction() as conn:
             rows = conn.execute(f"SELECT * FROM state_steward_proposals {where} "
@@ -642,6 +678,7 @@ class StateSteward:
 
     @writer_only_read("list_steward_proposals")
     def get_proposal(self, proposal_id):
+        self._owner_or_steward()
         with self.store.transaction() as conn:
             return _proposal(self._get(conn, proposal_id))
 
@@ -650,6 +687,8 @@ class StateSteward:
         """What stopping the proposal's target driver would interrupt, now."""
         with self.store.transaction() as conn:
             row = _proposal(self._get(conn, proposal_id))
+            if "project_id" not in row["payload"]:
+                return {"running_subagents": [], "unsettled_attempts": []}
             return stop_impact(conn, row["payload"]["project_id"])
 
     def _owner(self):
@@ -746,6 +785,44 @@ class StateSteward:
         self._notify()
         return out
 
+    def execute_connection_change(self, proposal_id):
+        """Run an EXECUTING connection_change proposal (7.8.10a): the registry checked
+        again (the connection's conn_uid and config_version, each tool's definition; an
+        `add` re-runs every creation check), the frozen payload written, `last_change`
+        and `config_version` stamped and the proposal's `done` in ONE transaction. Any
+        mismatch fails the proposal (separately) and writes nothing. After the commit the
+        gateway is told the tool list may have changed: a notification, no restart."""
+        from core import state_steward_connection_proposals as ccp
+        from core import state_steward_connections as sc
+        with self.store.transaction() as conn:
+            row = self._get(conn, proposal_id)
+        if row["status"] != "executing" or row["kind"] != CONNECTION_KIND:
+            return _proposal(row)
+        payload = json.loads(row["payload_json"])
+        removed = None
+        try:
+            ccp.check_address(payload)
+            with self.store.transaction(write=True) as conn:
+                row = self._get(conn, proposal_id)
+                if row["status"] != "executing" or row["kind"] != CONNECTION_KIND:
+                    return _proposal(row)
+                done = ccp.execute(conn, payload, proposal_id)
+                removed = done["removed"]
+                self._finish(conn, proposal_id, "done", done["result"])
+                out = _proposal(self._get(conn, proposal_id))
+        except ccp.ExecutionRefused as exc:
+            return self.finish(proposal_id, "failed", {"error": exc.code, "op": payload["op"],
+                                                       "conn_id": payload["conn_id"],
+                                                       **({"connect_url": exc.connect} if exc.connect else {})})
+        except Exception as exc:  # noqa: BLE001 - any failure is the proposal's result
+            return self.fail(proposal_id, f"{type(exc).__name__}: {exc}" if not isinstance(exc, StateGraphError)
+                             else str(exc))
+        if removed is not None:
+            ccp.after_remove(removed)
+        sc.tools_changed()
+        self._notify()
+        return out
+
     def finish(self, proposal_id, status, result):
         """Write the terminal state of an EXECUTING proposal (and wake the steward)."""
         with self.store.transaction(write=True) as conn:
@@ -823,6 +900,11 @@ class StateSteward:
         for row in rows:
             if row["kind"] == "create_project":
                 self.execute_create_project(row["proposal_id"])
+                continue
+            if row["kind"] == CONNECTION_KIND:
+                # One transaction: a crash rolled all of it back, so it runs again (and
+                # fails, writing nothing, if the registry moved meanwhile).
+                self.execute_connection_change(row["proposal_id"])
                 continue
             target = json.loads(row["payload_json"])["project_id"]
             if row["kind"] in ARCHIVE_KINDS:

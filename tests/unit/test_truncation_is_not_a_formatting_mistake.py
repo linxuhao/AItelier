@@ -525,6 +525,8 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL for the pushed owner questions and their relayed answers (step 22)",
     ("core/state_steward_connections.py", "SCHEMA"):
         "SQL DDL for the steward's connection registry, its tools, secrets references and call ledger (step 24.1a)",
+    ("core/state_steward_confirmations.py", "SCHEMA"):
+        "SQL DDL for the steward's outward-action confirmations and the dashboard message marks (step 24.1b)",
     ("core/state_channels.py", "SCHEMA"):
         "SQL DDL for the owner chat channel tables (step 19)",
     ("core/state_groups.py", "SCHEMA"):

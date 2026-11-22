@@ -88,13 +88,14 @@ from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 from core import drivers
+from core import state_steward_confirmations as confirmations
 from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
 from core.state_graph import StateConflict, StateGraphError, StateNotFound, canonical, now
 from core.state_privacy import UntrustedDatabase, writer_only_read
 from core.state_schema_migration import add_column_if_missing
-from core.state_steward import (ARCHIVE_KINDS, ProposalConflict, _hash, _proposal, default_tz, impact_is_empty,
-                                steward_project, stop_impact)
+from core.state_steward import (ARCHIVE_KINDS, CONNECTION_KIND, ProposalConflict, _hash, _proposal, default_tz,
+                                impact_is_empty, steward_project, stop_impact)
 
 log = logging.getLogger(__name__)
 
@@ -504,7 +505,8 @@ def match_phrase(conn, body):
 
 def _subject(proposal):
     """What a decided proposal was about, from its stored row: {kind, target}."""
-    return {"kind": proposal["kind"], "target": proposal["payload"].get("project_id")}
+    payload = proposal["payload"]
+    return {"kind": proposal["kind"], "target": payload.get("project_id") or payload.get("conn_id")}
 
 
 def check_qr_svg(svg):
@@ -870,6 +872,12 @@ class StateChannels:
                      (message_id, channel, sender_ref, channel_message_ref, moment.isoformat(), channel_at))
         matched = match_phrase(conn, body)
         result = {"message_id": message_id, "duplicate": False, "approval": None}
+        # Step 24.1b (design-steward 7.8.9): the requester's exact `确认 <code>` / `取消 <code>`
+        # for a confirmation of theirs is decided here, in the transaction that writes it.
+        confirmation = confirmations.match_reply(conn, body, channel=channel, sender_ref=sender_ref,
+                                                 written_at=written_at, message_id=message_id)
+        if confirmation is not None:
+            result["confirmation"] = confirmation
         if matched is not None and written_at is None:
             result["approval"] = {"proposal_id": matched["proposal_id"], "action": matched["action"],
                                   "outcome": "refused", "refusal": "approval_undated"}
@@ -1490,8 +1498,17 @@ class StateChannels:
         same text field on the same stored row)."""
         matched = {}
 
+        confirmed = {}
+
         def written(conn, message_id):
             if project_id == steward_project() and self.steward.is_owner_session():
+                # Step 24.1b: the browser session's message can ask for an outward action
+                # (the dashboard is its conversation) and can confirm one, by server time.
+                confirmations.record_dashboard_message(conn, message_id)
+                decided = confirmations.match_reply(conn, body, channel=confirmations.DASHBOARD, sender_ref=None,
+                                                    written_at=_now(), message_id=message_id)
+                if decided is not None:
+                    confirmed.update(decided)
                 found = match_phrase(conn, body)
                 if found is not None:
                     matched.update(found, message_id=message_id)
@@ -1502,6 +1519,8 @@ class StateChannels:
         if matched:
             record = {"phrase": matched["phrase"], "message_id": matched["message_id"]}
             result = {**result, "approval": self._decide(matched, self.actor, record)}
+        if confirmed:
+            result = {**result, "confirmation": dict(confirmed)}
         return result
 
     # ---------------------------------------------------------------- the decision
@@ -1532,6 +1551,11 @@ class StateChannels:
                     impact = stop_impact(conn, json.loads(row["payload_json"])["project_id"])
                     if not impact_is_empty(impact):
                         return {**out, "outcome": "refused", "refusal": "needs_dashboard_confirmation"}
+                if (row["kind"] == CONNECTION_KIND and row["status"] == "open" and row["version"] == version
+                        and json.loads(row["payload_json"]).get("widens") is not False):
+                    # A change that widens a permission is approved on the dashboard card only
+                    # (design-steward 7.8.10a): the phrase names an id, never what it approves.
+                    return {**out, "outcome": "refused", "refusal": "needs_dashboard_approval"}
             if row["kind"] in DRIVER_KINDS and steward.driver_runner is None:
                 return {**out, "outcome": "refused", "refusal": "driver_runtime_unavailable"}
             row = steward.decide_begin(proposal_id, version, decided_by, record, carrier)
@@ -1542,6 +1566,8 @@ class StateChannels:
             return {**out, "outcome": "refused", "refusal": _refusal(exc)}
         if row["kind"] == "create_project":
             result = steward.execute_create_project(proposal_id)
+        elif row["kind"] == CONNECTION_KIND:
+            result = steward.execute_connection_change(proposal_id)
         elif row["kind"] in ARCHIVE_KINDS:
             result = steward.execute_archive(proposal_id)
         else:

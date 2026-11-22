@@ -130,7 +130,9 @@ _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules",
                        "list_list_items",
                        # Step 24.1a: the connection reads answer the owner's session or the steward.
                        "list_steward_connections", "list_steward_connection_tools",
-                       "list_pushed_owner_questions"}
+                       "list_pushed_owner_questions",
+                       # Step 24.1c (review R2): a proposal's payload copies connection facts.
+                       "list_steward_proposals"}
 
 
 def _family_reader(steward):

@@ -231,6 +231,10 @@ def initialize(db) -> None:
             ("sender_driver_id", "TEXT"),
             ("ack_mode", "TEXT NOT NULL DEFAULT 'at_least_n' CHECK(ack_mode IN ('at_least_n','broadcast'))"),
             ("ack_quorum", "INTEGER NOT NULL DEFAULT 1 CHECK(ack_quorum>=1)"),
+            # Step 24.1c (design-steward 7.8.10a): the owner message a steward's handoff
+            # cites, checked when written; never part of a reply (the contract's message
+            # shape is unchanged).
+            ("cites_owner_message_id", "TEXT"),
         ]:
             add_column_if_missing(conn, "state_director_messages", name, definition)
         conn.executescript(quorum.SCHEMA)
@@ -337,6 +341,32 @@ class SQLiteDirectorMessaging:
             "WHERE d.delivery_id=? AND d.target_driver_id=?",
             (delivery_id, self.driver_id)).fetchone()
 
+    def _check_cited_owner_message(self, conn, sender_project_id, message_id):
+        """Step 24.1c (design-steward 7.8.10a "source"): `cites_owner_message_id` is the
+        steward's alone (its handoff names the owner message it passes on), and must be a
+        message the owner wrote in the steward's own conversation. Anyone else, or any
+        other message, is refused before a row is written."""
+        from core.state_steward import steward_project
+        home = steward_project()
+        role = None
+        if self.driver_id:
+            row = conn.execute("SELECT capabilities_json FROM drivers WHERE driver_id=? AND status='active'",
+                               (self.driver_id,)).fetchone()
+            try:
+                role = (json.loads(row[0]) or {}).get("role") if row is not None else None
+            except (ValueError, TypeError, AttributeError):
+                role = None
+        if role != "steward" or sender_project_id != home:
+            raise DirectorMessageError("invalid_request", self.reply_schema,
+                                       message="cites_owner_message_id: only the steward's own letters cite an owner message")
+        cited = conn.execute("SELECT project_id,sender_driver_id,channel FROM driver_inbox_messages WHERE message_id=?",
+                             (message_id,)).fetchone()
+        if cited is None or cited["project_id"] != home or cited["sender_driver_id"] is not None \
+                or cited["channel"] != "user":
+            raise DirectorMessageError("invalid_request", self.reply_schema,
+                                       message="cites_owner_message_id: not_an_owner_message - name a message the "
+                                               "owner wrote to the steward")
+
     def _dedupe(self, conn, scope, operation, request_key, payload_json):
         row = conn.execute(
             "SELECT payload_json,result_json FROM state_director_idempotency "
@@ -421,7 +451,8 @@ class SQLiteDirectorMessaging:
     def send_director_message(self, sender_project_id, director_identity, request_key,
                               subject, body, target_project_id=None, broadcast=False,
                               reply_to_delivery_id=None, delivery_mode="transient",
-                              ack_mode=None, ack_quorum=None, protocol_version="v2"):
+                              ack_mode=None, ack_quorum=None, protocol_version="v2",
+                              cites_owner_message_id=None):
         self._set_reply_schema(protocol_version, ack_mode is not None or ack_quorum is not None)
         if ack_mode is not None or ack_quorum is not None:
             self.v3 = True
@@ -465,6 +496,9 @@ class SQLiteDirectorMessaging:
         ack_quorum = 1 if ack_quorum is None else ack_quorum
         if ack_mode not in ("at_least_n","broadcast") or type(ack_quorum) is not int or ack_quorum<1:
             _invalid()
+        if cites_owner_message_id is not None:
+            # Only when given: a send without it keeps its idempotency payload as before.
+            payload["cites_owner_message_id"] = _db_id(cites_owner_message_id, "cites_owner_message_id")
         payload_json = _canonical(payload)
         operation = "send_director_message"
         with self.store.transaction(write=True) as conn:
@@ -472,6 +506,8 @@ class SQLiteDirectorMessaging:
             if replay is not None:
                 return replay
             self._project(conn, sender_project_id)
+            if cites_owner_message_id is not None:
+                self._check_cited_owner_message(conn, sender_project_id, cites_owner_message_id)
             thread_id = None
             if targeted:
                 self._project(conn, target_project_id)
@@ -566,8 +602,9 @@ class SQLiteDirectorMessaging:
                 tuple(message[key] for key in (
                     "message_id", "thread_id", "sender_project_id", "director_identity", "actor",
                     "subject", "body", "created_at", "reply_to_delivery_id", "delivery_mode")))
-            conn.execute("UPDATE state_director_messages SET sender_driver_id=?,ack_mode=?,ack_quorum=? WHERE message_id=?",
-                         (self.driver_id,ack_mode,ack_quorum,message_id))
+            conn.execute("UPDATE state_director_messages SET sender_driver_id=?,ack_mode=?,ack_quorum=?,"
+                         "cites_owner_message_id=? WHERE message_id=?",
+                         (self.driver_id,ack_mode,ack_quorum,cites_owner_message_id,message_id))
             deliveries = []
             for target in targets:
                 delivery = {

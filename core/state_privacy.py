@@ -145,6 +145,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # Step 22: the questions pushed to the owner's chat channel (code, when pushed and
     # reminded, how closed) and each answer relayed from it. No projection.
     "state_owner_question_pushes", "state_owner_question_answers",
+    # Step 24.1b: confirmations of outward actions (the exact arguments - a mail's text - and
+    # the text the requester read) and the marks of the owner's dashboard messages.
+    "state_steward_confirmations", "state_steward_dashboard_messages",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

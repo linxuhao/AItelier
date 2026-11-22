@@ -37,6 +37,7 @@ import time
 import types
 from pathlib import Path
 
+import pytest
 import yaml
 
 from skillflow import PipelineGraph
@@ -46,6 +47,9 @@ from skillflow.tool_loader import ToolLoader
 
 from core import gate_deferral
 from core.skillflow_host import AItelierSkillFlow
+
+# Each row drives real rounds against a gate that never answers: 5-170 s apiece.
+pytestmark = pytest.mark.slow
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 

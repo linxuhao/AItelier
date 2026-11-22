@@ -149,6 +149,7 @@ def _run(argv: list[str], home: Path) -> tuple[int, str, float]:
     return proc.returncode, output or "", time.monotonic() - started
 
 
+@pytest.mark.slow
 def test_driver_node_suite_passes_under_node_test(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:

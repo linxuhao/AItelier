@@ -20,12 +20,17 @@
 # the absence gate and spends no implement cycle.
 import json
 
+import pytest
+
 from core import gate_deferral
 from skillflow.output_targets import git
 from tests.gate_fixture import (GATE_PY, HarnessRig, assert_repo_gate_calls,
                                 embed_env)
 from tests.skillflow.test_coding_impl_gate_absence import (
     _SILENT_TAIL, _drive, _gate_calls, _wire)
+
+# Same real-round absence gate as the module above: 10-170 s per row.
+pytestmark = pytest.mark.slow
 
 # The gate owns its controlled fixture settings: `core/repository_executor_entry`
 # builds the gate child's environment from scratch (HOME, PATH, PYTHONPATH,

@@ -2,6 +2,9 @@ from pathlib import Path
 
 import pytest
 
+# A lint over this repository's sources, not a product behaviour.
+pytestmark = pytest.mark.meta
+
 _ROOT = Path(__file__).resolve().parent.parent.parent
 
 

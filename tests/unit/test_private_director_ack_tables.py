@@ -90,6 +90,7 @@ def old_sets():
             if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name)
             and n.targets[0].id in {'PRIVATE_STATE_TABLES','PUBLIC_STATE_TABLES'}}
 
+@pytest.mark.meta
 @pytest.mark.skipif(not _git_object_present(BASELINE_PRIVACY_OBJECT),
     reason=f"needs a checkout with history: the git object {BASELINE_PRIVACY_OBJECT} is "
            "absent from this checkout, so the pre-policy baseline cannot be read (a "

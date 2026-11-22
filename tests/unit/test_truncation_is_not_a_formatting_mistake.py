@@ -1327,6 +1327,7 @@ def test_prose_is_collected_when_it_is_formatted_or_concatenated(tmp_path):
     assert expected <= set(missing), missing
 
 
+@pytest.mark.meta
 def test_every_prose_constant_in_core_is_accounted_for():
     """Code prose constants are covered, or named in ONE exemption table.
 
@@ -1537,6 +1538,7 @@ def _damaged_reader(entry):
     return read
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("entry", _CATALOG.CORRUPTIONS,
                          ids=lambda e: e["id"])
 def test_every_surface_driven_test_stays_green_on_a_damaged_live_tree(
@@ -1571,6 +1573,7 @@ def test_every_surface_driven_test_stays_green_on_a_damaged_live_tree(
 # through, leaving the disk bytes — not a stub — as the damaged source.
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("entry", _CATALOG.CORRUPTIONS,
                          ids=lambda e: e["id"])
 def test_every_surface_driven_test_stays_green_on_a_real_damaged_tree(

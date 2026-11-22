@@ -25,6 +25,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
+# Guards over the driver suite's hand-kept run list, not a product behaviour.
+pytestmark = pytest.mark.meta
+
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "integrations" / "dsh-driver"
 # Node's discovery is wider than *.test.* / *.spec.*: it also runs `*-test.mjs`,

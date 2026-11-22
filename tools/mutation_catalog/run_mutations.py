@@ -157,8 +157,11 @@ def _plan_edits(tree: Path, edits):
 
 def _run_pytest(tree: Path, targets, spec: dict | None, tag: str):
     """Run pytest in `tree`. Returns (bare_rc, output, ignition, argv)."""
+    # pytest.ini deselects `slow` rows by default; several targets (the absence
+    # gate) are slow, so name the selection the catalog was measured under.
     argv = [sys.executable, "-m", "pytest", "-q", "-rfE",
-            "-p", "no:cacheprovider", "-p", "ignition_plugin", *targets]
+            "-p", "no:cacheprovider", "-p", "ignition_plugin",
+            "-m", "not network and not docker and not baked_toolchain", *targets]
     out_json = Path(tempfile.mkstemp(prefix=f"ign-{tag}-",
                                      suffix=".json")[1])
     env = {**os.environ,

@@ -289,6 +289,7 @@ def _assert_suite_green(suite: Suite, home: Path) -> None:
     )
 
 
+@pytest.mark.slow
 def test_director_node_suite_passes_under_node_test(tmp_path: Path) -> None:
     _assert_suite_green(SUITES[0], tmp_path)
 

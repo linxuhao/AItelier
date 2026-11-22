@@ -127,6 +127,7 @@ def test_the_steward_is_refused_every_write_outside_the_whitelist(world, action)
     assert not world.owner.store.is_project_archived("alpha")
 
 
+@pytest.mark.meta
 def test_the_steward_write_whitelist_is_exactly_these_actions():
     """Enumerated, not derived: both inbox acknowledgements are named here and nothing
     else moved (resolve stays out of both)."""

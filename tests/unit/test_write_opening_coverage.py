@@ -169,6 +169,7 @@ def _mutation_run(action, files):
         return rc, report
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("action", _covered_actions())
 def test_a_write_action_that_opens_the_project_goes_red(action):
     assert _organic_witnesses(action), (
@@ -200,6 +201,7 @@ def test_the_exemption_is_named_justified_and_inside_the_table():
         assert isinstance(reason, str) and len(reason) > 40, "exemptions carry a reason"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("action", sorted(EXEMPT))
 def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action):
     """Remove `action` from EXEMPT and the parametrized gate above picks it up

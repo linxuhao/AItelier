@@ -1886,6 +1886,28 @@ test('step 22: a look still running is the follow-up\'s answer only once it ends
   w.timer.close();
 });
 
+test('step 22: close while the follow-up waits out a running look: no look after that look ends', async () => {
+  // As above: the follow-up fires at 63 s, mid-mirror, and waits for the look that ends at 70 s.
+  // close() cannot clear it any more (it already fired); only tick()'s closed guard stops it.
+  const w = pushWorld({ mirrorMs: 10000 });
+  w.timer.start();
+  await w.advance(29000);
+  w.ask('q0');
+  await w.advance(2000);
+  w.ask('q1');
+  w.timer.changed({ asked: true });
+  await w.advance(1);
+  await w.advance(60000 - w.now); // 60 s: the poll's look pushes q0; its mirror runs until 70 s
+  assert.deepEqual(w.pushes.map(p => p.ids), [['q0']]);
+  await w.advance(OWNER_QUESTIONS_FOLLOW_UP_MS + 31000 - w.now); // 63 s: the follow-up has fired
+  assert.equal(w.timer.followUp, undefined, 'the follow-up already fired: close() has nothing to clear');
+  assert.equal(w.syncs.length, 2);
+  w.timer.close();
+  await w.advance(130000 - w.now);
+  assert.equal(w.syncs.length, 2, 'closed: the waiting follow-up does not look once the running look ends');
+  assert.deepEqual(w.pushes.map(p => p.ids), [['q0']]);
+});
+
 test('step 22: the runtime looks on owner_question_changed in code - the event is quiet, no model turn', () => {
   const source = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
   const at = source.indexOf('runtime.onEvent = async raw => {');

@@ -686,7 +686,7 @@ export class OwnerQuestionsTimer {
   }
   /** A question event: look now. The backend holds a new question for WAIT, so when one was
    *  asked, look once more just after WAIT from this event - one pending follow-up at most,
-   *  moved by each later ask, so a burst from one asker goes out as one push. */
+   *  moved by each later ask, so a burst within WAIT goes out as one push. */
   changed({ asked = false } = {}) {
     if (this.closed) return Promise.resolve();
     if (asked) {

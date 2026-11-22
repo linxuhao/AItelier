@@ -526,9 +526,13 @@ export interface OwnerChannels {
    *  without calling `open`; (3) `open()` streams the bytes, held to the limits and the type
    *  table. {ref, kind, mime, size, durationMs?} or {refused: too_large | type | unsupported |
    *  gone | unavailable | channel_sender_not_bound | invalid_media}. `open` may throw
-   *  {refused: 'too_large' | 'gone'} (a bridge's 413 / 410); any other throw is `unavailable`. */
+   *  {refused: 'too_large' | 'gone'} (a bridge's 413 / 410); any other throw is `unavailable`.
+   *  `conversationRef`: the group the message came in (the room, the same field a group
+   *  message carries to inbound, step 23); a channel MUST pass it for a group's file. A group
+   *  message has no media in 24.2: it is refused `unsupported` before the binding check and
+   *  `open` - nothing fetched, nothing stored, whoever sent it. */
   storeMedia(meta: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; index: number; kind: 'image' | 'voice' | 'file';
-    mime?: string; name?: string }, open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>):
+    mime?: string; name?: string; conversationRef?: string }, open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>):
     Promise<{ ref: string; kind: string; mime: string; size: number; durationMs?: number } | { refused: string }>;
 }
 

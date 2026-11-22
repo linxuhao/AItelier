@@ -374,6 +374,24 @@ test('storeMedia: (1) the binding first - a stranger\'s open() is never called; 
     { refused: 'unsupported' }, 'no group media in 24.2');
 });
 
+test('storeMedia: a group\'s file (conversationRef, declared in host.d.ts) is unsupported before the binding check - bound or stranger, nothing opened or stored', async () => {
+  // Review T1: the marker the refusal keys on is part of the published storeMedia contract.
+  const declared = readFileSync(new URL('../host.d.ts', import.meta.url), 'utf8');
+  const meta = declared.match(/storeMedia\(meta: \{([^}]*)\}/);
+  assert.ok(meta, 'host.d.ts declares storeMedia(meta: {...})');
+  assert.match(meta[1], /\bconversationRef\?: string\b/, 'storeMedia\'s meta declares conversationRef');
+  const w = channelWorld();
+  let opened = 0;
+  const open = async () => { opened += 1; return png(); };
+  for (const senderRef of ['wxid_owner', 'wxid_stranger']) {
+    assert.deepEqual(await w.service.storeMedia({ channel: 'wechat', senderRef, messageRef: `g-${senderRef}`, index: 0, kind: 'image',
+      conversationRef: 'room-1' }, open), { refused: 'unsupported' }, senderRef);
+  }
+  assert.equal(opened, 0, 'nothing fetched');
+  assert.deepEqual(w.calls.senderBound, [], 'refused before the binding check');
+  assert.deepEqual(w.library.rows, [], 'nothing stored');
+});
+
 test('storeMedia without a media library (the local host) or without the host\'s binding read is unsupported', async () => {
   const host = { relay: async () => ({}), bind: async () => ({}), sourceOf: async () => null, recordDelivery: async () => ({}), list: async () => ({ channels: [] }) };
   const handle = createOwnerChannels({ host });

@@ -6,11 +6,14 @@ production container.
 ## Markers
 
 `pytest.ini` registers these markers. The default `addopts` deselects
-`network`, `docker`, `baked_toolchain` and `slow`.
+`network`, `docker` and `baked_toolchain` only. The tiers are opt-out: plain
+`pytest` selects the `slow`, `meta`, `gate` and `serial` rows, because the
+platform's repository gate (`aitelier/tools/run_tests/impl.py`) runs plain
+`pytest` and must keep selecting every row it selected before the tiers existed.
 
 | Marker | Default run | What it marks |
 |---|---|---|
-| `slow` | deselected | Rows that take minutes of wall time: the node/vitest suites run from pytest (`tests/integration/test_driver_node_suite_runs.py`, which also runs the director suite, and `test_web_suite_runs.py`), the skillflow absence-gate modules (`tests/skillflow/test_coding_impl_gate_absence.py`, `test_coding_impl_absence_needs_nothing_else_red.py`) and the prose guard's round-9/10 self-proof poles (`test_truncation_is_not_a_formatting_mistake.py`, `test_prose_corruption_catalog.py`). |
+| `slow` | selected | Rows that take minutes of wall time: the node/vitest suites run from pytest (`tests/integration/test_driver_node_suite_runs.py`, which also runs the director suite, and `test_web_suite_runs.py`), the skillflow absence-gate modules (`tests/skillflow/test_coding_impl_gate_absence.py`, `test_coding_impl_absence_needs_nothing_else_red.py`) and the prose guard's round-9/10 self-proof poles (`test_truncation_is_not_a_formatting_mistake.py`, `test_prose_corruption_catalog.py`). |
 | `meta` | selected | Guards over test sources or hand-kept lists rather than product behaviour: `test_no_verbatim_previous_line_dup.py`, `test_state_wait_bounds.py`, `test_driver_suite_lists_its_files.py`, the prose-constant accounting row, the private-ack-table union row and the steward write whitelist row. |
 | `gate` | selected | Registered for integration gates that need a real clock or real subprocesses. No row carries it yet. |
 | `serial` | selected | Rows that break under pytest-xdist; see "Parallel runs" below. |
@@ -22,26 +25,22 @@ name every exclusion you still want.
 ## Commands
 
 ```bash
-# Default tier (what plain `pytest` runs)
+# Everything (what plain `pytest` and the repository gate run, serially)
 python -m pytest -q -p no:cacheprovider
+
+# Recommended fast local run: skip the slow tier
+python -m pytest -q -p no:cacheprovider -m "not network and not docker and not baked_toolchain and not slow"
 
 # Slow tier only
 python -m pytest -q -p no:cacheprovider -m slow
 
-# Everything the default used to select before the slow tier existed
-python -m pytest -q -p no:cacheprovider -m "not network and not docker and not baked_toolchain"
-
-# Meta guards only, or the default tier without them
+# Meta guards only, or the fast run without them
 python -m pytest -q -p no:cacheprovider -m meta
 python -m pytest -q -p no:cacheprovider -m "not network and not docker and not baked_toolchain and not slow and not meta"
 ```
 
-The slow tier is not part of the default run, so whoever relies on the default
-run as a gate must run `-m slow` as a second job. The platform's repository gate
-(`aitelier/tools/run_tests/impl.py`) runs plain `pytest` and has no such job
-yet: until one exists, a gate run of this repository does not run the driver,
-director and web JS suites, the skillflow
-absence gate or the prose self-proof poles.
+The `serial` rows pass in a plain serial run, so plain `pytest` needs no second
+invocation; only parallel runs split them out (see "Parallel runs" below).
 
 The director suite has no row of its own. The driver row's discovery includes
 `integrations/dsh-driver/plugin-boundary.test.mjs`, which imports all 20 director test
@@ -73,8 +72,13 @@ Images built before it do not. `pytest-timeout` is deliberately not pinned; see
 the end of this section.
 
 ```bash
-python -m pytest -q -p no:cacheprovider -n 4 --dist loadfile --basetemp=/tmp/xb -m "not network and not docker and not baked_toolchain and not slow and not serial"
+# Everything plain `pytest` selects, in two invocations: xdist for all but the
+# serial rows, then the serial rows on their own
+python -m pytest -q -p no:cacheprovider -n 4 --dist loadfile --basetemp=/tmp/xb -m "not network and not docker and not baked_toolchain and not serial"
 python -m pytest -q -p no:cacheprovider -m serial
+
+# The same without the slow tier
+python -m pytest -q -p no:cacheprovider -n 4 --dist loadfile --basetemp=/tmp/xb -m "not network and not docker and not baked_toolchain and not slow and not serial"
 ```
 
 `--dist loadfile` keeps each file on one worker, so module-level state is never
@@ -130,13 +134,13 @@ durations file does not name are charged its median. Regenerate the file from
 the files of LIST, which only makes sense for a serial log: in an xdist (`-n`) log
 the total is wall time, so `measure` ignores LIST there and warns. A
 `--durations=0` log lists every row and needs no LIST.
-The committed file holds the default tier (plain `pytest`, without `slow`)
-after the State template change, measured 2026-11-22 under `-n 4`; files with no
-default-tier row are absent and charged the median.
+The committed file holds the fast run (everything but `slow`, the recommended
+local command above) after the State template change, measured 2026-11-22 under
+`-n 4`; files with no row outside `slow` are absent and charged the median.
 `tests/unit/test_write_opening_coverage.py` was re-measured alone (serial, 2 CPUs)
-after its mutation rows moved in-process and into the default tier.
+after its mutation rows moved in-process and out of the slow tier.
 Slow-tier rows are not in it, so dropping the director row and trimming the skillflow
-absence rows changed no entry: the default tier of
+absence rows changed no entry: the non-slow part of
 `tests/integration/test_director_and_channel_node_suites_run.py` was always the WeChat
 row alone (re-measured 2026-11-22 at 2.8 s, against the recorded 2.7 s).
 

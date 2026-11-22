@@ -172,7 +172,11 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         # Step 24.1a (design-steward 7.8.5, 7.8.18): the host writes a fallback-restart marker;
         # the steward re-reads one registered connection's tools (discovery fields only). The
         # gateway judges private connections by step 23's turn audience, above.
-        "steward_tools_resync_due", "steward_connection_refresh"}
+        "steward_tools_resync_due", "steward_connection_refresh",
+        # Step 22 (design-steward 7.6): the HOST pushes the directors' open questions to the
+        # owner's default channel and relays a channel message as the answer to the codes it
+        # names (the model passes one message id; tests/unit/test_owner_questions.py).
+        "sync_owner_questions", "relay_owner_answer"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

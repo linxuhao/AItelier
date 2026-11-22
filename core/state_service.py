@@ -211,6 +211,11 @@ class StateService:
         # Step 24.1a: the steward's own MCP connections (after the steward: its identity checks).
         from core.state_steward_connections import StateStewardConnections
         self.steward_connections = StateStewardConnections(self.store, actor, driver_id, steward=self.steward)
+        # Step 22: the directors' questions pushed to the owner's default channel and
+        # answered there (after the channels: their binding check and code guard).
+        from core.state_owner_questions import StateOwnerQuestions
+        self.owner_questions = StateOwnerQuestions(self.store, actor, driver_id, steward=self.steward,
+                                                   inbox=self.driver_inbox, channels=self.channels)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

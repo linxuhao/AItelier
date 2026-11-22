@@ -521,6 +521,8 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL schema for the attempt tables",
     ("core/state_lists.py", "SCHEMA"):
         "SQL DDL for the family lists table (step 25 C4)",
+    ("core/state_owner_questions.py", "SCHEMA"):
+        "SQL DDL for the pushed owner questions and their relayed answers (step 22)",
     ("core/state_steward_connections.py", "SCHEMA"):
         "SQL DDL for the steward's connection registry, its tools, secrets references and call ledger (step 24.1a)",
     ("core/state_channels.py", "SCHEMA"):

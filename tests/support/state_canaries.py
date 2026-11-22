@@ -300,6 +300,17 @@ def _plan():
             ("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day,rpc_error,is_error) "
              "VALUES(?,'tool',?,'2999-01-01',?,0)"),
             (STEWARD_CONNECTION, now, c("state_steward_tool_calls"))),
+        # Step 22: a pushed question (the canary as its project, message and segment) and an
+        # answer relayed for it (the canary as its source and answer message).
+        "state_owner_question_pushes": (
+            ("INSERT INTO state_owner_question_pushes(code_no,project_id,message_id,segment_id,asker_driver_id,"
+             "pushed_at) VALUES(7,?,?,?,?,?)"),
+            (c("state_owner_question_pushes"), c("state_owner_question_pushes"), c("state_owner_question_pushes"),
+             c("state_owner_question_pushes"), now)),
+        "state_owner_question_answers": (
+            ("INSERT INTO state_owner_question_answers(source_message_id,code_no,answer_message_id,at,received_at) "
+             "VALUES(?,7,?,?,?)"),
+            (c("state_owner_question_answers"), c("state_owner_question_answers"), now, now)),
     }
 
 

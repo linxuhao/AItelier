@@ -1451,6 +1451,18 @@ class ListGroupRecent(Request):
     limit: int = Field(default=6, ge=1, le=20)
 
 
+# Step 22 (core.state_owner_questions, design-steward 7.6): the steward's HOST pushes the
+# directors' open questions to the owner's default channel, and relays an owner channel
+# message as the answer to the pushed questions it names (the model passes one message id).
+class SyncOwnerQuestions(Project):
+    pass
+
+
+class RelayOwnerAnswer(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    source_message_id: str = Field(min_length=1, max_length=200)
+
+
 READ_REQUESTS = {
     "driver_postcompact_guidance": DriverPostcompactGuidance,
     "list_driver_notebooks": Request,
@@ -1490,6 +1502,7 @@ READ_REQUESTS = {
     "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": ListFamilyMemory,
     "list_list_items": ListListItems,
     "list_steward_connections": Empty, "list_steward_connection_tools": StewardConnectionRef,
+    "list_pushed_owner_questions": Empty,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -1580,6 +1593,8 @@ WRITER_ONLY_READS = frozenset({
     "list_list_items",
     # Step 24.1a: the steward's connections and their tools. Private tables.
     "list_steward_connections", "list_steward_connection_tools",
+    # Step 22: the questions pushed to the owner's channel and still waiting. A private table.
+    "list_pushed_owner_questions",
 })
 
 
@@ -1657,6 +1672,7 @@ WRITE_REQUESTS = {
     "steward_connection_secret_set": StewardConnectionSecretSet,
     "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
     "steward_tools_resync_due": StewardToolsResyncDue,
+    "sync_owner_questions": SyncOwnerQuestions, "relay_owner_answer": RelayOwnerAnswer,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -2052,6 +2068,9 @@ def _handlers(service) -> dict:
         "steward_connection_probe": service.steward_connections.probe,
         "steward_connection_refresh": service.steward_connections.refresh,
         "steward_tools_resync_due": service.steward_connections.tools_resync_due,
+        "sync_owner_questions": service.owner_questions.sync,
+        "relay_owner_answer": service.owner_questions.relay_answer,
+        "list_pushed_owner_questions": service.owner_questions.list_pushed,
     }
 
 
@@ -2157,6 +2176,13 @@ def _driver_defaults(service, action, arguments):
 # the turn audience step 23's set_steward_turn_audience recorded. steward_connection_refresh
 # re-reads one REGISTERED connection's tool list (discovery fields only: never allowed,
 # outward, visibility or enabled); the steward cannot change its connections otherwise.
+# The two step 22 actions (design-steward 7.6) are called by the steward's HOST code, never
+# by its model directly: sync_owner_questions writes the push of the directors' open
+# questions as the steward's own message and its ledger rows, and relay_owner_answer writes
+# an owner channel message, byte for byte, as the owner's answer to the pushed questions it
+# names. relay_owner_answer is triggered by the model through the host's relay_answer tool,
+# which passes ONE message id: the codes are read by code, the words copied by code, and the
+# sender's binding checked again by the command.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
@@ -2177,7 +2203,10 @@ STEWARD_WRITE_ACTIONS = frozenset({
     # Step 25 (design-steward 7.9.4, 7.9.5): post_group_notice is the HOST's, called in code
     # with the schedule row that fired (the model has no tool for it); the three list writes are
     # the family list tools (add and check from a group turn too, remove in an owner turn only).
-    "post_group_notice", "add_list_items", "check_list_items", "remove_list_items"})
+    "post_group_notice", "add_list_items", "check_list_items", "remove_list_items",
+    # Step 22 (design-steward 7.6): the HOST's push of the open questions and its relay of an
+    # owner channel answer (the model passes one message id through relay_answer).
+    "sync_owner_questions", "relay_owner_answer"})
 # Step 23: the writes a public-view service (a group turn's tool request, carrying
 # X-AItelier-Read-As) may make; every other write is public_view_read_only. Each handler
 # judges the recorded turn audience (core.state_groups.StateGroups.group_turn). Step 25 C4 adds

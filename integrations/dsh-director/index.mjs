@@ -18,6 +18,8 @@ import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
+import { registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
+import { attachmentLine } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
@@ -57,6 +59,8 @@ export function ownerChannelsFor(ctx, host) {
   // outlives the process, and it does so in the one directory this session already owns.
   const stateDir = host.config?.stateDir;
   return createOwnerChannels({ host: host.channels, ...(host.groups ? { groups: host.groups } : {}),
+    // Step 24.2 (7.8.12): storeMedia stores into the host's media library, when it has one.
+    ...(host.capabilities.includes('media') && host.media ? { media: host.media } : {}),
     ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
     log: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) });
 }
@@ -104,15 +108,26 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     texts: { sectionName: labels.sectionPrefix + ':tool-discovery', section: texts.toolDiscoverySection,
       searchDescription: texts.tools.search_tools },
     ...(stewardCatalog ? { catalog: sessionId => stewardCatalog.catalog(sessionId) } : {}) });
+  // Step 24.2 (7.8.12): with the host's media library, the urls this turn's connection tools
+  // returned (send_media fetches only those, through the connection that returned them).
+  const mediaHost = stewardCatalog && host.capabilities.includes('media') ? host.media : undefined;
+  const urlLedger = mediaHost ? new UrlLedger() : undefined;
   if (stewardCatalog) {
     // External content (7.8.8): the guard reads only the cache and the turn record; a
     // connection tool's result marks the turn before the result is released.
     ctx.tools.guard(exec => stewardCatalog.refusal(exec));
     ctx.on('tools/post-execute', async (exec, result, next) => {
-      if (exec.agent?.session?.id === config.sessionId && stewardCatalog.isConnectionTool(exec.name)) stewardCatalog.markExternal();
+      if (exec.agent?.session?.id === config.sessionId && stewardCatalog.isConnectionTool(exec.name)) {
+        stewardCatalog.markExternal();
+        urlLedger?.record(exec.name, result);
+      }
       return next();
     });
-    ctx.on('session/event', (session, event) => { if (session?.id === config.sessionId) stewardCatalog.observe(event); });
+    ctx.on('session/event', (session, event) => {
+      if (session?.id !== config.sessionId) return;
+      stewardCatalog.observe(event);
+      if (event?.type === 'turn/start') urlLedger?.reset();
+    });
     ctx.on('agent/pre-step', async (payload, next) => {
       if (payload?.agent?.session?.id === config.sessionId) await stewardCatalog.preStep(payload.signal);
       return next();
@@ -383,14 +398,14 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   await op('install')(api);
   // Step 23: an accepted group question is steered into the steward tagged with its group (the
   // tag, never the text, makes the turn a group turn), with that group's recent exchanges.
-  if (groupTurns && channels && host.groups) channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label }) => {
+  if (groupTurns && channels && host.groups) channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label, attachments }) => {
     await agentExists;
     const listed = await host.groups.list().catch(() => ({}));
     const group = (listed?.groups ?? []).find(g => g.channel === channel && g.group_ref === groupRef);
     const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
     while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
     const wake = { group_turn: { group: group?.label ?? '家庭群', messages: [{ message_id, sender_role, sender: sender_label,
-      ...(at ? { at } : {}), text }], recent } };
+      ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent } };
     ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],
       source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: group?.label ?? null, question_ids: [message_id],
         sender_refs: [senderRef] } })));
@@ -707,6 +722,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // changes to them, when the host's catalog provides those operations.
     if (stewardCatalog && catalogHost.manage) registerConnectionTools(scope, { defineTool, jsonOutput,
       manage: catalogHost.manage, catalog: stewardCatalog, host: catalogHost });
+    // Step 24.2 (design-steward 7.8.12): media_call and send_media, when the host has a media library.
+    if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
+      media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
     // Step 23: the family memory, a store of its own on the host, for group turns only (the

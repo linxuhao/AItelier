@@ -17,8 +17,10 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
-  replyToLetter, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages } from './steward-host.mjs';
+import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
+  replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
+  mediaRootFrom } from './steward-host.mjs';
+import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -544,10 +546,21 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let sendToGroup;
   // Step 24.1a: the plugin's "this turn read outside content" (api.externalContent), kept from install().
   let externalContent = () => false;
+  // Step 24.2 (design-steward 7.8.12): the steward's media library, when the DSH host gave a
+  // media root (core/dsh_driver.py _environment); without one there is no `media` capability.
+  let mediaLog = () => {}, gatewayToken;
+  const mediaRoot = steward ? mediaRootFrom(env) : undefined;
+  // The voice length is measured with ffprobe: AITELIER_MEDIA_FFPROBE names it (default `ffprobe`
+  // on PATH); one that is missing refuses every voice `unsupported` (fail closed).
+  const library = mediaRoot ? createMediaLibrary({ root: mediaRoot, userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
+    ffprobe: env.AITELIER_MEDIA_FFPROBE || 'ffprobe', log: (event, fields) => mediaLog(event, fields) }) : undefined;
+  const gatewayFetch = (connId, url, signal) => fetch(`${String(env.AITELIER_STEWARD_GATEWAY_URL ?? 'http://127.0.0.1:4445/api/steward/mcp').replace(/\/+$/, '')}/${encodeURIComponent(connId)}/fetch?url=${encodeURIComponent(url)}`,
+    { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal: signal ?? AbortSignal.timeout(180000) });
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
-      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog'] : [])],
+      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog'] : []),
+      ...(library ? ['media'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
       sessionEnv: SESSION_ENV,
@@ -582,6 +595,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       const require = createRequire(env.AITELIER_DSH_ENTRY);
       ({ installModelSelection } = await import(require.resolve('@deepseek-ai/dsh-agent')));
       const token = (await readFile(env.AITELIER_DRIVER_TOKEN_FILE, 'utf8')).trim();
+      gatewayToken = token;
+      // The library logs a mime and a size, never a name or a byte.
+      mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
       request = suppliedRequest ?? (async (path, body, signal, { readAs } = {}) => {
         const response = await fetch(new URL(path, env.AITELIER_URL), {
           method: body === undefined ? 'GET' : 'POST',
@@ -962,9 +978,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         await sync();
         // The id is the payload's digest (plugin step 7): a replay from the same cursor that
         // returns the same batch is recognised and not delivered twice; a batch that grew
-        // has a new id and is delivered. Stable across restarts: it depends on nothing local.
-        const text = 'AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox });
-        await notify(text, { id: 'state:' + createHash('sha256').update(text).digest('hex').slice(0, 40) });
+        // has a new id and is delivered. Stable across restarts: it depends on nothing local
+        // (stateWake: not on the attachment lines either).
+        // Step 24.2 (7.8.12): each owner message's attachments as one line each, from its source row.
+        const shown = steward && library ? await withAttachmentLines(request, result) : result;
+        const { text, id } = stateWake(result, inbox, shown);
+        await notify(text, { id });
       };
       const inbox = await projectInbox();
       // Native goal rounds start/continue the director; bootstrap is not a human
@@ -1014,7 +1033,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       }
       await ctx.sessionPersistence.flush();
       if (pendingInbox && (goal?.phase !== 'active' || goal.activation !== 'armed')) deliverInbox();
-      return { done: runtime.pump(), stop: () => { scheduleTimer?.close(); questionsTimer?.close(); runtime.close(); } };
+      // Step 24.2: the library's 30-day and total-size cleanup, once now and daily.
+      library?.start();
+      return { done: runtime.pump(), stop: () => { scheduleTimer?.close(); questionsTimer?.close(); library?.stop(); runtime.close(); } };
     },
   };
   // v1.2 (plugin step 12): the steward's owner-message check, portfolio and handoff; a
@@ -1024,7 +1045,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 24.1a: the steward's own catalog (its connections through the backend's gateway);
   // 24.1b: and confirmations of outward actions, the text sent back to the requester.
   { catalog: catalogOps((...args) => request(...args), { confirm: confirmOps((...args) => request(...args), { project,
-    mirror: (...args) => mirrorOwnerMessage?.(...args), groupSend: (...args) => sendToGroup ? sendToGroup(...args) : false }) }) });
+    mirror: (...args) => mirrorOwnerMessage?.(...args), groupSend: (...args) => sendToGroup ? sendToGroup(...args) : false }) }) },
+  // Step 24.2: the media library behind storeMedia, media_call and send_media.
+  library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch }) } : {});
   return host;
 }
 

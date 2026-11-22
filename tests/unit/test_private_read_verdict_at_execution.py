@@ -69,6 +69,8 @@ _ARGS = {
     "list_owner_channel_login_requests": {},
     "due_channel_alerts": {},
     "message_sources": {"message_ids": [C.CHANNEL_MESSAGE]},
+    # Step 24.2: storeMedia's binding read (core/state_channels.py).
+    "owner_channel_sender_bound": {"channel": "wechat", "sender_ref": "wxid-canary"},
     # Step 23: the family group's reads (core/state_groups.py).
     "list_owner_groups": {},
     "list_group_recent": {"channel": "wechat", "group_ref": "room-canary"},
@@ -124,6 +126,8 @@ def _steward_reader(trusted, tmp_path):
 # pushed-questions read the same.
 _STEWARD_ONLY_READS = {"list_steward_memory_requests", "list_steward_schedules", "list_owner_channels",
                        "list_owner_channel_login_requests", "message_sources", "due_channel_alerts",
+                       # Step 24.2: storeMedia's binding read answers the owner's session or the steward.
+                       "owner_channel_sender_bound",
                        # Step 23: the steward's host reads its groups and a group's recent exchanges.
                        "list_owner_groups", "list_group_recent",
                        # Step 25 C4: the family lists (the steward, the owner's session, a group turn).

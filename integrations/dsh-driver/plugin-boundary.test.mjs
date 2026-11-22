@@ -43,6 +43,7 @@ import '../dsh-director/test/group-turns.test.mjs';
 import '../dsh-director/test/catalog.test.mjs';
 import '../dsh-director/test/confirm.test.mjs';
 import '../dsh-director/test/connections.test.mjs';
+import '../dsh-director/test/media.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';
 import { adapterVocabulary, adapterPattern } from './plugin-vocabulary.mjs';
 

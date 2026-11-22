@@ -333,6 +333,17 @@ def load_roles(path=None):
 RESERVED_ROLES = {"aitelier-home": "steward"}
 # The memory owner the steward's runtime is started for (AITELIER_DSH_MEMORY_USER).
 STEWARD_MEMORY_USER = "owner"
+# Step 24.2 (design-steward 7.8.12 "存储", 7.8.12a piece 3): the media library's root on this host,
+# outside every container mount and outside the memory's git repository. A host may move it
+# with AITELIER_MEDIA_ROOT (an absolute path); each writer keeps its own subdirectory.
+MEDIA_ROOT_DEFAULT = "~/.local/share/dsh-director/media"
+
+
+def media_root() -> str:
+    configured = os.environ.get("AITELIER_MEDIA_ROOT", "").strip()
+    if configured.startswith("/"):
+        return configured
+    return str(Path(MEDIA_ROOT_DEFAULT).expanduser())
 # The steward's chat channel plugins (step 19, design-steward 7.2): each is loaded only
 # when the secret files it reads exist under ~/.aitelier-secrets (the plugins read them
 # from the same home), so a host without them runs exactly as before.
@@ -755,11 +766,16 @@ class DshDrivers:
                    # directory, with this checkout's hooks (core/dsh_todo_hooks.py).
                    AITELIER_TODO_PYTHON=sys.executable,
                    AITELIER_TODO_CWD=str(TODO_ROOT), **TODO_CLI_ENV,
-                   AITELIER_DSH_MAX_ACTIVE_SUBAGENTS=str(MAX_ACTIVE_SUBAGENTS))
+                   AITELIER_DSH_MAX_ACTIVE_SUBAGENTS=str(MAX_ACTIVE_SUBAGENTS),
+                   # Step 24.2 (design-steward 7.8.12a piece 3): the media root, given by this host to
+                   # every driver process - a driver's own `~` is DSH_HOME's world under ~/.AItelier.
+                   AITELIER_MEDIA_ROOT=media_root())
         if role == "steward":
             # The plugin's root role (HostConfig.rootRole); a director gets no
             # variable at all. The memory owner is the one owner for now.
-            env.update(AITELIER_DSH_ROLE=role, AITELIER_DSH_MEMORY_USER=STEWARD_MEMORY_USER)
+            env.update(AITELIER_DSH_ROLE=role, AITELIER_DSH_MEMORY_USER=STEWARD_MEMORY_USER,
+                       # Step 24.2 (7.8.12): the gateway the steward's media fetch goes through.
+                       AITELIER_STEWARD_GATEWAY_URL=self.steward_gateway_url)
         if self.host_controller:
             env.update(DSH_PERMISSION_MODE="danger-full-access", AITELIER_DSH_EXECUTION="host",
                        AITELIER_DSH_BACKEND_SOURCE=str(Path(__file__).resolve().parents[1]))

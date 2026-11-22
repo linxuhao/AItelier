@@ -279,7 +279,7 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.deepEqual(Object.keys(steward.catalog.confirm).sort(), ['cancel', 'create', 'deliver', 'get']);
   assert.deepEqual(Object.keys(steward.catalog.manage).sort(), ['propose', 'refresh', 'tools']);
   assert.deepEqual(Object.keys(steward.channels).sort(), ['bind', 'claimAlert', 'codeCheck', 'dueAlerts', 'list', 'recordAlert', 'recordDelivery',
-    'relay', 'reportStatus', 'sourceOf']);
+    'relay', 'reportStatus', 'senderBound', 'sourceOf']);
   assert.deepEqual(Object.keys(steward.portfolio).sort(),
     ['acknowledge', 'acknowledgePrivate', 'conversation', 'inbox', 'privateInbox', 'project', 'projects'],
     'the steward\'s own inbox pages are two of the reads this host provides, and acknowledging a delivery is its one write per inbox');

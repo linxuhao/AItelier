@@ -497,11 +497,11 @@ test('nothing is written down before the host has allowed it, whatever digits th
   assert.deepEqual(records.filter(message => message.text !== undefined), [], 'and none of their texts is on disk');
 });
 
-test('the plugin-facing service is exactly {register, inbound}; the director-side handle carries the polls', () => {
+test('the plugin-facing service is exactly {register, inbound, storeMedia}; the director-side handle carries the polls', () => {
   const channels = createOwnerChannels({ host: fakeHost().host });
-  // host.d.ts: `OwnerChannels` is what a plugin injects (register/inbound only);
-  // ready/pollStatus/pollOwed/stop live on the OwnerChannelsHandle createOwnerChannels returns.
-  assert.deepEqual(Object.keys(channels.service).sort(), ['inbound', 'register']);
+  // host.d.ts: `OwnerChannels` is what a plugin injects (register/inbound, and step 24.2's
+  // storeMedia); ready/pollStatus/pollOwed/stop live on the OwnerChannelsHandle createOwnerChannels returns.
+  assert.deepEqual(Object.keys(channels.service).sort(), ['inbound', 'register', 'storeMedia']);
   assert.equal(typeof channels.ownerMessageSent, 'function');
   assert.equal(typeof channels.ready, 'function');
   assert.equal(typeof channels.pollStatus, 'function');

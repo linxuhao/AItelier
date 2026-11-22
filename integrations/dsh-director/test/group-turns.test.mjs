@@ -78,7 +78,12 @@ test('guard: in a group turn only the group tools, at most six calls; anything n
   // Step 24 (iss-7e0949291b584b42, 7.8.8): search_tools and call_tool are group tools now - what
   // they reach is the turn's catalog, public connections only (the catalog and the gateway's
   // audience check); the connection-configuration tools stay refused, and so does anything new.
-  for (const name of [...STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n)), 'connections_list', 'connection_tools',
+  // Step 24.2 (7.8.8): media_call and send_media are group tools now, so the derived default-deny
+  // list no longer holds them - and nothing else left it (the exact set below is the other side).
+  const denied = STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n));
+  assert.ok(!denied.includes('media_call') && !denied.includes('send_media'));
+  assert.ok(STEWARD_TOOLS.includes('media_call') && STEWARD_TOOLS.includes('send_media'), 'roles.json presents both to the steward');
+  for (const name of [...denied, 'connections_list', 'connection_tools',
     'connection_refresh', 'propose_connection_change', 'a_tool_added_next_year']) {
     const g = turns();
     g.split([group('q')], 1);
@@ -86,7 +91,7 @@ test('guard: in a group turn only the group tools, at most six calls; anything n
   }
   const g2 = turns();
   g2.split([group('q')], 1);
-  for (const name of ['portfolio_projects', 'search_tools', 'family_memory_note', 'call_tool', 'request_confirmation', 'run_confirmed'])
+  for (const name of ['portfolio_projects', 'family_memory_note', 'call_tool', 'request_confirmation', 'run_confirmed', 'media_call'])
     assert.equal(g2.guard(name), undefined, name);
   assert.equal(g2.guard('search_tools'), answerNow, 'the discovery tools count toward the six like any call');
 });
@@ -121,7 +126,7 @@ test('guard (step 24, 7.8.8): a group turn calls its PUBLIC connection tools - d
 
 test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
   assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'list_add', 'list_check', 'list_show',
-    'portfolio_project', 'portfolio_projects', 'request_confirmation', 'run_confirmed', 'search_tools']);
+    'media_call', 'portfolio_project', 'portfolio_projects', 'request_confirmation', 'run_confirmed', 'search_tools', 'send_media']);
   for (const name of ['list_show', 'list_add', 'list_check']) {
     const g = turns();
     g.split([group('q')], 1);

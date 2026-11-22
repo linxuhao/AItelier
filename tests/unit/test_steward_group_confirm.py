@@ -193,7 +193,7 @@ def test_the_group_send_budget_is_twenty_an_hour_apart_from_the_questions(world,
     answer = gask(world, "c1", f"确认 {code}")
     assert answer["confirmation"]["outcome"] == "confirmed" and "confirmation_line" not in answer
     assert state_groups.GROUP_LIMITS["group_sends_per_hour"] == 20
-    assert set(state_groups.GROUP_SEND_KINDS) == {"confirmation", "confirmation_line"}
+    assert set(state_groups.GROUP_SEND_KINDS) == {"confirmation", "confirmation_line", "media"}
 
 
 def test_the_accounts_outbound_cap_holds_a_confirmation_too(world, monkeypatch):

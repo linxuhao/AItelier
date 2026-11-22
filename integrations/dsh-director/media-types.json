@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). Office documents, archives and executables are deliberately absent (v1).",
+  "limits": {
+    "image_bytes": 20971520,
+    "file_bytes": 26214400,
+    "voice_bytes": 26214400,
+    "outbound_bytes": 26214400,
+    "voice_ms": 120000,
+    "image_pixels": 40000000,
+    "inbound_per_channel_hour": 20,
+    "retention_days": 30,
+    "total_bytes": 5368709120
+  },
+  "types": [
+    { "mime": "image/png", "kind": "image", "ext": "png", "signatures": [[{ "offset": 0, "hex": "89504e470d0a1a0a" }]] },
+    { "mime": "image/jpeg", "kind": "image", "ext": "jpg", "signatures": [[{ "offset": 0, "hex": "ffd8ff" }]] },
+    { "mime": "image/gif", "kind": "image", "ext": "gif", "signatures": [[{ "offset": 0, "hex": "474946383761" }], [{ "offset": 0, "hex": "474946383961" }]] },
+    { "mime": "image/webp", "kind": "image", "ext": "webp", "signatures": [[{ "offset": 0, "hex": "52494646" }, { "offset": 8, "hex": "57454250" }]] },
+    { "mime": "application/pdf", "kind": "file", "ext": "pdf", "signatures": [[{ "offset": 0, "hex": "255044462d" }]] },
+    { "mime": "audio/wav", "kind": "voice", "ext": "wav", "signatures": [[{ "offset": 0, "hex": "52494646" }, { "offset": 8, "hex": "57415645" }]] },
+    { "mime": "audio/ogg", "kind": "voice", "ext": "ogg", "signatures": [[{ "offset": 0, "hex": "4f676753" }]] },
+    { "mime": "audio/flac", "kind": "voice", "ext": "flac", "signatures": [[{ "offset": 0, "hex": "664c6143" }]] },
+    { "mime": "audio/amr", "kind": "voice", "ext": "amr", "signatures": [[{ "offset": 0, "hex": "2321414d52" }]] },
+    { "mime": "audio/webm", "kind": "voice", "ext": "webm", "signatures": [[{ "offset": 0, "hex": "1a45dfa3" }]] },
+    { "mime": "audio/mp4", "kind": "voice", "ext": "m4a", "signatures": [[{ "offset": 4, "hex": "667479704d344120" }], [{ "offset": 4, "hex": "667479704d344220" }], [{ "offset": 4, "hex": "6674797069736f6d" }], [{ "offset": 4, "hex": "667479706d703432" }]] },
+    { "mime": "audio/mpeg", "kind": "voice", "ext": "mp3", "signatures": [[{ "offset": 0, "hex": "494433" }], [{ "offset": 0, "hex": "fffb" }], [{ "offset": 0, "hex": "fff3" }], [{ "offset": 0, "hex": "fff2" }]] },
+    { "mime": "audio/aac", "kind": "voice", "ext": "aac", "signatures": [[{ "offset": 0, "hex": "fff1" }], [{ "offset": 0, "hex": "fff9" }]] }
+  ],
+  "samples": [
+    { "hex": "89504e470d0a1a0a0000000d49484452", "mime": "image/png" },
+    { "hex": "ffd8ffe000104a464946", "mime": "image/jpeg" },
+    { "hex": "474946383961010001", "mime": "image/gif" },
+    { "hex": "52494646240000005745425056503820", "mime": "image/webp" },
+    { "hex": "52494646240000005741564566", "mime": "audio/wav" },
+    { "hex": "255044462d312e370a", "mime": "application/pdf" },
+    { "hex": "4f67675300020000", "mime": "audio/ogg" },
+    { "hex": "000000206674797069736f6d00000200", "mime": "audio/mp4" },
+    { "hex": "504b0304140006000800", "mime": null },
+    { "hex": "d0cf11e0a1b11ae1", "mime": null },
+    { "hex": "4d5a90000300000004", "mime": null },
+    { "hex": "7f454c4602010100", "mime": null },
+    { "hex": "52494646240000004156492020", "mime": null }
+  ]
+}

@@ -51,12 +51,13 @@ from datetime import datetime, timedelta
 from types import MappingProxyType
 
 from core.message_body_guard import refuse_credential_body
-from core import state_channels
+from core import media_types, state_channels
 from core import state_steward_confirmations as confirmations
 from core.state_channels import (BODY_MAX_BYTES, CHANNELS, CODE_TTL, _code_hash, _require_utf8, _written_at,
                                  digit_windows, require_bound)
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_privacy import writer_only_read
+from core.state_schema_migration import add_column_if_missing
 from core.state_steward import _hash
 
 log = logging.getLogger(__name__)
@@ -117,12 +118,13 @@ GROUP_LIMITS = MappingProxyType({
     # questions: a group gets at most 60 + 1 + 1 + 20 + 6 = 88 messages an hour, under the
     # bridge's 90 backstop; every one also counts toward account_out_per_hour.
     "group_notices_per_hour": 6,
-    # Step 24 (design-steward 7.8.9): the 20 of that sum - confirmation texts and the lines
-    # deciding them (later also send_media's files), apart from the 60 questions.
+    # Step 24 (design-steward 7.8.9): the 20 of that sum - confirmation texts, the lines
+    # deciding them and (step 24.2, 7.8.12) send_media's files, apart from the 60 questions.
     "group_sends_per_hour": 20,
 })
-# The outbound kinds group_sends_per_hour counts.
-GROUP_SEND_KINDS = ("confirmation", "confirmation_line")
+# The outbound kinds group_sends_per_hour counts - the one list send_refusal reads, so every
+# path that posts one of them is held to the same budget.
+GROUP_SEND_KINDS = ("confirmation", "confirmation_line", "media")
 # The family memory (7.7.8a, director 420): bounded, the same 30 days as the group rows.
 FAMILY_LIMITS = MappingProxyType({"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000})
 # Step 0 item 1 (7.7.11) decides this: True only if the owner's id in a group is NOT the
@@ -233,6 +235,8 @@ class StateGroups:
         if not isinstance(store.db, UntrustedDatabase):
             with store.db.get_connection() as conn:
                 conn.executescript(SCHEMA)
+                # Step 24.2 (7.8.12): a group message's attachments as metadata (core.media_types).
+                add_column_if_missing(conn, "state_group_messages", "attachments_json", "TEXT")
                 conn.commit()
 
     # ---------------------------------------------------------------- helpers
@@ -579,7 +583,7 @@ class StateGroups:
         return out
 
     def relay_group_message(self, project_id, request_key, channel, group_ref, sender_ref, channel_message_ref, body,
-                            channel_at=None):
+                            channel_at=None, attachments=None):
         """One @-message from the bound group: dated by the channel within the last
         fresh_minutes, deduplicated by its channel ref, stamped owner/member by code, held to
         the group's, the member's and the account's hourly bounds, stored. Answers
@@ -590,7 +594,8 @@ class StateGroups:
         that is exactly the sender's reply to a confirmation of theirs in this group (step 24,
         7.8.9) is decided before the quotas: the answer then carries `confirmation` and, when
         the group's send budget allows, `confirmation_line` (and its message id) for the host
-        to send."""
+        to send. `attachments` (step 24.2, 7.8.12) is the metadata of the message's files, kept
+        in the row's attachments_json (core.media_types); never a byte or a name."""
         if channel not in CHANNELS:
             raise StateGraphError("invalid_channel")
         _require_utf8("body", body, "invalid_body")
@@ -600,6 +605,7 @@ class StateGroups:
         if size > BODY_MAX_BYTES:
             raise StateGraphError(f"body_too_long: {size} bytes; at most {BODY_MAX_BYTES} bytes")
         refuse_credential_body(body)
+        files = media_types.normalise_attachments(attachments)
         written = _written_at(channel_at)
         moment = _now()
         answer = None
@@ -623,9 +629,10 @@ class StateGroups:
 
             def keep(kind, accepted=0, role=None, text=None):
                 conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,"
-                             "sender_ref,sender_role,channel_message_ref,body,at) VALUES(?,?,?,'in',?,?,?,?,?,?,?)",
+                             "sender_ref,sender_role,channel_message_ref,body,at,attachments_json) "
+                             "VALUES(?,?,?,'in',?,?,?,?,?,?,?,?)",
                              (message_id, channel, group_ref, kind, accepted, sender_ref, role, channel_message_ref,
-                              text, moment.isoformat()))
+                              text, moment.isoformat(), json.dumps(files) if files and text is not None else None))
             # A live ACCOUNT code in a group message: whoever has it for 10 minutes becomes the
             # owner, so it is retired and the body is never kept (7.7.9). Group codes travel the
             # bind path only.
@@ -824,6 +831,44 @@ class StateGroups:
                       row["target_group_ref"] if row is not None else None, None)
         else:
             self._log("notice posted", channel, group, None, len(body.encode("utf-8")))
+        return out
+
+    def post_group_media(self, project_id, request_key, turn, kind, caption=None):
+        """Step 24.2 (design-steward 7.8.12, 7.8.9): one file the steward's send_media sends
+        into the group of the turn its HOST names (the recorded audience; never a group the
+        call names). In one transaction: the turn is the recorded one and its group is bound
+        (else media_group_turn_only), the caption passes the exit check (else withheld, with
+        the kind), the group's send budget and the account's cap allow one more (else
+        group_send_budget / group_quota_account). Then one outbound row of kind 'media' (a
+        GROUP_SEND_KINDS kind) whose body is the caption or the placeholder; no State event.
+        The host sends the file through the channel after this answer. Answered once per
+        request_key."""
+        if kind not in media_types.KINDS:
+            raise StateGraphError("invalid_request: kind is image, voice or file")
+        if caption is not None:
+            _require_utf8("caption", caption, "invalid_request")
+            caption = caption.strip() or None
+        request_hash = _hash([turn, kind, caption])
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "post_group_media", request_key, request_hash)
+            if replay is not None:
+                return {**replay, "duplicate": True}
+            row = self.group_turn(conn, turn, "media_group_turn_only")
+            channel, group = row["channel"], row["group_ref"]
+            reason = self.exit_check(conn, caption, moment) if caption else None
+            refused = "withheld" if reason else self.send_refusal(conn, channel, group, moment)
+            if refused is not None:
+                result = {"refused": refused, **({"reason": reason} if reason else {})}
+            else:
+                body = caption or {"image": "[图片]", "voice": "[语音]", "file": "[文件]"}[kind]
+                message_id = self._out_row(conn, channel, group, "media", body, moment, request_key=request_key)
+                self._retain(conn, moment)
+                result = {"posted": True, "message_id": message_id, "channel": channel, "group_ref": group,
+                          **({"caption": caption} if caption else {})}
+            out = self.steward._record(conn, "post_group_media", request_key, request_hash, result)
+        self._log("media " + (refused or "posted"), channel, group, None)
         return out
 
     def set_steward_turn_audience(self, project_id, turn, audience, group=None, sender_refs=None):

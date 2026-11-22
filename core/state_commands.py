@@ -1273,6 +1273,9 @@ class RelayOwnerMessage(Project):
     # The channel client's question, not a relay: may this text be kept in its durable owed
     # store? Answered {store_text} and nothing is relayed, recorded or decided.
     precheck: bool = False
+    # Step 24.2 (design-steward 7.8.12): the files' METADATA (kind, ref | refused, mime?, size?,
+    # durationMs?), checked by core.media_types.normalise_attachments; no byte, no name.
+    attachments: list[dict[str, Any]] | None = Field(default=None, max_length=10)
 
 
 class BindOwnerChannel(Project):
@@ -1391,6 +1394,11 @@ class MessageSources(Request):
     message_ids: list[str] = Field(max_length=200)
 
 
+class OwnerChannelSenderBound(Request):
+    channel: _CHANNEL
+    sender_ref: str = Field(min_length=1, max_length=200)
+
+
 # Step 23: the steward in the owner's family group (core.state_groups, design-steward 7.7).
 # The first four writes are the steward's HOST's, called in code with what the bridge
 # received or what a group turn ended with; note_family_memory is the steward's family
@@ -1413,6 +1421,14 @@ class RelayGroupMessage(Project):
     channel_message_ref: str = Field(min_length=1, max_length=200)
     body: str
     channel_at: str | None = Field(default=None, min_length=1, max_length=64)
+    attachments: list[dict[str, Any]] | None = Field(default=None, max_length=10)
+
+
+class PostGroupMedia(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    turn: str = Field(min_length=1, max_length=64)
+    kind: Literal["image", "voice", "file"]
+    caption: str | None = Field(default=None, max_length=1000)
 
 
 class PostGroupReply(Project):
@@ -1531,6 +1547,7 @@ READ_REQUESTS = {
     "list_steward_memory_requests": ListStewardMemoryRequests,
     "list_steward_schedules": ListStewardSchedules,
     "list_owner_channels": Empty, "message_sources": MessageSources,
+    "owner_channel_sender_bound": OwnerChannelSenderBound,
     "list_owner_channel_login_requests": Empty,
     "due_channel_alerts": Empty,
     "list_owner_groups": Empty, "list_group_recent": ListGroupRecent, "list_family_memory": ListFamilyMemory,
@@ -1616,6 +1633,8 @@ WRITER_ONLY_READS = frozenset({
     "list_steward_schedules",
     # Step 19: the owner's channel bindings and the messages' sources. Private tables.
     "list_owner_channels", "message_sources",
+    # Step 24.2: whether a sender is a channel's current binding (storeMedia's check). A private table.
+    "owner_channel_sender_bound",
     # Step 19: the owner's pending requests for a new WeChat login QR. A private table.
     "list_owner_channel_login_requests",
     # Step 25: the channel alerts due now, from the channel status and the alert ledger. Private tables.
@@ -1698,6 +1717,7 @@ WRITE_REQUESTS = {
     "claim_channel_alert": ClaimChannelAlert, "record_channel_alert": RecordChannelAlert,
     "bind_owner_group": BindOwnerGroup, "relay_group_message": RelayGroupMessage,
     "post_group_reply": PostGroupReply, "set_steward_turn_audience": SetStewardTurnAudience,
+    "post_group_media": PostGroupMedia,
     "note_family_memory": NoteFamilyMemory,
     "post_group_notice": PostGroupNotice,
     "add_list_items": AddListItems, "check_list_items": CheckListItems, "remove_list_items": RemoveListItems,
@@ -2077,6 +2097,7 @@ def _handlers(service) -> dict:
         "report_channel_status": service.channels.report_channel_status,
         "list_owner_channels": service.channels.list_owner_channels,
         "message_sources": service.channels.message_sources,
+        "owner_channel_sender_bound": service.channels.owner_channel_sender_bound,
         "list_owner_channel_login_requests": service.channels.list_login_requests,
         "due_channel_alerts": service.channels.due_channel_alerts,
         "complete_owner_channel_login_request": service.channels.complete_login_request,
@@ -2085,6 +2106,7 @@ def _handlers(service) -> dict:
         "bind_owner_group": service.groups.bind_owner_group,
         "relay_group_message": service.groups.relay_group_message,
         "post_group_reply": service.groups.post_group_reply,
+        "post_group_media": service.groups.post_group_media,
         "set_steward_turn_audience": service.groups.set_steward_turn_audience,
         "note_family_memory": service.groups.note_family_memory,
         "list_owner_groups": service.groups.list_owner_groups,
@@ -2252,7 +2274,11 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "post_group_notice", "add_list_items", "check_list_items", "remove_list_items",
     # Step 22 (design-steward 7.6): the HOST's push of the open questions and its relay of an
     # owner channel answer (the model passes one message id through relay_answer).
-    "sync_owner_questions", "relay_owner_answer"})
+    "sync_owner_questions", "relay_owner_answer",
+    # Step 24.2 (design-steward 7.8.12): the HOST's record of one send_media file into the group of
+    # the turn it recorded (budgeted with the confirmations, caption exit-checked); the file
+    # itself goes out through the channel, never through State.
+    "post_group_media"})
 # Step 23: the writes a public-view service (a group turn's tool request, carrying
 # X-AItelier-Read-As) may make; every other write is public_view_read_only. Each handler
 # judges the recorded turn audience (core.state_groups.StateGroups.group_turn). Step 25 C4 adds

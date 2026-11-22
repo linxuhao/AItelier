@@ -45,6 +45,19 @@ outward call is forwarded once and never retried.
 An oauth connection's upstream client carries `OAuthBearer` (core.steward_oauth): the
 token is refreshed under a minute before expiry, and once after an upstream 401, without
 reopening the session.
+
+`GET /api/steward/mcp/{conn_id}/fetch?url=...` (step 24.2, design-steward 7.8.12 "结果里的
+文件") hands the steward's host the file a connection's tool result named - agentmcp's
+download addresses carry the gateway's own Host (`http://mcp_server:9003/files/...`), which
+the host cannot resolve. Same entry checks as above, and then: the url must have appeared
+VERBATIM in a result this gateway forwarded for that connection during the turn recorded now
+(the host records the same (conn_id, url) and passes the conn_id; here the gateway's own
+record is checked too, so a url the model invents or carries over from another turn or
+connection is refused `url_not_seen`); a private connection only in an owner turn; the url's
+origin (scheme, host, port) is the connection's own and a redirect to another origin is
+refused; no upstream credential is sent (no header, no oauth token); at most the table's
+outbound_bytes (25 MiB); the type is the first bytes' signature in the shared table
+(core.media_types), never the upstream's Content-Type.
 """
 from __future__ import annotations
 
@@ -54,8 +67,12 @@ import logging
 import os
 import socket
 import time
+import re
+import sqlite3
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager, suppress
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import uvicorn
@@ -64,6 +81,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.websockets import WebSocketClose
 
 from api import authz
+from core import media_types
 from core import state_steward_confirmations as sconf
 from core import state_steward_connections as sc
 from core import steward_oauth
@@ -446,6 +464,8 @@ class Gateway:
         self.started = False
         self.version = 0  # bumped by every change notice; the cached hash below is for one version
         self.digest: tuple[int, str] | None = None
+        # Step 24.2: (conn_id, url) -> the recorded turn its result came back in (bounded).
+        self.seen_urls: OrderedDict[tuple[str, str], str | None] = OrderedDict()
 
     def spawn(self, coroutine):
         task = asyncio.get_running_loop().create_task(coroutine)
@@ -802,6 +822,9 @@ class Gateway:
             rpc_error = f"upstream_error:{code}" if code is not None else "upstream_error"
         if rpc_error:
             answer = _error(mid, rpc_error, "the connection did not answer this call")
+        elif not is_error:
+            turn = await asyncio.to_thread(_read, self.app, recorded_turn)
+            self.remember_urls(conn_id, result, turn)
         response_bytes = len(json.dumps(answer, ensure_ascii=False).encode("utf-8", "replace"))
         duration = int((time.monotonic() - started) * 1000)
         await asyncio.to_thread(sc.finish_call, _store(self.app), call_id, rpc_error=rpc_error,
@@ -818,6 +841,18 @@ class Gateway:
                     rpc_error or ("tool_error" if is_error else "ok"), request_bytes, response_bytes, duration)
         return answer
 
+    def remember_urls(self, conn_id: str, result, turn):
+        """Every url in a forwarded result, verbatim, for /fetch (bounded, oldest out)."""
+        try:
+            text = json.dumps(result, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return
+        for url in URL_IN_TEXT.findall(text):
+            self.seen_urls.pop((conn_id, url), None)
+            self.seen_urls[(conn_id, url)] = turn
+            while len(self.seen_urls) > SEEN_URLS_KEPT:
+                self.seen_urls.popitem(last=False)
+
     async def current(self, *, fresh=False) -> str:
         """The effective hash, cached per change version: a POST does not rescan the tool
         table unless a change notice came since (the 30-second check reads it fresh, which
@@ -831,6 +866,33 @@ class Gateway:
 
     async def stale(self, session_id) -> bool:
         return self.served.get(session_id) != await self.current()
+
+
+# ------------------------------------------------------------------ files (step 24.2)
+URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>\\`)\]}]+")
+SEEN_URLS_KEPT = 2000
+FETCH_REDIRECTS = 3
+
+
+def recorded_turn(conn) -> str | None:
+    """The turn the steward's host recorded last (core.state_groups' one-row record)."""
+    try:
+        row = conn.execute("SELECT turn FROM state_steward_turn_audience WHERE id=1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row[0] if row else None
+
+
+def _origin(url: str):
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return parts.scheme, parts.hostname.lower(), parts.port or (443 if parts.scheme == "https" else 80)
+
+
+def _fetch_refused(status: int, code: str):
+    logger.info("steward gateway: fetch refused %s", code)
+    return JSONResponse({"detail": code}, status_code=status)
 
 
 def gateway(app) -> Gateway:
@@ -933,6 +995,73 @@ async def get(request: Request):
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.get(PATH + "/{conn_id}/fetch")
+async def fetch(conn_id: str, request: Request, url: str = ""):
+    """One file a connection's result named, for the steward's host (see the module text)."""
+    _driver, refused = admit(request)
+    if refused is not None:
+        return refused
+    gw = gateway(request.app)
+
+    def judge():
+        with _store(request.app).transaction() as conn:
+            row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+            if row is None:
+                return "unknown_connection", None, None
+            if not sc.connection_usable(row):
+                return "connection_unavailable", None, None
+            if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
+                return "not_visible_in_this_turn", None, None
+            return None, dict(row), recorded_turn(conn)
+
+    code, row, turn = await asyncio.to_thread(judge)
+    if code:
+        return _fetch_refused({"unknown_connection": 404, "connection_unavailable": 409}.get(code, 403), code)
+    if not url or (conn_id, url) not in gw.seen_urls or gw.seen_urls[(conn_id, url)] != turn or turn is None:
+        return _fetch_refused(403, "url_not_seen")
+    origin = _origin(row["url"])
+    if origin is None or _origin(url) != origin:
+        return _fetch_refused(403, "other_origin")
+    cap = media_types.limits()["outbound_bytes"]
+    try:
+        address = await asyncio.to_thread(sc.checked_address, url)
+    except (StateGraphError, sc.ProbeFailed) as exc:
+        return _fetch_refused(403, getattr(exc, "code", None) or str(exc).split(":")[0])
+    # No upstream credential: no header, no oauth token, no cookie - a bare client.
+    async with httpx.AsyncClient(transport=transport_for(address), follow_redirects=False,
+                                 timeout=httpx.Timeout(30.0, read=UPSTREAM_TIMEOUT)) as client:
+        target = url
+        try:
+            for _hop in range(FETCH_REDIRECTS + 1):
+                async with client.stream("GET", target) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        target = urljoin(target, response.headers.get("location", ""))
+                        if _origin(target) != origin:
+                            return _fetch_refused(502, "redirect_other_origin")
+                        continue
+                    if response.status_code != 200:
+                        return _fetch_refused(502, "upstream_status")
+                    declared = response.headers.get("content-length", "")
+                    if declared.isdigit() and int(declared) > cap:
+                        return _fetch_refused(413, "too_large")
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body += chunk
+                        if len(body) > cap:
+                            return _fetch_refused(413, "too_large")
+                    break
+            else:
+                return _fetch_refused(502, "redirect_other_origin")
+        except httpx.HTTPError:
+            return _fetch_refused(502, "upstream_unavailable")
+    kind = media_types.sniff(bytes(body[:64]))
+    if kind is None:
+        return _fetch_refused(415, "type")
+    logger.info("steward gateway: fetch %s mime=%s bytes=%d", conn_id, kind["mime"], len(body))
+    return Response(content=bytes(body), media_type=kind["mime"],
+                    headers={"X-AItelier-Media-Kind": kind["kind"], "X-Content-Type-Options": "nosniff"})
 
 
 @router.delete(PATH)

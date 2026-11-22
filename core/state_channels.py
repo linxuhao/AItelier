@@ -88,6 +88,7 @@ from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 from core import drivers
+from core import media_types
 from core import state_steward_confirmations as confirmations
 from core.driver_inbox import USER_SUBJECT
 from core.message_body_guard import refuse_credential_body
@@ -602,6 +603,9 @@ class StateChannels:
                 # Additive (message time): every source row written before it has no
                 # channel time, which is what NULL means.
                 add_column_if_missing(conn, "state_message_sources", "channel_at", "TEXT")
+                # Step 24.2 (design-steward 7.8.12): an inbound message's attachments as metadata
+                # (core.media_types.normalise_attachments): never a byte, never a file name.
+                add_column_if_missing(conn, "state_message_sources", "attachments_json", "TEXT")
                 added = {column: add_column_if_missing(conn, "state_owner_channel_status", column, definition)
                          for column, definition in _STATUS_COLUMNS}
                 # Once each, when its column is added: a placeholder row waits for a real reading;
@@ -718,7 +722,7 @@ class StateChannels:
 
     # ---------------------------------------------------------------- the steward's host
     def relay_owner_message(self, project_id, request_key, channel, sender_ref, channel_message_ref, body,
-                            channel_at=None, precheck=False):
+                            channel_at=None, precheck=False, attachments=None):
         """One owner message from a channel into the steward's conversation, then the
         chat approval check. Idempotent per request_key and per channel message: either
         replay answers the first result with duplicate: true - except an approval whose
@@ -734,7 +738,10 @@ class StateChannels:
         first result). `channel_at` is when the
         channel says the message was written; it dates an approval phrase - an approval
         without it is refused approval_undated - and is not part of the request's
-        identity (a redelivery may stamp it anew)."""
+        identity (a redelivery may stamp it anew). `attachments` (step 24.2, 7.8.12) is the
+        metadata of the message's files - the host's library refs or the closed set's refusals
+        (core.media_types) - kept in the source row's attachments_json; the body (its text and
+        the placeholder lines the plugin wrote) is judged exactly as before."""
         # A direct caller's guard: over the command boundary the model's Literal refuses
         # another channel first (a field error, which the host answers invalid_request).
         if channel not in CHANNELS:
@@ -757,7 +764,10 @@ class StateChannels:
             # its durable owed store (lib/channels.mjs): may this text be kept? Nothing is
             # relayed, recorded or decided - see _store_text_verdict.
             return self._store_text_verdict(channel, sender_ref, body)
-        request_hash = _hash([channel, sender_ref, channel_message_ref, body])
+        files = media_types.normalise_attachments(attachments)
+        # A request without attachments hashes exactly as before step 24.2 (a replay of an older
+        # request stays the same request).
+        request_hash = _hash([channel, sender_ref, channel_message_ref, body] + ([files] if files else []))
         # The per-message record's key: the channel message of this sender.
         ref_key = f"{channel}:{_hash([sender_ref, channel_message_ref])}"
         home = steward_project()
@@ -767,7 +777,7 @@ class StateChannels:
                                   ref_key)
             if first is None:
                 first = self._write_relay(conn, home, request_key, request_hash, channel, sender_ref,
-                                          channel_message_ref, ref_key, body, size, written_at)
+                                          channel_message_ref, ref_key, body, size, written_at, files)
                 fresh = True
             else:
                 fresh = False
@@ -811,7 +821,7 @@ class StateChannels:
         return None
 
     def _write_relay(self, conn, home, request_key, request_hash, channel, sender_ref, channel_message_ref,
-                     ref_key, body, size, written_at):
+                     ref_key, body, size, written_at, files=None):
         """The owner message, its source row and its two ledger records, in the caller's
         transaction. An approval phrase to decide is recorded `pending` (the phrase, the
         version it names and when it was written): the decision runs after this commits,
@@ -868,8 +878,9 @@ class StateChannels:
         elif written_at is not None:
             channel_at = written_at.astimezone(timezone.utc).isoformat()
         conn.execute("INSERT INTO state_message_sources(message_id,direction,channel,sender_ref,"
-                     "channel_message_ref,at,channel_at) VALUES(?,'in',?,?,?,?,?)",
-                     (message_id, channel, sender_ref, channel_message_ref, moment.isoformat(), channel_at))
+                     "channel_message_ref,at,channel_at,attachments_json) VALUES(?,'in',?,?,?,?,?,?)",
+                     (message_id, channel, sender_ref, channel_message_ref, moment.isoformat(), channel_at,
+                      json.dumps(files) if files else None))
         matched = match_phrase(conn, body)
         result = {"message_id": message_id, "duplicate": False, "approval": None}
         # Step 24.1b (design-steward 7.8.9): the requester's exact `确认 <code>` / `取消 <code>`
@@ -1438,10 +1449,32 @@ class StateChannels:
             self._reader(conn)
             rows = conn.execute("SELECT * FROM state_message_sources WHERE message_id IN "
                                 f"({','.join('?' * len(message_ids))})", message_ids).fetchall() if message_ids else []
+        # Step 24.2: a message that carried files says so (their metadata); one without keeps
+        # exactly the answer it had before.
         return {"sources": {r["message_id"]: {"direction": r["direction"], "channel": r["channel"],
                                               "sender_ref": r["sender_ref"],
                                               "channel_message_ref": r["channel_message_ref"], "at": r["at"],
-                                              "error": r["error"], "channel_at": r["channel_at"]} for r in rows}}
+                                              "error": r["error"], "channel_at": r["channel_at"],
+                                              **({"attachments": json.loads(r["attachments_json"])}
+                                                 if r["attachments_json"] else {})} for r in rows}}
+
+    @writer_only_read("owner_channel_sender_bound")
+    def owner_channel_sender_bound(self, channel, sender_ref):
+        """Step 24.2 (design-steward 7.8.12, storeMedia step 1): is `sender_ref` the channel's
+        current binding? The same judgement relay_owner_message makes (require_bound), as a
+        read: the steward's host asks it BEFORE it fetches one byte of an attachment. Nothing
+        is written or logged beyond the usual."""
+        if channel not in CHANNELS:
+            raise StateGraphError(f"invalid_channel: channel must be one of {', '.join(CHANNELS)}")
+        if not isinstance(sender_ref, str) or not sender_ref:
+            raise StateGraphError("invalid_request: sender_ref")
+        with self.store.transaction() as conn:
+            self._reader(conn)
+            try:
+                require_bound(conn, channel, sender_ref)
+            except StateGraphError:
+                return {"bound": False}
+        return {"bound": True}
 
     # ---------------------------------------------------------------- the owner (dashboard)
     def issue_code(self, channel):

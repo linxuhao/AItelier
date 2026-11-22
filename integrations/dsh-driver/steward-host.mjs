@@ -1,5 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { withoutLeadingClockLines, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
+import { attachmentLine } from '../dsh-director/lib/media.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -713,9 +714,15 @@ export function channelOps(request) {
     return result.code && !result.message_id && !result.bound ? { refused: String(result.code) } : result;
   };
   return {
-    relay: ({ channel, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_owner_message', {
+    relay: ({ channel, senderRef, messageRef, text, at, attachments }, signal) => request('/api/state/commands/relay_owner_message', {
       request_key: `relay:${channel}:${digest(senderRef + '\n' + messageRef)}`, channel, sender_ref: senderRef, channel_message_ref: messageRef,
-      body: text, ...(at ? { channel_at: at } : {}) }, signal).then(answered, refused),
+      body: text, ...(at ? { channel_at: at } : {}),
+      // Step 24.2 (7.8.12): the files' metadata only (refs or refusals); absent, the request is as before.
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}) }, signal).then(answered, refused),
+    // Step 24.2 (7.8.12, storeMedia step 1): is this sender the channel's binding now? A read; the
+    // plugin asks it before it fetches one byte of an attachment.
+    senderBound: ({ channel, senderRef }, signal) => request('/api/state/query/owner_channel_sender_bound',
+      { channel, sender_ref: senderRef }, signal).then(r => r?.result ?? r),
     // The channel client's one question before it writes the owner's own words down: may
     // this text be kept? The host's own rule answers it (a bound sender, and no live binding
     // code in the text in ANY rendering - core/state_channels.py:_store_text_verdict), so the
@@ -808,9 +815,10 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     bind: ({ channel, groupRef, senderRef, messageRef, prefix, code }, signal) => request('/api/state/commands/bind_owner_group', {
       request_key: `group-bind:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       code, mention_prefix: prefix, channel_message_ref: messageRef }, signal).then(result, refused),
-    relay: ({ channel, groupRef, senderRef, messageRef, text, at }, signal) => request('/api/state/commands/relay_group_message', {
+    relay: ({ channel, groupRef, senderRef, messageRef, text, at, attachments }, signal) => request('/api/state/commands/relay_group_message', {
       request_key: `group:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
-      channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}) }, signal).then(result, refused),
+      channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}),
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}) }, signal).then(result, refused),
     reply: ({ questionId, alsoAnswers = [], body }, signal) => request('/api/state/commands/post_group_reply', {
       request_key: `group-reply:${questionId}`, question_id: questionId, body,
       ...(alsoAnswers.length ? { also_answers: alsoAnswers } : {}) }, signal).then(result, refused),
@@ -844,6 +852,50 @@ export function groupOps({ request, toolRequest = request, project, me }) {
       { request_key: listKey('list-remove', turn), item_ids: itemIds }, signal)
       .then(result, refusedBy),
   };
+}
+
+/** Step 24.2 (design-steward 7.8.12): the host side of the steward's media - its library
+ *  (lib/media.mjs, the one writer of `<AITELIER_MEDIA_ROOT>/<userId>/`), the gateway fetch
+ *  of a file a connection's result named, and the group's record of a file sent there.
+ *  `gatewayFetch(connId, url, signal)` is the HTTP GET of the backend's
+ *  /api/steward/mcp/{conn_id}/fetch with the steward's token (runtime.mjs); the bytes it
+ *  answers are stored as `generated` under the turn's audience. A refusal is {refused}. */
+export function mediaOps({ request, library, gatewayFetch }) {
+  return {
+    ingest: (meta, open) => library.ingest(meta, open),
+    resolve: async ref => library.lookup(ref),
+    read: ref => library.read(ref),
+    setProtected: fn => library.setProtected(fn),
+    async fetch({ connId, url, audience }, signal) {
+      let response;
+      try { response = await gatewayFetch(connId, url, signal); }
+      catch (error) { return { refused: 'fetch_failed', reason: String(error?.message ?? error).slice(0, 200) }; }
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        return { refused: typeof detail?.detail === 'string' ? detail.detail : `fetch_${response.status}` };
+      }
+      return library.ingest({ channel: 'generated', audience, source: 'generated' }, () => response.body);
+    },
+    postGroup: ({ turn, kind, caption }, signal) => request('/api/state/commands/post_group_media', {
+      request_key: `group-media:${turn}:${randomUUID()}`, turn, kind, ...(caption ? { caption } : {}) }, signal)
+      .then(r => r?.result ?? r, stateRefusal),
+  };
+}
+
+/** Step 24.2 (7.8.12 "模型怎么用"): a wake shows each owner message's attachments as one line
+ *  each ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB]) - read from the message's source row,
+ *  never from its text. A failed read leaves the wake as it was (its body has the placeholders). */
+export async function withAttachmentLines(request, result, signal) {
+  const ids = (result?.driver_inbox ?? []).filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string').map(m => m.message_id);
+  if (!ids.length) return result;
+  let sources;
+  try { const listed = await request('/api/state/query/message_sources', { message_ids: ids.slice(0, 200) }, signal); sources = (listed?.result ?? listed)?.sources; }
+  catch { return result; }
+  if (!sources) return result;
+  return { ...result, driver_inbox: result.driver_inbox.map(m => {
+    const files = sources?.[m?.message_id]?.attachments;
+    return Array.isArray(files) && files.length ? { ...m, attachments: files.map(attachmentLine) } : m;
+  }) };
 }
 
 /** Step 24.1a (design-steward 7.8.8): the line the host writes first into a letter the

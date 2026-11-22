@@ -133,7 +133,7 @@ export interface DirectorHost {
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
   capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
-    | 'portfolio' | 'handoff' | 'proposals' | 'channels'>;
+    | 'portfolio' | 'handoff' | 'proposals' | 'channels' | 'groups' | 'catalog' | 'media'>;
   config: HostConfig;
 
   // ---- required ----
@@ -332,8 +332,44 @@ export interface DirectorHost {
         Promise<{ proposal_id: string; version: number; status: 'open'; needs_dashboard: boolean } | { refused: string; reason?: string }>;
     };
   };
+  /** Step 24.2 (design-steward 7.8.12, 7.8.12a): the host's media library - one writer of
+   *  `<media root>/<userId>/` (the root from AITELIER_MEDIA_ROOT), lib/media.mjs. Declared, the
+   *  plugin's ownerChannels.storeMedia stores into it and the steward gets media_call and
+   *  send_media; undeclared (the built-in local host), neither tool is registered and
+   *  storeMedia answers {refused: 'unsupported'}.
+   *  - ingest: the library's one way in (no binding check: storeMedia makes that one first) -
+   *    idempotent by (channel, messageRef, index) without calling `open`, then open()'s bytes
+   *    counted against the limits, typed by media-types.json, an image's pixels and a voice's
+   *    length (ffprobe) checked; {ref, kind, mime, size, durationMs?, duplicate?} or {refused:
+   *    too_large | type | unsupported | gone | unavailable}. `audience` is 'owner' or
+   *    'group:<channel>:<group_ref>'; `source` 'in' (a channel's) or 'generated'.
+   *  - resolve: a ref's row with its absolute `path`, `kind` and `ext` (undefined: unknown or gone).
+   *  - read: a ref's bytes (media_call fills them in as base64, host-side).
+   *  - fetch: a file a connection's tool result named, through the backend gateway's
+   *    /api/steward/mcp/{conn_id}/fetch (the plugin passes only a url it saw in this turn's
+   *    results, with the conn_id that returned it), stored as `generated` under `audience`.
+   *  - postGroup (optional): record one send_media file for the group of the recorded turn -
+   *    group_send_budget, caption exit-checked - {posted, channel, group_ref, caption?} or {refused}.
+   *  - setProtected (optional): refs the library must not clean (a relay not committed yet). */
+  media?: {
+    ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
+      open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>): Promise<{ ref: string; kind: 'image' | 'voice' | 'file';
+      mime: string; size: number; durationMs?: number; duplicate?: boolean } | { refused: string }>;
+    resolve(ref: string): Promise<undefined | { ref: string; path: string; kind: 'image' | 'voice' | 'file'; ext: string; mime: string;
+      size: number; durationMs?: number; audience: string; sha256: string; file: string }>;
+    read(ref: string): Promise<undefined | { row: object; bytes: Uint8Array }>;
+    fetch(request: { connId: string; url: string; audience: string }, signal?: AbortSignal): Promise<{ ref: string } | { refused: string; reason?: string }>;
+    postGroup?(request: { turn: string; kind: 'image' | 'voice' | 'file'; caption?: string }, signal?: AbortSignal):
+      Promise<{ posted: true; message_id: string; channel: string; group_ref: string; caption?: string } | { refused: string; reason?: string }>;
+    setProtected?(refs: () => Iterable<string>): void;
+  };
   channels?: {
-    relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal):
+    /** Step 24.2: `attachments` - the files' metadata the plugin checked (each a kind and exactly
+     *  one of a library ref or a refusal of the closed set; mime, size, durationMs), kept on the
+     *  message's source row; never a byte or a name. */
+    relay(inbound: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string;
+      attachments?: Array<{ kind: 'image' | 'voice' | 'file'; ref?: string; refused?: 'too_large' | 'type' | 'unsupported' | 'gone';
+        mime?: string; size?: number; durationMs?: number }> }, signal?: AbortSignal):
       Promise<{ message_id: string | null; duplicate: boolean; decided_on_replay?: boolean; approval: null | { proposal_id: string; action: 'approve' | 'decline';
         outcome: 'executed' | 'refused'; refusal?: string; kind?: string; target?: string; result?: object }; approval_pending?: boolean } | { refused: string; reason?: string }>;
     bind(bind: { channel: 'slack' | 'wechat'; senderRef: string; code: string; messageRef: string }, signal?: AbortSignal):
@@ -346,6 +382,10 @@ export interface DirectorHost {
       bound_at: string | null; revoked_at: string | null; is_default: boolean }>; default_channel: 'slack' | 'wechat' | null }>;
     codeCheck?(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string },
       signal?: AbortSignal): Promise<{ store_text: boolean }>;
+    /** Step 24.2 (storeMedia step 1): is `senderRef` the channel's current binding? The relay's
+     *  own judgement as a read; it throws when the host cannot be reached (storeMedia answers
+     *  `unavailable`, transient). Absent: storeMedia answers `unsupported`. */
+    senderBound?(who: { channel: 'slack' | 'wechat'; senderRef: string }, signal?: AbortSignal): Promise<{ bound: boolean }>;
     reportStatus?(status: { channel: 'slack' | 'wechat'; connected: boolean; detail?: string; qrSvg?: string }, signal?: AbortSignal):
       Promise<object>;
     dueAlerts?(signal?: AbortSignal): Promise<{ due: { channel: 'slack' | 'wechat'; kind: 'down' | 'up'; down_since: string; attempt: number }[] }>;
@@ -382,7 +422,8 @@ export interface DirectorHost {
 export interface GroupsHost {
   list(signal?: AbortSignal): Promise<{ owner_refs: Record<string, string>; groups: Array<{ channel: string; group_ref: string; label: string | null; mention_prefix: string }> }>;
   bind(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; prefix: string; code: string }, signal?: AbortSignal): Promise<unknown>;
-  relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string }, signal?: AbortSignal): Promise<unknown>;
+  relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string;
+    attachments?: object[] }, signal?: AbortSignal): Promise<unknown>;
   reply(a: { questionId: string; alsoAnswers: string[]; body: string }, signal?: AbortSignal): Promise<unknown>;
   recent(a: { channel: string; groupRef: string }, signal?: AbortSignal): Promise<{ recent: unknown[] }>;
   audience(a: { turn: string; audience: 'owner' | 'group'; group?: { channel: string; group_ref: string }; senderRefs: string[] }, signal?: AbortSignal): Promise<unknown>;
@@ -447,12 +488,40 @@ export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_
 export interface OwnerChannels {
   /** `login` (optional; the WeChat channel's): ask for a new login QR now. It answers
    *  {requested: true} or {refused, retry_after_s?} and never the QR, which the channel
-   *  shows through `status().qrSvg` only. */
+   *  shows through `status().qrSvg` only.
+   *  `sendFile` and `mediaKinds` (optional, step 24.2, design-steward 7.8.12): one file the
+   *  steward's send_media sends - to the bound owner (`to`, `replyToRef?`) or into a group
+   *  (`groupRef`) - and the kinds it can send; without sendFile, or for a kind not in
+   *  mediaKinds, send_media is refused channel_no_media. */
   register(channel: { name: 'slack' | 'wechat'; send(text: string, options: { replyToRef?: string; to?: string }): Promise<{ ref?: string }>;
     status(): { connected: boolean; detail?: string; qrSvg?: string };
-    login?(): Promise<ChannelLoginAnswer> }): () => void;
-  inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string }):
+    login?(): Promise<ChannelLoginAnswer>;
+    sendFile?(file: { to?: string; groupRef?: string; replyToRef?: string; kind: 'image' | 'voice' | 'file'; mime: string; name: string;
+      path: string; caption?: string }): Promise<{ ref?: string }>;
+    mediaKinds?: Array<'image' | 'voice' | 'file'> }): () => void;
+  /** Step 24.2: `attachments` (optional) - what storeMedia answered for each of the message's
+   *  files: each EXACTLY one of `ref` (an m_ library ref storeMedia gave; a channel's own ids
+   *  never come here) or `refused` (too_large | type | unsupported | gone - a channel writes
+   *  these itself for what it knows it cannot take: a declared size over the bound, a kind it
+   *  cannot fetch, a file the source no longer has). A message whose storeMedia answered
+   *  channel_sender_not_bound comes WITHOUT attachments. Anything outside that closed set
+   *  refuses the message invalid_inbound. The placeholder lines are written by the director
+   *  (lib/channels.mjs), never by a channel; the text may be empty when files came. */
+  inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string;
+    attachments?: Array<{ kind: 'image' | 'voice' | 'file'; ref?: string; refused?: 'too_large' | 'type' | 'unsupported' | 'gone';
+      mime?: string; size?: number; name?: string; durationMs?: number }> }):
     Promise<{ accepted: boolean; reason?: string }>;
+  /** Step 24.2: store attachment `index` of message `messageRef` BEFORE inbound. In order: (1)
+   *  the sender is the channel's current binding (host.channels.senderBound; unreachable:
+   *  `unavailable`, transient - hold the message and ask again), else channel_sender_not_bound
+   *  and `open` is never called; (2) a stored (channel, messageRef, index) answers its ref
+   *  without calling `open`; (3) `open()` streams the bytes, held to the limits and the type
+   *  table. {ref, kind, mime, size, durationMs?} or {refused: too_large | type | unsupported |
+   *  gone | unavailable | channel_sender_not_bound | invalid_media}. `open` may throw
+   *  {refused: 'too_large' | 'gone'} (a bridge's 413 / 410); any other throw is `unavailable`. */
+  storeMedia(meta: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; index: number; kind: 'image' | 'voice' | 'file';
+    mime?: string; name?: string }, open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>):
+    Promise<{ ref: string; kind: string; mime: string; size: number; durationMs?: number } | { refused: string }>;
 }
 
 /** What `createOwnerChannels` returns: `service` is the whole plugin-facing surface (it is
@@ -470,6 +539,12 @@ export interface OwnerChannelsHandle {
    *  the channel's own code, retry_after_s?}. Only those fields are passed on; never throws. Behind the steward's
    *  request_wechat_qr tool and DirectorApi.ownerChannelLogin. */
   login(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
+  /** Step 24.2: where a file answering owner message `replyTo` goes ({channel, to, replyToRef?})
+   *  or {refused: dashboard_no_media | not_bound | channel_not_connected | channel_no_media}. */
+  ownerMediaTarget(replyTo: string, kind?: string): Promise<{ channel: string; to: string; replyToRef?: string } | { refused: string }>;
+  /** Step 24.2: one file through `channel`'s sendFile: {sent, channel, ref?} or {refused}. */
+  sendFile(channel: string, file: object): Promise<{ sent: true; channel: string; ref?: string } | { refused: string; reason?: string }>;
+  canSendFile(channel: string, kind: string): boolean;
   ready(): void;
   pollStatus(): Promise<void>;
   /** Every message the director still owes an answer asks again now (the 30 s poll's own step). */

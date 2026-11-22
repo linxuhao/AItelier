@@ -40,6 +40,7 @@
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { MEDIA_KINDS, MEDIA_REFUSALS, REF_PATTERN, placeholder } from './media.mjs';
 
 export const CHANNEL_NAMES = ['slack', 'wechat'];
 
@@ -274,7 +275,7 @@ export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recen
  *    timers. The service exists from the plugin's apply on, so a channel plugin can hand a
  *    message in before the host has installed itself (measured: its caller did not exist
  *    yet); every call to the host waits for ready(). */
-export function createOwnerChannels({ host, groups, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
+export function createOwnerChannels({ host, groups, media, log = () => {}, replies = channelReplies, limits = CHANNEL_LIMITS,
   owedFile = defaultOwedFile(), clock = Date.now }) {
   const registered = new Map(), told = new Map(), sending = new Map(), binds = new Map(), lanes = new Map(),
     answeredRefs = new Set();
@@ -309,7 +310,8 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
         // A record without a text is a real one: it says a message is owed whose body was
         // never written down because the host had not judged it (see remember()).
         if (message && text(message.channel) && text(message.senderRef) && text(message.messageRef)
-          && (message.text === undefined || typeof message.text === 'string'))
+          && (message.text === undefined || typeof message.text === 'string')
+          && (message.attachments === undefined || Array.isArray(message.attachments)))
           owed.set(key, message);
       }
     } catch (error) {
@@ -370,8 +372,13 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
     const noLine = throttled === undefined ? previous?.throttled === true : throttled === true;
     // `owedAt`: when this message was first owed here (kept across a restart) - with the
     // channel's `at`, what dates the line it may owe (lineExpired).
+    // Step 24.2 (7.8.12): the attachments' refs travel with the record, so a relay that is not
+    // committed yet keeps its media out of the library's cleanup (media.setProtected below).
+    const attachments = Array.isArray(message.attachments) ? message.attachments
+      : Array.isArray(previous?.attachments) ? previous.attachments : undefined;
     owed.set(key, { channel: message.channel, senderRef: message.senderRef, messageRef: message.messageRef,
       ...(kept === undefined ? {} : { text: kept }), ...(pending === undefined ? {} : { refusal: pending }),
+      ...(attachments?.length ? { attachments } : {}),
       ...(noLine ? { throttled: true } : {}),
       ...(text(message.at) ? { at: message.at } : {}),
       owedAt: text(previous?.owedAt) ? previous.owedAt : new Date().toISOString() });
@@ -644,12 +651,17 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
         throw new Error('ownerChannels.register: send and status must be functions');
       if (channel.login !== undefined && typeof channel.login !== 'function')
         throw new Error('ownerChannels.register: login, when given, must be a function');
-      for (const optional of ['sendGroup', 'setRooms'])
+      for (const optional of ['sendGroup', 'setRooms', 'sendFile'])
         if (channel[optional] !== undefined && typeof channel[optional] !== 'function')
           throw new Error(`ownerChannels.register: ${optional}, when given, must be a function`);
+      // Step 24.2 (7.8.12): the kinds this channel can send with sendFile, a subset of image, voice, file.
+      if (channel.mediaKinds !== undefined && (!Array.isArray(channel.mediaKinds)
+        || channel.mediaKinds.some(kind => !MEDIA_KINDS.includes(kind))))
+        throw new Error(`ownerChannels.register: mediaKinds, when given, must be a subset of ${MEDIA_KINDS.join(', ')}`);
       if (registered.has(channel.name)) throw new Error(`ownerChannels.register: ${channel.name} is already registered`);
       const entry = { send: channel.send, status: channel.status, ...(channel.login ? { login: channel.login } : {}),
-        ...(channel.sendGroup ? { sendGroup: channel.sendGroup } : {}), ...(channel.setRooms ? { setRooms: channel.setRooms } : {}) };
+        ...(channel.sendGroup ? { sendGroup: channel.sendGroup } : {}), ...(channel.setRooms ? { setRooms: channel.setRooms } : {}),
+        ...(channel.sendFile ? { sendFile: channel.sendFile, mediaKinds: [...new Set(channel.mediaKinds ?? [])] } : {}) };
       registered.set(channel.name, entry);
       log('channel_registered', { channel: channel.name });
       void reportStatus(channel.name, statusOf(channel.name, entry));
@@ -662,7 +674,13 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
     },
 
     /** One message that arrived on a channel. A channel's messages reach the host one at a
-     *  time, in the order they were handed in. */
+     *  time, in the order they were handed in. Step 24.2 (7.8.12): `attachments`, when given,
+     *  are what storeMedia answered for each of the message's files - each EXACTLY one of a
+     *  library ref (m_...) or a refusal of the closed set (too_large, type, unsupported, gone);
+     *  anything else refuses the whole message invalid_inbound. The placeholder lines ([图片],
+     *  [语音 0:23], [文件], [图片 过大未收] ...) are written HERE, after the message's own text,
+     *  never by a channel; the host gets the attachments' metadata (kind, mime, size,
+     *  durationMs, ref or refused) and no name and no byte. */
     inbound(message = {}) {
       const { channel, senderRef, messageRef, text: body } = message;
       if (!CHANNEL_NAMES.includes(channel) || !text(senderRef) || !text(messageRef) || typeof body !== 'string') {
@@ -672,10 +690,106 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       // Step 23: a group message never enters the owner's lane or the owed store, is never a
       // 6-digit binding attempt and is never answered bindRefused (design-steward 7.7.11).
       if (message.conversationRef !== undefined) return groupInbound(message);
-      const run = (lanes.get(channel) ?? Promise.resolve()).then(() => handle(message));
+      const run = (lanes.get(channel) ?? Promise.resolve()).then(async () => {
+        const prepared = await withAttachments(message);
+        return prepared ? handle(prepared) : { accepted: false, reason: 'invalid_inbound' };
+      });
       lanes.set(channel, run);
       return run;
     },
+
+    /** Step 24.2 (design-steward 7.8.12): store one attachment of a message that arrived on a
+     *  channel, BEFORE the message is handed in. In order: (1) the sender must be the channel's
+     *  current binding (the host's read-only check; a host it cannot reach is `unavailable`,
+     *  transient like inbound's) - otherwise channel_sender_not_bound and `open` is never
+     *  called, so not one byte of a stranger's is fetched; (2) idempotent by (channel,
+     *  messageRef, index): a stored one answers its ref without calling `open`; (3) only then
+     *  `open()` gives the bytes, held to the library's limits and type table. Answers {ref,
+     *  kind, mime, size, durationMs?} or {refused}. A group message has no media in 24.2
+     *  (refused unsupported), nor does a host without a media library. */
+    async storeMedia(meta = {}, open) {
+      const { channel, senderRef, messageRef, index, kind } = meta;
+      if (!CHANNEL_NAMES.includes(channel) || !text(senderRef) || !text(messageRef) || !Number.isInteger(index) || index < 0
+        || !MEDIA_KINDS.includes(kind) || typeof open !== 'function') return { refused: 'invalid_media' };
+      if (meta.conversationRef !== undefined || !media || typeof host.senderBound !== 'function') return { refused: 'unsupported' };
+      try {
+        await hostReady();
+        const answer = await host.senderBound({ channel, senderRef });
+        if (answer?.bound !== true) {
+          log('channel_media_refused', { channel, reason: 'channel_sender_not_bound' });
+          return { refused: 'channel_sender_not_bound' };
+        }
+      } catch (error) {
+        log('channel_media_failed', { channel, error: short(error) });
+        return { refused: 'unavailable' };
+      }
+      let stored;
+      try { stored = await media.ingest({ channel, messageRef, index, audience: 'owner', source: 'in' }, open); }
+      catch (error) { log('channel_media_failed', { channel, error: short(error) }); return { refused: 'unavailable' }; }
+      return stored && (stored.ref || stored.refused) ? stored : { refused: 'unavailable' };
+    },
+  };
+
+  // ---- media (step 24.2) ----
+  // The message with its attachments checked and its placeholder lines written, or undefined
+  // when an attachment is outside the closed set (or names a ref the library does not hold).
+  const withAttachments = async message => {
+    if (message.attachments === undefined) return message;
+    const list = message.attachments;
+    if (!Array.isArray(list) || list.length > 10) return invalidAttachments(message);
+    const kept = [];
+    for (const item of list) {
+      if (!item || typeof item !== 'object' || !MEDIA_KINDS.includes(item.kind)) return invalidAttachments(message);
+      const hasRef = Object.hasOwn(item, 'ref'), hasRefused = Object.hasOwn(item, 'refused');
+      if (hasRef === hasRefused) return invalidAttachments(message);
+      if (hasRefused) {
+        if (!MEDIA_REFUSALS.includes(item.refused)) return invalidAttachments(message);
+        kept.push({ kind: item.kind, refused: item.refused });
+        continue;
+      }
+      if (typeof item.ref !== 'string' || !REF_PATTERN.test(item.ref)) return invalidAttachments(message);
+      let row;
+      try { row = await media?.resolve?.(item.ref); } catch { row = undefined; }
+      if (!row) return invalidAttachments(message);
+      kept.push({ kind: row.kind ?? item.kind, ref: item.ref, ...(text(row.mime) ? { mime: row.mime } : {}),
+        ...(Number.isInteger(row.size) ? { size: row.size } : {}), ...(Number.isInteger(row.durationMs) ? { durationMs: row.durationMs } : {}) });
+    }
+    if (!kept.length) { const { attachments: _none, ...rest } = message; return rest; }
+    const lines = kept.map(placeholder);
+    const composed = [message.text.trim() ? message.text : '', ...lines].filter(Boolean).join('\n');
+    return { ...message, text: composed, attachments: kept };
+  };
+  const invalidAttachments = message => {
+    log('channel_inbound_invalid', { channel: message.channel, reason: 'attachments' });
+    return undefined;
+  };
+  // Refs owed to a relay that has not committed stay out of the library's cleanup.
+  media?.setProtected?.(() => [...owed.values()].flatMap(record => (record.attachments ?? []).map(a => a.ref).filter(Boolean)));
+  /** Where a file for the reply to owner message `replyTo` goes (the channel it came from, to
+   *  the account bound now), or {refused}: dashboard_no_media for a dashboard message (24.2),
+   *  channel_no_media when that channel cannot send this kind. */
+  const ownerMediaTarget = async (replyTo, kind) => {
+    await hostReady();
+    const source = await host.sourceOf(replyTo);
+    if (!source || source.direction !== 'in' || !CHANNEL_NAMES.includes(source.channel)) return { refused: 'dashboard_no_media' };
+    const bound = await binding(source.channel);
+    if (!bound || bound.sender_ref !== source.sender_ref) return { refused: 'not_bound' };
+    const entry = registered.get(source.channel);
+    if (!entry) return { refused: 'channel_not_connected' };
+    if (!entry.sendFile || (kind !== undefined && !entry.mediaKinds.includes(kind))) return { refused: 'channel_no_media' };
+    return { channel: source.channel, to: bound.sender_ref, replyToRef: source.channel_message_ref ?? undefined };
+  };
+  const sendFileVia = async (channel, file) => {
+    const entry = registered.get(channel);
+    if (!entry?.sendFile || !entry.mediaKinds.includes(file.kind)) return { refused: 'channel_no_media' };
+    try {
+      const sent = await within(Promise.resolve(entry.sendFile(file)), limits.sendMs, 'send_timeout');
+      log('channel_file_sent', { channel, mime: file.mime });
+      return { sent: true, channel, ...(text(sent?.ref) ? { ref: sent.ref } : {}) };
+    } catch (error) {
+      log('channel_file_failed', { channel, error: short(error) });
+      return { refused: 'send_failed', reason: short(error) };
+    }
   };
 
   // ---- the family group (step 23) ----
@@ -706,7 +820,7 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       }
     } catch (error) { log('group_rooms_failed', { error: short(error) }); }
   };
-  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind }) => {
+  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments }) => {
     const seen = { channel, group_ref: groupRef, sender_ref: senderRef, length: body.length };
     if (!groups || !text(groupRef)) return { accepted: false, reason: 'no_groups' };
     let result;
@@ -714,7 +828,8 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       await hostReady();
       result = groupBind
         ? await groups.bind({ channel, groupRef, senderRef, messageRef, prefix: groupBind.prefix, code: groupBind.code })
-        : await groups.relay({ channel, groupRef, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}) });
+        : await groups.relay({ channel, groupRef, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}),
+          ...(attachments?.length ? { attachments } : {}) });
     } catch (error) {
       log('group_inbound_failed', { ...seen, error: short(error) });
       return { accepted: false, reason: 'unavailable' };
@@ -741,13 +856,16 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
     log('group_message_accepted', seen);
     // Taken by the host and not yet steered: a failure here loses the question (never
     // doubles it); the dashboard shows it unanswered.
-    try { await groupWake?.({ channel, groupRef, senderRef, text: body, at, ...result }); }
+    try { await groupWake?.({ channel, groupRef, senderRef, text: body, at, ...(attachments?.length ? { attachments } : {}), ...result }); }
     catch (error) { log('group_wake_failed', { ...seen, error: short(error) }); }
     return { accepted: true };
   };
   const groupInbound = message => {
     const key = message.channel + '\n' + message.conversationRef;
-    const run = (groupLanes.get(key) ?? Promise.resolve()).then(() => handleGroup(message));
+    const run = (groupLanes.get(key) ?? Promise.resolve()).then(async () => {
+      const prepared = await withAttachments(message);
+      return prepared ? handleGroup(prepared) : { accepted: false, reason: 'invalid_inbound' };
+    });
     groupLanes.set(key, run.catch(() => {}));
     return run;
   };
@@ -762,10 +880,11 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
     } else held.delete(key);
     return result;
   };
-  const handleOnce = async ({ channel, senderRef, messageRef, text: body, at }) => {
+  const handleOnce = async ({ channel, senderRef, messageRef, text: body, at, attachments }) => {
     const seen = { channel, sender_ref: senderRef, at: at ?? new Date().toISOString(), length: body.length };
     const trimmed = body.trim();
-    const message = { channel, senderRef, messageRef, text: body, at };
+    const files = Array.isArray(attachments) && attachments.length ? attachments : undefined;
+    const message = { channel, senderRef, messageRef, text: body, at, ...(files ? { attachments: files } : {}) };
     const owed1 = owedKey(message);
     // Was this message ALREADY owed when it arrived - by an earlier process (a restart) or by
     // an earlier attempt here? That is what "a line the store still says is owed" means; the
@@ -790,7 +909,7 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       // owner's six digits are an ordinary message. Past the channel's binding attempts for
       // the minute, six digits are relayed like any message: the host takes the owner's and
       // refuses a stranger's, silently.
-      const attempt = CODE.test(trimmed) && bindAllowed(channel);
+      const attempt = !files && CODE.test(trimmed) && bindAllowed(channel);
       if (CODE.test(trimmed) && !attempt) log('channel_bind_throttled', seen);
       if (attempt && (await binding(channel))?.sender_ref !== senderRef) {
         const result = await host.bind({ channel, senderRef, code: trimmed, messageRef });
@@ -807,7 +926,8 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
           forget(owed1);
         return bound ? { accepted: true } : { accepted: false, reason: String(result?.refused ?? 'refused') };
       }
-      const result = await host.relay({ channel, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}) });
+      const result = await host.relay({ channel, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}),
+        ...(files ? { attachments: files } : {}) });
       if (result?.refused) {
         const reason = String(result.refused);
         if (RETRYABLE.has(reason)) {
@@ -1168,6 +1288,13 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
     service, ownerMessageSent, login,
     /** Step 23: one line into a bound group (the steward's reply, as the host formatted it). */
     sendGroup: sendGroupLine,
+    /** Step 24.2 (7.8.12): where a file answering owner message `replyTo` would go, or {refused}. */
+    ownerMediaTarget: (replyTo, kind) => ownerMediaTarget(replyTo, kind).catch(error => ({ refused: 'unavailable', reason: short(error) })),
+    /** Step 24.2: one file through a channel's sendFile ({to, replyToRef?} for the owner,
+     *  {groupRef} for a group; kind, mime, name, path, caption?): {sent, channel, ref?} or
+     *  {refused: channel_no_media | send_failed}. */
+    sendFile: sendFileVia,
+    canSendFile: (channel, kind) => Boolean(registered.get(channel)?.sendFile && registered.get(channel).mediaKinds.includes(kind)),
     /** Step 23: who steers an accepted group question into the steward (the director, once
      *  its session exists). */
     setGroupWake: fn => { groupWake = fn; },

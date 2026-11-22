@@ -1,0 +1,387 @@
+/** The steward host's media library (step 24.2, design-steward 7.8.12 "存储" and "上限", 7.8.12a
+ *  "24.2 要为复用交出的四件").
+ *
+ *  One writer per subdirectory: `<root>/<userId>/` holds this writer's files and its own
+ *  `index.jsonl`. The root comes from the host (AITELIER_MEDIA_ROOT, set by the DSH host for
+ *  every driver process; a driver's own `~` is under ~/.AItelier and is not used). Files are
+ *  `<root>/<userId>/<YYYY-MM>/<sha256>.<ext>`, directories 0700 and files 0600, deduplicated
+ *  by sha256: a second copy of the same bytes gets its own row and ref but points at the file
+ *  the first one wrote (`file`, relative to the root, is therefore in every row - the month
+ *  of `at` does not name it).
+ *
+ *  `ingest(meta, open)` is the library's one way in, and it knows nothing about bindings
+ *  (that check belongs to a channel: lib/channels.mjs storeMedia does it BEFORE calling here,
+ *  and a dashboard upload, 24.2b, comes in already judged). In order:
+ *   1. idempotent by (channel, messageRef, index): a stored one answers its ref, `open` is
+ *      not called (a channel's replay fetches nothing again);
+ *   2. a chat channel's inbound media are held to limits.inbound_per_channel_hour, counted
+ *      from the index (so a restart keeps the count); one past it is refused too_large -
+ *      the design's placeholder for every over-limit attachment;
+ *   3. then `open()` gives the bytes, counted as they come and cut at the bound (a
+ *      declared size is never trusted); the type is the first bytes' signature in the
+ *      shared table (media-types.json), else `type`; an image's pixel count is read from its
+ *      header (at most limits.image_pixels) and a voice's length is measured with ffprobe
+ *      (at most limits.voice_ms; no ffprobe, or one that cannot read it: `unsupported` -
+ *      fail closed).
+ *  Refusals of the closed set: too_large, type, unsupported, gone; a failure to read the
+ *  source or to write is `unavailable` (transient: the caller may ask again).
+ *
+ *  Refs are `m_` + 16 random hex characters, never a hash (they say nothing about whether
+ *  two files are the same). Each row carries its AUDIENCE: `owner`, or `group:<channel>:
+ *  <group_ref>`; `covers(turnAudience, row)` is the one rule media_call and send_media use
+ *  (an owner turn covers every ref, a group turn only its own group's).
+ *
+ *  Kept 30 days (cleanup(), daily while started) and at most limits.total_bytes in all,
+ *  oldest first; refs still owed to a relay (`protect()`) are never cleaned. Logs carry a
+ *  mime and a size, never a name or a byte. */
+import { createHash, randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join, relative, sep } from 'node:path';
+import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
+
+const TABLE = JSON.parse(readFileSync(new URL('../media-types.json', import.meta.url), 'utf8'));
+export const MEDIA_TYPES = Object.freeze(TABLE.types);
+export const MEDIA_LIMITS = Object.freeze({ ...TABLE.limits });
+export const MEDIA_KINDS = Object.freeze(['image', 'voice', 'file']);
+/** What an attachment that did not come in says (the closed set of design-steward 7.8.12). */
+export const MEDIA_REFUSALS = Object.freeze(['too_large', 'type', 'unsupported', 'gone']);
+export const REF_PATTERN = /^m_[0-9a-f]{16}$/;
+const CHANNEL_SOURCES = new Set(['slack', 'wechat']);
+const SNIFF_BYTES = 64;
+const DAY_MS = 24 * 3600 * 1000;
+
+const signatureMatches = (buffer, signature) => signature.every(({ offset, hex }) => {
+  const want = Buffer.from(hex, 'hex');
+  return buffer.length >= offset + want.length && buffer.subarray(offset, offset + want.length).equals(want);
+});
+/** The type the first bytes name in the shared table, or undefined. */
+export function sniff(buffer) {
+  return MEDIA_TYPES.find(type => type.signatures.some(signature => signatureMatches(buffer, signature)));
+}
+
+/** {width, height} from an image's own header (png, gif, webp, jpeg), or undefined. No
+ *  decoder: only the few header bytes each format puts its size in. */
+export function imageSize(buffer, mime) {
+  try {
+    if (mime === 'image/png') return buffer.length >= 24 ? { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) } : undefined;
+    if (mime === 'image/gif') return buffer.length >= 10 ? { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) } : undefined;
+    if (mime === 'image/webp') {
+      const chunk = buffer.toString('latin1', 12, 16);
+      if (chunk === 'VP8 ' && buffer.length >= 30) return { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff };
+      if (chunk === 'VP8L' && buffer.length >= 25) {
+        const [b0, b1, b2, b3] = buffer.subarray(21, 25);
+        return { width: 1 + (((b1 & 0x3f) << 8) | b0), height: 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6)) };
+      }
+      if (chunk === 'VP8X' && buffer.length >= 30) return { width: 1 + buffer.readUIntLE(24, 3), height: 1 + buffer.readUIntLE(27, 3) };
+      return undefined;
+    }
+    if (mime === 'image/jpeg') {
+      let i = 2;
+      while (i + 4 <= buffer.length) {
+        if (buffer[i] !== 0xff) return undefined;
+        const marker = buffer[i + 1];
+        if (marker === 0xff) { i += 1; continue; }
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        if ((marker >= 0xc0 && marker <= 0xcf) && ![0xc4, 0xc8, 0xcc].includes(marker))
+          return i + 9 <= buffer.length ? { height: buffer.readUInt16BE(i + 5), width: buffer.readUInt16BE(i + 7) } : undefined;
+        i += 2 + buffer.readUInt16BE(i + 2);
+      }
+    }
+  } catch { return undefined; }
+  return undefined;
+}
+
+/** The audience label of a turn ({kind: 'owner'} or a group turn), or undefined when it
+ *  cannot be named (a group turn of unknown group). */
+export function audienceLabel(audience) {
+  if (audience?.kind === 'owner') return 'owner';
+  if (audience?.kind === 'group' && typeof audience.channel === 'string' && typeof audience.group_ref === 'string')
+    return `group:${audience.channel}:${audience.group_ref}`;
+  return undefined;
+}
+/** Whether a turn of `audience` may use this row: an owner turn every ref, a group turn only
+ *  its own group's (design-steward 7.8.12 "受众标签"). Anything unreadable: no. */
+export function covers(audience, row) {
+  if (audience?.kind === 'owner') return true;
+  const label = audienceLabel(audience);
+  return label !== undefined && label.startsWith('group:') && row?.audience === label;
+}
+
+const KIND_NAMES = Object.freeze({ image: '图片', voice: '语音', file: '文件' });
+const REFUSED_WORDS = Object.freeze({ too_large: '过大未收', type: '类型不收', unsupported: '未收：渠道不支持', gone: '未收：已取不到' });
+const clock = ms => { const s = Math.round(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const bytes = n => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
+/** The placeholder the owner's conversation keeps for one attachment ([图片], [语音 0:23],
+ *  [文件], [图片 过大未收]...): what lib/channels.mjs writes into the body, nothing else does. */
+export function placeholder(attachment) {
+  const name = KIND_NAMES[attachment?.kind] ?? '文件';
+  if (attachment?.refused) return `[${name} ${REFUSED_WORDS[attachment.refused] ?? '未收'}]`;
+  if (attachment?.kind === 'voice' && Number.isInteger(attachment.durationMs)) return `[${name} ${clock(attachment.durationMs)}]`;
+  return `[${name}]`;
+}
+/** The one line a wake shows for one attachment ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB]). */
+export function attachmentLine(attachment) {
+  if (!attachment?.ref) return placeholder(attachment);
+  const name = KIND_NAMES[attachment.kind] ?? '文件';
+  if (attachment.kind === 'voice' && Number.isInteger(attachment.durationMs)) return `[${name} ${attachment.ref}，${clock(attachment.durationMs)}]`;
+  return `[${name} ${attachment.ref}${attachment.mime ? '，' + attachment.mime : ''}${Number.isInteger(attachment.size) ? '，' + bytes(attachment.size) : ''}]`;
+}
+
+class Refused extends Error { constructor(code) { super(code); this.refused = code; } }
+
+/** ffprobe's duration of `path` in ms, or a refusal: no ffprobe at `command` (or it fails, or
+ *  times out, or names no duration) is `unsupported` - the length could not be measured. */
+export function probeDuration(command, path, { timeoutMs = 15000 } = {}) {
+  return new Promise(resolve => {
+    let out = '', done = false;
+    const finish = value => { if (!done) { done = true; clearTimeout(timer); resolve(value); } };
+    let child;
+    try {
+      child = spawn(command, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path],
+        { stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { finish({ refused: 'unsupported' }); return; }
+    const timer = setTimeout(() => { child.kill('SIGKILL'); finish({ refused: 'unsupported' }); }, timeoutMs);
+    timer.unref?.();
+    child.on('error', () => finish({ refused: 'unsupported' }));
+    child.stdout.on('data', chunk => { if (out.length < 200) out += chunk; });
+    child.on('close', code => {
+      const seconds = Number.parseFloat(out.trim());
+      finish(code === 0 && Number.isFinite(seconds) && seconds >= 0 ? { ms: Math.round(seconds * 1000) } : { refused: 'unsupported' });
+    });
+  });
+}
+
+const asIterable = source => {
+  if (source && typeof source[Symbol.asyncIterator] === 'function') return source;
+  if (source && typeof source.getReader === 'function') return Readable.fromWeb(source);
+  if (Buffer.isBuffer(source) || source instanceof Uint8Array) return [source];
+  throw new Error('open() gave no byte stream');
+};
+
+/** @param root the media root (AITELIER_MEDIA_ROOT); @param userId this writer's subdirectory.
+ *  @param ffprobe the ffprobe command (default $AITELIER_MEDIA_FFPROBE, else `ffprobe` on PATH).
+ *  @param protect () => refs that must outlive cleanup (a relay not committed yet). */
+export function createMediaLibrary({ root, userId = 'owner', ffprobe = process.env.AITELIER_MEDIA_FFPROBE || 'ffprobe',
+  limits = MEDIA_LIMITS, now = () => Date.now(), log = () => {}, protect = () => [], random = n => randomBytes(n) } = {}) {
+  if (typeof root !== 'string' || !root) throw new Error('media library: root is required');
+  if (typeof userId !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(userId) || userId.startsWith('.')) throw new Error('media library: bad userId');
+  const home = join(root, userId);
+  const indexFile = join(home, 'index.jsonl');
+  const ensureDir = path => { mkdirSync(path, { recursive: true, mode: 0o700 }); chmodSync(path, 0o700); };
+  let protectFn = protect;
+  let rows = [];
+  try {
+    rows = readFileSync(indexFile, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+      try { const row = JSON.parse(line); return REF_PATTERN.test(row?.ref) && typeof row.file === 'string' ? [row] : []; } catch { return []; }
+    });
+  } catch (error) { if (error?.code !== 'ENOENT') log('media_index_unreadable', { error: String(error?.code ?? error).slice(0, 60) }); }
+  const absolute = row => join(root, row.file);
+  const inside = path => !relative(home, path).startsWith('..') && !relative(home, path).startsWith(sep);
+  const rewrite = () => {
+    ensureDir(home);
+    const temporary = indexFile + '.tmp';
+    writeFileSync(temporary, rows.map(row => JSON.stringify(row) + '\n').join(''), { mode: 0o600 });
+    renameSync(temporary, indexFile);
+  };
+  const append = row => { ensureDir(home); appendFileSync(indexFile, JSON.stringify(row) + '\n', { mode: 0o600 }); };
+  const capFor = kind => kind === 'image' ? limits.image_bytes : kind === 'voice' ? limits.voice_bytes : limits.file_bytes;
+  const maxBytes = Math.max(limits.image_bytes, limits.file_bytes, limits.voice_bytes, limits.outbound_bytes);
+
+  const find = (channel, messageRef, index) => rows.find(row => row.channel === channel && row.messageRef === messageRef
+    && row.index === index && existsSync(absolute(row)));
+  const lookup = ref => {
+    if (typeof ref !== 'string' || !REF_PATTERN.test(ref)) return undefined;
+    const row = rows.find(r => r.ref === ref);
+    if (!row) return undefined;
+    const path = absolute(row);
+    if (!inside(path) || !existsSync(path)) return undefined;
+    const type = MEDIA_TYPES.find(t => t.mime === row.mime);
+    return { ...row, path, kind: type?.kind ?? 'file', ext: type?.ext ?? 'bin' };
+  };
+  const freshRef = () => { for (;;) { const ref = 'm_' + Buffer.from(random(8)).toString('hex'); if (!rows.some(r => r.ref === ref)) return ref; } };
+
+  async function receive(open) {
+    let source;
+    try { source = await open(); }
+    catch (error) {
+      if (MEDIA_REFUSALS.includes(error?.refused)) throw new Refused(error.refused);
+      throw new Refused('unavailable');
+    }
+    if (source && typeof source === 'object' && MEDIA_REFUSALS.includes(source.refused)) throw new Refused(source.refused);
+    const chunks = [];
+    let size = 0, type, cap = maxBytes, head = Buffer.alloc(0);
+    try {
+      for await (const chunk of asIterable(source)) {
+        const piece = Buffer.from(chunk);
+        size += piece.length;
+        if (!type && head.length < SNIFF_BYTES) head = Buffer.concat([head, piece.subarray(0, SNIFF_BYTES - head.length)]);
+        if (!type && head.length >= SNIFF_BYTES) {
+          type = sniff(head);
+          if (!type) throw new Refused('type');
+          cap = capFor(type.kind);
+        }
+        if (size > cap) throw new Refused('too_large');
+        chunks.push(piece);
+      }
+    } catch (error) {
+      if (error instanceof Refused) throw error;
+      if (MEDIA_REFUSALS.includes(error?.refused)) throw new Refused(error.refused);
+      throw new Refused('unavailable');
+    }
+    type ??= sniff(head);
+    if (!type) throw new Refused('type');
+    if (size > capFor(type.kind)) throw new Refused('too_large');
+    return { buffer: Buffer.concat(chunks, size), size, type };
+  }
+
+  async function store(meta, open) {
+    const { buffer, size, type } = await receive(open);
+    let durationMs;
+    if (type.kind === 'image') {
+      const dims = imageSize(buffer, type.mime);
+      if (!dims || !(dims.width > 0) || !(dims.height > 0)) throw new Refused('unsupported');
+      if (dims.width * dims.height > limits.image_pixels) throw new Refused('too_large');
+    }
+    const sha256 = createHash('sha256').update(buffer).digest('hex');
+    const at = new Date(now());
+    const month = at.toISOString().slice(0, 7);
+    const existing = rows.find(row => row.sha256 === sha256 && existsSync(absolute(row)));
+    let file = existing?.file;
+    const temporary = join(home, `.incoming-${Buffer.from(random(8)).toString('hex')}`);
+    try {
+      ensureDir(home);
+      if (type.kind === 'voice') {
+        if (existing && Number.isInteger(existing.durationMs)) durationMs = existing.durationMs;
+        else {
+          writeFileSync(temporary, buffer, { mode: 0o600 });
+          const probed = await probeDuration(ffprobe, temporary);
+          if (probed.refused) throw new Refused(probed.refused);
+          if (probed.ms > limits.voice_ms) throw new Refused('too_large');
+          durationMs = probed.ms;
+        }
+      }
+      if (!file) {
+        ensureDir(join(home, month));
+        file = `${userId}/${month}/${sha256}.${type.ext}`;
+        if (!existsSync(temporary)) writeFileSync(temporary, buffer, { mode: 0o600 });
+        renameSync(temporary, join(root, file));
+      }
+    } catch (error) {
+      if (error instanceof Refused) throw error;
+      log('media_store_failed', { mime: type.mime, size, error: String(error?.code ?? 'error').slice(0, 40) });
+      throw new Refused('unavailable');
+    } finally { rmSync(temporary, { force: true }); }
+    const row = { ref: freshRef(), sha256, mime: type.mime, size, ...(durationMs !== undefined ? { durationMs } : {}),
+      audience: meta.audience, source: meta.source, channel: meta.channel,
+      ...(typeof meta.messageRef === 'string' ? { messageRef: meta.messageRef } : {}),
+      ...(Number.isInteger(meta.index) ? { index: meta.index } : {}), file, at: at.toISOString() };
+    rows.push(row);
+    append(row);
+    log('media_stored', { mime: row.mime, size: row.size });
+    enforceTotal(new Set([row.ref]));
+    return row;
+  }
+
+  let lane = Promise.resolve();
+  /** @param meta {channel, messageRef?, index?, audience: 'owner' | 'group:<channel>:<ref>',
+   *    source: 'in' | 'generated'} @param open () => a byte stream (async iterable, web stream
+   *    or Buffer); throwing {refused: <closed set>} passes that refusal on. */
+  const ingest = (meta = {}, open) => {
+    const run = lane.then(async () => {
+      if (typeof meta.audience !== 'string' || !(meta.audience === 'owner' || meta.audience.startsWith('group:'))) return { refused: 'invalid_media' };
+      if (!['in', 'generated'].includes(meta.source) || typeof meta.channel !== 'string' || !meta.channel) return { refused: 'invalid_media' };
+      if (typeof open !== 'function') return { refused: 'invalid_media' };
+      const keyed = typeof meta.messageRef === 'string' && Number.isInteger(meta.index);
+      if (keyed) {
+        const stored = find(meta.channel, meta.messageRef, meta.index);
+        if (stored) return { ref: stored.ref, kind: lookup(stored.ref)?.kind, mime: stored.mime, size: stored.size,
+          ...(stored.durationMs !== undefined ? { durationMs: stored.durationMs } : {}), duplicate: true };
+      }
+      if (meta.source === 'in' && CHANNEL_SOURCES.has(meta.channel)) {
+        const hour = now() - 3600000;
+        const taken = rows.filter(row => row.source === 'in' && row.channel === meta.channel && Date.parse(row.at) > hour).length;
+        if (taken >= limits.inbound_per_channel_hour) { log('media_refused', { reason: 'rate' }); return { refused: 'too_large' }; }
+      }
+      try {
+        const row = await store(meta, open);
+        return { ref: row.ref, kind: lookup(row.ref)?.kind, mime: row.mime, size: row.size,
+          ...(row.durationMs !== undefined ? { durationMs: row.durationMs } : {}) };
+      } catch (error) {
+        const code = error instanceof Refused ? error.refused : 'unavailable';
+        log('media_refused', { reason: code });
+        return { refused: code };
+      }
+    });
+    lane = run.catch(() => {});
+    return run;
+  };
+
+  const protectedRefs = () => { try { return new Set(protectFn() ?? []); } catch { return new Set(rows.map(r => r.ref)); } };
+  const dropRows = victims => {
+    if (!victims.size) return 0;
+    const gone = rows.filter(row => victims.has(row.ref));
+    rows = rows.filter(row => !victims.has(row.ref));
+    rewrite();
+    for (const row of gone) if (!rows.some(other => other.file === row.file)) {
+      const path = absolute(row);
+      if (inside(path)) rmSync(path, { force: true });
+    }
+    return gone.length;
+  };
+  const totalBytes = () => { const seen = new Map(); for (const row of rows) seen.set(row.file, row.size); return [...seen.values()].reduce((a, b) => a + b, 0); };
+  function enforceTotal(keep = new Set()) {
+    if (totalBytes() <= limits.total_bytes) return 0;
+    const hold = protectedRefs();
+    const victims = new Set();
+    const ordered = [...rows].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    let total = totalBytes();
+    for (const row of ordered) {
+      if (total <= limits.total_bytes) break;
+      if (keep.has(row.ref) || hold.has(row.ref)) continue;
+      victims.add(row.ref);
+      const remaining = rows.filter(r => !victims.has(r.ref));
+      const seen = new Map(); for (const r of remaining) seen.set(r.file, r.size);
+      total = [...seen.values()].reduce((a, b) => a + b, 0);
+    }
+    const n = dropRows(victims);
+    if (n) log('media_evicted', { rows: n });
+    return n;
+  }
+  /** Rows past retention_days (and their files, once no row points at them), then the total
+   *  bound oldest first; a protected ref is never removed. */
+  function cleanup() {
+    const cutoff = now() - limits.retention_days * DAY_MS, hold = protectedRefs();
+    const expired = new Set(rows.filter(row => Date.parse(row.at) < cutoff && !hold.has(row.ref)).map(row => row.ref));
+    const removed = dropRows(expired);
+    const evicted = enforceTotal();
+    if (removed) log('media_expired', { rows: removed });
+    return { removed, evicted };
+  }
+  let timer;
+  return {
+    root, home, indexFile, ingest, lookup, find, cleanup, enforceTotal, covers,
+    get rows() { return rows.map(row => ({ ...row })); },
+    totalBytes,
+    /** The bytes of a ref (undefined when the ref is unknown or its file is gone). */
+    async read(ref) { const row = lookup(ref); return row ? { row, bytes: await readFile(row.path) } : undefined; },
+    setProtected(fn) { if (typeof fn === 'function') protectFn = fn; },
+    /** Every file and row of this writer (the dashboard's 清空媒体). */
+    clear() { const n = rows.length; rows = []; rmSync(home, { recursive: true, force: true }); return { removed: n }; },
+    start(intervalMs = DAY_MS) {
+      if (timer) return;
+      try { cleanup(); } catch (error) { log('media_cleanup_failed', { error: String(error?.code ?? 'error').slice(0, 40) }); }
+      timer = setInterval(() => { try { cleanup(); } catch (error) { log('media_cleanup_failed', { error: String(error?.code ?? 'error').slice(0, 40) }); } }, intervalMs);
+      timer.unref?.();
+    },
+    stop() { clearInterval(timer); timer = undefined; },
+  };
+}
+
+/** Where the library reads its things from the host's environment: the root the DSH host
+ *  gives (AITELIER_MEDIA_ROOT), or undefined - then there is no library and no media tool. */
+export function mediaRootFrom(env = process.env) {
+  const root = env.AITELIER_MEDIA_ROOT;
+  return typeof root === 'string' && root.startsWith('/') ? root : undefined;
+}

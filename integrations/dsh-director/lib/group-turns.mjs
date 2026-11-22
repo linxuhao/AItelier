@@ -33,7 +33,10 @@ export const FOLD_SOURCE = 'dsh-director-group-fold';
  *  Any tool added later is refused in a group turn by default. */
 export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfolio_project', 'family_memory_note',
   'family_memory_show', 'list_show', 'list_add', 'list_check', 'search_tools', 'call_tool', 'request_confirmation',
-  'run_confirmed']));
+  'run_confirmed',
+  // Step 24.2 (7.8.8, 7.8.12): media_call (its own nested call is the catalog's, judged by name and
+  // not counted again) and send_media (only into this group, one of its group_send_budget sends).
+  'media_call', 'send_media']));
 /** The family memory is for group turns only (7.7.8a, platform director 420). */
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
@@ -41,7 +44,7 @@ export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family
 export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose',
   // 7.8.8: a connection change waits for the owner too.
   'propose_connection_change']));
-export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed); your last words are your reply to the group';
+export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
 export const familyRefusal = 'family memory is for group turns only';
 export const pausedRefusal = 'a group turn ran since your owner last wrote; this waits until your owner writes';
 export const answerNow = 'answer now';

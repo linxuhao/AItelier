@@ -473,8 +473,13 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
     assert.deepEqual(await channels.registered.login(), { refused: 'qr_waiting' });
     bot.emit('login', { id: 'wxid_bot' });
     await until(() => channels.registered.status().connected);
-    bot.emit('message', { id: 'w1', self: () => false, room: () => undefined, type: () => 7, text: () => '你好',
-      date: () => new Date(), talker: () => ({ id: 'wxid_owner', type: () => 0 }) });
+    // The live puppet's message shape (neo 0.1.1): the room id rides on `payload.roomId`,
+    // and `message.room()` throws `this.roomRawPayload is not a function`. The bridge reads
+    // the payload, so a bridge that still loaded a Room would lose both messages here.
+    const live = fields => ({ self: () => false, type: () => 7, date: () => new Date(),
+      room: () => { throw new TypeError('this.roomRawPayload is not a function'); }, ...fields });
+    bot.emit('message', live({ id: 'w1', payload: {}, text: () => '你好',
+      talker: () => ({ id: 'wxid_owner', type: () => 0 }) }));
     await until(() => channels.received.length === 1);
     assert.deepEqual({ ...channels.received[0], at: undefined },
       { channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'w1', text: '你好', at: undefined });
@@ -483,8 +488,8 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
     // Step 23: the whitelist from the host, then one family member's @-message in that room
     // and the steward's answer back into it.
     await channels.registered.setRooms({ ownerRef: 'wxid_owner', rooms: [{ room_ref: 'r1@chatroom', prefix: '@管家' }] });
-    bot.emit('message', { id: 'w2', self: () => false, room: () => ({ id: 'r1@chatroom' }), type: () => 7, text: () => '@管家 周六干嘛',
-      date: () => new Date(), talker: () => ({ id: 'wxid_m1', type: () => 0 }) });
+    bot.emit('message', live({ id: 'w2', payload: { roomId: 'r1@chatroom' }, text: () => '@管家 周六干嘛',
+      talker: () => ({ id: 'wxid_m1', type: () => 0 }) }));
     await until(() => channels.received.length === 2);
     assert.deepEqual({ ...channels.received[1], at: undefined },
       { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'w2', text: '周六干嘛', at: undefined, conversationRef: 'r1@chatroom' });

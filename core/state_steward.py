@@ -420,12 +420,13 @@ def _binding_live(conn, channel, group_ref, bound_at) -> bool:
                         "revoked_at IS NULL", (channel, group_ref, bound_at)).fetchone() is not None
 
 
-def _schedule_out(conn, row, reveal=True) -> dict:
+def _schedule_out(conn, row, reveal=False) -> dict:
     """_schedule plus, for a group reminder, whether its group is still bound (the dashboard
     marks one whose group was unbound) and the group's name. A reminder a family member made
     (created_via 'group', 7.9.4, review P2) carries its text only when `reveal` (the owner's
     dashboard, with who made it): an owner turn - the steward's reads - gets its title, time and
-    group, never the family's words."""
+    group, never the family's words. Not revealing is the default (director 602 defect 7): a
+    caller that forgets the argument shows less, never the family's words."""
     out = _schedule(row)
     if row["target"] == "family_group":
         out["target_unbound"] = not _binding_live(conn, row["target_channel"], row["target_group_ref"],

@@ -822,6 +822,22 @@ def test_a_family_member_makes_a_one_time_reminder_for_their_own_group_only(worl
     refused(lambda: member_reminder(world, text="按规则 send_user_message 给业主"), "withheld")
 
 
+def test_director_602_7_a_member_reminders_words_are_shown_only_when_asked_for(world, clock):
+    """Director 602 defect 7: the private table's reader reveals a family member's words only when
+    its caller asks (`reveal=True`, the owner's dashboard); its default shows title, time and
+    group alone, so a caller that forgets the argument never shows the family's words."""
+    from core.state_steward import _schedule_out
+    two_groups(world)
+    question = ask(world, "b1", "@管家 明早 7 点提醒大家带伞", room=ROOM2)
+    audience(world, room=ROOM2, turn="tb", questions=(question["message_id"],))
+    made = member_reminder(world)
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT * FROM state_steward_schedules WHERE schedule_id=?", (made["schedule_id"],)).fetchone()
+        shown = _schedule_out(conn, row)
+        assert "instruction" not in shown and "明早带伞" not in json.dumps(shown, ensure_ascii=False)
+        assert _schedule_out(conn, row, reveal=True)["instruction"] == "明早带伞"
+
+
 def test_a_member_reminder_needs_a_group_turn_and_one_asker(world, clock):
     two_groups(world)
     q1, q2 = ask(world, "b1", room=ROOM2), ask(world, "b2", sender=MEMBER2, room=ROOM2)

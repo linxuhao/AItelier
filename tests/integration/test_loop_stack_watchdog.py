@@ -330,6 +330,9 @@ def _clean_environment(monkeypatch):
 
 # ── 1. the witness: every thread, under its own id, while the syscall blocks ─
 
+# Under xdist, execnet adds a thread that threading.active_count() does not count
+# but faulthandler dumps, so the section count is one over.
+@pytest.mark.serial
 def test_real_watchdog_dumps_every_thread_while_one_is_parked_in_a_syscall(tmp_path):
     dump_dir = tmp_path / "dumps"
 

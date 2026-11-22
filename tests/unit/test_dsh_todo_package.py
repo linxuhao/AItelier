@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -149,6 +150,10 @@ def test_no_file_of_the_package_imports_core_or_names_aitelier():
     assert not offenders, "\n".join(offenders)
 
 
+# Order-dependent: test_gate_deferral_execution_points.py reloads core.gate_deferral
+# in place, after which the forwarded classes are no longer the same objects. The
+# default (alphabetical) order runs this file first; xdist may not.
+@pytest.mark.serial
 def test_the_core_forwards_are_the_package_modules_with_aitelier_hooks():
     import core.todo_batch
     import core.todo_cli

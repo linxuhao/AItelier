@@ -709,6 +709,18 @@ describe('reminders', () => {
     expect([kept.target, kept.group_ref]).toEqual([undefined, undefined]);
   });
 
+  it('review F3: a reminder a family member made offers no "me" target - it goes only to a group', async () => {
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群'), G('r2@chatroom', '老家群')]});
+    const member = schedule({target: 'family_group', target_channel: 'wechat', target_group_ref: 'r2@chatroom',
+      target_group_label: '老家群', target_unbound: false, created_via: 'group', created_by_label: '二姨', instruction: '明早带伞'});
+    const view = render(StewardScheduleForm, {...form(), row: member});
+    await waitFor(() => expect(view.container.querySelector('[data-schedule-group="r1@chatroom"]')).not.toBeNull());
+    expect(view.container.querySelector('[data-schedule-owner]')).toBeNull();
+    cleanup();
+    const own = render(StewardScheduleForm, {...form(), row: schedule()});
+    await waitFor(() => expect(own.container.querySelector('[data-schedule-owner]')).not.toBeNull());
+  });
+
   it('step 25 C11: a 422 withheld says the group may not see it; the list marks group reminders and an unbound group', async () => {
     api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群')]});
     api.createStewardSchedule.mockRejectedValue(new ApiError(422, '', null, {code: 'withheld', reason: 'private_project: the name or id of a project that is not public'}));

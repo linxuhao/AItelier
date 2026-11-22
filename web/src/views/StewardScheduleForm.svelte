@@ -110,7 +110,10 @@
   <label>{t('steward.schedTitle')}<input type="text" maxlength="200" bind:value={title} /></label>
   <fieldset class="kind" data-schedule-target>
     <legend>{t('steward.schedTarget')}</legend>
-    <label><input type="radio" name="schedule-target" value="owner" bind:group={dest} /> {t('steward.schedTargetOwner')}</label>
+    <!-- A family member's reminder goes only to a group (review F3: the backend refuses member_reminder). -->
+    {#if initial?.created_via !== 'group'}
+      <label><input type="radio" name="schedule-target" value="owner" bind:group={dest} data-schedule-owner /> {t('steward.schedTargetOwner')}</label>
+    {/if}
     {#each groups as g (g.channel + ' ' + g.group_ref)}
       <label><input type="radio" name="schedule-target" value={g.group_ref} bind:group={dest} data-schedule-group={g.group_ref} />
         {t('steward.schedTargetGroup').replace('{name}', g.label ?? g.group_ref)}</label>

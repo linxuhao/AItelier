@@ -1237,6 +1237,11 @@ class StateSteward:
                                                          "its words or group, on the dashboard")
             repointed = target is not None
             target = target if repointed else row["target"]
+            if row["created_via"] == "group" and target == "owner":
+                # Review F3: a family member's words stay a group's, on every path - re-pointed to
+                # the owner they would fire into an owner turn as an instruction.
+                raise ScheduleInvalid("member_reminder", "a reminder a family member made goes only to a family "
+                                                         "group; delete it instead")
             if target == "owner":
                 bound = (None, None, None)
             elif repointed:

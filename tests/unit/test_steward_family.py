@@ -809,6 +809,13 @@ def test_a_family_member_makes_a_one_time_reminder_for_their_own_group_only(worl
     refused(lambda: execute(world.steward, "update_steward_schedule",
                             {"request_key": "u", "schedule_id": made["schedule_id"], "expected_version": 1,
                              "instruction": "改了"}, allow_write=True), "member_reminder")
+    # Review F3: nor the owner on the dashboard re-points it to the owner (the family's words
+    # would fire into an owner turn as an instruction); another bound group is still fine.
+    refused(lambda: world.owner.steward.update_schedule(made["schedule_id"], 1, target="owner", as_owner=True),
+            "member_reminder")
+    moved = world.owner.steward.update_schedule(made["schedule_id"], 1, target="family_group", group="家庭群",
+                                                as_owner=True)
+    assert (moved["target"], moved["target_group_ref"]) == ("family_group", ROOM)
     # Only once, within 7 days, the group's checks: refused otherwise.
     refused(lambda: member_reminder(world, at="2027-01-09T08:00:00+00:00"), "too_far")
     refused(lambda: member_reminder(world, at="2026-12-31T08:00:00+00:00"), "at_in_past")

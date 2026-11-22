@@ -83,13 +83,19 @@ const digest = value => createHash('sha256').update(String(value)).digest();
 // An error as one log line (never a QR: neither neo nor Wechaty puts one in an error).
 const short = error => String(error?.message ?? error?.data ?? error).slice(0, 200);
 
+/** The room a message was posted in, or undefined for a 1:1 message: the message payload's
+ *  own `roomId`, the field Wechaty's `message.room()` reads before it loads a Room. Never
+ *  `message.room()` here: the id in the payload is all the ring needs, and loading a Room
+ *  asks the puppet for a room payload it cannot supply. (The send path still loads one.) */
+const roomOf = message => message.payload?.roomId || undefined;
+
 /** Whether this WeChat message is one the owner could have written to the bot:
  *  a 1:1 text from someone else. Rooms, the account's own messages (also those it
- *  sends from the phone) and official accounts are never relayed. Neo reports every
- *  peer as contact type Unknown, so official accounts are recognised by WeChat's
- *  `gh_` id prefix as well as by type. */
+ *  sends from the phone) and official accounts are never relayed. Neo files a peer it
+ *  heard from as contact type Unknown and one it has not seen as Individual, so official
+ *  accounts are recognised by WeChat's `gh_` id prefix as well as by type. */
 export function isOwnerCandidate(message, types) {
-  if (message.self() || message.room()) return false;
+  if (message.self() || roomOf(message)) return false;
   if (message.type() !== types.Message.Text) return false;
   const talker = message.talker();
   if (!talker?.id || talker.id.startsWith('gh_')) return false;
@@ -278,9 +284,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   /** A group message (step 23): the account's own and non-text ones are dropped; a bound
    *  room's message passes only when it calls the bot with the room's prefix; an unbound
    *  room's only when it is exactly "@prefix group-code". Nothing else is kept or logged. */
-  function relayGroup(message, room, at) {
+  function relayGroup(message, roomRef, at) {
     if (message.self() || message.type() !== types.Message.Text) return false;
-    const roomRef = room.id, senderRef = message.talker()?.id;
+    const senderRef = message.talker()?.id;
     if (!roomRef || !senderRef) return false;
     const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id), ...(at ? { at } : {}) };
     if (rooms.has(roomRef)) {
@@ -301,9 +307,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       // time (never the bridge's own: the host refuses an undated approval phrase).
       const date = message.date?.();
       const at = date instanceof Date && !Number.isNaN(date.getTime()) ? date.toISOString() : undefined;
-      const room = message.room();
-      if (room) {
-        if (!relayGroup(message, room, at)) return;
+      const roomRef = roomOf(message);
+      if (roomRef) {
+        if (!relayGroup(message, roomRef, at)) return;
       } else {
         if (!isOwnerCandidate(message, types)) return;
         const event = { type: 'message', sender_ref: message.talker().id, message_ref: String(message.id),

@@ -85,7 +85,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
   scope.tools.register(defineTool({ name: 'media_call',
     description: 'Run one of your connection tools (a name search_tools gave you) on media files: media maps an argument name to an attachment ref (m_...), e.g. {"image_base64": "m_3f9a..."}; your host fills that argument with the file and runs the call. arguments are the other arguments. Use it to read a photo (ocr_image), transcribe a voice message (transcribe_audio) and the like.',
     parameters: { name: { type: 'string', required: true }, arguments: { type: 'object', additionalProperties: true },
-      media: { type: 'object', additionalProperties: { type: 'string' }, required: true } },
+      media: { type: 'object', additionalProperties: true, required: true } },
     output: jsonOutput,
     async execute(args, exec) {
       if (!mine(exec)) return { refused: 'not_available', reason: 'only in your own conversation' };

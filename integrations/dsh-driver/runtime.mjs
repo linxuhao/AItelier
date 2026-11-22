@@ -13,7 +13,8 @@
  *  that moved are re-exported with this deployment's labels bound) except one: `boot`.
  *  Booting is dsh-director's now - its index.mjs exports boot(ctx, { host }), a
  *  different signature - and nothing imported this file's boot. The added names are
- *  SESSION_ENV, aitelierHost and attemptWorkState. exports.test.mjs pins both lists. */
+ *  SESSION_ENV, aitelierHost, attemptWorkState and stateRequest (the State retry policy,
+ *  exported so its test can drive it). exports.test.mjs pins both lists. */
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
@@ -515,6 +516,44 @@ function askOwnerRequest(project, { id, text, context }) {
     body: context ?? '', segments: [{ kind: 'question', id, text }] };
 }
 
+/** A State READ that misses its deadline is retried once with a longer budget. The backend
+ *  answers every sync State request from one shared worker pool, so under load a single read can
+ *  miss its 30 s deadline while the next one succeeds: on 2026-11-22 a one-slot State read took
+ *  21-68 s while /health answered in 34 ms, and each miss exited the driver - 38 restarts in 90
+ *  minutes, and no line named the read or its duration. A WRITE keeps its single attempt, because
+ *  only State's own request_key replay knows whether a failed write landed, and a caller that
+ *  supplied a signal keeps that deadline rather than the default one. */
+export function stateRequest(send, { log = {}, retryMs = 90000 } = {}) {
+  // Path, duration and error identity only: never a body, never a token.
+  const note = (level, event, fields) => {
+    const sink = log[level];
+    if (typeof sink === 'function') sink(event + ' ' + JSON.stringify(fields));
+  };
+  return async function request(path, body, signal, { readAs } = {}) {
+    const started = Date.now();
+    try {
+      return await send(path, body, signal, readAs);
+    } catch (error) {
+      const elapsed = Date.now() - started;
+      note('warn', 'state request failed', { path, kind: body === undefined ? 'read' : 'write',
+        ms: elapsed, name: String(error?.name ?? 'Error'), status: error?.status ?? null });
+      const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+      if (!timedOut || signal || body !== undefined) throw error;
+      const retryStarted = Date.now();
+      try {
+        const answer = await send(path, body, AbortSignal.timeout(retryMs), readAs);
+        note('info', 'state read retried after a timeout', { path, first_ms: elapsed,
+          retry_ms: Date.now() - retryStarted });
+        return answer;
+      } catch (retryError) {
+        note('warn', 'state read retry failed', { path, retry_ms: Date.now() - retryStarted,
+          name: String(retryError?.name ?? 'Error'), status: retryError?.status ?? null });
+        throw retryError;
+      }
+    }
+  };
+}
+
 export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
@@ -598,7 +637,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       gatewayToken = token;
       // The library logs a mime and a size, never a name or a byte.
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
-      request = suppliedRequest ?? (async (path, body, signal, { readAs } = {}) => {
+      /** One State request, exactly as the driver has always sent it. Split out of `request`
+       *  below so a read that missed its deadline can be tried once more with a longer budget. */
+      const sendRequest = async (path, body, signal, readAs) => {
         const response = await fetch(new URL(path, env.AITELIER_URL), {
           method: body === undefined ? 'GET' : 'POST',
           headers: { 'Content-Type': 'application/json', 'X-AItelier-Driver-Token': token,
@@ -630,7 +671,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           throw error;
         }
         return response.json();
-      });
+      };
+      // A State READ that times out is retried once with a longer budget (stateRequest, above).
+      // A caller that supplied its own signal, and every write, keep their single attempt.
+      request = suppliedRequest ?? stateRequest(sendRequest,
+        { log: { warn: line => ctx.logger.warn(line), info: line => ctx.logger.info(line) } });
       // Efforts from roles.json; AITELIER_DSH_ROOT_REASONING_EFFORT still overrides the
       // director (an invalid value: max, as before the table).
       installHostModel(ctx, llm, { request, project, session: env.AITELIER_DSH_SESSION,

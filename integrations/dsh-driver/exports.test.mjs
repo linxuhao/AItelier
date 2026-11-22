@@ -9,8 +9,9 @@ import * as runtime from './runtime.mjs';
 
 const before = JSON.parse(readFileSync(new URL('./test-fixtures/runtime-exports.before-split.json', import.meta.url), 'utf8')).names;
 
-test('runtime.mjs exports everything it exported before the split except boot, and adds only the named three', () => {
+test('runtime.mjs exports everything it exported before the split except boot, and adds only the names its header lists', () => {
   const now = Object.keys(runtime);
   assert.deepEqual(before.filter(name => !now.includes(name)), ['boot']);
-  assert.deepEqual(now.filter(name => !before.includes(name)).sort(), ['SESSION_ENV', 'aitelierHost', 'attemptWorkState']);
+  assert.deepEqual(now.filter(name => !before.includes(name)).sort(),
+    ['SESSION_ENV', 'aitelierHost', 'attemptWorkState', 'stateRequest']);
 });

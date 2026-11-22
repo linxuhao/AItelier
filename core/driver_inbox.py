@@ -692,7 +692,11 @@ class DriverInbox:
         writer of the user's half: the dashboard's message above, a message the
         owner sent from a chat channel (core.state_channels) and an owner's channel
         answer to a pushed question (core.state_owner_questions, which names its
-        recipients in `target_driver_ids`) land identically."""
+        recipients in `target_driver_ids`) land identically. With answers it also writes
+        the steward's question event ('answered') on that connection; the caller's
+        write transaction (core.state_graph.transaction) notifies the State waiters
+        once it has committed an event row, so this writer never notifies itself -
+        a notify before the commit would wake a waiter that reads nothing."""
         parent = None
         if reply_to_message_id is not None:
             parent = self._conversation_message(conn, project_id, reply_to_message_id)

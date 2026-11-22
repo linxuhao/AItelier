@@ -192,6 +192,42 @@ def question_ids(world, project):
     return [q["message_id"] for q in open_questions(world, project)]
 
 
+def test_every_answer_writer_notifies_the_waiters_after_its_commit(world, monkeypatch):
+    """The steward's host looks when a State wait wakes (core.state_changes.notify), so each
+    writer of an 'answered' event notifies AFTER the commit that makes the row readable: a
+    notify before it wakes a waiter that reads nothing. write_user_half writes the event on its
+    caller's connection; the caller's write transaction notifies once that commit is done."""
+    from core import state_changes
+    seen = []
+
+    def notify(db_path):
+        # A second connection reads committed rows only (WAL): what a woken waiter reads.
+        with world.db.get_connection() as conn:
+            seen.append(conn.execute("SELECT COUNT(*) FROM state_events WHERE event_type=? AND "
+                                     "json_extract(payload_json,'$.change')='answered'",
+                                     (oq.QUESTION_EVENT,)).fetchone()[0])
+    monkeypatch.setattr(state_changes, "notify", notify)
+    first = ask(world, world.alpha, "alpha", "q1", "问题一")
+    ask(world, world.beta, "beta", "q2", "问题二")
+    sync(world)
+    # The dashboard's answer: send_user_conversation -> write_user_half with answers.
+    seen.clear()
+    execute(world.owner, "send_user_conversation_message", {
+        "request_key": "dash-q1", "project_id": "alpha", "body": "用 A",
+        "answers": [{"message_id": first, "segment_id": "q1"}]}, allow_write=True)
+    assert [e[1]["change"] for e in question_events(world)].count("answered") == 1
+    assert 1 in seen, f"the dashboard answer's event was not notified after its commit: {seen}"
+    # A plain channel message answers nothing: no event (its relay notifies for its own row).
+    code = next(r["code_no"] for r in ledger(world) if r["project_id"] == "beta")
+    source = channel_message(world, f"Q{code} 用 B", "wx-answer")
+    assert [e[1]["change"] for e in question_events(world)].count("answered") == 1
+    # The channel relay of that answer: relay_owner_answer -> write_user_half with answers.
+    seen.clear()
+    assert relay(world, source)["results"][0]["outcome"] == "relayed"
+    assert [e[1]["change"] for e in question_events(world)].count("answered") == 2
+    assert 2 in seen, f"the channel answer's event was not notified after its commit: {seen}"
+
+
 def test_the_push_and_its_ledger_commit_together_and_an_unmirrored_push_is_handed_back(world, monkeypatch):
     ask(world, world.alpha, "alpha", "q1", "问题一")
 

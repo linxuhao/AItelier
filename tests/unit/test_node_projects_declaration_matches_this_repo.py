@@ -39,20 +39,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # fail there, so declaring either would turn a documented absence into a red
 # gate -- which measures nothing and hides which suite is broken.
 EXCEPTIONS = {
-    "integrations/dsh-channel-slack": {
-        "reason": (
-            "its own suite cannot resolve the Slack SDK it installs no copy of: "
-            "package.json declares no dependencies at all ('its Slack SDK is "
-            "installed with the DSH runtime, not here') while index.mjs lazily "
-            "requires @slack/socket-mode and @slack/web-api, so the two tests "
-            "that load the real SDK fail with MODULE_NOT_FOUND. The gate installs "
-            "one project's own dependencies only, so the SDK is absent in every "
-            "snapshot the gate builds for this directory"),
-        "evidence": (
-            "dsh-channel-slack.log: `npm test` rc 1 in 2 s (24 of 26 tests pass; "
-            "'Cannot find module @slack/socket-mode' at index.mjs:230, require "
-            "stack integrations/dsh-driver/package.json)"),
-    },
     "integrations/dsh-director": {
         "reason": (
             "its 23-file suite does not finish inside the gate's 300 s script "

@@ -328,7 +328,7 @@ test('placeholders and wake lines', () => {
 
 // --- ownerChannels: storeMedia, attachments, sendFile, with a fake channel ------------------
 
-function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now, mediaKinds = ['image', 'file'] } = {}) {
+function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now, mediaKinds = ['image', 'file'], sendFile = true } = {}) {
   const dir = root();
   const library = createMediaLibrary({ root: join(dir, 'media'), ...(now ? { now } : {}) });
   const media = { ingest: (m, o) => library.ingest(m, o), resolve: async ref => library.lookup(ref), read: ref => library.read(ref),
@@ -346,7 +346,8 @@ function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now, mediaK
   };
   const handle = createOwnerChannels({ host, media, ...(owedFile ? { owedFile } : {}) });
   const unregister = handle.service.register({ name: 'wechat', send: async (text, options) => { calls.sent.push([text, options]); return { ref: 'out' }; },
-    status: () => ({ connected: true }), sendFile: async file => { calls.files.push(file); return { ref: 'file-out' }; }, mediaKinds });
+    status: () => ({ connected: true }),
+    ...(sendFile ? { sendFile: async file => { calls.files.push(file); return { ref: 'file-out' }; }, mediaKinds } : {}) });
   handle.ready();
   return { dir, library, media, calls, host, handle, sources, unregister, service: handle.service };
 }
@@ -475,8 +476,8 @@ test('sendFile target: a dashboard message is dashboard_no_media; a channel with
 
 const OCR = 'mcp__sw__media__ocr_image', DRAW = 'mcp__sw__media__generate_image', SEND = 'mcp__sw__mailpub__send_message';
 
-function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels, mediaKinds } = {}) {
-  const w = channelWorld(mediaKinds ? { mediaKinds } : {});
+function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels, mediaKinds, sendFile } = {}) {
+  const w = channelWorld({ ...(mediaKinds ? { mediaKinds } : {}), ...(sendFile === false ? { sendFile } : {}) });
   const turn = { audience, turn: 't1' };
   const executed = [], fetched = [], posted = [], checked = [];
   let out;
@@ -546,6 +547,31 @@ test('send_media(url): only a url a connection tool returned in this turn, fetch
   assert.equal(t.library.rows.at(-1).source, 'generated');
   t.ledger.reset();
   assert.equal((await t.run('send_media', { url })).refused, 'url_not_seen', 'a new turn forgets the last turn\'s urls');
+});
+
+test('send_media(url) in an owner turn: a channel that cannot send the file is refused before anything is fetched or stored', async () => {
+  // Review F3: the owner's channel is judged with the kind before the fetch - no sendFile or no
+  // kinds at all refuses any url; a kind its name says (cat.png) that the channel lacks refuses it.
+  const url = 'http://mcp_server:9003/files/cat.png?sig=1', unnamed = 'http://mcp_server:9003/files/7f3a?sig=1';
+  for (const shape of [{ sendFile: false }, { mediaKinds: [] }, { mediaKinds: ['file'] }]) {
+    const t = toolWorld(shape);
+    await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
+    t.ledger.record(DRAW, { value: { url, unnamed } });
+    assert.deepEqual(await t.run('send_media', { url }), { refused: 'channel_no_media' }, JSON.stringify(shape));
+    if (!shape.mediaKinds?.length) assert.deepEqual(await t.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
+    assert.equal(t.fetched.length, 0, `nothing fetched: ${JSON.stringify(shape)}`);
+    assert.equal(t.library.rows.length, 0, 'nothing stored');
+    assert.equal(t.calls.files.length, 0);
+  }
+  // A url whose name says nothing, on a file-only channel: its kind is known once fetched -
+  // fetched and stored, then refused without sending.
+  const t = toolWorld({ mediaKinds: ['file'] });
+  await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
+  t.ledger.record(DRAW, { value: { unnamed } });
+  assert.deepEqual(await t.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
+  assert.equal(t.fetched.length, 1);
+  assert.equal(t.calls.files.length, 0, 'not sent');
+  assert.deepEqual(await t.handle.ownerMediaTarget('msg-1', 'image'), { refused: 'channel_no_media' }, 'the kind branch is live');
 });
 
 test('send_media: a dashboard turn is dashboard_no_media; no requester is no_requester; exactly one of ref and url', async () => {

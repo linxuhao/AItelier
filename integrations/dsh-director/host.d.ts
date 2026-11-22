@@ -548,7 +548,8 @@ export interface OwnerChannelsHandle {
    *  request_wechat_qr tool and DirectorApi.ownerChannelLogin. */
   login(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
   /** Step 24.2: where a file answering owner message `replyTo` goes ({channel, to, replyToRef?})
-   *  or {refused: dashboard_no_media | not_bound | channel_not_connected | channel_no_media}. */
+   *  or {refused: dashboard_no_media | not_bound | channel_not_connected | channel_no_media}; channel_no_media
+   *  when the channel cannot send `kind` - or, kind omitted, any kind. */
   ownerMediaTarget(replyTo: string, kind?: string): Promise<{ channel: string; to: string; replyToRef?: string } | { refused: string }>;
   /** Step 24.2: one file through `channel`'s sendFile: {sent, channel, ref?} or {refused}. */
   sendFile(channel: string, file: object): Promise<{ sent: true; channel: string; ref?: string } | { refused: string; reason?: string }>;

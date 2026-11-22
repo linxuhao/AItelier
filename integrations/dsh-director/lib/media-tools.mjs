@@ -149,7 +149,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       const kind = row?.kind ?? kindOfUrl(args.url);
       let target;
       if (turn.kind === 'owner') {
-        target = await channels.ownerMediaTarget(catalog.requester);
+        target = await channels.ownerMediaTarget(catalog.requester, kind);
         if (target?.refused) return target;
       } else {
         if (!channels.canSendFile(turn.channel, kind)) return { refused: 'channel_no_media' };
@@ -165,6 +165,9 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       const file = { kind: row.kind, mime: row.mime, name: `${row.kind}-${row.ref.slice(2, 10)}.${row.ext}`, path: row.path,
         ...(args.caption ? { caption: args.caption } : {}) };
       if (turn.kind === 'owner') {
+        // A url whose name said nothing: its real kind is known only now - its bytes are fetched
+        // and stored by now (kept as any generated file), but a kind the channel cannot send is not sent.
+        if (!channels.canSendFile(target.channel, row.kind)) return { refused: 'channel_no_media' };
         const sent = await channels.sendFile(target.channel, { ...file, to: target.to, ...(target.replyToRef ? { replyToRef: target.replyToRef } : {}) });
         return sent.sent ? { sent: true, ref: row.ref, kind: row.kind, channel: target.channel } : sent;
       }

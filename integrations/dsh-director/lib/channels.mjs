@@ -772,7 +772,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   media?.setProtected?.(() => [...owed.values()].flatMap(record => (record.attachments ?? []).map(a => a.ref).filter(Boolean)));
   /** Where a file for the reply to owner message `replyTo` goes (the channel it came from, to
    *  the account bound now), or {refused}: dashboard_no_media for a dashboard message (24.2),
-   *  channel_no_media when that channel cannot send this kind. */
+   *  channel_no_media when that channel cannot send this kind - or, kind undefined (a url whose
+   *  type is known only once fetched), cannot send any kind. Asked before anything is fetched. */
   const ownerMediaTarget = async (replyTo, kind) => {
     await hostReady();
     const source = await host.sourceOf(replyTo);
@@ -781,7 +782,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     if (!bound || bound.sender_ref !== source.sender_ref) return { refused: 'not_bound' };
     const entry = registered.get(source.channel);
     if (!entry) return { refused: 'channel_not_connected' };
-    if (!entry.sendFile || (kind !== undefined && !entry.mediaKinds.includes(kind))) return { refused: 'channel_no_media' };
+    if (!entry.sendFile || !entry.mediaKinds.length || (kind !== undefined && !entry.mediaKinds.includes(kind)))
+      return { refused: 'channel_no_media' };
     return { channel: source.channel, to: bound.sender_ref, replyToRef: source.channel_message_ref ?? undefined };
   };
   const sendFileVia = async (channel, file) => {

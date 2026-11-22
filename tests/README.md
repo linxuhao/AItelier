@@ -54,9 +54,11 @@ The skillflow absence-gate rows spend their time in real `test`-step re-runs (ea
 nested pytest plus the `run_tests.sh` gate), not in sleeps: the clock is injected. So
 each row drives only as many laps as its assertion needs. The laps row sets the
 absence edge's `max_loop` to 5 on the loaded graph (`_wire(absence_max_loop=...)`)
-instead of driving the shipped 100, and asserts separately that
-`configs/coding_impl.yaml` still ships 100 and that 100 laps of the measured lap length
-fit inside its 10800 s ceiling. Measured 2026-11-22 in a 2-CPU container, the two
+instead of driving the shipped 100. It pins only one shipped value, that
+`configs/coding_impl.yaml` still says `max_loop: 100`; the 60 s wait and 10800 s ceiling
+are the row's own (product defaults 300 s and 12600 s), and it checks that 100 laps of
+the measured lap length fit inside that ceiling. Whether the episode clock tracks elapsed
+time is pinned by the pole C rows in `test_coding_impl_gate_absence.py`, not this row. Measured 2026-11-22 in a 2-CPU container, the two
 modules went from 12 rows in 367 s to 11 rows in 121 s.
 
 The node suites need `integrations/dsh-driver/node_modules` to resolve. In the

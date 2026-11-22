@@ -104,6 +104,58 @@ def test_a_stranger_with_attachments_is_refused_like_any_stranger(world, monkeyp
         relay_with(world, "[图片]", "c4", [{"kind": "image", "ref": REF}], sender="U0STRANGER")
 
 
+def _relay_state(world):
+    """Everything a relay writes: the source rows, the relay's ledger records, the owner's messages."""
+    with world.db.get_connection() as conn:
+        sources = [dict(r) for r in conn.execute("SELECT message_id,channel_message_ref,attachments_json "
+                                                 "FROM state_message_sources ORDER BY message_id")]
+        ledger = sorted(tuple(r) for r in conn.execute(
+            "SELECT operation,request_key,payload_json,result_json FROM driver_inbox_requests "
+            "WHERE operation LIKE 'relay_owner_message%'"))
+    messages = [(m["message_id"], m["body"]) for m in execute(
+        world.owner, "list_user_conversation", {"project_id": "aitelier-home"})["messages"] if m["sender_kind"] == "user"]
+    return sources, ledger, messages
+
+
+@pytest.mark.parametrize("first, again", [
+    # 2026-11-22: relayed while the host had no media library, then replayed from the WeChat
+    # bridge's ring after a restart with the library on, by which time the file was gone.
+    (("[图片 未收：渠道不支持]", [{"kind": "image", "refused": "unsupported"}]),
+     ("[图片 未收：已取不到]", [{"kind": "image", "refused": "gone"}])),
+    # Only the metadata differs (the library's own size and mime once the bytes were fetched).
+    (("[图片]", [{"kind": "image", "ref": REF, "mime": "image/jpeg", "size": 1234}]),
+     ("[图片]", [{"kind": "image", "ref": "m_fedcba9876543210", "mime": "image/png", "size": 99}])),
+    # Attachments now, none the first time (and the other way round is the same rule).
+    (("看这个", None), ("看这个\n[图片 未收：已取不到]", [{"kind": "image", "refused": "gone"}])),
+])
+@pytest.mark.parametrize("key", [None, "another-key"])
+def test_a_channel_messages_first_relay_wins_over_a_redelivery_rendered_differently(world, monkeypatch, first, again,
+                                                                                     key):
+    """The redelivery of an owner message already relayed (same channel, sender and channel
+    message) is the first result's duplicate - under its own request_key too, whose hash now
+    differs - never idempotency_conflict: the channel would tell the owner 'Not delivered'.
+    It writes nothing and the first body and attachments stay."""
+    bind_slack(world, monkeypatch)
+    answer = relay_with(world, first[0], "c-img", first[1])
+    assert answer["duplicate"] is False
+    before = _relay_state(world)
+    assert before[2] == [(answer["message_id"], first[0])]
+    replayed = relay_with(world, again[0], "c-img", again[1], key=key)
+    assert replayed == {**answer, "duplicate": True}
+    assert _relay_state(world) == before, "nothing written: one source row, the first body and attachments"
+    stored = source_row(world, answer["message_id"])["attachments_json"]
+    assert (json.loads(stored) if stored else None) == first[1]
+
+
+def test_a_request_key_reused_for_another_channel_message_is_still_idempotency_conflict(world, monkeypatch):
+    bind_slack(world, monkeypatch)
+    relay_with(world, "[图片 未收：渠道不支持]", "c-one", [{"kind": "image", "refused": "unsupported"}], key="k")
+    before = _relay_state(world)
+    with pytest.raises(StateGraphError, match="idempotency_conflict"):
+        relay_with(world, "[图片 未收：已取不到]", "c-two", [{"kind": "image", "refused": "gone"}], key="k")
+    assert _relay_state(world) == before
+
+
 # --- the read-only binding check storeMedia asks first --------------------------------------
 
 def test_the_sender_bound_read_answers_the_relays_own_judgement(world, monkeypatch):
@@ -151,6 +203,25 @@ def test_a_group_question_keeps_its_attachments_metadata(world, monkeypatch):
     with world.db.get_connection() as conn:
         assert conn.execute("SELECT attachments_json FROM state_group_messages WHERE message_id=?",
                             (plain["message_id"],)).fetchone()[0] is None
+
+
+def test_a_group_messages_first_relay_wins_over_a_redelivery_rendered_differently(world, monkeypatch):
+    """The group path dedupes by its channel message before anything else (no request ledger):
+    a ring replay whose placeholder and attachments changed is the first one's duplicate."""
+    group_ready_plain(world, monkeypatch)
+
+    def ask(body, files, key):
+        return execute(world.steward, "relay_group_message", {
+            "request_key": key, "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER,
+            "channel_message_ref": "a9", "body": body, "channel_at": state_channels._now().isoformat(),
+            "attachments": files}, allow_write=True)
+    first = ask("[图片 未收：渠道不支持]", [{"kind": "image", "refused": "unsupported"}], "g-a9")
+    assert first["duplicate"] is False
+    again = ask("[图片 未收：已取不到]", [{"kind": "image", "refused": "gone"}], "g-a9")
+    assert again == {"duplicate": True, "message_id": first["message_id"], "accepted": True}
+    with world.db.get_connection() as conn:
+        rows = conn.execute("SELECT body,attachments_json FROM state_group_messages WHERE channel_message_ref='a9'").fetchall()
+    assert [tuple(r) for r in rows] == [("[图片 未收：渠道不支持]", json.dumps([{"kind": "image", "refused": "unsupported"}]))]
 
 
 def test_send_media_files_share_the_groups_twenty_sends_with_the_confirmations(world, monkeypatch):

@@ -423,6 +423,21 @@ test('inbound with attachments: the closed set, placeholders written here, the m
   assert.ok(!('attachments' in w.calls.relay.at(-1)));
 });
 
+test('inbound: a ring replay of a media message the host already relayed is its duplicate - nothing is said on the channel', async () => {
+  // 2026-11-22: relayed as [图片 未收：渠道不支持] with no media library, then replayed after a
+  // restart with the file gone. The host answers the first relay as a duplicate (never
+  // idempotency_conflict); the owner is told nothing - no receipt, no refusal line.
+  const w = channelWorld();
+  w.host.relay = async message => { w.calls.relay.push(message); return { message_id: 'msg-first', duplicate: true, approval: null }; };
+  const answer = await w.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'm-img', text: '', at: new Date().toISOString(),
+    attachments: [{ kind: 'image', refused: 'gone' }] });
+  assert.deepEqual(answer, { accepted: true, duplicate: true });
+  assert.equal(w.calls.relay.at(-1).text, '[图片 未收：已取不到]');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(w.calls.sent, [], 'not one line for a duplicate');
+  w.unregister();
+});
+
 test('inbound: anything outside the closed set refuses the message and the host is not asked', async () => {
   const w = channelWorld();
   const { ref } = await w.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'm1', index: 0, kind: 'image' }, async () => png());

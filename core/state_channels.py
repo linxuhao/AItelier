@@ -802,10 +802,11 @@ class StateChannels:
 
     def _relayed(self, conn, request_key, request_hash, channel, sender_ref, channel_message_ref, ref_key):
         """The ledger's record of this relay when it was relayed before (by request_key,
-        or by its channel message under any key), else None."""
-        replay = self.steward._replay(conn, "relay_owner_message", request_key, request_hash)
-        if replay is not None:
-            return replay
+        or by its channel message under any key), else None. The channel message is looked up
+        FIRST: its first relay wins, so a redelivery whose rendering changed since (a media
+        placeholder or attachment refusal that differs once the host's library is on, or a
+        fetch that went gone meanwhile) is that first result's duplicate - not the request_key's
+        idempotency_conflict, which stays for a key reused on another channel message."""
         seen = conn.execute("SELECT message_id FROM state_message_sources WHERE direction='in' AND channel=? "
                             "AND sender_ref=? AND channel_message_ref=?",
                             (channel, sender_ref, channel_message_ref)).fetchone()
@@ -813,6 +814,9 @@ class StateChannels:
             first = conn.execute("SELECT result_json FROM driver_inbox_requests WHERE actor=? AND operation=? "
                                  "AND request_key=?", (self.actor, "relay_owner_message:ref", ref_key)).fetchone()
             return json.loads(first[0]) if first else {"message_id": seen[0], "approval": None}
+        replay = self.steward._replay(conn, "relay_owner_message", request_key, request_hash)
+        if replay is not None:
+            return replay
         # A binding message delivered again after it bound its sender: the sender is
         # bound now, so the host relays it - it was never an owner message, and it
         # neither lands in the conversation nor wakes the steward.

@@ -447,8 +447,14 @@ test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry th
       assert.ok(commands(name).length && commands(name).every(s => s.readAs === undefined), name);
     assert.ok(seen.state.filter(s => s.path.endsWith('/list_owner_groups')).every(s => s.readAs === undefined));
     assert.deepEqual(commands('set_steward_turn_audience').map(s => s.body.audience).slice(0, 2), ['group', 'owner']);
+    // Step 23.1 (7.7.7): the group turn's record names the question it took, the owner turn's none;
+    // the reply names that same turn.
+    const [groupRecord, ownerRecord] = commands('set_steward_turn_audience');
+    assert.deepEqual(groupRecord.body.question_ids, ['gq1']);
+    assert.equal(ownerRecord.body.question_ids, undefined);
     // The group turn's last words went to its group once, through post_group_reply ...
-    assert.deepEqual(commands('post_group_reply').map(s => [s.body.question_id, s.body.body]), [['gq1', 'GROUP_ADAPTER_ANSWER']]);
+    assert.deepEqual(commands('post_group_reply').map(s => [s.body.question_id, s.body.body, s.body.turn]),
+      [['gq1', 'GROUP_ADAPTER_ANSWER', groupRecord.body.turn]]);
     assert.deepEqual(seen.groupSends, [{ room: 'r1@chatroom', text: '「武侠项目怎样」\nGROUP_ADAPTER_ANSWER' }]);
     // ... and never to the owner: m-owner-1 was in the group turn's input and unanswered, and no
     // automatic reply answered it. The owner turn's last words did answer m-owner-2.
@@ -687,6 +693,11 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     // The reply opened a group turn (a person's message: the outside-content mark is cleared) and
     // run_confirmed ran the stored call.
     assert.match(resultOf('r1'), /SW_OK mcp__sw__calfam__create_event/, trace);
+    // Step 23.1 (7.8.9 step 5): run_confirmed read the record for the turn it ran in - the second
+    // group turn, recorded as the group's.
+    const gets = commands('get_steward_confirmation');
+    const groupTurns = commands('set_steward_turn_audience').filter(a => a.body.audience === 'group').map(a => a.body.turn);
+    assert.ok(gets.length && gets.every(s => s.body.turn === groupTurns.at(-1)) && groupTurns.length >= 2, trace);
     assert.deepEqual(seen.mcp.filter(m => m.name === 'mcp__sw__calfam__create_event').map(m => m.args), [created]);
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

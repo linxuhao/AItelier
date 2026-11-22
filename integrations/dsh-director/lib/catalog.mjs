@@ -34,7 +34,9 @@ export const WAIT_MS = 3000;
 export const RESYNC_AFTER_MS = 60000;
 /** The steward's own writes (this plugin's tools) an injected instruction must not reach
  *  without a person; a host adds the names of its own writing tools (`host.catalog.writes`). */
-export const NATIVE_WRITES = new Set(['handoff', 'memory_note', 'memory_profile_update', 'propose', 'propose_connection_change']);
+export const NATIVE_WRITES = new Set(['handoff', 'memory_note', 'memory_profile_update', 'propose', 'propose_connection_change',
+  // Step 23.1 (design-steward 7.9.4, 7.8.8 (2)): a family member's reminder to their group.
+  'group_reminder_set']);
 
 const prefixOf = (server, connId) => `mcp__${server}__${connId}__`;
 

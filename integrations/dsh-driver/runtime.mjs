@@ -717,15 +717,16 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         const changed = result => { void scheduleTimer?.refresh(); return result; };
         const scheduleShape = { type: 'object', additionalProperties: true, description: '{"kind":"cron","expr":"0 9 * * 1-5"} (5-field cron: minute hour day month weekday) or {"kind":"once","at":"<ISO time>"}' };
         scope.tools.register(defineTool({ name: 'schedule_list',
-          description: 'Your reminders: each one\'s id, version, title, instruction, schedule, timezone, whether it is on, next and last run, and who created or last changed it (your owner can change them too).',
+          description: 'Your reminders: each one\'s id, version, title, instruction, schedule, timezone, whether it is on, next and last run, and who created or last changed it (your owner can change them too). A group reminder names its group (target_group_label). One a family member made in a group (created_via "group") shows its title, time and group, never its words: only your owner changes it, on the dashboard.',
           parameters: {}, output: json,
           execute: (_args, exec) => listSchedules(toolRequest, exec.signal).then(schedules => ({ schedules })),
         }));
         scope.tools.register(defineTool({ name: 'schedule_set',
-          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner. target "family_group" (only when your owner asks for a reminder to the family group): the instruction is then the exact words posted into the bound family group when due, at most 500 characters, not an instruction to you - you are not woken; channel names the group when both channels have one. Refused no_group_bound when no group is bound, withheld when the words name something the group may not see.',
+          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner. target "family_group" (only when your owner asks for a reminder to a family group): the instruction is then the exact words posted into that group when due, at most 500 characters, not an instruction to you - you are not woken; group is the bound group\'s name (your snapshot lists them), required when more than one group is bound. A reminder is your owner\'s own unless they name a group (or say "to the group" while only one is bound). Refused no_group_bound when no group is bound, group_required when several are and none is named, withheld when the words name something the group may not see.',
           parameters: { schedule_id: { type: 'string' }, expected_version: { type: 'integer' }, title: { type: 'string' }, instruction: { type: 'string' },
             schedule: scheduleShape, tz: { type: 'string' }, enabled: { type: 'boolean' },
-            target: { type: 'string', enum: ['owner', 'family_group'] }, channel: { type: 'string', enum: ['wechat', 'slack'] } }, output: json,
+            target: { type: 'string', enum: ['owner', 'family_group'] }, group: { type: 'string' },
+            channel: { type: 'string', enum: ['wechat', 'slack'] } }, output: json,
           execute: (args, exec) => setSchedule(toolRequest, args, exec.signal).then(changed),
         }));
         scope.tools.register(defineTool({ name: 'schedule_delete',
@@ -807,14 +808,20 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       // The steward's snapshot also names its open proposals (plugin step 13): after a
       // compaction it must still know what its owner has yet to decide.
       const proposals = await openProposals(request).catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
+      // Step 23.1 (7.7.24 item 8, review P1): a group reminder names the group it goes to; the
+      // snapshot carries titles, times and group names only - never list items or a reminder's words.
       const schedules = await listSchedules(request).then(rows => rows.filter(r => r.enabled)
         .map(r => ({ schedule_id: r.schedule_id, title: r.title, schedule: r.schedule, tz: r.tz, next_run_at: r.next_run_at,
-          ...(r.target === 'family_group' ? { target: r.target } : {}) })))
+          ...(r.target === 'family_group' ? { target: r.target, target_group: r.target_group_label ?? null } : {}),
+          ...(r.created_via === 'group' ? { created_via: 'group' } : {}) })))
         .catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
+      const groups = await request('/api/state/query/list_owner_groups', {}).then(r => ((r?.result ?? r)?.groups ?? [])
+        .map(g => g.label).filter(Boolean)).catch(() => undefined);
       // Design-steward 7.3 layer 2: what is open, from data, not from the model's memory.
       const threads = await openThreads({ request, project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR });
       return runtime.render() + '\n\nOpen threads:\n' + JSON.stringify(threads) + '\n\nYour open proposals:\n' + JSON.stringify(proposals)
-        + '\n\nYour reminders (on):\n' + JSON.stringify(schedules);
+        + '\n\nYour reminders (on):\n' + JSON.stringify(schedules)
+        + (groups?.length ? '\n\nYour owner\'s bound family groups (by name):\n' + JSON.stringify(groups) : '');
     },
     progress: body => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`, body),
     /** One get_attempt per plan attempt (see settledAttempts). */

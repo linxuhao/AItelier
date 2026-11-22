@@ -43,7 +43,7 @@ const key = what => `${what}:${Date.now().toString(36)}:${(keys++).toString(36)}
 
 /** Create (no schedule_id) or change one reminder. A change needs the version the steward saw. */
 export function setSchedule(request, args, signal) {
-  const fields = Object.fromEntries(['title', 'instruction', 'schedule', 'tz', 'enabled', 'target', 'channel']
+  const fields = Object.fromEntries(['title', 'instruction', 'schedule', 'tz', 'enabled', 'target', 'channel', 'group']
     .filter(k => args[k] !== undefined).map(k => [k, args[k]]));
   if (!args.schedule_id) return request('/api/state/commands/create_steward_schedule', { request_key: key('schedule-create'), ...fields }, signal).then(unwrap, refused);
   if (!Number.isInteger(args.expected_version)) return Promise.resolve({ refused: 'expected_version_required', reason: 'read it with schedule_list first' });

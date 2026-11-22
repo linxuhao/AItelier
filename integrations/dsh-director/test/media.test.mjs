@@ -779,3 +779,13 @@ test('a fake channel end to end: storeMedia for each file, then inbound with the
   assert.deepEqual(readFileSync(t.calls.files.at(-1).path), jpeg(800, 600));
   assert.equal(t.calls.files.at(-1).replyToRef, 'wx-77');
 });
+
+test('step 23.1 (7.7.16, review P5): group B\'s turn refuses group A\'s media refs - media_call and send_media - and uses its own', async () => {
+  const t = toolWorld({ audience: { kind: 'group', channel: 'wechat', group_ref: 'r2' } });
+  const fromA = await t.library.ingest({ channel: 'generated', audience: 'group:wechat:r1', source: 'generated' }, async () => png(11, 11));
+  assert.equal((await t.run('media_call', { name: OCR, media: { image_base64: fromA.ref } })).refused, 'not_visible_in_this_turn');
+  assert.equal((await t.run('send_media', { ref: fromA.ref })).refused, 'not_visible_in_this_turn');
+  assert.deepEqual([t.executed.length, t.posted.length, t.calls.files.length], [0, 0, 0], 'nothing ran, nothing was budgeted or sent');
+  const fromB = await t.library.ingest({ channel: 'generated', audience: 'group:wechat:r2', source: 'generated' }, async () => png(12, 12));
+  assert.deepEqual(await t.run('media_call', { name: OCR, media: { image_base64: fromB.ref } }), { text: 'OCR: 你好' });
+});

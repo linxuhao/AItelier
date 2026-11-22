@@ -819,13 +819,15 @@ export function groupOps({ request, toolRequest = request, project, me }) {
       request_key: `group:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}),
       ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}) }, signal).then(result, refused),
-    reply: ({ questionId, alsoAnswers = [], body }, signal) => request('/api/state/commands/post_group_reply', {
-      request_key: `group-reply:${questionId}`, question_id: questionId, body,
+    // Step 23.1 (7.7.7): the turn that ended is named; the backend answers only a question it took.
+    reply: ({ questionId, alsoAnswers = [], body, turn }, signal) => request('/api/state/commands/post_group_reply', {
+      request_key: `group-reply:${questionId}`, question_id: questionId, body, turn: String(turn ?? ''),
       ...(alsoAnswers.length ? { also_answers: alsoAnswers } : {}) }, signal).then(result, refused),
     recent: ({ channel, groupRef }, signal) => request('/api/state/query/list_group_recent',
       { channel, group_ref: groupRef, limit: 6 }, signal).then(result),
-    audience: ({ turn, audience, group, senderRefs = [] }, signal) => request('/api/state/commands/set_steward_turn_audience',
-      { turn, audience, ...(group ? { group } : {}), sender_refs: senderRefs }, signal).then(result),
+    audience: ({ turn, audience, group, senderRefs = [], questionIds = [] }, signal) => request('/api/state/commands/set_steward_turn_audience',
+      { turn, audience, ...(group ? { group } : {}), sender_refs: senderRefs,
+        ...(questionIds.length ? { question_ids: questionIds } : {}) }, signal).then(result),
     /** An owner message newer than `since` is among the turn's input (the reading forwardFinalText uses). */
     async ownerSpokeSince(since, input, signal) {
       return (await unansweredOwnerMessages({ request, project, me, signal }))
@@ -840,17 +842,25 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     // (in a group turn it carries the public-read header and must name the recorded turn: the
     // plugin passes its open turn; in an owner turn the header is absent and `turn` is ignored).
     // remove is an owner turn's alone (the guard refuses it in a group turn, the backend too).
-    listShow: ({ list } = {}, signal, { turn } = {}) => toolRequest('/api/state/query/list_list_items',
-      { ...(list ? { list } : {}), ...(turn ? { turn } : {}) }, signal).then(r => listWhoShown(result(r)), refusedBy),
-    listAdd: ({ list, items }, signal, { turn } = {}) => toolRequest('/api/state/commands/add_list_items',
-      { request_key: listKey('list-add', turn), list, items,
+    // Step 23.1 (7.9.5): `group` names whose lists in an owner turn (the plugin never sends one
+    // from a group turn; the backend takes that turn's group from its record).
+    listShow: ({ list, group } = {}, signal, { turn } = {}) => toolRequest('/api/state/query/list_list_items',
+      { ...(list ? { list } : {}), ...(group ? { group } : {}), ...(turn ? { turn } : {}) }, signal)
+      .then(r => listWhoShown(result(r)), refusedBy),
+    listAdd: ({ list, items, group }, signal, { turn } = {}) => toolRequest('/api/state/commands/add_list_items',
+      { request_key: listKey('list-add', turn), list, items, ...(group ? { group } : {}),
         ...(turn ? { turn } : {}) }, signal).then(r => listWhoShown(result(r)), refusedBy),
-    listCheck: ({ itemIds, done = true }, signal, { turn } = {}) => toolRequest('/api/state/commands/check_list_items',
-      { request_key: listKey('list-check', turn), item_ids: itemIds, done,
+    listCheck: ({ itemIds, done = true, group }, signal, { turn } = {}) => toolRequest('/api/state/commands/check_list_items',
+      { request_key: listKey('list-check', turn), item_ids: itemIds, done, ...(group ? { group } : {}),
         ...(turn ? { turn } : {}) }, signal).then(r => listWhoShown(result(r)), refusedBy),
-    listRemove: ({ itemIds }, signal, { turn } = {}) => toolRequest('/api/state/commands/remove_list_items',
-      { request_key: listKey('list-remove', turn), item_ids: itemIds }, signal)
+    listRemove: ({ itemIds, group }, signal, { turn } = {}) => toolRequest('/api/state/commands/remove_list_items',
+      { request_key: listKey('list-remove', turn), item_ids: itemIds, ...(group ? { group } : {}) }, signal)
       .then(result, refusedBy),
+    // Step 23.1 (7.9.4): a family member's one-time reminder to the group of the turn, through the
+    // request a group turn's tools use (public-read header); the turn is the plugin's open turn.
+    reminderSet: ({ at, text }, signal, { turn } = {}) => toolRequest('/api/state/commands/create_group_reminder',
+      { request_key: `group-reminder:${turn}:${digest(String(at) + '\n' + String(text))}`, at: String(at ?? ''),
+        text: String(text ?? ''), turn }, signal).then(result, refusedBy),
   };
 }
 
@@ -996,7 +1006,8 @@ export function confirmOps(request, { project, mirror = () => {}, groupSend }) {
     },
     cancel: (code, signal) => request('/api/state/commands/cancel_steward_confirmation', { code }, signal)
       .then(r => r?.result ?? r, stateRefusal),
-    get: (code, signal) => request('/api/state/commands/get_steward_confirmation', { code }, signal)
+    // Step 23.1 (7.8.9 step 5): the turn run_confirmed runs in.
+    get: (code, signal, { turn } = {}) => request('/api/state/commands/get_steward_confirmation', { code, turn: String(turn ?? '') }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };
 }

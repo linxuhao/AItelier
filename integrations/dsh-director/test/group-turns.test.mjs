@@ -9,8 +9,8 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GroupTurns, GROUP_SOURCE, FOLD_SOURCE, GROUP_TOOLS, PAUSED_TOOLS, groupTurnRefusal, familyRefusal, pausedRefusal,
-  answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup, groupReplies } from '../lib/group-turns.mjs';
+import { GroupTurns, GROUP_SOURCE, FOLD_SOURCE, FOLD_LINE, GROUP_TOOLS, FAMILY_TOOLS, PAUSED_TOOLS, groupTurnRefusal, familyRefusal,
+  groupReminderRefusal, pausedRefusal, answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup, groupReplies } from '../lib/group-turns.mjs';
 import { GROUP_LIMITS, CHANNEL_LIMITS, createOwnerChannels, channelReplies } from '../lib/channels.mjs';
 import { ContextInjection, clockLine } from '../lib/core.mjs';
 
@@ -125,8 +125,9 @@ test('guard (step 24, 7.8.8): a group turn calls its PUBLIC connection tools - d
 });
 
 test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
-  assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'list_add', 'list_check', 'list_show',
-    'media_call', 'portfolio_project', 'portfolio_projects', 'request_confirmation', 'run_confirmed', 'search_tools', 'send_media']);
+  assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'group_reminder_set', 'list_add',
+    'list_check', 'list_show', 'media_call', 'portfolio_project', 'portfolio_projects', 'request_confirmation', 'run_confirmed',
+    'search_tools', 'send_media']);
   for (const name of ['list_show', 'list_add', 'list_check']) {
     const g = turns();
     g.split([group('q')], 1);
@@ -154,9 +155,10 @@ test('guard: an unknown audience reads as a group; an owner turn never gets the 
   const g = turns();
   assert.equal(g.guard('memory_note'), groupTurnRefusal);
   g.split([message('owner')], 1);
-  for (const name of STEWARD_TOOLS.filter(n => !n.startsWith('family_'))) assert.equal(g.guard(name), undefined, name);
+  for (const name of STEWARD_TOOLS.filter(n => !FAMILY_TOOLS.has(n))) assert.equal(g.guard(name), undefined, name);
   assert.equal(g.guard('family_memory_note'), familyRefusal);
   assert.equal(g.guard('family_memory_show'), familyRefusal);
+  assert.equal(g.guard('group_reminder_set'), groupReminderRefusal);
 });
 
 test('pause: after a group turn the paused writes wait for the owner; a broken pause file is in effect', () => {
@@ -660,7 +662,7 @@ test('group reply: a system clock line the steward copied to the start of its wo
   const clock = clockLine({ now: Date.parse('2026-11-21T10:14:00Z'), tz: 'Europe/Paris' });
   const r = groupReply(`${clock}\n${clock} (after tool)\n\n周六去公园。`);
   await r.done;
-  assert.deepEqual(r.replied, [{ questionId: 'gq2', alsoAnswers: ['gq1'], body: '周六去公园。' }]);
+  assert.deepEqual(r.replied, [{ questionId: 'gq2', alsoAnswers: ['gq1'], body: '周六去公园。', turn: '7' }]);
   assert.deepEqual(r.sent, [['wechat', 'r1', '「Q2」\n周六去公园。']]);
   assert.deepEqual(r.warned, []);
 });
@@ -671,4 +673,102 @@ test('group reply: words that are only a system clock line send nothing, recorde
   assert.deepEqual(r.replied, []);
   assert.deepEqual(r.sent, []);
   assert.deepEqual(r.warned, ['group reply not sent {"reason":"only_clock_text","question_id":"gq2"}']);
+});
+
+
+// --- step 23.1: several groups (design-steward 7.7.24) ----------------------------------------
+
+test('guard (step 23.1, 7.9.4): group_reminder_set in a group turn only - the owner\'s turn is told to use the host\'s reminder tool', () => {
+  assert.ok(FAMILY_TOOLS.has('group_reminder_set') && GROUP_TOOLS.has('group_reminder_set'));
+  assert.match(groupTurnRefusal, /group_reminder_set/);
+  const g = turns();
+  g.split([group('明早提醒带伞')], 1);
+  assert.equal(g.guard('group_reminder_set'), undefined);
+  const o = turns();
+  o.split([message('owner')], 1);
+  assert.equal(o.guard('group_reminder_set'), groupReminderRefusal);
+  assert.match(groupReminderRefusal, /reminder tool/);
+  assert.equal(o.guard('family_memory_note'), familyRefusal);
+  // ... and every step-23 group tool is still counted toward the six in a group turn.
+  for (let i = 0; i < 5; i += 1) g.guard('list_show');
+  assert.equal(g.guard('group_reminder_set'), answerNow);
+});
+
+const groupB = (text, qid = 'qb' + ids) => message(text, { kind: GROUP_SOURCE, channel: 'wechat', group_ref: 'r2', group_label: '老家群',
+  question_ids: [qid], sender_refs: ['wxid_b'] });
+
+test('fold (step 23.1, 7.7.24 item 3): group A\'s turn, then group B\'s - B\'s first step folds A to the one line that names no group, time or count', () => {
+  const session = fakeSession(script([
+    ev('turn/start', { turn: 1 }), ev('user/message', group('A_QUESTION_MARKER')),
+    ev('assistant/message', { message: { id: 'a1', content: [{ type: 'text', text: 'A_ANSWER_MARKER 家庭群' }] } }), ev('turn/end', { turn: 1 }),
+    ev('turn/start', { turn: 2 }), ev('user/message', groupB('B_QUESTION')),
+  ]));
+  assert.equal(foldGroupTurns(session, input => ({ ...input, id: 'f' + ++ids }), { before: 5 }), 1);
+  const visible = session.surface.nodes.map(seq => JSON.stringify(session.log[seq].data));
+  assert.ok(!visible.some(t => t.includes('A_QUESTION_MARKER') || t.includes('A_ANSWER_MARKER') || t.includes('家庭群')));
+  const line = session.log.find(e => e.data?.source?.kind === FOLD_SOURCE).data.content[0].text;
+  assert.equal(line, FOLD_LINE);
+  assert.doesNotMatch(line, /group [^ ]+,|question\(s\)|\d{4}-\d\d-\d\d/);
+  assert.ok(visible.some(t => t.includes('B_QUESTION')), 'B\'s own question is not folded');
+});
+
+test('compaction filter (step 23.1): a compaction over two groups\' turns removes both', () => {
+  const events = script([
+    ev('turn/start'), ev('user/message', { ...group('A_Q'), id: 'ua' }), ev('assistant/message', { message: { id: 'aa', content: [] } }), ev('turn/end'),
+    ev('turn/start'), ev('user/message', { ...groupB('B_Q'), id: 'ub' }), ev('assistant/message', { message: { id: 'ab', content: [] } }), ev('turn/end'),
+    ev('turn/start'), ev('user/message', { ...message('OWNER'), id: 'uo' }),
+  ]);
+  const request = { purpose: 'compaction', messages: [{ id: 'sys', role: 'system' }, { id: 'ua', role: 'user', content: 'A_Q' },
+    { id: 'aa', role: 'assistant', content: 'A_A' }, { id: 'ub', role: 'user', content: 'B_Q' }, { id: 'ab', role: 'assistant', content: 'B_A' },
+    { id: 'uo', role: 'user', content: 'OWNER' }] };
+  const out = filterCompactionRequest(request, events, input => ({ ...input, id: 'x' + ++ids }));
+  const text = JSON.stringify(out.messages);
+  assert.ok(!/A_Q|A_A|B_Q|B_A/.test(text) && text.includes('OWNER'));
+});
+
+test('audience (step 23.1): two groups\' questions never share a turn - B\'s goes back and opens a later turn', () => {
+  const g = turns();
+  const a = group('A'), b = groupB('B');
+  const first = g.split([a, b], 1, 1);
+  assert.deepEqual(first.keep, [a]);
+  assert.deepEqual(first.back, [b]);
+  assert.deepEqual(g.split([groupB('B2')], 2, 1).back.length, 1, 'nor merged in a later step');
+  g.split([b], 1, 2);
+  assert.equal(g.audience().group_ref, 'r2');
+  assert.equal(g.current.merged, 1, 'B\'s merge count starts from zero');
+});
+
+test('setup (step 23.1, 7.7.7): the audience record carries the questions the turn took; a later merge records the whole turn again', async () => {
+  const w = setupWorld();
+  const q1 = group('Q1', 'r1', 'gq1'), q2 = group('Q2', 'r1', 'gq2');
+  await w.setup.step(w.payload(4), { kind: 'enter', messages: [q1] });
+  assert.deepEqual(w.calls.audience.map(a => [a.turn, a.audience, a.group, a.questionIds, a.senderRefs]),
+    [['4', 'group', { channel: 'wechat', group_ref: 'r1' }, ['gq1'], ['wxid_m']]]);
+  const later = await w.setup.step(w.payload(4, 2), { kind: 'enter', messages: [q2] });
+  assert.deepEqual(later.messages, [q2]);
+  assert.deepEqual(w.calls.audience.at(-1).questionIds, ['gq1', 'gq2']);
+  assert.deepEqual(w.g.current.questions, ['gq1', 'gq2']);
+  // An owner turn records no questions.
+  await w.setup.step(w.payload(5), { kind: 'enter', messages: [message('OWNER')] });
+  assert.equal(w.calls.audience.at(-1).questionIds, undefined);
+});
+
+test('setup (step 23.1): a merge that cannot be recorded goes back for a later turn and is not this turn\'s question', async () => {
+  let failing = false;
+  const w = setupWorld({ audience: async () => { if (failing) throw new Error('HTTP 503'); return { recorded: true }; } });
+  await w.setup.step(w.payload(4), { kind: 'enter', messages: [group('Q1', 'r1', 'gq1')] });
+  failing = true;
+  const payload = w.payload(4, 2);
+  const q2 = group('Q2', 'r1', 'gq2');
+  const later = await w.setup.step(payload, { kind: 'enter', messages: [q2] });
+  assert.deepEqual(later.messages, []);
+  assert.deepEqual(texts(payload.agent.inbox.list), ['Q2']);
+  assert.deepEqual(w.g.current.questions, ['gq1'], 'the reply answers only what the turn took on record');
+  assert.equal(w.g.current.merged, 1);
+});
+
+test('group wake (step 23.1, 7.7.4): the wake names the group by its own name and never falls back to a shared one', () => {
+  const index = readFileSync(join(here, '../index.mjs'), 'utf8');
+  const wake = index.slice(index.indexOf('channels.setGroupWake('), index.indexOf('channels?.ready();'));
+  assert.ok(wake.includes('group: group?.label ?? null') && !wake.includes("'家庭群'"), 'no 家庭群 fallback in the wake');
 });

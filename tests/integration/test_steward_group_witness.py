@@ -434,3 +434,202 @@ def test_the_press_witness_one_run_real_backend_real_dsh_adapter_and_recording(w
             except subprocess.TimeoutExpired:
                 proc.kill()
         shutil.rmtree(directory, ignore_errors=True)
+
+
+# --- 6. two groups (step 23.1, design-steward 7.7.16 end item 4) ---------------------------------
+
+# The scripted model of the two-group run: group A's turn notes a family-memory marker and asks
+# for a one-time reminder to A (its words another marker, due tomorrow); group B's turn reads its
+# family memory and lists and asks for a reminder to B due in 45 s; the owner's turn reads the
+# reminder list. Every request body is recorded.
+PROVIDER_TWO = r"""
+import { createRequire } from 'node:module';
+import { appendFileSync } from 'node:fs';
+const require = createRequire(process.env.AITELIER_DSH_ENTRY);
+const { LlmAdapter } = await import(require.resolve('@deepseek-ai/dsh-llm'));
+export const name = 'w231-provider';
+export const inject = ['llm'];
+const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
+const soon = ms => new Date(Date.now() + ms).toISOString();
+export function apply(ctx) {
+  const done = new Set();
+  const once = (id, name, args) => done.has(id) ? undefined : (done.add(id), tool(id, name, args));
+  class FixtureAdapter extends LlmAdapter {
+    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 64000 }, defaultMaxTokens: 1024 }; }
+    async *stream(options) {
+      const phase = globalThis.__w231Phase ?? 0, body = JSON.stringify(options.messages);
+      const last = options.messages.at(-1), after = last?.role === 'tool' ? last.toolCallId : undefined;
+      let block;
+      if (options.purpose === 'compaction' || !options.tools?.length || options.sessionId !== process.env.AITELIER_DSH_SESSION)
+        block = { type: 'text', text: 'Fixture.' };
+      else if (phase === 1) block = after === 'a1' ? once('a2', 'group_reminder_set', { at: soon(86400000), text: process.env.W231_REMINDER_A })
+        : after === 'a2' ? { type: 'text', text: 'A_W231_ANSWER' } : once('a1', 'family_memory_note', { text: process.env.W231_MARKER });
+      else if (phase === 2) block = after === 'b1' ? once('b2', 'list_show', {})
+        : after === 'b2' ? once('b3', 'group_reminder_set', { at: soon(45000), text: process.env.W231_REMINDER_B })
+        : after === 'b3' ? { type: 'text', text: 'B_W231_ANSWER' } : once('b1', 'family_memory_show', {});
+      else if (phase === 3) block = after === 'o1' ? { type: 'text', text: 'OWNER_W231_ANSWER' } : once('o1', 'schedule_list', {});
+      block ??= { type: 'text', text: 'Done.' };
+      appendFileSync(process.env.W231_RECORD, JSON.stringify({ session: options.sessionId, purpose: options.purpose ?? null, phase, body,
+        after: after ?? null }) + '\n');
+      yield { type: 'block-start', index: 0, blockType: block.type };
+      if (block.type === 'text') yield { type: 'text-delta', index: 0, text: block.text };
+      else yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+      yield { type: 'block-end', index: 0, block };
+      yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20 } };
+      yield { type: 'finish', reason: { kind: block.type === 'text' ? 'stop' : 'tool-calls' } };
+    }
+  }
+  ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
+}
+"""
+
+# The channel that drives it: group A's member asks (phase 1); after that turn, group B's member
+# (2); after that, the owner in the 1:1 chat (3); after that, wait for B's reminder to be sent (4).
+CHANNEL_TWO = r"""
+import { appendFileSync } from 'node:fs';
+export const name = 'w231-channel';
+export const inject = ['ownerChannels'];
+const note = (kind, value) => appendFileSync(process.env.W231_CHANNEL, JSON.stringify({ kind, ...value }) + '\n');
+export function apply(ctx) {
+  globalThis.__w231Phase = 1;
+  let reminded = false;
+  ctx.on('dispose', ctx.ownerChannels.register({ name: 'wechat', status: () => ({ connected: true }),
+    async send(text, options) { note('send', { text, options }); return { ref: 'out-' + Date.now() }; },
+    async sendGroup(room, text) { note('group', { room, text }); if (text.includes(process.env.W231_REMINDER_B)) reminded = true; return { ref: 'gout-' + Date.now() }; },
+    async setRooms(rooms) { note('rooms', rooms); } }));
+  const inbound = async message => note('inbound', { ref: message.messageRef,
+    answer: await ctx.ownerChannels.inbound({ channel: 'wechat', at: new Date().toISOString(), ...message }) });
+  void inbound({ senderRef: process.env.W231_MEMBER, messageRef: 'ga-1', text: 'A_W231_QUESTION 记住这个', conversationRef: process.env.W231_ROOM_A });
+  let ended = false, busy = false;
+  ctx.on('session/event', (session, event) => { if (session.id === process.env.AITELIER_DSH_SESSION && event.type === 'turn/end') ended = true; });
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (agent.session.id !== process.env.AITELIER_DSH_SESSION || status !== 'idle' || !ended || busy) return;
+    ended = false; busy = true;
+    setTimeout(async () => {
+      try {
+        const phase = globalThis.__w231Phase;
+        if (phase === 1) { globalThis.__w231Phase = 2;
+          await inbound({ senderRef: process.env.W231_MEMBER, messageRef: 'gb-1', text: 'B_W231_QUESTION 家里有什么事', conversationRef: process.env.W231_ROOM_B }); }
+        else if (phase === 2) { globalThis.__w231Phase = 3;
+          await inbound({ senderRef: process.env.W231_OWNER, messageRef: 'o-1', text: 'OWNER_W231_QUESTION' }); }
+        else if (phase === 3) { globalThis.__w231Phase = 4;
+          const timer = setInterval(() => { if (reminded) { clearInterval(timer); note('done', {}); } }, 250); }
+      } catch (error) { note('error', { error: String(error?.stack ?? error) }); }
+      finally { busy = false; }
+    }, 300);
+  });
+}
+"""
+
+
+def test_the_two_group_witness_a_never_reaches_b_nor_the_owner_and_each_reminder_goes_to_its_group(
+        world, http, served, monkeypatch):
+    """Design-steward 7.7.16 end item 4 (step 23.1): group A's turn writes a family-memory marker
+    and asks for a reminder to A (its words a second marker); group B's turn right after reads its
+    family memory and lists and asks for a reminder to B. No request body of B's turn, nor B's
+    family_memory_show answer, carries A's marker, A's question or A's name; A's reply went only
+    to A and B's only to B; B's reminder is sent only into B when due; the owner's next turn
+    (it reads schedule_list) carries neither the family marker nor either reminder's words."""
+    node = shutil.which("node")
+    assert node and DSH_ENTRY.exists(), "the witness needs the shipped image (node and the pinned DSH)"
+    url, recorder = served
+    label_a = "甲组群7f3c"
+    bound_group(world, label=label_a)
+    from tests.unit.test_steward_groups import ROOM2
+    bound_group(world, room=ROOM2, key="bg-2", label="乙组群")
+    world.runtime.update("aitelier-home", enabled=1, phase="running")
+    monkeypatch.setattr(world.runtime, "running", lambda project_id: project_id == "aitelier-home")
+    marker, reminder_a, reminder_b = ("FAMILY-" + str(uuid.uuid4()), "REMIND-A-" + str(uuid.uuid4())[:8],
+                                      "REMIND-B-" + str(uuid.uuid4())[:8])
+    driver_id = world.steward_row["driver_id"]
+    directory = Path(tempfile.mkdtemp(prefix="w231-witness-", dir=Path.home()))
+    proc = None
+    try:
+        profile = directory / "home/profiles/driver"
+        profile.mkdir(parents=True)
+        (directory / "provider.mjs").write_text(PROVIDER_TWO, encoding="utf-8")
+        (directory / "channel.mjs").write_text(CHANNEL_TWO, encoding="utf-8")
+        (profile / "package.json").write_text(json.dumps(
+            {"private": True, "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-base"]}}}), encoding="utf-8")
+        (profile / "cordis.patch.yml").write_text(json.dumps([
+            {"id": "hmr", "disabled": True}, {"id": "tool-result-pruner", "disabled": True},
+            *[{"id": plugin, "disabled": True} for plugin in ("tool-subagent-fork", "tool-workflow", "plan-mode", "tool-todo")],
+            {"insert": [{"id": "fixture", "name": str(directory / "provider.mjs")},
+                        {"id": "dsh-director", "name": str(ROOT / "integrations/dsh-director/index.mjs")},
+                        {"id": "aitelier-driver", "name": str(ROOT / "integrations/dsh-driver/runtime.mjs")},
+                        {"id": "dsh-channel-wechat", "name": str(directory / "channel.mjs")}]}]), encoding="utf-8")
+        record, channel = directory / "model.jsonl", directory / "channel.jsonl"
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("AITELIER_") and k not in ("DSH_PERMISSION_MODE", "DSH_HOME")}
+        env.update({
+            "DSH_HOME": str(directory / "home"), "AITELIER_DSH_ENTRY": str(DSH_ENTRY),
+            "AITELIER_DRIVER_TOKEN_FILE": str(world.runtime.root / driver_id / "token"), "AITELIER_DRIVER_ID": driver_id,
+            "AITELIER_DSH_PROJECT": "aitelier-home", "AITELIER_DSH_SESSION": "w231-root", "AITELIER_DSH_PROVIDER": "fixture",
+            "AITELIER_DSH_MODEL": "fixture-model", "AITELIER_URL": url, "AITELIER_DSH_STATE_DIR": str(directory),
+            "AITELIER_SECRETS_DIR": str(directory / "no-secrets"), "AITELIER_DSH_ROLE": "steward",
+            "AITELIER_DSH_MEMORY_USER": "owner", "AITELIER_DSH_MEMORY_ROOT": str(directory / "memory"),
+            "W231_RECORD": str(record), "W231_CHANNEL": str(channel), "W231_MARKER": marker,
+            "W231_REMINDER_A": reminder_a, "W231_REMINDER_B": reminder_b,
+            "W231_OWNER": OWNER_WX, "W231_MEMBER": MEMBER, "W231_ROOM_A": ROOM, "W231_ROOM_B": ROOM2})
+        log = (directory / "dsh.log").open("wb")
+        proc = subprocess.Popen([node, str(DSH_ENTRY), "--profile", "driver"], cwd=directory, env=env,
+                                stdout=log, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline and proc.poll() is None:
+            if any(n["kind"] in ("done", "error") for n in _lines(channel)):
+                break
+            time.sleep(0.2)
+        notes = _lines(channel)
+        assert any(n["kind"] == "done" for n in notes), json.dumps(notes, ensure_ascii=False)[:3000] + "\n" + \
+            json.dumps([(c["path"], c["status"], c["answer"][:200].decode("utf-8", "replace")) for c in recorder.calls
+                        if c["status"] and c["status"] >= 400])[:3000] + "\n" + \
+            (directory / "dsh.log").read_text(encoding="utf-8", errors="replace")[-4000:]
+        requests = [r for r in _lines(record) if r["session"] == "w231-root" and r["purpose"] is None]
+        turn = lambda phase: [r for r in requests if r["phase"] == phase]  # noqa: E731
+        escaped = lambda text: json.dumps(text)[1:-1]  # noqa: E731 (the ASCII-escaped form)
+        assert turn(1) and turn(2) and turn(3)
+        # A's turn wrote the marker into A's family memory and a reminder to A (by code: its group,
+        # its title); B's turn a reminder to B.
+        with world.db.get_connection() as conn:
+            assert [tuple(r) for r in conn.execute("SELECT group_ref, text FROM state_family_memory")] == [(ROOM, marker)]
+            made = {r[0]: r[1:] for r in conn.execute("SELECT instruction, target_group_ref, created_via, title "
+                                                      "FROM state_steward_schedules")}
+        assert made[reminder_a][:2] == (ROOM, "group") and made[reminder_a][2].startswith("家人建的提醒 · " + label_a)
+        assert made[reminder_b][:2] == (ROOM2, "group")
+        # B's turn: no byte of A's marker, question, reminder words or name - in any request body ...
+        for r in turn(2):
+            for secret in (marker, "A_W231_QUESTION", "A_W231_ANSWER", reminder_a, label_a):
+                assert secret not in r["body"] and escaped(secret) not in r["body"], (secret, r["after"])
+        assert any("B_W231_QUESTION" in r["body"] for r in turn(2))
+        # ... nor in what B's family_memory_show and list_show answered (the backend's bytes).
+        b_turn = json.loads(next(c["body"] for c in recorder.calls if c["path"] == "/api/state/commands/set_steward_turn_audience"
+                                 and json.loads(c["body"]).get("group", {}).get("group_ref") == ROOM2))["turn"]
+        shown = [c for c in recorder.calls if c["path"] in ("/api/state/query/list_family_memory", "/api/state/query/list_list_items")
+                 and json.loads(c["body"]).get("turn") == b_turn]
+        assert {c["path"] for c in shown} == {"/api/state/query/list_family_memory", "/api/state/query/list_list_items"}
+        for c in shown:
+            assert c["read_as"] == "public" and c["status"] == 200, c
+            assert marker.encode() not in c["answer"] and label_a.encode() not in c["answer"]
+            assert escaped(label_a).encode() not in c["answer"]
+        # Each reply went to its own group only; B's reminder only into B.
+        groups_out = [(n["room"], n["text"]) for n in notes if n["kind"] == "group"]
+        assert [room for room, text in groups_out if "A_W231_ANSWER" in text] == [ROOM]
+        assert [room for room, text in groups_out if "B_W231_ANSWER" in text] == [ROOM2]
+        assert [room for room, text in groups_out if reminder_b in text] == [ROOM2]
+        assert not [text for room, text in groups_out if reminder_a in text], "A's reminder is due tomorrow"
+        # The owner's next turn read the reminder list: titles and groups, never the family's words.
+        listed = [c for c in recorder.calls if c["path"] == "/api/state/query/list_steward_schedules"
+                  and c["read_as"] is None and c["status"] == 200]
+        assert listed
+        for r in turn(3):
+            for secret in (marker, reminder_a, reminder_b, "A_W231_QUESTION", "B_W231_QUESTION"):
+                assert secret not in r["body"] and escaped(secret) not in r["body"], (secret, r["after"])
+        assert any(r["after"] == "o1" and "家人建的提醒" in r["body"] for r in turn(3)), "schedule_list showed the titles"
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        shutil.rmtree(directory, ignore_errors=True)

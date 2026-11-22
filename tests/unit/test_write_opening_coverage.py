@@ -11,8 +11,8 @@ each action:
 1. requires a real ORGANIC test witness (a test file outside this module and the
    always-included privacy modules that names or calls the action) and refuses
    to pass without one;
-2. runs this module's sentinel for the action (below) under the `mutation_gate`
-   plugin, which makes that one action open the project every time it runs;
+2. runs them under the `mutation_gate` plugin, which makes that one action open
+   the project every time it runs;
 3. requires the run to go RED *and* the mutation to have FIRED > 0 times — a
    green with fired == 0 is meaningless and is treated as a failure.
 
@@ -183,11 +183,12 @@ def test_a_write_action_that_opens_the_project_goes_red(action):
         f"write action '{action}' has no organic test witness: the always-included "
         f"privacy modules do not count as a witness, so a mutation that makes "
         f"'{action}' open the project could go entirely unnoticed")
-    # Only the sentinel runs: under -x the nested run stopped at the sentinel's red
-    # before any witness file executed, so passing them only cost collection time.
-    # A sentinel that does not fire is now a named failure below, not a fallback.
-    rc, report = _mutation_run(action, [])
-    names = [f"test_performing_a_write_action_leaves_the_project_private[{action}]"]
+    # The witness files stay in the run: they execute only when the sentinel does
+    # not go red, and for retire_context_run_protection that is the case (its
+    # sentinel fires 0 times; a witness file supplies the red).
+    files = _exercising_files(action)
+    rc, report = _mutation_run(action, files)
+    names = [f.name for f in files]
     assert report.get("fired", 0) > 0, (
         f"mutation for '{action}' (infected {report.get('target')}) FIRED 0 TIMES over "
         f"{names} — this green would prove nothing; widen or fix the scope. {report}")

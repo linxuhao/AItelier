@@ -318,3 +318,27 @@ test('the marker tracks the candidate report: a finished plan is not nagged, and
     assert.equal(ids(unfinishedWithoutChild(after, live, settled)).includes(IDS.open), true);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('settledAttempts keeps at most SETTLED_READS_AT_ONCE host reads in flight, and still reads each attempt once', async () => {
+  // The director core's own settledAttempts (runtime.mjs wraps it with a get_attempt reader).
+  const { SETTLED_READS_AT_ONCE, settledAttempts: coreSettled } = await import('../dsh-director/lib/core.mjs');
+  assert.equal(SETTLED_READS_AT_ONCE, 4);
+  const plans = Array.from({ length: 30 }, (_, i) => ({ attempt_id: `attempt-${i}`, remaining: ['implement'] }));
+  plans.push({ attempt_id: 'attempt-0~verify-a', batch: 'attempt-0', remaining: ['verify'] });
+  let inFlight = 0, peak = 0;
+  const asked = [];
+  const read = async id => {
+    asked.push(id);
+    inFlight += 1; peak = Math.max(peak, inFlight);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    inFlight -= 1;
+    if (id === 'attempt-3') throw new Error('host unreachable');
+    return id === 'attempt-0' || id === 'attempt-7';
+  };
+  const settled = await coreSettled(plans, read);
+  assert.equal(peak, SETTLED_READS_AT_ONCE, 'more than the cap were in flight at once (or the cap was never reached)');
+  assert.equal(asked.length, 30, 'an attempt was read more than once (the batch sub-plan reuses its attempt read)');
+  assert.deepEqual([...settled].sort(), ['attempt-0', 'attempt-0~verify-a', 'attempt-7']);
+  const one = await coreSettled(plans.slice(0, 3), read, undefined, { concurrency: 1 });
+  assert.deepEqual([...one], ['attempt-0']);
+});

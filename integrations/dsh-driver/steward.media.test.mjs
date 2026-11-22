@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { aitelierHost } from './runtime.mjs';
+import { aitelierHost, DriverRuntime } from './runtime.mjs';
 import { channelOps, groupOps, mediaOps, mediaRootFrom, stateWake, withAttachmentLines } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
@@ -45,6 +45,48 @@ test('ingest through the host adapter keeps the caller\'s signal: already aborte
   // Without a signal (or a live one) the same call stores it.
   const stored = await host.media.ingest(meta, open, { signal: new AbortController().signal });
   assert.match(stored.ref, /^m_[0-9a-f]{16}$/); assert.equal(opened, 1);
+});
+
+test('events(): the media library\'s cleanup runs at the start (an expired row and its file go) and daily after; stop() ends it', async () => {
+  // Review T3: runtime.mjs library?.start() / library?.stop(), through the adapter's own events()
+  // and the stop it returns - not the library's cleanup() called by hand.
+  const DAY = 24 * 3600 * 1000;
+  const root = mkdtempSync(join(tmpdir(), 'steward-media-')), stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  const old = createMediaLibrary({ root, now: () => Date.now() - 40 * DAY });
+  const { ref } = await old.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const file = old.lookup(ref).path;
+  // A fake State: the reads events() makes answer empty; the subscription parks until stopped.
+  const request = async (path, body, signal) => {
+    if (path === '/api/drivers/me') return { driver_id: 'drv-home' };
+    if (path.endsWith('/context')) return { project_id: 'aitelier-home', driver_id: 'drv-home', event_seq: 1, nodes: [],
+      project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'protocol' };
+    if (path.endsWith('/activity') || path.endsWith('/heartbeat')) return { ok: true };
+    if (path === '/api/state/query/list_director_messages') return { result: { items: [], matched_total: 0, has_more: false } };
+    if (path === '/api/state/query/wait_for_state_change') return new Promise((_, reject) =>
+      signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+    return { result: {} };
+  };
+  const runtime = new DriverRuntime({ project: 'aitelier-home', driver: 'drv-home', directory: stateDir, request, retryDelayMs: 10 });
+  await runtime.init();
+  const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: root, AITELIER_DSH_STATE_DIR: stateDir }), { request, runtime });
+  assert.equal((await host.media.resolve(ref))?.ref, ref, 'the expired row is there before events()');
+  const api = { notify: async () => {}, eventMessage: text => text, setHostError: async () => {}, clearHostError: async () => {},
+    isDisposed: () => false, ownerMessageSent: async () => {}, agent: { session: { snapshotEvents: () => [] }, steer: () => {} },
+    ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {}, goals: { get: () => undefined },
+      agents: { withoutInitiator: fn => fn() }, sessionPersistence: { flush: async () => {} } } };
+  const armed = [], cleared = [], { setInterval: realSet, clearInterval: realClear } = globalThis;
+  globalThis.setInterval = (fn, ms, ...rest) => { const timer = realSet(fn, ms, ...rest); if (ms === DAY) armed.push(timer); return timer; };
+  globalThis.clearInterval = timer => { if (armed.includes(timer)) cleared.push(timer); return realClear(timer); };
+  try {
+    const events = await host.events(api);
+    assert.equal(await host.media.resolve(ref), undefined, 'the start\'s cleanup dropped the 40-day-old row');
+    assert.equal(existsSync(file), false, 'and its file');
+    assert.equal(armed.length, 1, 'the daily cleanup is armed');
+    assert.equal(cleared.length, 0);
+    events.stop();
+    await Promise.resolve(events.done).catch(() => {});
+    assert.deepEqual(cleared, armed, 'stop() ends the daily cleanup');
+  } finally { Object.assign(globalThis, { setInterval: realSet, clearInterval: realClear }); }
 });
 
 test('the media root comes from AITELIER_MEDIA_ROOT (absolute) or there is none', () => {

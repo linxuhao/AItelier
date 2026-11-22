@@ -43,6 +43,10 @@ def _verbatim_previous_line_sites(source):
 # THIRD occurrence at a listed site changes the count and must be written
 # down here before the suite goes green.
 TEST_INTENTIONAL_REPEATS = [
+    # step 24.1a: calling twice is the point (rate-limited refusal log; idempotent marker check)
+    ("tests/unit/test_steward_connections.py", '_check(world)', 1),
+    ("tests/unit/test_steward_connections.py", 'gw._log_refusal("10.0.0.9", "token")', 1),
+    ("tests/unit/test_steward_fallback_restart.py", 'sc.check_stream_markers(conn, drivers)', 1),
     ("tests/integration/test_state_graph_entrypoints.py", 'assert module._start_driver("run1", scheduler_owned=True, auto_approve=False)', 1),
     ("tests/integration/test_tool_operation_owner_recovery.py", 'sf.reconcile_active_operations(run_id, trigger="retryable_trace")', 1),
     ("tests/unit/test_ai_router.py", 'litellm.exceptions.RateLimitError("Limit reached", model="zai", llm_provider="zai"),', 1),
@@ -133,7 +137,7 @@ def test_named_test_repeats_are_pinned_and_current():
     # The length is pinned as well: a silently DROPPED entry is invisible to the
     # equality above (its site would simply stop being a repeat), so the list's
     # size is written down here too.
-    assert len(TEST_INTENTIONAL_REPEATS) == 24
+    assert len(TEST_INTENTIONAL_REPEATS) == 27
 
 
 

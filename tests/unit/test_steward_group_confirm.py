@@ -431,3 +431,52 @@ def test_a_calendar_write_marked_outward_needs_the_askers_confirmation_in_owner_
     assert upstream.methods.count("tools/call") == before + 1
     assert call("calfam__create_event", event)["error"]["data"]["code"] == "confirmation_required", "one confirmation, one write"
     assert json.loads(record(world, asked["code"])["args_json"]) == event
+
+
+def test_two_groups_a_code_confirmed_in_one_group_runs_only_in_that_groups_turn(world, server, upstream, monkeypatch):
+    """Step 23.1 (7.8.9 steps 5 and 6, 7.7.24 item 4): a code group A's asker confirmed is not
+    run in group B's turn - run_confirmed's read is not_this_conversation and the gateway takes
+    no confirmation of another conversation; an owner turn may run it (director 581), told which
+    group and who confirmed; A's own later turn runs it."""
+    calendar_ready(world, monkeypatch)
+    code = world.owner.groups.issue_group_code("wechat", "老家群")["code"]
+    execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": "r2@chatroom",
+                                                "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
+            allow_write=True)
+    event = {"title": "周六聚餐", "start": "2026-11-28T18:00:00+08:00"}
+
+    def call(name, arguments):
+        return body_of(rpc(server, world, "tools/call", {"name": name, "arguments": arguments}))[0]
+
+    def get(code, turn):
+        return execute(world.steward, "get_steward_confirmation", {"code": code, "turn": turn}, allow_write=True)
+
+    question = gask(world, "q1", "周六聚餐加到家庭日历")["message_id"]
+    group_turn(world, turn="ga")
+    asked = request(world, question, event, name="mcp__sw__calfam__create_event")["code"]
+    assert gask(world, "c1", f"确认 {asked}")["confirmation"]["outcome"] == "confirmed"
+    # Group B's turn: someone there types A's code.
+    execute(world.steward, "relay_group_message", {
+        "request_key": "g-b1", "channel": "wechat", "group_ref": "r2@chatroom", "sender_ref": MEMBER2,
+        "channel_message_ref": "b1", "body": f"确认 {asked}", "channel_at": state_channels._now().isoformat()},
+        allow_write=True)
+    execute(world.steward, "set_steward_turn_audience", {"turn": "gb", "audience": "group", "group": {
+        "channel": "wechat", "group_ref": "r2@chatroom"}, "sender_refs": [MEMBER2]}, allow_write=True)
+    with pytest.raises(StateGraphError, match="not_this_conversation"):
+        get(asked, "gb")
+    before = upstream.methods.count("tools/call")
+    assert call("calfam__create_event", event)["error"]["data"]["code"] == "confirmation_required"
+    assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
+    # A turn that is not the recorded one cannot be told: refused too.
+    with pytest.raises(StateGraphError, match="not_this_conversation"):
+        get(asked, "ga")
+    # The owner's turn may run it, knowingly: the read names the group and who confirmed it.
+    execute(world.steward, "set_steward_turn_audience", {"turn": "o1", "audience": "owner"}, allow_write=True)
+    told = get(asked, "o1")
+    assert (told["status"], told["group"], told["confirmed_by"]) == ("confirmed", "家庭群", "成员甲")
+    # A's own later turn runs it (the read names no group there).
+    group_turn(world, turn="ga2")
+    mine = get(asked, "ga2")
+    assert mine["status"] == "confirmed" and "group" not in mine
+    assert "result" in call("calfam__create_event", event)
+    assert upstream.methods.count("tools/call") == before + 1

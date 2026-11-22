@@ -34,7 +34,13 @@ group_ref and bound_at are copied onto the row), at most GROUP_NOTICE_CHARS char
 exit-checked on every create and change that sets it (core.state_groups.exit_check). When
 due the host posts it with `post_group_notice` (core.state_groups), which checks the row
 fired for that due time (`last_due_at`): no model turn. Unbinding the group disables its
-reminders; a new binding never revives them.
+reminders; a new binding never revives them. Step 23.1 (design-steward 7.7.24): a group reminder
+names its group (`group`: its name or group_ref; picked automatically only when exactly one group
+is bound, else group_required), and a family member may ask, in a group turn, for a one-time
+reminder to that same group (core.state_groups.create_group_reminder -> create_member_reminder):
+its group and its maker come from the turn's audience record, its title is written by code, its
+text is never shown to an owner turn (only the dashboard shows it), and it counts toward a cap of
+its own (MEMBER_REMINDERS_PER_GROUP, MEMBER_REMINDERS_PER_PERSON), never toward the owner's.
 
 All three tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES).
 """
@@ -89,7 +95,10 @@ TARGET_COLUMNS = (
     ("target", "TEXT NOT NULL DEFAULT 'owner' CHECK(target IN ('owner','family_group'))"),
     ("target_channel", "TEXT"), ("target_group_ref", "TEXT"), ("target_bound_at", "TEXT"),
     # The due time the row last fired for (last_run_at is the moment of the fire, never equal).
-    ("last_due_at", "TEXT"))
+    ("last_due_at", "TEXT"),
+    # Step 23.1 (7.9.4): 'group' for a one-time reminder a family member asked for in a group
+    # turn (else NULL), and that member's sender_ref.
+    ("created_via", "TEXT"), ("created_by_ref", "TEXT"))
 
 KINDS = ("create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project", "connection_change")
 # Owner 2026-11-18: the steward may PROPOSE archiving / unarchiving a project; the
@@ -200,6 +209,13 @@ SCHEDULES_MAX = 50
 # reminder's text (the owner's exact words, posted as written) is at most this long.
 GROUP_SCHEDULES_MAX = 20
 GROUP_NOTICE_CHARS = 500
+# Step 23.1 (7.9.4, review F4): the one-time reminders family members ask for in a group, apart
+# from both caps above - at most this many not yet sent per group, and per member - due within
+# this many days. Their title is code's: MEMBER_REMINDER_TITLE.
+MEMBER_REMINDERS_PER_GROUP = 6
+MEMBER_REMINDERS_PER_PERSON = 3
+MEMBER_REMINDER_DAYS = 7
+MEMBER_REMINDER_TITLE = "家人建的提醒 · {group} · {when}"
 TARGETS = ("owner", "family_group")
 
 
@@ -388,7 +404,7 @@ def _schedule(row) -> dict:
             "last_fired_by": row["last_fired_by"], "created_at": row["created_at"], "updated_at": row["updated_at"],
             "overdue_seconds": _overdue(row), "target": row["target"], "target_channel": row["target_channel"],
             "target_group_ref": row["target_group_ref"], "target_bound_at": row["target_bound_at"],
-            "last_due_at": row["last_due_at"]}
+            "last_due_at": row["last_due_at"], "created_via": row["created_via"]}
 
 
 def _has_table(conn, name) -> bool:
@@ -404,13 +420,30 @@ def _binding_live(conn, channel, group_ref, bound_at) -> bool:
                         "revoked_at IS NULL", (channel, group_ref, bound_at)).fetchone() is not None
 
 
-def _schedule_out(conn, row) -> dict:
+def _schedule_out(conn, row, reveal=True) -> dict:
     """_schedule plus, for a group reminder, whether its group is still bound (the dashboard
-    marks one whose group was unbound)."""
+    marks one whose group was unbound) and the group's name. A reminder a family member made
+    (created_via 'group', 7.9.4, review P2) carries its text only when `reveal` (the owner's
+    dashboard, with who made it): an owner turn - the steward's reads - gets its title, time and
+    group, never the family's words."""
     out = _schedule(row)
     if row["target"] == "family_group":
         out["target_unbound"] = not _binding_live(conn, row["target_channel"], row["target_group_ref"],
                                                   row["target_bound_at"])
+        named = conn.execute("SELECT label FROM state_owner_groups WHERE channel=? AND group_ref=?",
+                             (row["target_channel"], row["target_group_ref"])).fetchone() \
+            if _has_table(conn, "state_owner_groups") else None
+        out["target_group_label"] = named[0] if named else None
+    if row["created_via"] == "group":
+        if reveal:
+            member = conn.execute("SELECT ordinal,label FROM state_group_members WHERE channel=? AND group_ref=? AND "
+                                  "sender_ref=?", (row["target_channel"], row["target_group_ref"],
+                                                   row["created_by_ref"])).fetchone() \
+                if _has_table(conn, "state_group_members") else None
+            from core.state_groups import member_label
+            out["created_by_label"] = (member["label"] or member_label(member["ordinal"])) if member else None
+        else:
+            del out["instruction"]
     return out
 
 
@@ -1050,32 +1083,43 @@ class StateSteward:
                 self._steward(conn)
             rows = conn.execute("SELECT * FROM state_steward_schedules WHERE deleted_at IS NULL" + where +
                                 " ORDER BY next_run_at IS NULL, next_run_at, created_at, schedule_id").fetchall()
-            return {"schedules": [_schedule_out(conn, r) for r in rows]}
+            reveal = self.is_owner_session()
+            return {"schedules": [_schedule_out(conn, r, reveal) for r in rows]}
 
     # ---- group reminders (step 25 C11, design-steward 7.9.4)
     @staticmethod
-    def _target(target, channel):
+    def _target(target, channel, group=None):
         if target not in TARGETS:
             raise ScheduleInvalid("invalid_target", "target is owner or family_group")
         if channel is not None and channel not in ("slack", "wechat"):
             raise ScheduleInvalid("invalid_target", "channel is slack or wechat")
-        if target == "owner" and channel is not None:
-            raise ScheduleInvalid("invalid_target", "a channel names the family group of a family_group reminder")
+        if target == "owner" and (channel is not None or group is not None):
+            raise ScheduleInvalid("invalid_target", "a group (or channel) names the family group of a family_group "
+                                                    "reminder")
         return target
 
     @staticmethod
-    def _bind_target(conn, channel):
-        """The binding a new group reminder records: the live group of `channel`, or of the one
-        channel that has a group (v1: one group per channel). None bound: no_group_bound;
-        groups on both channels and no channel named: channel_required."""
-        rows = conn.execute("SELECT channel,group_ref,bound_at FROM state_owner_groups WHERE revoked_at IS NULL "
-                            "ORDER BY channel").fetchall() if _has_table(conn, "state_owner_groups") else []
+    def _bind_target(conn, channel, group=None):
+        """The binding a group reminder records (7.9.4, step 23.1): the bound group `group`
+        names (its name or group_ref; `channel` optionally narrows), or the one bound group when
+        none is named. None bound: no_group_bound; several and none named: group_required; a name
+        no bound group has: unknown_group."""
+        rows = conn.execute("SELECT channel,group_ref,label,bound_at FROM state_owner_groups WHERE revoked_at IS NULL "
+                            "ORDER BY bound_at").fetchall() if _has_table(conn, "state_owner_groups") else []
         if channel is not None:
             rows = [r for r in rows if r["channel"] == channel]
         if not rows:
             raise ScheduleInvalid("no_group_bound", "no family group is bound" + (f" on {channel}" if channel else ""))
+        names = ", ".join(str(r["label"]) for r in rows)
+        if group is not None:
+            import unicodedata
+            folded = unicodedata.normalize("NFKC", str(group)).strip()
+            rows = [r for r in rows if r["group_ref"] == folded
+                    or unicodedata.normalize("NFKC", r["label"] or "").strip() == folded]
+            if not rows:
+                raise ScheduleInvalid("unknown_group", f"no bound group is named {folded!r}; bound: {names}")
         if len(rows) > 1:
-            raise ScheduleInvalid("channel_required", "a group is bound on each channel: name the channel")
+            raise ScheduleInvalid("group_required", f"several family groups are bound: name one ({names})")
         return rows[0]["channel"], rows[0]["group_ref"], rows[0]["bound_at"]
 
     def _check_notice(self, conn, instruction):
@@ -1098,22 +1142,25 @@ class StateSteward:
 
     @staticmethod
     def _group_room(conn, excluding=None):
+        # The family's own one-time reminders count apart (MEMBER_REMINDERS_PER_GROUP, review F4).
         live = conn.execute("SELECT COUNT(*) FROM state_steward_schedules WHERE deleted_at IS NULL AND "
-                            "target='family_group' AND schedule_id IS NOT ?", (excluding,)).fetchone()[0]
+                            "target='family_group' AND created_via IS NOT 'group' AND schedule_id IS NOT ?",
+                            (excluding,)).fetchone()[0]
         if live >= GROUP_SCHEDULES_MAX:
             raise ScheduleInvalid("too_many_group_reminders",
                                   f"at most {GROUP_SCHEDULES_MAX} family group reminders; delete one first")
 
     def create_schedule(self, title, instruction, schedule, tz=None, enabled=True, project_id=None,
-                        request_key=None, as_owner=False, target="owner", channel=None):
+                        request_key=None, as_owner=False, target="owner", channel=None, group=None):
         title, instruction = text(title, "title", 200), text(instruction, "instruction", 2000)
-        target = self._target(target or "owner", channel)
+        target = self._target(target or "owner", channel, group)
         tz = tz or default_tz()
         zone = _zone(tz)
         kind, at, expr = _shape(schedule, zone)
         # A reminder for the owner hashes as it always did (a key replayed across the upgrade).
         request_hash = _hash(["create", title, instruction, schedule, tz, enabled]
-                             + ([] if target == "owner" else [target, channel]))
+                             + ([] if target == "owner" else [target, channel])
+                             + ([] if group is None else [group]))
         with self.store.transaction(write=True) as conn:
             by = self._author(conn, project_id, as_owner)
             replay = self._keyed(conn, "create_steward_schedule", request_key, request_hash)
@@ -1121,12 +1168,13 @@ class StateSteward:
                 return replay
             moment = _now()
             runs = _upcoming(kind, at, expr, zone, moment)
-            live = conn.execute("SELECT COUNT(*) FROM state_steward_schedules WHERE deleted_at IS NULL").fetchone()[0]
+            live = conn.execute("SELECT COUNT(*) FROM state_steward_schedules WHERE deleted_at IS NULL AND "
+                                "created_via IS NOT 'group'").fetchone()[0]
             if live >= SCHEDULES_MAX:
                 raise ScheduleInvalid("too_many_schedules", f"at most {SCHEDULES_MAX} reminders; delete one first")
             bound = (None, None, None)
             if target == "family_group":
-                bound = self._bind_target(conn, channel)
+                bound = self._bind_target(conn, channel, group)
                 self._group_room(conn)
                 self._check_notice(conn, instruction)
             schedule_id, stamp = "sch-" + uuid4().hex[:12], _iso(moment)
@@ -1136,26 +1184,29 @@ class StateSteward:
                          (schedule_id, title, instruction, kind, at, expr, tz, int(bool(enabled)),
                           _iso(runs[0]) if enabled else None, by, by, stamp, stamp, target, *bound))
             out = self._done(conn, "create_steward_schedule", request_key, request_hash, schedule_id,
-                             _schedule_out(conn, self._schedule_row(conn, schedule_id)))
+                             _schedule_out(conn, self._schedule_row(conn, schedule_id), as_owner))
         self._notify()
         return out
 
     def update_schedule(self, schedule_id, expected_version, title=None, instruction=None, schedule=None, tz=None,
-                        enabled=None, project_id=None, request_key=None, as_owner=False, target=None, channel=None):
+                        enabled=None, project_id=None, request_key=None, as_owner=False, target=None, channel=None,
+                        group=None):
         """Change what is given. A new schedule or zone, or enabling, recomputes the
         next run from now; disabling clears it; otherwise it is kept. A `target` (or a
-        `channel`) given re-points the reminder: family_group records the group bound NOW.
-        A `channel` alone keeps the row's target: it re-points a family_group row and is
+        `group` or `channel`) given re-points the reminder: family_group records the group it
+        names now (the one bound group when none is named; several: group_required, step 23.1).
+        A `group` or `channel` alone keeps the row's target: it re-points a family_group row and is
         invalid_target on an owner row (review F1: an owner's private instruction never becomes
         group text by a channel). A group reminder is exit-checked when its text changes, when
         it becomes one and when it is enabled; it is never enabled while the group it recorded
         is unbound (a new binding never revives it, 7.9.4)."""
         if target is not None:
-            target = self._target(target, channel)
-        elif channel is not None:
-            self._target("family_group", channel)
+            target = self._target(target, channel, group)
+        elif channel is not None or group is not None:
+            self._target("family_group", channel, group)
         request_hash = _hash(["update", schedule_id, expected_version, title, instruction, schedule, tz, enabled]
-                             + ([] if target is None and channel is None else [target, channel]))
+                             + ([] if target is None and channel is None else [target, channel])
+                             + ([] if group is None else [group]))
         with self.store.transaction(write=True) as conn:
             by = self._author(conn, project_id, as_owner)
             replay = self._keyed(conn, "update_steward_schedule", request_key, request_hash)
@@ -1163,7 +1214,7 @@ class StateSteward:
                 return replay
             row = self._schedule_row(conn, schedule_id)
             if row["version"] != expected_version:
-                raise ScheduleConflict(_schedule(row))
+                raise ScheduleConflict(_schedule_out(conn, row, as_owner))
             current = _schedule(row)
             new_text = instruction is not None
             title = text(title, "title", 200) if title is not None else row["title"]
@@ -1174,17 +1225,22 @@ class StateSteward:
             enabled = bool(row["enabled"]) if enabled is None else enabled
             moment = _now()
             bound = (row["target_channel"], row["target_group_ref"], row["target_bound_at"])
-            if target is None and channel is not None:
+            if target is None and (channel is not None or group is not None):
                 if row["target"] != "family_group":
-                    raise ScheduleInvalid("invalid_target", "a channel names the family group of a family_group "
-                                                            "reminder; this one is for the owner")
+                    raise ScheduleInvalid("invalid_target", "a group (or channel) names the family group of a "
+                                                            "family_group reminder; this one is for the owner")
                 target = "family_group"
+            if row["created_via"] == "group" and not as_owner and (new_text or target is not None):
+                # A family member's words are never shown to an owner turn, so it changes neither
+                # them nor where they go (the owner does, on the dashboard).
+                raise ScheduleInvalid("member_reminder", "a reminder a family member made: only your owner changes "
+                                                         "its words or group, on the dashboard")
             repointed = target is not None
             target = target if repointed else row["target"]
             if target == "owner":
                 bound = (None, None, None)
             elif repointed:
-                bound = self._bind_target(conn, channel)
+                bound = self._bind_target(conn, channel, group)
                 if row["target"] != "family_group":
                     self._group_room(conn, excluding=schedule_id)
             if target == "family_group":
@@ -1205,9 +1261,47 @@ class StateSteward:
                          (title, instruction, kind, at, expr, tz, int(enabled), next_run, by, _iso(moment), target,
                           *bound, schedule_id))
             out = self._done(conn, "update_steward_schedule", request_key, request_hash, schedule_id,
-                             _schedule_out(conn, self._schedule_row(conn, schedule_id)))
+                             _schedule_out(conn, self._schedule_row(conn, schedule_id), as_owner))
         self._notify()
         return out
+
+    def create_member_reminder(self, conn, group, sender_ref, at, words):
+        """Step 23.1 (7.9.4): the one-time reminder a family member asked for in a group turn,
+        inside the caller's transaction (core.state_groups.create_group_reminder, which judged
+        the turn: `group` is the audience record's bound group row, `sender_ref` the turn's one
+        asker). Only once, due within MEMBER_REMINDER_DAYS; the words are posted as written, so
+        they pass the group's checks (_check_notice); at most MEMBER_REMINDERS_PER_PERSON of this
+        member and MEMBER_REMINDERS_PER_GROUP of this group not yet sent (counted apart from the
+        owner's 20 and 50). The title is code's: MEMBER_REMINDER_TITLE with the group's name and
+        the due time in the owner's zone. Returns the new row as an owner turn may see it."""
+        words = text(words, "text", GROUP_NOTICE_CHARS * 4)
+        tz = default_tz()
+        zone = _zone(tz)
+        kind, due, _expr = _shape({"kind": "once", "at": at}, zone)
+        moment = _now()
+        run = _upcoming(kind, due, None, zone, moment)[0]
+        if run - moment > timedelta(days=MEMBER_REMINDER_DAYS):
+            raise ScheduleInvalid("too_far", f"a family member's reminder is due within {MEMBER_REMINDER_DAYS} days")
+        self._check_notice(conn, words)
+        pending = ("SELECT COUNT(*) FROM state_steward_schedules WHERE deleted_at IS NULL AND enabled=1 AND "
+                   "next_run_at IS NOT NULL AND created_via='group' AND target_channel=? AND target_group_ref=?")
+        key = (group["channel"], group["group_ref"])
+        if conn.execute(pending + " AND created_by_ref=?", (*key, sender_ref)).fetchone()[0] >= MEMBER_REMINDERS_PER_PERSON:
+            raise ScheduleInvalid("member_reminders_full", f"at most {MEMBER_REMINDERS_PER_PERSON} reminders of one "
+                                                           "person wait to be sent")
+        if conn.execute(pending, key).fetchone()[0] >= MEMBER_REMINDERS_PER_GROUP:
+            raise ScheduleInvalid("group_member_reminders_full", f"at most {MEMBER_REMINDERS_PER_GROUP} reminders the "
+                                                                 "family made in this group wait to be sent")
+        title = MEMBER_REMINDER_TITLE.format(group=group["label"], when=run.astimezone(zone).strftime("%m-%d %H:%M"))
+        schedule_id, stamp = "sch-" + uuid4().hex[:12], _iso(moment)
+        conn.execute("INSERT INTO state_steward_schedules(schedule_id,version,title,instruction,kind,at,expr,tz,"
+                     "enabled,next_run_at,created_by,updated_by,created_at,updated_at,target,target_channel,"
+                     "target_group_ref,target_bound_at,created_via,created_by_ref) "
+                     "VALUES(?,1,?,?,'once',?,NULL,?,1,?,'steward','steward',?,?,'family_group',?,?,?,'group',?)",
+                     (schedule_id, title, words, due, tz, _iso(run), stamp, stamp, group["channel"], group["group_ref"],
+                      group["bound_at"], sender_ref))
+        self._schedule_changed(conn, schedule_id)
+        return _schedule_out(conn, self._schedule_row(conn, schedule_id), reveal=False)
 
     def delete_schedule(self, schedule_id, expected_version, project_id=None, request_key=None, as_owner=False):
         """Soft delete: the row is never listed and never fires again."""
@@ -1219,7 +1313,7 @@ class StateSteward:
                 return replay
             row = self._schedule_row(conn, schedule_id)
             if row["version"] != expected_version:
-                raise ScheduleConflict(_schedule(row))
+                raise ScheduleConflict(_schedule_out(conn, row, as_owner))
             stamp = _iso(_now())
             conn.execute("UPDATE state_steward_schedules SET version=version+1,enabled=0,next_run_at=NULL,"
                          "updated_by=?,updated_at=?,deleted_at=? WHERE schedule_id=?", (by, stamp, stamp, schedule_id))

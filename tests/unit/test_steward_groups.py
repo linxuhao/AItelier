@@ -24,9 +24,10 @@ OWNER_WX, MEMBER, MEMBER2, ROOM, ROOM2 = "wxid_owner", "wxid_m1", "wxid_m2", "r1
 NOW = object()
 
 
-def bound_group(world, room=ROOM, key="bg-1"):
-    bind(world, "wechat", OWNER_WX, key="bind-wx")
-    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
+def bound_group(world, room=ROOM, key="bg-1", label="家庭群"):
+    if not rows(world, "SELECT 1 FROM state_owner_channels WHERE channel='wechat' AND revoked_at IS NULL"):
+        bind(world, "wechat", OWNER_WX, key="bind-wx")
+    code = world.owner.groups.issue_group_code("wechat", label)["code"]
     return execute(world.steward, "bind_owner_group", {"request_key": key, "channel": "wechat", "group_ref": room,
                                                        "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
                    allow_write=True)
@@ -40,9 +41,16 @@ def ask(world, ref, body="武侠那个项目做到哪了", sender=MEMBER, room=R
                     "channel_message_ref": ref, "body": body, **({"channel_at": at} if at else {})}, allow_write=True)
 
 
-def reply(world, question_id, body, key=None):
+def reply(world, question_id, body, key=None, turn="t-reply", stamp=True):
+    """The host's reply at the end of group turn `turn`; `stamp` first records that turn as the
+    question's group's (set_steward_turn_audience stamps the question, step 23.1)."""
+    if stamp:
+        found = rows(world, "SELECT group_ref, sender_ref FROM state_group_messages WHERE message_id=?", (question_id,))
+        if found:
+            audience(world, room=found[0][0], senders=(found[0][1],), turn=turn, questions=(question_id,))
     return execute(world.steward, "post_group_reply", {"request_key": key or f"group-reply:{question_id}",
-                                                       "question_id": question_id, "body": body}, allow_write=True)
+                                                       "question_id": question_id, "body": body, "turn": turn},
+                   allow_write=True)
 
 
 def rows(world, sql, args=()):
@@ -63,10 +71,11 @@ def family_view(world):
                         project_read_trusted=True, public_view=True)
 
 
-def audience(world, kind="group", room=ROOM, senders=(MEMBER,), turn="t1"):
+def audience(world, kind="group", room=ROOM, senders=(MEMBER,), turn="t1", questions=()):
     group = {"channel": "wechat", "group_ref": room} if kind == "group" else None
     return execute(world.steward, "set_steward_turn_audience",
-                   {"turn": turn, "audience": kind, "group": group, "sender_refs": list(senders)}, allow_write=True)
+                   {"turn": turn, "audience": kind, "group": group, "sender_refs": list(senders),
+                    **({"question_ids": list(questions)} if questions else {})}, allow_write=True)
 
 
 # --- the director's ruling: the numbers live in code -------------------------------------------
@@ -83,7 +92,9 @@ def test_group_limits_are_pinned_code_constants_that_no_environment_variable_cha
                                         # Step 25 C11 (7.9.4): the owner's group reminders, apart.
                                         "group_notices_per_hour": 6,
                                         # Step 24 (7.8.9): confirmation texts and their lines, apart.
-                                        "group_sends_per_hour": 20}
+                                        "group_sends_per_hour": 20,
+                                        # Step 23.1 (7.7.24, owner 2026-11-22): groups per channel.
+                                        "groups_per_channel": 3}
     with pytest.raises(TypeError):
         fresh.GROUP_LIMITS["group_per_hour"] = 1
     assert dict(fresh.FAMILY_LIMITS) == {"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000}
@@ -94,7 +105,7 @@ def test_group_limits_are_pinned_code_constants_that_no_environment_variable_cha
 def test_group_and_account_codes_never_retire_or_stand_for_each_other(world):
     bind(world, "wechat", OWNER_WX, key="bind-wx")
     account = world.owner.channels.issue_code("wechat")["code"]
-    group = world.owner.groups.issue_group_code("wechat")["code"]
+    group = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
     assert group.startswith("G-") and len(group) == 11
     # Issuing either kind leaves the other live.
     assert rows(world, "SELECT kind FROM state_owner_channel_codes WHERE used_at IS NULL ORDER BY kind") == \
@@ -113,7 +124,7 @@ def test_group_and_account_codes_never_retire_or_stand_for_each_other(world):
 
 def test_only_the_bound_account_with_a_group_code_binds_and_a_member_repost_counts_nothing(world):
     bind(world, "wechat", OWNER_WX, key="bind-wx")
-    code = world.owner.groups.issue_group_code("wechat")["code"]
+    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
     args = {"channel": "wechat", "group_ref": ROOM, "code": code, "mention_prefix": "@管家"}
     refused(lambda: execute(world.steward, "bind_owner_group", {**args, "request_key": "m", "sender_ref": MEMBER},
                             allow_write=True), "channel_sender_not_bound")
@@ -122,14 +133,165 @@ def test_only_the_bound_account_with_a_group_code_binds_and_a_member_repost_coun
     bound = execute(world.steward, "bind_owner_group", {**args, "request_key": "o", "sender_ref": OWNER_WX,
                                                         "code": code.lower().replace("-", " ")}, allow_write=True)
     assert bound["bound"] is True and bound["notice"] == state_groups.BIND_NOTICE
-    # The notice is one outbound row; a second group is refused, and so is a second code.
+    # The notice is one outbound row. Step 23.1 (7.7.24): the same room again is refused, a
+    # second group binds (a second code, named apart).
     assert rows(world, "SELECT direction, kind FROM state_group_messages") == [("out", "bind_notice")]
-    with pytest.raises(StateConflict):
-        world.owner.groups.issue_group_code("wechat")
+    again = world.owner.groups.issue_group_code("wechat", "老家群")["code"]
+    refused(lambda: execute(world.steward, "bind_owner_group", {**args, "code": again, "request_key": "o2",
+                                                                "sender_ref": OWNER_WX}, allow_write=True),
+            "group_already_bound")
+    second = execute(world.steward, "bind_owner_group", {**args, "group_ref": ROOM2, "code": again,
+                                                         "request_key": "o3", "sender_ref": OWNER_WX}, allow_write=True)
+    assert second["bound"] is True and second["label"] == "老家群"
+    assert rows(world, "SELECT group_ref, label FROM state_owner_groups WHERE revoked_at IS NULL ORDER BY bound_at") \
+        == [(ROOM, "家庭群"), (ROOM2, "老家群")]
 
 
 def test_no_group_code_without_a_bound_account(world):
-    refused(lambda: world.owner.groups.issue_group_code("wechat"), "channel_not_bound")
+    refused(lambda: world.owner.groups.issue_group_code("wechat", "家庭群"), "channel_not_bound")
+
+
+# --- step 23.1: several groups on a channel (design-steward 7.7.24) ----------------------------
+
+def test_a_channel_binds_up_to_groups_per_channel_and_the_cap_refuses_code_and_bind(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    late = world.owner.groups.issue_group_code("wechat", "亲戚群")["code"]
+    # A third group bound while that code waits (here directly, as another binding would).
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at) "
+                     "VALUES('wechat','r3@chatroom','同学群','@管家',?)", (state_channels._now().isoformat(),))
+        conn.commit()
+    refused(lambda: execute(world.steward, "bind_owner_group", {"request_key": "bg-4", "channel": "wechat",
+                                                                "group_ref": "r4@chatroom", "sender_ref": OWNER_WX,
+                                                                "code": late, "mention_prefix": "@管家"},
+                            allow_write=True), "too_many_groups")
+    refused(lambda: world.owner.groups.issue_group_code("wechat", "第四群"), "too_many_groups")
+    assert rows(world, "SELECT COUNT(*) FROM state_owner_groups WHERE revoked_at IS NULL") == [(3,)]
+    # Unbinding one makes room again.
+    world.owner.groups.unbind_owner_group("wechat", "r3@chatroom")
+    bound_group(world, room="r5@chatroom", key="bg-5", label="同学群")
+    assert rows(world, "SELECT COUNT(*) FROM state_owner_groups WHERE revoked_at IS NULL") == [(3,)]
+
+
+def test_a_group_name_is_required_and_unlike_every_bound_groups_on_any_channel(world):
+    bound_group(world)
+    for bad in ("", "  ", "名" * 21, None):
+        refused(lambda: world.owner.groups.issue_group_code("wechat", bad), "invalid_label")
+    refused(lambda: world.owner.groups.issue_group_code("wechat", "家庭群"), "group_label_taken")
+    refused(lambda: world.owner.groups.issue_group_code("wechat", "家庭群 "), "group_label_taken")  # NFKC, trimmed
+    # Another channel's bound group counts too (review F3).
+    bind(world, "slack", "U_OWNER", key="bind-slack")
+    refused(lambda: world.owner.groups.issue_group_code("slack", "家庭群"), "group_label_taken")
+    assert world.owner.groups.issue_group_code("slack", "工作群")["code"].startswith("G-")
+
+
+def test_the_migration_drops_the_one_live_index_and_names_an_unnamed_bound_group(world):
+    bound_group(world)
+    with world.db.get_connection() as conn:
+        # A step-23 database: the index and a group bound without a name.
+        conn.execute("CREATE UNIQUE INDEX state_owner_groups_one_live ON state_owner_groups(channel) "
+                     "WHERE revoked_at IS NULL")
+        conn.execute("UPDATE state_owner_groups SET label=NULL")
+        conn.commit()
+    StateService(world.db, actor="fixture", project_read_trusted=True)
+    assert rows(world, "SELECT name FROM sqlite_master WHERE name='state_owner_groups_one_live'") == []
+    assert rows(world, "SELECT label FROM state_owner_groups") == [("家庭群",)]
+    assert "turn" in {r[1] for r in rows(world, "PRAGMA table_info(state_group_messages)")}
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")  # two live rows on one channel
+
+
+def test_two_live_groups_both_relay_and_unbinding_one_leaves_the_other_whole(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    a, b = ask(world, "a1"), ask(world, "b1", room=ROOM2)
+    assert "message_id" in a and "message_id" in b  # neither is group_not_bound
+    audience(world, room=ROOM2, turn="tb")
+    execute(family_view(world), "note_family_memory", {"request_key": "fb", "text": "B 的事", "turn": "tb"},
+            allow_write=True)
+    world.owner.groups.name_group_member("wechat", ROOM2, MEMBER, "二姨")
+    world.owner.groups.set_family_note("wechat", ROOM2, "B 的说明")
+    unbound = world.owner.groups.unbind_owner_group("wechat", ROOM)
+    assert unbound["unbound"] is True and unbound["group_ref"] == ROOM
+    assert ask(world, "a2") == {"refused": "group_not_bound"}
+    assert "message_id" in ask(world, "b2", room=ROOM2)
+    assert rows(world, "SELECT DISTINCT group_ref FROM state_group_messages") == [(ROOM2,)]
+    assert rows(world, "SELECT label FROM state_group_members WHERE group_ref=?", (ROOM2,)) == [("二姨",)]
+    assert rows(world, "SELECT text FROM state_family_note") == [("B 的说明",)]
+    assert rows(world, "SELECT text FROM state_family_memory") == [("B 的事",)]
+    # Unbinding a group that is not bound changes nothing.
+    assert world.owner.groups.unbind_owner_group("wechat", ROOM)["unbound"] is False
+
+
+def test_with_two_groups_a_reply_goes_only_to_its_questions_group_in_its_own_turn(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    a, b = ask(world, "a1"), ask(world, "b1", room=ROOM2)
+    audience(world, room=ROOM, turn="ta", questions=(a["message_id"],))
+    # B's turn names B's question only; A's question id stays A's turn's.
+    stamped = audience(world, room=ROOM2, turn="tb", questions=(b["message_id"], a["message_id"]))
+    assert stamped["questions_stamped"] == 1
+    assert rows(world, "SELECT channel_message_ref, turn FROM state_group_messages WHERE direction='in' ORDER BY "
+                       "channel_message_ref") == [("a1", "ta"), ("b1", "tb")]
+    refused(lambda: reply(world, a["message_id"], "B 的答案", turn="tb", stamp=False), "not_this_turns_question")
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='out' AND kind='reply'") == [(0,)]
+    sent = reply(world, b["message_id"], "B 的答案", turn="tb", stamp=False)
+    assert (sent["channel"], sent["group_ref"]) == ("wechat", ROOM2)
+    # Answered: the same question again in its turn is refused too, under a new key.
+    refused(lambda: reply(world, b["message_id"], "再答", key="other", turn="tb", stamp=False),
+            "not_this_turns_question")
+    # A replay of the reply's own key comes before the check: the first answer, once.
+    assert reply(world, b["message_id"], "B 的答案", turn="tb", stamp=False)["duplicate"] is True
+    # A put back and taken by a later turn: re-stamped with that turn.
+    audience(world, room=ROOM, turn="ta2", questions=(a["message_id"],))
+    refused(lambda: reply(world, a["message_id"], "A 的答案", turn="ta", stamp=False), "not_this_turns_question")
+    assert reply(world, a["message_id"], "A 的答案", turn="ta2", stamp=False)["group_ref"] == ROOM
+
+
+def test_with_two_groups_family_memory_recent_and_names_stay_in_their_group(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    marker = "MARKER-A-7f3c"
+    a = ask(world, "a1", "记住 " + marker)
+    audience(world, room=ROOM, turn="ta", questions=(a["message_id"],))
+    execute(family_view(world), "note_family_memory", {"request_key": "fa", "text": marker, "turn": "ta"},
+            allow_write=True)
+    reply(world, a["message_id"], "记住了 " + marker, turn="ta", stamp=False)
+    b = ask(world, "b1", "家里有什么事", room=ROOM2)
+    audience(world, room=ROOM2, turn="tb", questions=(b["message_id"],))
+    shown = execute(family_view(world), "list_family_memory", {"turn": "tb"})
+    assert marker not in str(shown) and shown["entries"] == []
+    # B's turn naming A's turn is refused (the record is B's now).
+    refused(lambda: execute(family_view(world), "list_family_memory", {"turn": "ta"}), "family_memory_group_turn_only")
+    recent_b = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM2})
+    assert marker not in str(recent_b) and recent_b["recent"] == []
+    recent_a = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})
+    assert marker in str(recent_a)
+    # A name given in A is A's alone.
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
+    assert rows(world, "SELECT group_ref, label FROM state_group_members WHERE sender_ref=? ORDER BY group_ref",
+                (MEMBER,)) == [(ROOM, "妈妈"), (ROOM2, None)]
+    # Each member has 20 per group: 20 in A do not stop B.
+    for i in range(19):
+        ask(world, f"aa{i}")
+    assert ask(world, "aa19")["refused"] == "member_quota"
+    assert "message_id" in ask(world, "bb0", room=ROOM2)
+
+
+def test_the_account_cap_is_one_for_both_groups(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    moment = state_channels._now().isoformat()
+    with world.db.get_connection() as conn:
+        # Two bind notices are out already: A 88 rows in all, B 32 (7.9.4: a group's hour is at most 88).
+        for i in range(87):
+            conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,at) "
+                         "VALUES(?,?,?,'out','reply',1,?)", (f"oa{i}", "wechat", ROOM, moment))
+        for i in range(31):
+            conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,at) "
+                         "VALUES(?,?,?,'out','reply',1,?)", (f"ob{i}", "wechat", ROOM2, moment))
+        conn.commit()
+    assert ask(world, "b1", room=ROOM2) == {"refused": "group_quota_account", "sender_role": "member"}
 
 
 # --- relay -------------------------------------------------------------------------------------
@@ -200,11 +362,11 @@ def test_a_rename_on_the_dashboard_does_not_reset_the_members_window(world):
     bound_group(world)
     for i in range(20):
         ask(world, f"a{i}")
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     assert ask(world, "a20")["refused"] == "member_quota"
-    refused(lambda: world.owner.groups.name_group_member("wechat", "wxid_never", "x"), "unknown_member")
+    refused(lambda: world.owner.groups.name_group_member("wechat", ROOM, "wxid_never", "x"), "unknown_member")
     with pytest.raises(StateGraphError):
-        world.steward.groups.name_group_member("wechat", MEMBER, "x")
+        world.steward.groups.name_group_member("wechat", ROOM, MEMBER, "x")
 
 
 def test_the_account_outbound_cap_counts_every_group_of_the_channel_and_logs(world, caplog):
@@ -236,7 +398,7 @@ def test_thirty_day_retention_and_unbind_deletes_everything(world, monkeypatch):
     monkeypatch.setattr(state_channels, "_now", lambda: real() + timedelta(days=31))
     ask(world, "m2")
     assert rows(world, "SELECT channel_message_ref FROM state_group_messages WHERE direction='in'") == [("m2",)]
-    world.owner.groups.unbind_owner_group("wechat")
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
     assert rows(world, "SELECT COUNT(*) FROM state_group_messages") == [(0,)]
     assert ask(world, "m3") == {"refused": "group_not_bound"}
 
@@ -321,14 +483,13 @@ def test_the_platform_name_and_a_public_project_pass_and_a_live_group_code_is_wi
     bound_group(world, key="bg-a")
     question = ask(world, "m1")
     assert reply(world, question["message_id"], "AItelier 上的武虾传奇进展不错")["withheld"] is False
-    world.owner.groups.unbind_owner_group("wechat")
     monkeypatch.setattr(state_groups.secrets, "choice", lambda alphabet: "7")
-    code = world.owner.groups.issue_group_code("wechat")["code"]
+    code = world.owner.groups.issue_group_code("wechat", "老家群")["code"]
     assert code == "G-7777-7777"
     # Another group bound directly; the group code issued above stays live.
     with world.db.get_connection() as conn:
-        conn.execute("INSERT INTO state_owner_groups(channel,group_ref,mention_prefix,bound_at) "
-                     "VALUES('wechat',?,'@管家',?)", (ROOM2, state_channels._now().isoformat()))
+        conn.execute("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at) "
+                     "VALUES('wechat',?,'二群','@管家',?)", (ROOM2, state_channels._now().isoformat()))
         conn.commit()
     question = ask(world, "m2", room=ROOM2)
     assert reply(world, question["message_id"], "码 g7777 7777")["withheld"] is True
@@ -398,7 +559,7 @@ def test_family_memory_with_the_header_but_no_group_turn_is_refused(world, setup
 def test_family_memory_in_a_group_turn_takes_group_and_author_from_the_record(world, monkeypatch):
     bound_group(world)
     ask(world, "m1")
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     audience(world, senders=(MEMBER,))
     view = family_view(world)
     noted = execute(view, "note_family_memory", {"request_key": "k1", "text": " 周六去外婆家 ", "turn": "t1"}, allow_write=True)
@@ -418,9 +579,9 @@ def test_family_memory_in_a_group_turn_takes_group_and_author_from_the_record(wo
     # A service trusted for the family pair serves nothing else.
     with pytest.raises(ProjectPrivate):
         execute(view, "list_owner_channels", {})
-    world.owner.groups.set_family_note("wechat", "外婆家在城南")
+    world.owner.groups.set_family_note("wechat", ROOM, "外婆家在城南")
     assert execute(view, "list_family_memory", {"turn": "t1"})["family_note"] == "外婆家在城南"
-    world.owner.groups.unbind_owner_group("wechat")
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
     assert rows(world, "SELECT COUNT(*) FROM state_family_memory") == [(0,)]
     assert rows(world, "SELECT COUNT(*) FROM state_family_note") == [(0,)]
 
@@ -429,7 +590,7 @@ def test_family_memory_in_a_merged_turn_of_several_askers_names_nobody(world):
     bound_group(world)
     ask(world, "m1")
     ask(world, "m2", sender=MEMBER2)
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     audience(world, senders=(MEMBER, MEMBER2))
     noted = execute(family_view(world), "note_family_memory", {"request_key": "k1", "text": "周六去外婆家", "turn": "t1"},
                     allow_write=True)
@@ -477,11 +638,37 @@ def test_family_memory_names_the_live_turn_and_a_stale_record_serves_no_other_tu
 def test_the_family_note_is_the_owners_route_alone(world, client):
     bound_group(world)
     steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
-    assert client.put("/api/steward/groups/wechat/family-note", json={"text": "x"}, headers=steward).status_code == 403
-    r = client.put("/api/steward/groups/wechat/family-note", json={"text": "外婆家在城南"}, headers=OWNER_HEADERS)
+    room = ROOM.replace("@", "%40")  # the dashboard URL-encodes the group_ref
+    assert client.put(f"/api/steward/groups/wechat/{room}/family-note", json={"text": "x"},
+                      headers=steward).status_code == 403
+    r = client.put(f"/api/steward/groups/wechat/{room}/family-note", json={"text": "外婆家在城南"}, headers=OWNER_HEADERS)
     assert r.status_code == 200, r.text
-    view = client.get("/api/steward/groups?channel=wechat", headers=OWNER_HEADERS).json()["groups"][0]
+    listed = client.get(f"/api/steward/groups?channel=wechat&group_ref={room}", headers=OWNER_HEADERS).json()
+    view = listed["groups"][0]
     assert view["family_note"]["text"] == "外婆家在城南" and view["label"] == "家庭群"
+    assert listed["groups_per_channel"] == 3
+
+
+def test_every_group_route_names_its_group(world, client):
+    """Step 23.1 (7.7.13): with two groups each route acts on the group it names, never on the
+    other; the code route stays per channel and needs a name."""
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    ask(world, "a1")
+    ask(world, "b1", room=ROOM2)
+    enc = lambda ref: ref.replace("@", "%40")
+    assert client.post("/api/steward/groups/wechat/code", json={}, headers=OWNER_HEADERS).status_code == 422
+    assert client.post(f"/api/steward/groups/wechat/{enc(ROOM2)}/clear", headers=OWNER_HEADERS).json() == {"cleared": 2}
+    assert rows(world, "SELECT DISTINCT group_ref FROM state_group_messages WHERE direction='in'") == [(ROOM,)]
+    r = client.put(f"/api/steward/groups/wechat/{enc(ROOM)}/members/{MEMBER}", json={"label": "妈妈"},
+                   headers=OWNER_HEADERS)
+    assert r.status_code == 200, r.text
+    detail = client.get(f"/api/steward/groups?channel=wechat&group_ref={enc(ROOM2)}", headers=OWNER_HEADERS).json()
+    with_records = [g for g in detail["groups"] if "messages" in g]
+    assert [g["group_ref"] for g in with_records] == [ROOM2]
+    assert client.delete(f"/api/steward/groups/wechat/{enc(ROOM2)}", headers=OWNER_HEADERS).json()["unbound"] is True
+    left = client.get("/api/steward/groups", headers=OWNER_HEADERS).json()["groups"]
+    assert [(g["group_ref"], g["members"][0]["label"]) for g in left] == [(ROOM, "妈妈")]
 
 
 def test_the_turn_audience_is_the_stewards_overwritten_and_writes_no_event(world):
@@ -500,7 +687,7 @@ def test_the_turn_audience_is_the_stewards_overwritten_and_writes_no_event(world
 def test_the_owner_picks_the_one_pending_group_and_never_one_of_two(world, monkeypatch):
     monkeypatch.setattr(state_groups, "PICK_PENDING_GROUPS", True)
     bind(world, "wechat", OWNER_WX, key="bind-wx")
-    code = world.owner.groups.issue_group_code("wechat")["code"]
+    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
     args = {"channel": "wechat", "code": code, "mention_prefix": "@管家", "sender_ref": "wxid_owner_in_group"}
     refused(lambda: execute(world.steward, "bind_owner_group", {**args, "request_key": "p1", "group_ref": ROOM},
                             allow_write=True), "pending_owner_pick")
@@ -519,3 +706,23 @@ def test_the_owner_picks_the_one_pending_group_and_never_one_of_two(world, monke
         world.owner.groups.pick_pending_group("wechat", ROOM2)
     picked = world.owner.groups.pick_pending_group("wechat", ROOM)
     assert picked["bound"] is True and picked["group_ref"] == ROOM
+
+
+def test_another_bound_group_never_stops_a_pick_only_the_same_room_or_a_full_channel(world, monkeypatch):
+    """Step 23.1 (7.7.9 last item): a pick with another group bound binds; the same room bound
+    already is group_already_bound."""
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    monkeypatch.setattr(state_groups, "PICK_PENDING_GROUPS", True)
+    code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
+    args = {"channel": "wechat", "code": code, "mention_prefix": "@管家", "sender_ref": "wxid_owner_in_group"}
+    refused(lambda: execute(world.steward, "bind_owner_group", {**args, "request_key": "p1", "group_ref": ROOM},
+                            allow_write=True), "pending_owner_pick")
+    picked = world.owner.groups.pick_pending_group("wechat", ROOM)
+    assert picked["bound"] is True
+    assert rows(world, "SELECT group_ref, label FROM state_owner_groups WHERE revoked_at IS NULL ORDER BY bound_at") \
+        == [(ROOM2, "老家群"), (ROOM, "家庭群")]
+    # The same room reported again with a new code: already bound.
+    code = world.owner.groups.issue_group_code("wechat", "三群")["code"]
+    refused(lambda: execute(world.steward, "bind_owner_group", {**args, "code": code, "request_key": "p2",
+                                                                "group_ref": ROOM}, allow_write=True),
+            "group_already_bound")

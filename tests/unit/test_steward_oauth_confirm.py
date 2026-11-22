@@ -452,7 +452,11 @@ def ask(world, message_id, arguments=None, name=SEND):
 
 
 def status_of(world, code):
-    return execute(world.steward, "get_steward_confirmation", {"code": code}, allow_write=True)["status"]
+    """run_confirmed's read in the turn the host recorded last (step 23.1: it names its turn)."""
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT turn FROM state_steward_turn_audience WHERE id=1").fetchone()
+    return execute(world.steward, "get_steward_confirmation", {"code": code, "turn": row[0] if row else "none"},
+                   allow_write=True)["status"]
 
 
 def test_only_a_persons_message_of_a_channel_or_the_dashboard_can_ask(world, monkeypatch):
@@ -646,7 +650,7 @@ def test_the_owner_lists_the_confirmations_with_their_text(world):
     with pytest.raises(StateGraphError, match="owner_session_required"):
         world.steward.steward_confirmations.list_recent()
     with pytest.raises(StateNotFound):
-        execute(world.steward, "get_steward_confirmation", {"code": "K0000"}, allow_write=True)
+        execute(world.steward, "get_steward_confirmation", {"code": "K0000", "turn": "t1"}, allow_write=True)
 
 
 # --- review fixes (24.1b review) -----------------------------------------------------------------

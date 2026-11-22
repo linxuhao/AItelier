@@ -26,7 +26,12 @@ that asked for it (`create_steward_confirmation`); this module
   core.state_groups.relay_group_message, before its quotas), on the same channel,
   conversation and sender, within 10 minutes;
 - lets the gateway CONSUME one confirmed record whose hash equals the call it is about
-  to forward (api/steward_gateway.py): one confirmation, one forward, never retried.
+  to forward (api/steward_gateway.py): one confirmation, one forward, never retried;
+- in a group turn runs only that group's records (step 23.1, design-steward 7.8.9 step 5,
+  7.7.24 item 4): `get` (run_confirmed) names the turn and is refused not_this_conversation
+  for another group's record or the owner's, and `consume` takes no record of another
+  conversation than the recorded group turn's. An owner turn may run a group's record
+  (platform director 581): `get` then names the group and who confirmed it.
 
 Both tables are private (core.state_privacy.PRIVATE_STATE_TABLES); records are kept 30 days.
 """
@@ -35,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 
@@ -254,9 +260,21 @@ def consume(conn, connection, raw_name: str, arguments) -> str | None:
         return None
     digest = args_hash(connection["conn_uid"], connection["generation"], raw_name, canonical_arguments(arguments))
     since = _iso(_utcnow() - TTL)
+    # Step 23.1 (7.8.9 step 6): the gateway carries no turn, so it judges by the recorded
+    # audience alone (7.7.8a "边界"): in a group turn only that group's records; in an owner
+    # turn any record (director 581); no record of the turn is the owner's nothing (fail closed).
+    scope, args = "", []
+    try:
+        audience = conn.execute("SELECT audience,channel,group_ref FROM state_steward_turn_audience WHERE id=1").fetchone()
+    except sqlite3.OperationalError:  # no table yet: no turn was ever recorded
+        audience = None
+    if audience is None:
+        return None
+    if audience["audience"] != "owner":
+        scope, args = " AND audience='group' AND channel=? AND conversation_ref=?", [audience["channel"], audience["group_ref"]]
     row = conn.execute("SELECT code FROM state_steward_confirmations WHERE conn_id=? AND raw_name=? AND args_sha256=? "
-                       "AND status='confirmed' AND confirmed_at>=? ORDER BY confirmed_at LIMIT 1",
-                       (connection["conn_id"], raw_name, digest, since)).fetchone()
+                       "AND status='confirmed' AND confirmed_at>=?" + scope + " ORDER BY confirmed_at LIMIT 1",
+                       (connection["conn_id"], raw_name, digest, since, *args)).fetchone()
     if row is None:
         return None
     taken = conn.execute("UPDATE state_steward_confirmations SET status='consumed', consumed_at=? WHERE code=? "
@@ -413,17 +431,41 @@ class StateStewardConfirmations:
         return ({"kind": kind, "channel": row["channel"], "conversation_ref": row["group_ref"], "sender_ref": sender},
                 dict(group))
 
-    def get(self, code):
-        """One record for run_confirmed: the stored public name and arguments, and its status."""
+    def get(self, code, turn):
+        """One record for run_confirmed in the turn `turn` (the plugin's open turn): the stored
+        public name and arguments, and its status. The turn must be the one the host recorded
+        last (else not_this_conversation: whose turn this is cannot be told). In a group turn
+        only a record of that group (channel, conversation_ref) is given - another group's or
+        the owner's is not_this_conversation (step 23.1, 7.8.9 step 5); in an owner turn any
+        record, and a group's names its group and who confirmed it (`group`, `confirmed_by`,
+        platform director 581: the owner runs it knowingly)."""
         from core import state_steward_connections as sc
         if not isinstance(code, str) or not CODE.fullmatch(code):
             raise StateGraphError("invalid_code")
+        group_label = confirmer = None
         with self.store.transaction() as conn:
             self.steward._steward(conn)
             row = conn.execute("SELECT * FROM state_steward_confirmations WHERE code=?", (code,)).fetchone() \
                 if _has_tables(conn) else None
-        if row is None:
-            raise StateNotFound(f"unknown_code: no confirmation {code}")
+            if row is None:
+                raise StateNotFound(f"unknown_code: no confirmation {code}")
+            try:
+                audience = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1").fetchone()
+            except sqlite3.OperationalError:  # no table yet: no turn was ever recorded
+                audience = None
+            if audience is None or not isinstance(turn, str) or audience["turn"] != turn:
+                raise StateGraphError("not_this_conversation: this request is not the recorded turn's")
+            if audience["audience"] != "owner" and (row["audience"] != "group" or row["channel"] != audience["channel"]
+                                                    or row["conversation_ref"] != audience["group_ref"]):
+                raise StateGraphError("not_this_conversation: a confirmation runs only in the conversation it was "
+                                      "asked for")
+            if audience["audience"] == "owner" and row["audience"] == "group":
+                from core.state_groups import StateGroups
+                named = conn.execute("SELECT label FROM state_owner_groups WHERE channel=? AND group_ref=?",
+                                     (row["channel"], row["conversation_ref"])).fetchone()
+                group_label = named[0] if named else row["conversation_ref"]
+                confirmer = StateGroups._label_of(conn, row["channel"], row["conversation_ref"], row["sender_ref"],
+                                                  row["requester_kind"])
         status = row["status"]
         if status == "pending" and _utcnow() - _parse(row["created_at"]) > TTL:
             status = "expired"
@@ -431,7 +473,8 @@ class StateStewardConfirmations:
             status = "expired"
         return {"code": code, "status": status, "name": sc.public_name(row["conn_id"], row["gw_name"]),
                 "arguments": json.loads(row["args_json"]), "created_at": row["created_at"],
-                "confirmed_at": row["confirmed_at"]}
+                "confirmed_at": row["confirmed_at"],
+                **({"group": group_label, "confirmed_by": confirmer} if group_label is not None else {})}
 
     def cancel(self, code):
         """The host voids a PENDING record whose text never reached the requester (the

@@ -896,7 +896,7 @@ class TestTheStewardReadersRefuseTheAnonymous:
             # The gateway answers on its own port alone (director 487); a loopback Host.
             ("POST", "http://127.0.0.1:4445/api/steward/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
             ("GET", "http://127.0.0.1:4445/api/steward/mcp", None),
-            ("POST", "/api/state/commands/get_steward_confirmation", {"code": C.STEWARD_CONFIRMATION}),
+            ("POST", "/api/state/commands/get_steward_confirmation", {"code": C.STEWARD_CONFIRMATION, "turn": "t"}),
             ("POST", "/api/state/commands/cancel_steward_confirmation", {"code": C.STEWARD_CONFIRMATION}),
             ("POST", "/api/state/commands/create_steward_confirmation",
              {"name": f"mcp__sw__{C.STEWARD_CONNECTION}__tool", "arguments": {},

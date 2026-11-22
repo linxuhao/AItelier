@@ -37,7 +37,7 @@ import { openMemory, profileSection, registerMemoryTools } from './lib/memory/to
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
 import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
-import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
+import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
 
@@ -401,16 +401,19 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // tag, never the text, makes the turn a group turn), with that group's recent exchanges.
   if (groupTurns && channels && host.groups) channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label, attachments }) => {
     await agentExists;
-    const listed = await host.groups.list().catch(() => ({}));
+    const listed = await host.groups.list().catch(error => { ctx.logger.warn('group wake: groups not read: ' + String(error?.message ?? error).slice(0, 200)); return {}; });
     const group = (listed?.groups ?? []).find(g => g.channel === channel && g.group_ref === groupRef);
+    // The group's own name (step 23.1, 7.7.4) or no wake at all (director 602 defect 3, fail closed):
+    // groupWakeName throws, the channel logs group_wake_failed and the question stays unanswered.
+    let label;
+    try { label = groupWakeName(group); }
+    catch (error) { ctx.logger.warn('group wake refused ' + JSON.stringify({ channel, group_ref: groupRef, message_id })); throw error; }
     const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
     while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
-    // The group's own name (step 23.1, 7.7.4): required and unlike every other bound group's, so
-    // the model tells two groups apart by it; never a shared fallback name.
-    const wake = { group_turn: { group: group?.label ?? null, messages: [{ message_id, sender_role, sender: sender_label,
+    const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
       ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent } };
     ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],
-      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: group?.label ?? null, question_ids: [message_id],
+      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: label, question_ids: [message_id],
         sender_refs: [senderRef] } })));
     await ctx.sessionPersistence.flush();
   });

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GroupTurns, GROUP_SOURCE, FOLD_SOURCE, FOLD_LINE, GROUP_TOOLS, FAMILY_TOOLS, PAUSED_TOOLS, groupTurnRefusal, familyRefusal,
-  groupReminderRefusal, pausedRefusal, answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup, groupReplies } from '../lib/group-turns.mjs';
+  groupReminderRefusal, pausedRefusal, answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup, groupReplies, groupWakeName } from '../lib/group-turns.mjs';
 import { GROUP_LIMITS, CHANNEL_LIMITS, createOwnerChannels, channelReplies } from '../lib/channels.mjs';
 import { ContextInjection, clockLine } from '../lib/core.mjs';
 
@@ -795,5 +795,12 @@ test('setup (step 23.1): a merge that cannot be recorded goes back for a later t
 test('group wake (step 23.1, 7.7.4): the wake names the group by its own name and never falls back to a shared one', () => {
   const index = readFileSync(join(here, '../index.mjs'), 'utf8');
   const wake = index.slice(index.indexOf('channels.setGroupWake('), index.indexOf('channels?.ready();'));
-  assert.ok(wake.includes('group: group?.label ?? null') && !wake.includes("'家庭群'"), 'no 家庭群 fallback in the wake');
+  assert.ok(wake.includes('group: label') && wake.includes('group_label: label') && !wake.includes("'家庭群'"), 'no 家庭群 fallback in the wake');
+  assert.ok(wake.indexOf('groupWakeName(group)') < wake.indexOf('agent.steer('), 'the name is required before anything is steered');
+});
+
+test('group wake (director 602 defect 3): a group the host does not name wakes nothing - refused, never group: null', () => {
+  assert.equal(groupWakeName({ channel: 'wechat', group_ref: 'r1', label: '老家群' }), '老家群');
+  for (const group of [undefined, null, {}, { label: null }, { label: '' }, { label: '  ' }, { label: 7 }])
+    assert.throws(() => groupWakeName(group), /^Error: group_wake_unnamed/, JSON.stringify(group));
 });

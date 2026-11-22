@@ -325,6 +325,16 @@ export class GroupTurns {
   unpause() { if (this.pauseFile) rmSync(this.pauseFile, { force: true }); }
 }
 
+/** The name a group wake carries (step 23.1, 7.7.4): the bound group's own label, required and
+ *  unlike every other bound group's, so the model tells two groups apart by it - never a shared
+ *  fallback name and never null. A group the host's list does not name (the list could not be
+ *  read, or the group is not in it) throws `group_wake_unnamed` (director 602 defect 3: fail
+ *  closed, steward.md promises every wake names its group); the caller logs it and wakes nothing. */
+export function groupWakeName(group) {
+  if (typeof group?.label !== 'string' || !group.label.trim()) throw new Error('group_wake_unnamed: the host named no bound group for this question; no wake');
+  return group.label;
+}
+
 /** Puts input of another audience back for a later turn (7.7.3 item 2). DSH opens one turn per
  *  queued `next-turn` message, so owner input goes right after the owner input already waiting
  *  (it opens the very next turn, in its own order) and a group question to the end (in arrival

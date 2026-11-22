@@ -550,6 +550,31 @@ test('media_call: files whose base64 would not fit one gateway call are refused 
   assert.ok(sent > 38 * MiB && sent < MEDIA_LIMITS.call_body_bytes, `${sent}`);
 });
 
+test('media_call: the bound counts the other arguments as JSON (escaping included) and the envelope, not the files alone', async () => {
+  // Review round 2 (V2): two cases the files' base64 alone would let through.
+  const bound = MEDIA_LIMITS.call_body_bytes, envelope = 64 * 1024;
+  const t = toolWorld();
+  const pair = async (base64Each, tag) => {
+    const each = base64Each / 4 * 3;
+    assert.ok(Number.isInteger(each / 3), 'whole base64 quanta');
+    const refs = [];
+    for (const index of [0, 1]) refs.push((await t.library.ingest({ ...owner, messageRef: tag, index }, async () => pdf(each - 9))).ref);
+    return { a: refs[0], b: refs[1] };
+  };
+  // (1) The envelope: the files' base64 is 32 KiB under the bound, the 64 KiB envelope is not.
+  const close = await pair((bound - 32 * 1024) / 2, 'close');
+  assert.equal((await t.run('media_call', { name: OCR, media: close })).refused, 'media_too_large_for_one_call');
+  // (2) The arguments' JSON: files + envelope leave 512 KiB; a 300 KiB string of quotes is
+  // 300 KiB as text but 600 KiB once JSON-escaped, so the call no longer fits.
+  const roomy = await pair((bound - envelope - 512 * 1024) / 2, 'roomy');
+  const quotes = '"'.repeat(300 * 1024);
+  assert.equal((await t.run('media_call', { name: OCR, arguments: { note: quotes }, media: roomy })).refused, 'media_too_large_for_one_call');
+  assert.equal(t.executed.length, 0, 'no call was made');
+  // The same files with a short argument fit: it was the argument that did not.
+  assert.deepEqual(await t.run('media_call', { name: OCR, arguments: { note: 'x' }, media: roomy }), { text: 'OCR: 你好' });
+  assert.equal(t.executed.length, 1);
+});
+
 test('send_media(url): only a url a connection tool returned in this turn, fetched through that connection, sent to this turn\'s requester', async () => {
   const t = toolWorld();
   await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });

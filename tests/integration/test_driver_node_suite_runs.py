@@ -10,8 +10,16 @@ suite too (there is no separate director row).
 Concurrency 2 runs two test files at a time. At node's default, a 2-CPU container gets
 concurrency 1 and the suite took 338 s; at 2 three runs of this row in a 2-CPU container
 took 163 s, 166 s and 221 s (host load 5-16) and all three were green, 693/693
-(measured 2026-11-22, before the rebase onto main; at ``0685a65908`` the suite is 725
-tests and one run took 199 s at host load 12-23).
+(measured 2026-11-22, before the rebase onto main; at ``0685a65908`` the suite was 725
+tests and one run took 199 s at host load 12-23; at ``5638facc0c`` it is 773 tests and
+one run took 219 s at host load 15-35).
+
+This row is marked ``slow``, so the recommended fast command in ``tests/README.md``
+(``-m "... and not slow"``) runs no driver and no director javascript at all: this row
+is the only runner of both suites. It stays ``slow`` because every measured run above
+took longer than 160 s, most over three minutes. Run it on its own with
+``python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py``
+(plain ``pytest`` and ``-m slow`` select it too).
 
 Why: nothing else executes this suite. The pytest-side guard
 ``tests/unit/test_driver_suite_lists_its_files.py`` reads the suite's file list and its

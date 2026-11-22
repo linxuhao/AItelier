@@ -28,7 +28,8 @@ name every exclusion you still want.
 # Everything (what plain `pytest` and the repository gate run, serially)
 python -m pytest -q -p no:cacheprovider
 
-# Recommended fast local run: skip the slow tier
+# Recommended fast local run: skip the slow tier (this runs no driver or director
+# javascript; see below)
 python -m pytest -q -p no:cacheprovider -m "not network and not docker and not baked_toolchain and not slow"
 
 # Slow tier only
@@ -45,10 +46,17 @@ invocation; only parallel runs split them out (see "Parallel runs" below).
 The director suite has no row of its own. The driver row's discovery includes
 `integrations/dsh-driver/plugin-boundary.test.mjs`, which imports every director test
 file the director's npm script names, so the driver row runs every director test
-(measured 2026-11-22 at `0685a65908`: the 424 tests of the director suite run alone all
-appear, by name, among the driver run's 725). The
+(measured 2026-11-22 at `5638facc0c`: the 463 tests of the director suite run alone all
+appear, by name, among the driver run's 773). The
 driver row runs node with `--test-concurrency=2`; in a 2-CPU container node's default
 is 1, which took about twice as long.
+
+So the recommended fast command runs no driver and no director javascript: the driver
+row is `slow` (163-221 s per run in a 2-CPU container at concurrency 2, measured
+2026-11-22) and nothing else runs either suite. Only the WeChat channel suite (about
+3 s, `tests/integration/test_director_and_channel_node_suites_run.py`) runs in the fast
+command. Run the driver and director suites with
+`python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py`.
 
 The skillflow absence-gate rows spend their time in real `test`-step re-runs (each a
 nested pytest plus the `run_tests.sh` gate), not in sleeps: the clock is injected. So

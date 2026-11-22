@@ -3,8 +3,10 @@ from fastapi import Depends, Request
 
 from api.authz import (identity_resolved_once, is_via_cloudflare, may_read_private, request_actor,
                        request_identity, require_reader, require_writer)
-from api.dependencies import (get_db_manager_on_loop, get_workspace_manager_on_loop, get_skillflow,
-                              get_config_registry)
+# get_db_manager / get_workspace_manager stay importable from here: callers override
+# them as `dependency_overrides[routes.get_db_manager]`, which the on-loop variants honour.
+from api.dependencies import (get_db_manager, get_db_manager_on_loop, get_workspace_manager,  # noqa: F401
+                              get_workspace_manager_on_loop, get_skillflow, get_config_registry)
 from core.state_commands import GROUP_TURN_ACTIONS
 from core.state_service import StateService
 

@@ -1,4 +1,4 @@
-"""State schema setup runs once per process per database FILE (core.state_schema_setup).
+"""State schema setup runs once per database handle and FILE (core.state_schema_setup).
 
 Every State request builds a StateService. Before this, every construction re-ran
 every store's schema setup: on a scratch database 19 connections, 168 statements
@@ -116,6 +116,17 @@ def test_a_new_file_gets_its_own_setup(tmp_path, monkeypatch, window):
     assert counted.connections > 0 and counted.schema_statements(), "a second file must be set up"
     with sqlite3.connect(str(tmp_path / "b.db")) as conn:
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='driver_inbox_messages'").fetchone()
+
+
+def test_a_new_handle_on_the_same_file_sets_it_up_again(tmp_path, monkeypatch, window):
+    """Opening a database through a new handle runs the setup, as opening always did
+    (a test that rewrites a schema and reopens it relies on that); production holds
+    one handle per process."""
+    path = str(tmp_path / "state.db")
+    construct(DBManager(path))
+    counted = Counted(monkeypatch)
+    construct(DBManager(path))
+    assert counted.schema_statements(), "a new handle must run the setup"
 
 
 def test_a_file_replaced_at_the_same_path_gets_its_own_setup(tmp_path, monkeypatch, window):

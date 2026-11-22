@@ -15,8 +15,10 @@
 # left out of the declaration, but only by being named in EXCEPTIONS with the
 # measurement that kept it out: an unmeasured omission is the defect this test
 # exists to catch, and an EXCEPTIONS entry cannot be written without a number
-# from a run. The entries are measured in a throwaway container on the gate's
-# own shape (`docker run --rm --network none --cpus 2 --memory 2g`,
+# from a run -- a NON-ZERO one, because a directory whose suite passes belongs
+# in the declaration, not beside it. The entries are measured in a throwaway
+# container on the gate's own shape (`docker run --rm --network none --cpus 2
+# --memory 2g`,
 # an `npm ci`/`npm install --offline` install then `npm test` inside the gate's
 # 300 s script budget);
 # the log named in each entry is kept beside the run's report, not in the
@@ -67,8 +69,25 @@ EXCEPTIONS = {
     },
 }
 
-# Evidence must carry a number from a run, not a feeling about the code.
-_NUMBERED = re.compile(r"\b(?:rc|exit code)\s*-?\d+")
+# Evidence must carry a number from a run, not a feeling about the code -- and
+# the number has to be one only a FAILING run produces. `rc 0` is a suite that
+# passed, and an exception justified by a passing measurement keeps a project
+# the gate could measure out of `node_projects.json` for as long as nobody looks
+# again: the entry stays, the file stays silent, and the gate's report keeps
+# calling a green directory an absence. That is the rot this table exists to
+# prevent, so a zero code is not evidence.
+_NONZERO = re.compile(r"\b(?:rc|exit code)\s*([1-9]\d*)")
+
+
+def _measured_failure(evidence):
+    """The exit code `evidence` cites if that code is a failure, else None.
+
+    One landing point for "is this evidence a measurement of a red run?", asked
+    both by the EXCEPTIONS assertion below and by the witness that pins the
+    refusal of a zero code -- so relaxing the check cannot pass unfalsified.
+    """
+    match = _NONZERO.search(evidence)
+    return int(match.group(1)) if match else None
 
 
 def _relative(path):
@@ -126,9 +145,33 @@ def test_each_exception_is_a_discovered_project_that_is_not_declared():
             f"EXCEPTIONS names {directory}, which node_projects.json now "
             "declares: the entry (and its failing measurement) is stale")
         assert entry["reason"].strip(), f"EXCEPTIONS[{directory}] has no reason"
-        assert _NUMBERED.search(entry["evidence"]), (
-            f"EXCEPTIONS[{directory}] carries no measured exit code; evidence "
-            "must name the log and the code a run produced")
+        assert _measured_failure(entry["evidence"]) is not None, (
+            f"EXCEPTIONS[{directory}] carries no measured FAILING exit code; "
+            "evidence must name the log and a NON-ZERO code a run produced "
+            "(`rc 0` is a suite that passed: declare the project, do not "
+            "except it)")
+
+
+def test_an_exception_measured_green_is_refused():
+    """The other way this table rots: the suite went green and the entry stayed.
+
+    `rc 0` is what a working suite reports, so evidence citing one is not
+    evidence of the failure an exception exists to describe -- it is a project
+    this repository can declare. The check must refuse it, and must keep
+    accepting the non-zero codes a real exception rests on: 1 for a red suite,
+    124 for the gate's own timeout.
+    """
+    green = "measured: rc 0 in 4 s -- it actually passed"
+    assert _measured_failure(green) is None, (
+        "an `rc 0` measurement was accepted as evidence: the suite passed, so "
+        "the directory belongs in node_projects.json, not in EXCEPTIONS")
+    for evidence, code in (
+        ("dsh-channel-slack.log: `npm test` rc 1 in 2 s", 1),
+        ("dsh-director.log: `npm test` rc 124 (timed out) after 302 s", 124),
+        ("dsh-director-diagnostic.log: the same command exit code 124 "
+         "after 900 s (it passes alone: rc 0)", 124),
+    ):
+        assert _measured_failure(evidence) == code, evidence
 
 
 def test_the_gate_would_park_only_on_the_measured_exceptions():

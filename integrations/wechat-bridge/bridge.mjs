@@ -75,11 +75,13 @@ const WAV_HEADER_SLACK = 4096;
  *  messages forever. */
 export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
 /** A puppet error that says this message will never be handed over (neo's refusal of a peer it
- *  has not observed, an expired or unknown message; the fork's "payload is no longer cached"
- *  and its refusal of a message of another WeChat type): 410 gone at once.
+ *  has not observed, an expired or unknown message; the fork's "payload is no longer cached",
+ *  its refusal of a message of another WeChat type, and its refusals of a payload that can
+ *  never be fetched: an app message "not a file", one that "carries no encrypted" picture or
+ *  attachment, a voice that "states no byte length"): 410 gone at once.
  *  `createBridge({isGone})` replaces it should the fork name its refusals otherwise. */
 export const isGoneError = error =>
-  /observed peer|expired|not found|no longer cached|from a WeChat message of type/i.test(String(error?.message ?? error));
+  /observed peer|expired|not found|no longer cached|from a WeChat message of type|not a file|carries no encrypted|states no byte length/i.test(String(error?.message ?? error));
 /** The FileBox name decides what the fork sends (its messageSendFile): `.silk`/`.sil`/`.slk`/`.amr`
  *  a voice bar (the length in ms is the name's leading number), one of these an image, anything
  *  else a file attachment. */
@@ -266,7 +268,10 @@ const splitName = name => {
 export function sendPlan({ kind, name, bytes }, limits = MEDIA_SEND) {
   const clean = cleanName(name) || kind;
   const [stem, extension] = splitName(clean);
-  const asFile = { as: 'file', name: IMAGE_EXTENSIONS.includes(extension) || VOICE_EXTENSIONS.includes(extension) ? `${clean}.bin` : clean };
+  // The extension as the fork's carrier() reads it (all after the last dot, the whole name when
+  // it has none), so '.png', 'png' or 'silk' never reach its image or voice carrier as a file.
+  const forkExtension = clean.slice(clean.lastIndexOf('.') + 1).toLowerCase();
+  const asFile = { as: 'file', name: IMAGE_EXTENSIONS.includes(forkExtension) || VOICE_EXTENSIONS.includes(forkExtension) ? `${clean}.bin` : clean };
   if (kind === 'image' && isBubbleJpeg(bytes, limits))
     return [{ as: 'image', name: extension === 'jpg' || extension === 'jpeg' ? clean : `${stem}.jpg` }, asFile];
   const pcm = kind === 'voice' ? voicePcm(bytes, limits) : undefined;

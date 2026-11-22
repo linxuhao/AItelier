@@ -1236,6 +1236,13 @@ test('media: a puppet refusal is 410 gone; after a new login an old media_id is 
     assert.ok(isGoneError(new Error('Neo message payload is no longer cached')));
     assert.ok(isGoneError(new Error('Neo cannot fetch an image from a WeChat message of type 34')));
     assert.ok(!isGoneError(new Error('Neo is not logged in to WeChat: cannot fetch a file')));
+    // Its refusals of a payload that can never be fetched are gone as well (never retried).
+    for (const message of ['Neo app message is of type 57, not a file',
+      "Neo image payload carries no encrypted picture on WeChat's CDN",
+      "Neo file payload carries no encrypted attachment on WeChat's CDN",
+      'Neo voice payload states no byte length to fetch'])
+      assert.ok(isGoneError(new Error(message)), message);
+    assert.ok(!isGoneError(new Error('Neo session is offline')));
     bot.emit('logout');
     assert.equal(s.bridge.state.phase, 'idle');
     assert.deepEqual(await s.json('/media/' + oldId), [410, { error: 'gone' }], 'logged out');
@@ -1331,6 +1338,13 @@ test('send-file: the plan follows what the fork can send: a bubble JPEG as an im
   assert.deepEqual(sendPlan({ kind: 'file', name: 'chart.png', bytes: small }), [{ as: 'file', name: 'chart.png.bin' }]);
   for (const name of ['x.silk', 'x.SIL', 'x.slk', 'x.amr'])
     assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.bin' }]);
+  // The fork's carrier() takes all after the last dot (the whole name when there is none) as the
+  // extension: a name that is only an extension, with or without its dot, gets .bin too.
+  assert.deepEqual(sendPlan({ kind: 'image', name: '.png', bytes: PNG_BYTES }), [{ as: 'file', name: '.png.bin' }]);
+  for (const name of ['png', '.png', 'JPG', 'silk', '.silk', 'amr', '.amr'])
+    assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.bin' }], name);
+  assert.deepEqual(sendPlan({ kind: 'voice', name: '.amr', bytes: Buffer.from('#!AMR') }), [{ as: 'file', name: '.amr.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'file', name: 'report', bytes: Buffer.from('x') }), [{ as: 'file', name: 'report' }]);
 });
 
 test('send-file: needs the token, sends through messageSendFile, and has its own 25 MiB limit (413, nothing sent)', async () => {

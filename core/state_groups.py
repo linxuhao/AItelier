@@ -268,6 +268,20 @@ class StateGroups:
                         "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
                     conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
                                  (self._free_label(conn), channel, group_ref))
+                # Director 602 defect 6: a live group's name is unique in the database too. A name two
+                # live groups share (none should: the code refuses it) is renamed on the later one
+                # first, so the index can be made.
+                seen = set()
+                for (channel, group_ref, label) in conn.execute(
+                        "SELECT channel,group_ref,label FROM state_owner_groups WHERE revoked_at IS NULL "
+                        "ORDER BY bound_at").fetchall():
+                    if label in seen:
+                        label = self._free_label(conn)
+                        conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
+                                     (label, channel, group_ref))
+                    seen.add(label)
+                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS state_owner_groups_live_label ON "
+                             "state_owner_groups(label) WHERE revoked_at IS NULL")
                 conn.commit()
 
     # ---------------------------------------------------------------- helpers
@@ -294,11 +308,23 @@ class StateGroups:
         return any(unicodedata.normalize("NFKC", r[0]).strip() == label for r in conn.execute(
             "SELECT label FROM state_owner_groups WHERE revoked_at IS NULL AND label IS NOT NULL"))
 
+    @staticmethod
+    def _code_labels(conn, channel, moment):
+        """The names (NFKC, trimmed) that the live unused group codes of every channel but
+        `channel` hold (every channel's, for None): such a code binds later under its name
+        (review F4)."""
+        return {unicodedata.normalize("NFKC", r[0]).strip() for r in conn.execute(
+            "SELECT label FROM state_owner_channel_codes WHERE kind='group' AND channel IS NOT ? AND used_at IS NULL "
+            "AND retired_at IS NULL AND expires_at>? AND label IS NOT NULL", (channel, moment.isoformat()))}
+
     @classmethod
-    def _free_label(cls, conn):
-        """DEFAULT_GROUP_LABEL, or with a number when a bound group already has it."""
+    def _free_label(cls, conn, channel=None):
+        """DEFAULT_GROUP_LABEL, or with a number when a bound group already has it or a live
+        unused group code of another channel than `channel` holds it (director 602 defect 6: the
+        F4 hole for a code issued before names were required)."""
+        held = cls._code_labels(conn, channel, _now())
         label, n = DEFAULT_GROUP_LABEL, 1
-        while cls._label_taken(conn, label):
+        while cls._label_taken(conn, label) or label in held:
             n += 1
             label = f"{DEFAULT_GROUP_LABEL}{n}"
         return label
@@ -419,9 +445,7 @@ class StateGroups:
                 raise StateConflict("group_label_taken: a bound group already has this name; choose another")
             # Review F4: a live code of another channel with this name would bind second and be
             # refused in the group, where the dashboard never hears it - refuse it here instead.
-            if any(unicodedata.normalize("NFKC", r[0]).strip() == label for r in conn.execute(
-                    "SELECT label FROM state_owner_channel_codes WHERE kind='group' AND channel<>? AND used_at IS NULL "
-                    "AND retired_at IS NULL AND expires_at>? AND label IS NOT NULL", (channel, moment.isoformat()))):
+            if label in self._code_labels(conn, channel, moment):
                 raise StateConflict("group_label_taken: an unused code for another channel's group has this name; "
                                     "choose another")
             conn.execute("DELETE FROM state_owner_channel_codes WHERE channel=? AND kind='group' AND used_at IS NULL",
@@ -530,8 +554,8 @@ class StateGroups:
                 raise StateConflict(refusal)
             if code is None or code["used_at"] or code["retired_at"] or datetime.fromisoformat(code["expires_at"]) <= moment:
                 raise StateConflict("code_expired")
-            self._bind(conn, channel, room_ref, code["label"] or self._free_label(conn), rows[0]["mention_prefix"],
-                       rows[0]["code_hash"], moment)
+            self._bind(conn, channel, room_ref, code["label"] or self._free_label(conn, channel),
+                       rows[0]["mention_prefix"], rows[0]["code_hash"], moment)
             conn.execute("DELETE FROM state_pending_groups WHERE channel=?", (channel,))
             notice = self._out_row(conn, channel, room_ref, "bind_notice", BIND_NOTICE, moment)
         return {"bound": True, "channel": channel, "group_ref": room_ref, "notice": BIND_NOTICE,
@@ -662,7 +686,7 @@ class StateGroups:
                                      (channel, group_ref, prefix, digest, moment.isoformat()))
                         refusal = "pending_owner_pick"
             if refusal is None:
-                label = row["label"] or self._free_label(conn)  # a code issued before names were required
+                label = row["label"] or self._free_label(conn, channel)  # a code issued before names were required
                 self._bind(conn, channel, group_ref, label, prefix, digest, moment)
                 notice = self._out_row(conn, channel, group_ref, "bind_notice", BIND_NOTICE, moment)
                 result = {"bound": True, "channel": channel, "group_ref": group_ref, "label": label,

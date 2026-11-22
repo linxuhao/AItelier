@@ -196,6 +196,47 @@ def test_a_group_name_is_required_and_unlike_every_bound_groups_on_any_channel(w
     assert world.owner.groups.issue_group_code("wechat", "工作群")["code"].startswith("G-")
 
 
+def test_director_602_6_a_default_name_skips_another_channels_live_code_and_live_names_are_unique_in_the_db(world):
+    """Director 602 defect 6: a code issued before names were required binds under a default name;
+    that name skips one another channel's live code holds (else that code's bind would be refused
+    group_label_taken in its group, unseen on the dashboard). And a live group's name is unique
+    in the database itself (a partial unique index); a migration renames a shared one first."""
+    import sqlite3
+    bind(world, "wechat", OWNER_WX, key="bind-wx")
+    bind(world, "slack", "U_OWNER", key="bind-slack")
+    old = world.owner.groups.issue_group_code("wechat", "旧码")["code"]
+    with world.db.get_connection() as conn:  # a code of before names were required
+        conn.execute("UPDATE state_owner_channel_codes SET label=NULL WHERE channel='wechat' AND kind='group'")
+        conn.commit()
+    held = world.owner.groups.issue_group_code("slack", state_groups.DEFAULT_GROUP_LABEL)["code"]
+    bound = execute(world.steward, "bind_owner_group", {"request_key": "bg-old", "channel": "wechat", "group_ref": ROOM,
+                                                        "sender_ref": OWNER_WX, "code": old, "mention_prefix": "@管家"},
+                    allow_write=True)
+    assert bound["label"] == state_groups.DEFAULT_GROUP_LABEL + "2"
+    slack = execute(world.steward, "bind_owner_group", {"request_key": "bg-slack", "channel": "slack", "group_ref": "C1",
+                                                        "sender_ref": "U_OWNER", "code": held, "mention_prefix": "@管家"},
+                    allow_write=True)
+    assert slack["bound"] is True and slack["label"] == state_groups.DEFAULT_GROUP_LABEL
+    # The database refuses a second live group of a name; an unbound one may share it.
+    with world.db.get_connection() as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at) "
+                         "VALUES('wechat','r9@chatroom',?,'@管家','2026-01-01T00:00:00+00:00')",
+                         (state_groups.DEFAULT_GROUP_LABEL,))
+        conn.execute("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at,revoked_at) "
+                     "VALUES('wechat','r8@chatroom',?,'@管家','2026-01-01T00:00:00+00:00','2026-01-02T00:00:00+00:00')",
+                     (state_groups.DEFAULT_GROUP_LABEL,))
+        # A database of before the index with a shared live name: the migration renames the later one.
+        conn.execute("DROP INDEX state_owner_groups_live_label")
+        conn.execute("UPDATE state_owner_groups SET label=? WHERE group_ref=?", (state_groups.DEFAULT_GROUP_LABEL, ROOM))
+        conn.commit()
+    StateService(world.db, actor="fixture", project_read_trusted=True)
+    labels = rows(world, "SELECT label FROM state_owner_groups WHERE revoked_at IS NULL ORDER BY bound_at")
+    assert sorted(labels) == sorted({(state_groups.DEFAULT_GROUP_LABEL,), (state_groups.DEFAULT_GROUP_LABEL + "2",)})
+    assert rows(world, "SELECT name FROM sqlite_master WHERE name='state_owner_groups_live_label'") == \
+        [("state_owner_groups_live_label",)]
+
+
 def test_the_migration_drops_the_one_live_index_and_names_an_unnamed_bound_group(world):
     bound_group(world)
     with world.db.get_connection() as conn:

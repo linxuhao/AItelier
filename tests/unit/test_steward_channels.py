@@ -2001,6 +2001,23 @@ def _db_holds(world, tmp_path, code):
     return hits
 
 
+def _floor(world, tmp_path, code):
+    """The cells that already spell `code` before any writer runs.
+
+    A stored cell can spell a six-digit window it does not hold: an ISO timestamp's digits,
+    with the punctuation dropped, are one digit string like any other, and
+    2026-11-22T10:27:18.280550 carries 271828. That floor belongs to the clock, not to the
+    writer, so a writer's claim is measured as a delta from it (`_new_hits`). A code the
+    fixture itself stored in plaintext is still caught by the raw-byte check each of these
+    tests makes, which reads contiguous ASCII and no separated digits."""
+    return _db_holds(world, tmp_path, code)
+
+
+def _new_hits(world, tmp_path, code, floor):
+    """The cells that spell `code` now and did not before the writer ran."""
+    return [hit for hit in _db_holds(world, tmp_path, code) if hit not in floor]
+
+
 def _send_conversation(world, body, key, subject=None):
     return execute(world.owner, "send_user_conversation_message",
                    {"request_key": key, "project_id": HOME, "body": body,
@@ -2024,10 +2041,11 @@ def test_a_live_code_in_the_owners_dashboard_message_to_a_driver_is_refused_reti
     for whoever read the State file."""
     caplog.set_level(logging.WARNING, logger="core.state_channels")
     code = _issue(world, monkeypatch, "slack", "711833")
+    floor = _floor(world, tmp_path, code)
     before = _counts(world)
     refused(lambda: _send_driver(world, body.format(code=code), "dm-1"), "code_sent_to_bound_account")
     assert _counts(world) == before, "no message, no request record, no source row"
-    assert _db_holds(world, tmp_path, code) == []
+    assert _new_hits(world, tmp_path, code, floor) == []
     assert "code retired" in caplog.text and code not in caplog.text
     refused(lambda: bind_message(world, code, "m-steal", sender="U-INTRUDER"), "code_retired")
     # An ordinary message to the driver still goes through.
@@ -2036,8 +2054,9 @@ def test_a_live_code_in_the_owners_dashboard_message_to_a_driver_is_refused_reti
 
 def test_a_live_code_in_the_driver_messages_subject_is_refused_like_one_in_the_body(world, tmp_path, monkeypatch):
     code = _issue(world, monkeypatch, "wechat", "711833")
+    floor = _floor(world, tmp_path, code)
     refused(lambda: _send_driver(world, "please add it", "dm-s", subject=f"code {code}"), "code_sent_to_bound_account")
-    assert _db_holds(world, tmp_path, code) == []
+    assert _new_hits(world, tmp_path, code, floor) == []
     refused(lambda: bind_message(world, code, "m-steal", channel="wechat", sender="wxid-intruder"), "code_retired")
 
 
@@ -2049,11 +2068,12 @@ def test_a_live_code_split_over_the_subject_and_the_body_is_refused(world, tmp_p
     """The subject and the body land on one row: a code split between them is read back by
     joining the two, so it is scanned as one text."""
     code = _issue(world, monkeypatch, "slack", "711833")
+    floor = _floor(world, tmp_path, code)
     send = _send_conversation if writer == "conversation" else _send_driver
     before = _counts(world)
     refused(lambda: send(world, body, "split-1", subject=subject), "code_sent_to_bound_account")
     assert _counts(world) == before
-    assert _db_holds(world, tmp_path, code) == []
+    assert _new_hits(world, tmp_path, code, floor) == []
     refused(lambda: bind_message(world, code, "m-steal", sender="U-INTRUDER"), "code_retired")
 
 
@@ -2090,6 +2110,7 @@ def test_a_live_code_broken_up_or_folded_is_refused_retired_and_never_written(wo
     bind(world)
     code = _issue(world, monkeypatch, "wechat", "711833")
     body = shape(code)
+    floor = _floor(world, tmp_path, code)
     before = _counts(world)
     if writer == "relay":
         refused(lambda: relay(world, body, "ts-code"), "code_sent_to_bound_account")
@@ -2098,25 +2119,34 @@ def test_a_live_code_broken_up_or_folded_is_refused_retired_and_never_written(wo
     else:
         refused(lambda: _send_driver(world, body, "dm-code"), "code_sent_to_bound_account")
     assert _counts(world) == before, (label, "rows written")
-    assert _db_holds(world, tmp_path, code) == [], label
+    assert _new_hits(world, tmp_path, code, floor) == [], label
     refused(lambda: bind_message(world, code, "m-steal", channel="wechat", sender="wxid-intruder"), "code_retired")
 
 
 def test_a_db_copy_holds_no_live_code_after_every_writer_refused_one(world, tmp_path, monkeypatch):
     """After each writer has refused a code - the relay in three shapes, the conversation
     writer and the message to a driver - a copy of the State file holds none of them in any
-    digit form, in any cell, nor in the raw bytes of the file and its journal."""
+    digit form, in any cell the writers could have written, nor in the raw bytes of the file
+    and its journal. What a cell spelled before the writer ran is the clock's (`_floor`), so
+    every code is measured from its own floor."""
     bind(world)
-    codes = []
-    for i, (channel, body) in enumerate([("slack", "binding code: {}"), ("wechat", "{} thanks"), ("slack", "x{}x")]):
-        code = _issue(world, monkeypatch, channel, f"{314159 + i}")
+    codes, floors = [], {}
+
+    def issue(channel, value):
+        code = _issue(world, monkeypatch, channel, value)
         codes.append(code)
+        floors[code] = _floor(world, tmp_path, code)
+        return code
+
+    for i, (channel, body) in enumerate([("slack", "binding code: {}"), ("wechat", "{} thanks"), ("slack", "x{}x")]):
+        code = issue(channel, f"{314159 + i}")
         refused(lambda: relay(world, body.format(code), f"ts-{i}"), "code_sent_to_bound_account")
-    codes.append(_issue(world, monkeypatch, "slack", "271828"))
-    refused(lambda: _send_conversation(world, codes[-1], "d"), "code_sent_to_bound_account")
-    codes.append(_issue(world, monkeypatch, "slack", "161803"))
-    refused(lambda: _send_driver(world, f"code {codes[-1]}", "dm"), "code_sent_to_bound_account")
-    assert {code: _db_holds(world, tmp_path, code) for code in codes} == {code: [] for code in codes}
+    code = issue("slack", "271828")
+    refused(lambda: _send_conversation(world, code, "d"), "code_sent_to_bound_account")
+    code = issue("slack", "161803")
+    refused(lambda: _send_driver(world, f"code {code}", "dm"), "code_sent_to_bound_account")
+    assert {code: _new_hits(world, tmp_path, code, floors[code]) for code in codes} == \
+           {code: [] for code in codes}
     base = Path(world.db.db_path)
     raw = b"".join(path.read_bytes() for path in base.parent.glob(base.name + "*") if path.is_file())
     assert not [code for code in codes if code.encode() in raw]

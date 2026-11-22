@@ -845,3 +845,36 @@ def test_no_operation_leaves_a_restart_marker(world, op):
     assert hooks
     with world.db.get_connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM state_steward_restart_due").fetchone()[0] == 0
+
+
+def test_a_removed_connection_added_again_starts_with_no_tools(world):
+    ready(world, names=("web_search",))
+    assert "mcp__sw__media__web_search" in listed(world)["effective_tools"]
+    pid = propose(world, "remove", **version(world))["proposal_id"]
+    assert approve(world, pid)["status"] == "done"
+    pid = propose(world, "add", "media", **ADD)["proposal_id"]
+    assert approve(world, pid)["status"] == "done"
+    pid = propose(world, "update", **version(world), enabled=True)["proposal_id"]
+    assert approve(world, pid)["status"] == "done" and facts(world)["enabled"] is True
+    assert not [n for n in listed(world)["effective_tools"] if n.startswith("mcp__sw__media__")]
+    assert execute(world.owner, "list_steward_connection_tools", {"conn_id": "media"})["tools"] == []
+    discover(world)
+    tools = execute(world.owner, "list_steward_connection_tools", {"conn_id": "media"})["tools"]
+    assert {t["raw_name"] for t in tools} == {t["name"] for t in TOOLS}
+    assert not [t["raw_name"] for t in tools if t["allowed"]]
+    assert not [n for n in listed(world)["effective_tools"] if n.startswith("mcp__sw__media__")]
+
+
+@pytest.mark.parametrize("op", ["label", "visibility", "enable", "disable", "tools", "reenable"])
+def test_every_update_stamps_the_proposal_as_the_last_change(world, op):
+    ready(world, enabled=op != "enable", names=("web_search",))
+    assert facts(world)["last_change"] == "dashboard"
+    if op == "reenable":
+        discover(world, tools=[{**TOOLS[0], "description": "changed"}] + TOOLS[1:])
+        pid = propose(world, "reenable", **version(world), tools=[tool(world, "web_search", allowed=True)])["proposal_id"]
+    else:
+        fields = {"label": {"label": "Renamed"}, "visibility": {"visibility": "private"}, "enable": {"enabled": True},
+                  "disable": {"enabled": False}, "tools": {"tools": [tool(world, "ocr_image", allowed=True)]}}[op]
+        pid = propose(world, "update", **version(world), **fields)["proposal_id"]
+    assert approve(world, pid)["status"] == "done"
+    assert facts(world)["last_change"] == f"proposal:{pid}"

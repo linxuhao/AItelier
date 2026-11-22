@@ -2,6 +2,8 @@
   "projects": [
     "web",
     "integrations/dsh",
-    "integrations/dsh-driver"
+    "integrations/dsh-driver",
+    "integrations/dsh-channel-wechat",
+    "integrations/wechat-bridge"
   ]
 }

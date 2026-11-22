@@ -1,0 +1,49 @@
+name: cost_audit
+version: 1
+description: >-
+  Read-only cost audit of the project's checks and process: measure, then propose. The child
+  changes nothing but the one JSON report it writes during the step, and should not be the one
+  who added the gates it audits. Run each measuring command once with timing (the commands are
+  data, any language or runner; with none given, find the project's own checks, and a project
+  with no tests measures its build, review and delivery time instead). Look for nested test
+  runners that re-run work, expensive shared setup rebuilt per test, the same suite run twice,
+  tests that wait on real time or loop to a production-size limit, gates or abstractions with
+  one user, and full review ceremony for test-, doc- or comment-only changes. Report keys:
+  measured_commands [{command, seconds, exit}], baseline {total_seconds, previous_total_seconds
+  or null}, costliest [{item, seconds}] (the ten slowest tests, steps or gates), findings
+  [{category: over_engineering|over_gating|over_testing|performance|ceremony, where, cost_seconds,
+  evidence, proposed_change, still_guarded_by, risk: low|medium|high}] and recommendations. A
+  finding that removes a test or gate names in still_guarded_by what keeps guarding its risk (a
+  mutation another test still catches, a remaining test) or says it needs the owner's decision.
+  The report is a proposal: nothing waits on it, and the owner decides what changes.
+params:
+  report_path:
+    type: str
+    default: cost-audit.json
+    description: Workspace-relative path of the JSON report (keep it inside scope).
+  measure_commands:
+    type: list[str]
+    description: >-
+      The commands that run the project's checks, one whole command line each, for example
+      "npm test", "go test ./...", "cargo test" or "make check". Unset: the child finds them.
+  look_at:
+    type: list[str]
+    default: ["**"]
+    description: Globs of what the audit looks at (default the whole checkout).
+  previous_report:
+    type: str
+    description: The last cost audit's report, whose baseline this one is compared with.
+  scope:
+    type: list[str]
+    default: [cost-audit.json]
+    description: Globs the delivery may touch; must match report_path.
+items:
+  - id: audit
+    title: "Cost audit of ${look_at} (measured with: ${measure_commands}; compared with: ${previous_report}); write ${report_path}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: [$report_path]}
+      - predicate: report_json
+        args:
+          path: $report_path
+          require_keys: [measured_commands, baseline, costliest, findings, recommendations]

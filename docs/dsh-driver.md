@@ -374,6 +374,18 @@ template's name, version and file sha256 with the params. A template changes onl
 through a reviewed code change, like the predicate library. When no template
 fits a task, add one that way; never improvise items.
 
+The plugin ships a default set in `integrations/dsh-director/todo/todo_templates/`,
+used when the host names no directory: `change_files` (change named files inside
+a scope) and `cost_audit`. `cost_audit` is the read-only audit director.md asks
+for when checks get slower or after every 20 delivered work items: the child
+times the project's check commands (given as data in `measure_commands`, any
+language or runner, or none) and writes one JSON report (`report_path`, default
+`cost-audit.json`) with `measured_commands`, `baseline`, `costliest`, `findings`
+(each with category, where, cost, evidence, proposed change, what still guards
+it, risk) and `recommendations`. It proposes; nothing waits on it. This
+repository's `todo_templates/cost_audit.yaml` is a symlink to the plugin's file,
+so both sets carry one source.
+
 Director only, registered on the root agent's scope (children never see them):
 
 - `todo_templates()` → `templates`: the templates with name, version,

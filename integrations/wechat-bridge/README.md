@@ -267,6 +267,9 @@ node --test bridge.test.mjs qr-svg.test.mjs
 Fake Wechaty bots; nothing loads the puppet or reaches WeChat. Fresh real bots started
 and stopped in one process are checked offline by the image build (above).
 
-The image build also runs this suite, in its `build` stage, after the sources are copied: no
-pytest gate can run it (the aitelier image has no bridge dependencies), so the build is its only
-gate. The test files and fixtures are removed in that same layer and never reach the image.
+The image build also runs this suite, in its `build` stage, after the sources are copied, and that
+build is its only gate: the repository's node gate runs the projects the repo-root
+`node_projects.json` names (`web`, `integrations/dsh`, `integrations/dsh-driver`), and the bridge is
+not among them. The gate installs a project's dependencies itself (`aitelier/tools/run_tests`), so a
+missing bridge dependency in the aitelier image is not what keeps this suite out. The test files and
+fixtures are removed in that same layer and never reach the image.

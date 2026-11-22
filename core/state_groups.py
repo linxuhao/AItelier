@@ -385,7 +385,8 @@ class StateGroups:
         """A fresh group code for `channel` (owner session only), named `label` - the name of
         the group it binds (7.7.9, step 23.1): the channel must have a bound account and fewer
         than groups_per_channel bound groups (else too_many_groups), and no bound group of any
-        channel may have that name (else group_label_taken). Any earlier unused group code of
+        channel nor a live unused group code of another channel may have that name (else
+        group_label_taken). Any earlier unused group code of
         the channel stops working; account codes are untouched."""
         self.steward._owner()
         if channel not in CHANNELS:
@@ -403,6 +404,13 @@ class StateGroups:
                                     "channel; unbind one first")
             if self._label_taken(conn, label):
                 raise StateConflict("group_label_taken: a bound group already has this name; choose another")
+            # Review F4: a live code of another channel with this name would bind second and be
+            # refused in the group, where the dashboard never hears it - refuse it here instead.
+            if any(unicodedata.normalize("NFKC", r[0]).strip() == label for r in conn.execute(
+                    "SELECT label FROM state_owner_channel_codes WHERE kind='group' AND channel<>? AND used_at IS NULL "
+                    "AND retired_at IS NULL AND expires_at>? AND label IS NOT NULL", (channel, moment.isoformat()))):
+                raise StateConflict("group_label_taken: an unused code for another channel's group has this name; "
+                                    "choose another")
             conn.execute("DELETE FROM state_owner_channel_codes WHERE channel=? AND kind='group' AND used_at IS NULL",
                          (channel,))
             code = "G" + "".join(secrets.choice(_CROCKFORD) for _ in range(8))

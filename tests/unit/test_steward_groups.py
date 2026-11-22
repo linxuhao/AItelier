@@ -184,6 +184,14 @@ def test_a_group_name_is_required_and_unlike_every_bound_groups_on_any_channel(w
     bind(world, "slack", "U_OWNER", key="bind-slack")
     refused(lambda: world.owner.groups.issue_group_code("slack", "家庭群"), "group_label_taken")
     assert world.owner.groups.issue_group_code("slack", "工作群")["code"].startswith("G-")
+    # Review F4: so does another channel's unused, unexpired code; the same channel's next code
+    # replaces its own, so it may reuse the name; an expired one no longer holds it.
+    refused(lambda: world.owner.groups.issue_group_code("wechat", "工作群 "), "group_label_taken")
+    assert world.owner.groups.issue_group_code("slack", "工作群")["code"].startswith("G-")
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_owner_channel_codes SET expires_at='2000-01-01T00:00:00+00:00' WHERE kind='group'")
+        conn.commit()
+    assert world.owner.groups.issue_group_code("wechat", "工作群")["code"].startswith("G-")
 
 
 def test_the_migration_drops_the_one_live_index_and_names_an_unnamed_bound_group(world):

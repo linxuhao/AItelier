@@ -540,6 +540,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 19: the director's ownerMessageSent, kept from install() for attention.ask (the
   // steward's questions are its messages to its owner too).
   let mirrorOwnerMessage;
+  // Step 24 (7.8.9): a group requester's confirmation text goes out through the plugin's group send.
+  let sendToGroup;
   // Step 24.1a: the plugin's "this turn read outside content" (api.externalContent), kept from install().
   let externalContent = () => false;
   const host = {
@@ -572,8 +574,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     roles: table => aitelierRoles(table),
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
     async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent, turnAudience: audienceOf,
-      externalContent: external }) {
+      externalContent: external, groupSend }) {
       if (steward) mirrorOwnerMessage = ownerMessageSent;
+      if (steward && typeof groupSend === 'function') sendToGroup = groupSend;
       if (typeof audienceOf === 'function') turnAudience = audienceOf;
       if (steward && external) externalContent = external;
       const require = createRequire(env.AITELIER_DSH_ENTRY);
@@ -1021,7 +1024,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 24.1a: the steward's own catalog (its connections through the backend's gateway);
   // 24.1b: and confirmations of outward actions, the text sent back to the requester.
   { catalog: catalogOps((...args) => request(...args), { confirm: confirmOps((...args) => request(...args), { project,
-    mirror: (...args) => mirrorOwnerMessage?.(...args) }) }) });
+    mirror: (...args) => mirrorOwnerMessage?.(...args), groupSend: (...args) => sendToGroup ? sendToGroup(...args) : false }) }) });
   return host;
 }
 

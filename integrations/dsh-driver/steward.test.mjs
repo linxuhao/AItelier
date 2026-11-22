@@ -1265,6 +1265,31 @@ test('step 24.1b: the requester is the newest owner message the wake carries; th
   assert.equal(catalogOps(request).confirm, undefined, 'no confirmations without the ops');
 });
 
+test('step 24 (7.8.9): a group requester\'s confirmation goes only into that group through the group send, never the owner\'s conversation', async () => {
+  const calls = [], groupSent = [];
+  const request = async (path, body) => {
+    calls.push([path.split('/').at(-1), body]);
+    if (path.endsWith('/create_steward_confirmation')) return { result: { code: 'K7Q2A', text: 'T', channel: 'wechat', group_ref: 'r1', reply_to_message_id: 'gq2' } };
+    return { result: { message_id: 'never' } };
+  };
+  let took = true;
+  const confirm = confirmOps(request, { project: 'aitelier-home', mirror: async () => { throw new Error('no mirror for a group'); },
+    groupSend: async (...args) => { groupSent.push(args); return took; } });
+  const created = await confirm.create({ name: 'mcp__sw__calfam__create_event', arguments: { title: 't' }, requesterMessageId: 'gq2',
+    audience: 'group', questionIds: ['gq1', 'gq2'] });
+  assert.equal(created.group_ref, 'r1');
+  assert.deepEqual(calls, [['create_steward_confirmation', { name: 'mcp__sw__calfam__create_event', arguments: { title: 't' },
+    requester_message_id: 'gq2', audience: 'group', question_ids: ['gq1', 'gq2'] }]]);
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }), { group_ref: 'r1', sent: true });
+  assert.deepEqual(groupSent, [['wechat', 'r1', 'T']]);
+  assert.equal(calls.length, 1, 'nothing written into the owner\'s conversation');
+  took = false;
+  assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }),
+    { refused: 'not_delivered', reason: 'group_send_failed' });
+  assert.deepEqual(await confirmOps(request, { project: 'p' }).deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }),
+    { refused: 'not_delivered', reason: 'group_send_failed' }, 'no group send: refused, and the plugin cancels the record');
+});
+
 test('step 24.1c: the connection ops are two reads, one refresh and one proposal of kind connection_change', async () => {
   const calls = [];
   const request = async (path, body) => {

@@ -19,7 +19,7 @@ const CACHE = {
 const wake = (...ids) => 'EVENT:\n' + JSON.stringify({ events: [], driver_inbox: ids.map(id => ({ message_id: id, sender_kind: 'user' })) });
 const userMessage = text => ({ type: 'user/message', data: { message: { content: [{ type: 'text', text }] } } });
 
-function fixture({ stateDir, turn = { kind: 'owner' } } = {}) {
+function fixture({ stateDir, turn = { kind: 'owner' }, questions } = {}) {
   const calls = [];
   const dir = stateDir ?? mkdtempSync(join(tmpdir(), 'confirm-'));
   const host = {
@@ -32,7 +32,8 @@ function fixture({ stateDir, turn = { kind: 'owner' } } = {}) {
     audience: () => turn.audience ?? turn });
   const record = { status: 'confirmed', name: SEND, arguments: { to: 'a@example.com', body: 'stored' } };
   const confirm = {
-    create: async (request) => { calls.push(['create', request]); return { code: 'K7Q2A', text: 'TEXT', channel: 'slack', reply_to_message_id: request.requesterMessageId, expires_at: 'e' }; },
+    create: async (request) => { calls.push(['create', request]); return { code: 'K7Q2A', text: 'TEXT', reply_to_message_id: request.requesterMessageId, expires_at: 'e',
+      ...(request.audience === 'group' ? { channel: 'wechat', group_ref: 'room1' } : { channel: 'slack' }) }; },
     deliver: async (message) => { calls.push(['deliver', message]); return delivery.answer; },
     get: async code => { calls.push(['get', code]); return { code, ...record }; },
     cancel: async code => { calls.push(['cancel', code]); return { code, status: 'cancelled' }; },
@@ -42,7 +43,7 @@ function fixture({ stateDir, turn = { kind: 'owner' } } = {}) {
   const scope = { tools: { register: tool => tools.set(tool.name, tool) } };
   const ctx = { tools: { execute: async request => { executed.push(request); return { value: { sent: true }, content: [{ type: 'text', text: 'sent' }] }; } } };
   class HarnessError extends Error { constructor(message, code) { super(message); this.code = code; } }
-  registerConfirmTools(scope, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError, confirm, catalog });
+  registerConfirmTools(scope, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError, confirm, catalog, groupQuestions: () => questions?.ids });
   const run = (name, args, session = 'root') => tools.get(name).execute(args, { agent: { session: { id: session } }, signal: undefined,
     callId: 'c1', rootCallId: 'r1', token: 'tok-1' });
   return { catalog, calls, record, run, executed, dir, delivery };
@@ -68,7 +69,8 @@ test('request_confirmation: no person\'s message in the turn is no_requester; th
 
 test('request_confirmation: the audience it names is step 23\'s open turn - a group turn, or one it cannot read, is not the owner\'s', async () => {
   const turn = { audience: { kind: 'group', channel: 'wechat', group_ref: 'room1' } };
-  const f = fixture({ turn });
+  const questions = { ids: ['gq-1'] };
+  const f = fixture({ turn, questions });
   await f.catalog.preStep();
   f.catalog.observe({ type: 'turn/start', seq: 1 });
   f.catalog.observe(userMessage(wake('m-1')));
@@ -77,6 +79,63 @@ test('request_confirmation: the audience it names is step 23\'s open turn - a gr
   f.catalog.audience = () => { throw new Error('not yet'); };
   await f.run('request_confirmation', { name: SEND, arguments: { to: 'a@example.com' } });
   assert.deepEqual(f.calls.filter(c => c[0] === 'create').map(c => c[1].audience), ['group', 'group']);
+});
+
+test('request_confirmation in a group turn (7.8.9): the requester is the turn\'s newest question, never an owner message; the text goes to the group', async () => {
+  const turn = { audience: { kind: 'group', channel: 'wechat', group_ref: 'room1' } };
+  const questions = { ids: undefined };
+  const f = fixture({ turn, questions });
+  await f.catalog.preStep();
+  f.catalog.observe({ type: 'turn/start', seq: 1 });
+  // An owner message id in the input names no group requester; no question either: no_requester.
+  f.catalog.observe(userMessage(wake('m-1')));
+  assert.equal((await f.run('request_confirmation', { name: SEND, arguments: { to: 'a@example.com' } })).refused, 'no_requester');
+  questions.ids = ['gq-1', 'gq-2'];
+  const answer = await f.run('request_confirmation', { name: SEND, arguments: { to: 'anyone@example.com' } });
+  assert.deepEqual(answer, { code: 'K7Q2A', status: 'pending', expires_at: 'e' });
+  assert.deepEqual(f.calls, [
+    ['create', { name: SEND, arguments: { to: 'anyone@example.com' }, requesterMessageId: 'gq-2', audience: 'group', questionIds: ['gq-1', 'gq-2'] }],
+    ['deliver', { code: 'K7Q2A', text: 'TEXT', replyTo: 'gq-2', channel: 'wechat', groupRef: 'room1' }]]);
+  // The host's refusals (ambiguous_requester, withheld, group_send_budget) reach the model as
+  // they are, and nothing is delivered.
+  for (const refused of ['ambiguous_requester', 'withheld', 'group_send_budget']) {
+    const seen = [], tools = new Map();
+    registerConfirmTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx: {}, defineTool: t => t, jsonOutput: {}, HarnessError: Error,
+      confirm: { create: async () => { seen.push('create'); return { refused }; }, deliver: async () => { seen.push('deliver'); return { sent: true }; } },
+      catalog: f.catalog, groupQuestions: () => ['gq-3'] });
+    const out = await tools.get('request_confirmation').execute({ name: SEND, arguments: { to: 'x' } }, { agent: { session: { id: 'root' } } });
+    assert.deepEqual(out, { refused });
+    assert.deepEqual(seen, ['create'], refused);
+  }
+});
+
+test('25.3 calendar (7.9.6): a calendar write marked outward goes through request_confirmation in owner and group turns; a private calendar is not in a group turn\'s catalog', async () => {
+  const CREATE = 'mcp__sw__calfam__create_event', LIST = 'mcp__sw__calfam__list_events', MINE = 'mcp__sw__calme__create_event';
+  const cache = { connections: [
+    { conn_id: 'calfam', visibility: 'public', usable: true, tools: [{ name: CREATE, egress: true, outward: true }, { name: LIST, egress: false, outward: false }] },
+    { conn_id: 'calme', visibility: 'private', usable: true, tools: [{ name: MINE, egress: true, outward: true }] }],
+    effective_tools: [CREATE, LIST, MINE], effective_hash: 'c'.repeat(64) };
+  for (const kind of ['owner', 'group']) {
+    const calls = [];
+    const turn = { kind };
+    const catalog = new StewardCatalog({ host: { connections: async () => cache, resyncDue: async () => {}, humanInput: t => t.startsWith('EVENT:'),
+      requesterOf: () => 'm-1' }, stateDir: mkdtempSync(join(tmpdir(), 'cal-')), rootSession: 'root', registryNames: () => cache.effective_tools,
+    audience: () => turn });
+    await catalog.preStep();
+    catalog.observe({ type: 'turn/start', seq: 1 });
+    catalog.observe(userMessage(wake('m-1')));
+    const tools = new Map();
+    registerConfirmTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx: {}, defineTool: t => t, jsonOutput: {}, HarnessError: Error,
+      confirm: { create: async r => { calls.push(r); return { code: 'K7Q2A', text: 'T', channel: 'wechat', reply_to_message_id: r.requesterMessageId, expires_at: 'e' }; },
+        deliver: async () => ({ sent: true }) }, catalog, groupQuestions: () => ['gq-1'] });
+    const ask = name => tools.get('request_confirmation').execute({ name, arguments: { title: '周六聚餐', start: '2026-11-28T18:00' } },
+      { agent: { session: { id: 'root' } } });
+    assert.equal((await ask(CREATE)).status, 'pending', kind);
+    assert.equal((await ask(LIST)).refused, 'not_outward', 'reading the calendar needs no confirmation');
+    assert.equal((await ask(MINE)).refused ?? 'pending', kind === 'owner' ? 'pending' : 'not_visible_in_this_turn', kind);
+    assert.deepEqual(calls.map(c => [c.name, c.audience]), kind === 'owner' ? [[CREATE, 'owner'], [MINE, 'owner']] : [[CREATE, 'group']]);
+    assert.equal(catalog.catalog('root').has(MINE), kind === 'owner');
+  }
 });
 
 test('request_confirmation: only an outward tool of this turn\'s catalog, only in the steward\'s own session', async () => {

@@ -6,8 +6,10 @@
  *  - the AUDIENCE of a turn: a turn whose first step claims a message tagged by the host
  *    (`source.kind` GROUP_SOURCE) is that group's turn, any other turn the owner's; input of
  *    another audience is put back to open the next turn;
- *  - the GUARD: a group turn may call only GROUP_TOOLS (at most turnToolCalls calls, every call
- *    counted, refused or not, per turn id from 0), an owner turn never the family memory tools, and after a group turn,
+ *  - the GUARD: a group turn may call only GROUP_TOOLS and the turn's connection catalog (public
+ *    connections only, `connectionTools`) - at most turnToolCalls top-level calls, every one
+ *    counted, refused or not, per turn id from 0; a nested call (call_tool, run_confirmed) is
+ *    judged by name and not counted again - an owner turn never the family memory tools, and after a group turn,
  *    until the owner writes, an owner turn not the PAUSED_TOOLS (group-pause.json);
  *  - the FOLD: each finished group turn is replaced on the surface by one fixed line at the
  *    first step of the next turn (DSH's own positional replace, the one compaction uses), so
@@ -21,17 +23,23 @@ import { withoutLeadingClockLines } from './core.mjs';
 
 export const GROUP_SOURCE = 'dsh-director-group';
 export const FOLD_SOURCE = 'dsh-director-group-fold';
-/** What a group turn may call (7.7.5): the public portfolio reads, the family memory and (step
- *  25 C4, 7.9.5, owner 2026-11-21) the family lists' show, add and check - never list_remove.
+/** What a group turn may call (7.7.5): the public portfolio reads, the family memory, (step
+ *  25 C4, 7.9.5, owner 2026-11-21) the family lists' show, add and check - never list_remove -
+ *  and (step 24, 7.8.8) the way to the turn's connection tools: search_tools and call_tool find
+ *  and call only the turn's catalog, which in a group turn holds public connections alone, and an
+ *  outward one runs only after the asker confirms it in the group (request_confirmation,
+ *  run_confirmed; 7.8.9). The connection tools themselves are the catalog's names
+ *  (`connectionTools`), never listed here; the four connection-configuration tools are not here.
  *  Any tool added later is refused in a group turn by default. */
 export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfolio_project', 'family_memory_note',
-  'family_memory_show', 'list_show', 'list_add', 'list_check']));
+  'family_memory_show', 'list_show', 'list_add', 'list_check', 'search_tools', 'call_tool', 'request_confirmation',
+  'run_confirmed']));
 /** The family memory is for group turns only (7.7.8a, platform director 420). */
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
  *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
 export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose']));
-export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools and list_show, list_add, list_check; your last words are your reply to the group';
+export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed); your last words are your reply to the group';
 export const familyRefusal = 'family memory is for group turns only';
 export const pausedRefusal = 'a group turn ran since your owner last wrote; this waits until your owner writes';
 export const answerNow = 'answer now';
@@ -172,8 +180,10 @@ export function filterCompactionRequest(options, events, createUserMessage) {
  *  The merge count and the tool call count belong to one turn id (`current.turn`): each turn
  *  starts them at 0, and only a group turn counts (7.7.3 item 3, 7.7.5). */
 export class GroupTurns {
-  constructor({ stateDir, limits, log = () => {}, pausedTools = [], neutralKinds = [] }) {
-    Object.assign(this, { limits, log });
+  /** @param connectionTools () => the Set of connection tool names this turn may use (the
+   *  steward's catalog: in a group turn its public connections), or undefined for none. */
+  constructor({ stateDir, limits, log = () => {}, pausedTools = [], neutralKinds = [], connectionTools = () => undefined }) {
+    Object.assign(this, { limits, log, connectionTools });
     this.neutral = new Set([...NEUTRAL, ...neutralKinds]);
     this.pausedTools = new Set([...PAUSED_TOOLS, ...pausedTools]);
     this.pauseFile = stateDir ? join(stateDir, 'group-pause.json') : undefined;
@@ -260,15 +270,19 @@ export class GroupTurns {
 
   /** The guard's verdict for one root tool call (a refusal string, or undefined). The audience
    *  first, then the count: only a group turn counts its calls, from 0 in each turn, and it
-   *  counts EVERY call the guard sees (a refused one too, as resume() counts them from the log),
-   *  so a group turn is bounded at turnToolCalls calls: from the next one on every call is
-   *  answerNow, whatever its name; before that a name off the whitelist is groupTurnRefusal. */
-  guard(name) {
+   *  counts EVERY top-level call the guard sees (a refused one too, as resume() counts them from
+   *  the log), so a group turn is bounded at turnToolCalls calls: from the next one on every call
+   *  is answerNow, whatever its name; before that a name off the whitelist (GROUP_TOOLS and the
+   *  turn's connection catalog) is groupTurnRefusal. A `nested` call - the one call_tool or
+   *  run_confirmed makes inside a counted call - is judged by its name alone and not counted. */
+  guard(name, { nested = false } = {}) {
     const turn = this.open();
     if ((turn?.audience.kind ?? 'group') === 'group') {
-      if (turn) turn.calls += 1;
-      if (turn && turn.calls > this.limits.turnToolCalls) return answerNow;
-      if (!GROUP_TOOLS.has(name)) return groupTurnRefusal;
+      if (turn && !nested) turn.calls += 1;
+      if (turn && !nested && turn.calls > this.limits.turnToolCalls) return answerNow;
+      let catalog;
+      try { catalog = this.connectionTools(); } catch { catalog = undefined; }
+      if (!GROUP_TOOLS.has(name) && !catalog?.has(name)) return groupTurnRefusal;
       return turn ? undefined : answerNow;
     }
     if (FAMILY_TOOLS.has(name)) return familyRefusal;

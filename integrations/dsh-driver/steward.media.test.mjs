@@ -5,7 +5,7 @@
  *  there is some, storeMedia's binding read, and a wake shows attachments one line each. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aitelierHost } from './runtime.mjs';
@@ -29,6 +29,22 @@ test('the media capability: a steward with a media root has it (and validates); 
   assert.ok(!bare.capabilities.includes('media')); assert.equal(bare.media, undefined);
   const director = aitelierHost(env({ AITELIER_MEDIA_ROOT: root }));
   assert.ok(!director.capabilities.includes('media'), 'the director gets the root (24.2b uses it), not the steward\'s tools');
+});
+
+test('ingest through the host adapter keeps the caller\'s signal: already aborted is unavailable, open never called, nothing stored', async () => {
+  // Review T2: host.d.ts media.ingest(meta, open, {signal}) - the adapter the plugin is given
+  // (aitelierHost(...).media, not a fixture of its own) must hand the signal to the library.
+  const root = mkdtempSync(join(tmpdir(), 'steward-media-'));
+  const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: root }));
+  let opened = 0;
+  const open = async () => { opened += 1; return PNG; };
+  const meta = { channel: 'wechat', messageRef: 'w1', index: 0, audience: 'owner', source: 'in' };
+  assert.deepEqual(await host.media.ingest(meta, open, { signal: AbortSignal.abort() }), { refused: 'unavailable' });
+  assert.equal(opened, 0, 'not one byte was asked for');
+  assert.equal(existsSync(join(root, 'owner', 'index.jsonl')), false, 'no row');
+  // Without a signal (or a live one) the same call stores it.
+  const stored = await host.media.ingest(meta, open, { signal: new AbortController().signal });
+  assert.match(stored.ref, /^m_[0-9a-f]{16}$/); assert.equal(opened, 1);
 });
 
 test('the media root comes from AITELIER_MEDIA_ROOT (absolute) or there is none', () => {

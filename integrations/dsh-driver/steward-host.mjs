@@ -862,7 +862,7 @@ export function groupOps({ request, toolRequest = request, project, me }) {
  *  answers are stored as `generated` under the turn's audience. A refusal is {refused}. */
 export function mediaOps({ request, library, gatewayFetch }) {
   return {
-    ingest: (meta, open) => library.ingest(meta, open),
+    ingest: (meta, open, options) => library.ingest(meta, open, options),
     resolve: async ref => library.lookup(ref),
     read: ref => library.read(ref),
     setProtected: fn => library.setProtected(fn),

@@ -1,34 +1,3 @@
-From 32e2443607038a9472f6f017cf5b6154649f7b1d Mon Sep 17 00:00:00 2001
-From: AItelier wechat-bridge fork <noreply@aitelier.invalid>
-Date: Sun, 22 Nov 2026 12:03:01 +0000
-Subject: [PATCH] Carry every incoming message type out of the addon
-
-The addon decided which messages exist: incoming_text dropped anything whose type
-was not 1 before TypeScript could look at it, so images (3), voice (34), video
-(43), stickers (47), app messages and quoted replies (49/57) and system notices
-(10000) never left native code.
-
-The addon is a protocol client, not a policy. It now drops outgoing only and
-reports WeChat's own message type with the raw content/inline_data bytes (base64),
-so the consumer can see what arrived. Which arriving types may enter a
-conversation stays the consumer's decision: the bridge admits text only, and system
-notices and app messages stay out of conversations until a rule says otherwise.
-
-Text is unchanged: type 1 keeps the same JSON shape, the sender-in-content group
-split, and a group message without a valid sender is still skipped, never credited
-to the group.
-
-The Puppet maps the payload: text stays Text, image/voice/video/sticker map to
-their Wechaty types, and every type this puppet does not model - a system notice
-included - is Unknown, never Text, so WeChat's own announcement cannot read as a
-member speaking.
----
- native/src/lib.rs      | 173 ++++++++++++++++++++++++++++++++++++++++-
- src/native.ts          |  27 ++++++-
- src/puppet-neo.ts      |  38 ++++++++-
- test/ding-dong.test.ts |  41 +++++++++-
- 4 files changed, 269 insertions(+), 10 deletions(-)
-
 diff --git a/native/src/lib.rs b/native/src/lib.rs
 index ec6c930..06c97f6 100644
 --- a/native/src/lib.rs
@@ -294,7 +263,7 @@ index eea2d34..6cdf763 100644
    lookupSelf(): Promise<SelfProfile>
    logout(): Promise<{ accepted: boolean }>
 diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
-index 9da9e02..46ab9d1 100644
+index 9da9e02..414f487 100644
 --- a/src/puppet-neo.ts
 +++ b/src/puppet-neo.ts
 @@ -2,10 +2,33 @@ import { setTimeout as delay } from 'node:timers/promises'
@@ -341,7 +310,56 @@ index 9da9e02..46ab9d1 100644
  
    constructor(options: PuppetOptions = {}) {
      super(options)
-@@ -236,7 +259,16 @@ export class PuppetNeo extends Puppet {
+@@ -125,14 +148,46 @@ export class PuppetNeo extends Puppet {
+   override async contactRawPayload(id: string): Promise<payloads.Contact> {
+     if (id === this.currentUserId) return this.selfContact(id)
+     const contact = this.contacts.get(id)
+-    if (!contact) throw new Error('Neo has no payload for this contact')
+-    return contact
++    if (contact) return contact
++    // Wechaty loads a sender before a consumer sees the message, and Neo caches only the
++    // peers this login has heard from, so an uncached peer used to have no payload at all:
++    // reading the sender (its type, its name) threw, and the message was dropped with it.
++    // The id is all this puppet can honestly say about such a contact: no display name is
++    // invented, and it is not an official account by type.
++    return {
++      id,
++      name: id,
++      avatar: '',
++      phone: [],
++      type: types.Contact.Individual,
++      gender: types.ContactGender.Unknown,
++    }
+   }
+ 
+   override async contactRawPayloadParser(payload: payloads.Contact): Promise<payloads.Contact> {
+     return payload
+   }
+ 
++  /**
++   * A room as far as Neo can describe one: the id it already knows. Wechaty asks for it
++   * when it loads a group message's Room, and without it the mixin's
++   * `this.roomRawPayload(...)` call is a TypeError: `Room.find` turns that into an `error`
++   * event and `Message.ready()` still resolves, so the message is emitted - but the
++   * framework's own post-emit `msg.room()` and any consumer's `message.room()` throw, and
++   * the bridge lost every group message that way before it handled it.
++   *
++   * Neo's sync stream names the group but carries no topic and no member roster, so
++   * those stay empty and `Room.ready()` - which asks for the roster too - remains
++   * unsupported by this puppet.
++   */
++  override async roomRawPayload(id: string): Promise<payloads.Room> {
++    return { id, topic: '', memberIdList: [], adminIdList: [] }
++  }
++
++  override async roomRawPayloadParser(payload: payloads.Room): Promise<payloads.Room> {
++    return payload
++  }
++
+   override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
+     if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
+     const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
+@@ -236,7 +291,16 @@ export class PuppetNeo extends Puppet {
        for (const item of page.messages) {
          if (this.messages.has(item.id)) continue
          this.rememberContact(item.talker)
@@ -360,7 +378,7 @@ index 9da9e02..46ab9d1 100644
            putRecent(this.rooms, item.room, true)
            putRecent(this.messages, item.id, { ...text, roomId: item.room })
 diff --git a/test/ding-dong.test.ts b/test/ding-dong.test.ts
-index 72e7b75..c3a0983 100644
+index 72e7b75..65687d2 100644
 --- a/test/ding-dong.test.ts
 +++ b/test/ding-dong.test.ts
 @@ -4,7 +4,7 @@ import { test } from 'node:test'
@@ -390,7 +408,7 @@ index 72e7b75..c3a0983 100644
    /** Thrown by NewSync instead of delivering messages. */
    laterSync?: Error
  }
-@@ -190,6 +192,41 @@ test('group text names the group and the member, and the reply goes to the group
+@@ -190,6 +192,77 @@ test('group text names the group and the member, and the reply goes to the group
    }
  })
  
@@ -423,6 +441,42 @@ index 72e7b75..c3a0983 100644
 +    assert.equal(system.messageType, 10000)
 +    assert.equal(system.roomId, room)
 +    assert.equal(system.text, undefined)
++    assert.deepEqual(events.errors, [])
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('a room payload is answered from the sync stream, so a group message\'s room() does not throw', async () => {
++  const { puppet, events } = scriptedPuppet([], () => ({}))
++  // Wechaty answers a group message's room() by asking the puppet for that room's
++  // payload (Message.ready() -> Room.find({ id }) -> roomPayload). Before this answer
++  // existed that call threw `this.roomRawPayload is not a function`, so no consumer
++  // could load the room a group message names.
++  const payload = await puppet.roomPayload(room)
++  assert.equal(payload.id, room)
++  // Neo names the group in the sync stream and nothing else: no topic, no roster.
++  assert.equal(payload.topic, '')
++  assert.deepEqual(payload.memberIdList, [])
++  assert.deepEqual(payload.adminIdList, [])
++  assert.deepEqual(events.errors, [])
++})
++
++test('a sender Neo has not cached is still nameable, and is not an official account', async () => {
++  const { puppet, events } = scriptedPuppet([], () => ({ messages: [direct] }))
++  const delivered = waitFor<payloads.EventMessage>(done => puppet.once('message', done), 'message')
++  await puppet.start()
++  try {
++    await delivered
++    // Wechaty loads the sender before a consumer sees the message; a peer this login has
++    // not heard from used to reject the load and the message went with it.
++    const stranger = await puppet.contactPayload('fixture-stranger')
++    assert.equal(stranger.id, 'fixture-stranger')
++    assert.equal(stranger.name, 'fixture-stranger')
++    assert.notEqual(stranger.type, types.Contact.Official)
++    // The cached sender and the logged-in account keep the payloads they had.
++    assert.equal((await puppet.contactPayload(sender)).id, sender)
++    assert.equal((await puppet.contactPayload(username)).name, profile.nickname)
 +    assert.deepEqual(events.errors, [])
 +  } finally {
 +    await puppet.stop()

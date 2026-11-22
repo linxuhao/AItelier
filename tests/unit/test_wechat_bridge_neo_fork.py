@@ -155,6 +155,7 @@ def test_the_pin_names_a_commit_and_the_snapshot_says_which(tmp_path: Path, pin:
 
 def test_every_pinned_file_is_vendored_unchanged(pin: dict) -> None:
     assert pin["files"], "pin.json pins no files"
+    assert len(pin["files"]) == 7, "the pin no longer names the seven upstream blobs the fork carries"
     for entry in pin["files"]:
         vendored = SNAPSHOT / entry["path"]
         assert vendored.is_file(), f"{entry['path']} is pinned but not vendored"
@@ -207,6 +208,22 @@ def test_the_patch_applies_to_the_pinned_bytes(tmp_path: Path, pin: dict) -> Non
     assert "function messageType({ messageType }: IncomingMessage): types.Message {" in puppet
     assert "default: return types.Message.Unknown" in puppet
     assert "type: types.Message.Text }" not in puppet, "the payload type is still a constant"
+    # Which also answers the two payloads Wechaty asks for when a message arrives: the
+    # room a group message was posted in, and a sender neo has not cached. Without the
+    # room payload `Room.find` fails (`roomRawPayload is not a function`) and every
+    # consumer's `message.room()` throws; without the contact one the sender has no
+    # payload to read (`Neo has no payload for this contact`).
+    assert "override async roomRawPayload(id: string): Promise<payloads.Room> {" in puppet
+    assert "return { id, topic: '', memberIdList: [], adminIdList: [] }" in puppet, (
+        "the room payload carries more than neo can supply (a topic, a member roster)"
+    )
+    assert "override async roomRawPayloadParser(payload: payloads.Room): Promise<payloads.Room> {" in puppet
+    assert "Neo has no payload for this contact" not in puppet, "an uncached sender still throws"
+    assert "if (contact) return contact" in puppet
+    assert "type: types.Contact.Individual," in puppet, "an uncached contact is not nameable as itself"
+    fork_tests = (snapshot / "test/ding-dong.test.ts").read_text(encoding="utf-8")
+    assert "await puppet.roomPayload(room)" in fork_tests, "the fork does not test the room payload"
+    assert "fixture-stranger" in fork_tests, "the fork does not test an uncached sender"
 
 
 def test_the_native_stage_builds_the_pinned_commit_with_the_pinned_patch(pin: dict) -> None:
@@ -239,6 +256,38 @@ def test_the_native_stage_builds_the_pinned_commit_with_the_pinned_patch(pin: di
     assert "cargo build --release --locked" in native
     assert "git apply" in native
     assert re.search(r"npm-cli\.js test", native), "the native stage does not test what it built"
+
+
+def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin: dict) -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    native = dict(docker_stages(dockerfile))["native"]
+    name = Path(pin["patch"]["path"]).name
+
+    # Exactly one patch is carried into the build: the pinned one, by its own name.
+    copied = [line for line in native.splitlines() if re.match(r"^COPY\s", line) and ".patch" in line]
+    assert len(copied) == 1, f"the native stage copies {len(copied)} patch lines: {copied}"
+    sources = [token for token in copied[0].split() if token.endswith(".patch")]
+    assert sources == [f"neo-fork/{name}"], f"the build copies {sources}, the pin names neo-fork/{name}"
+
+    # Its digest is checked against pin.json's before anything is patched, and the check
+    # precedes the apply: an unverified patch would make the pin a comment.
+    read = re.search(rf"const\s+patch\s*=\s*readFileSync\('([^']*{re.escape(name)})'\)", native)
+    assert read, f"the native stage never reads {name}"
+    compare = re.search(r"if \(sha256\(patch\) !== pin\.patch\.sha256\) throw new Error\(", native)
+    assert compare, "the native stage applies the patch without checking pin.json's sha256 for it"
+    check_at = re.search(r"git apply --check (\S+)", native)
+    apply_at = re.search(r"git apply (?!-)(\S+)", native)
+    assert check_at and apply_at, "the native stage does not check the patch before applying it"
+    assert apply_at.group(1) == check_at.group(1) == read.group(1), (
+        f"the stage verifies {read.group(1)} and applies {apply_at.group(1)}"
+    )
+    assert native.index(compare.group(0)) < native.index(check_at.group(0)) < native.index(apply_at.group(0)), (
+        "the digest is checked, or the patch tested, after it was already applied"
+    )
+
+    # One patch, applied once: a second apply would land on a tree the pin never described.
+    applies = re.findall(r"git apply (?!-)(\S+)", native)
+    assert applies == [read.group(1)], f"the native stage applies {applies}"
 
 
 def test_the_image_overlays_exactly_the_fork_addon_and_its_dist(pin: dict) -> None:

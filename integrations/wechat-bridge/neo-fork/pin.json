@@ -44,6 +44,6 @@
   ],
   "patch": {
     "path": "integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch",
-    "sha256": "5c376513f12cc36dba996c2ef3fad4deaa3bf238118d22a7444511f75fece90b"
+    "sha256": "10da097f0c1e06fd2f8a65e1da69e9d2416e857210cb03dafba86d2ae78e17ed"
   }
 }

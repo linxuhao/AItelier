@@ -47,9 +47,14 @@ function fakeBot({ known = ['wxid_owner'] } = {}) {
   return bot;
 }
 
+/** A message shaped like the live puppet's: neo's payload carries `roomId` for a group
+ *  message and nothing for a 1:1 one, and `room()` throws the TypeError Wechaty raises
+ *  when the puppet answers no room payload (`this.roomRawPayload is not a function`) - a
+ *  throwing fake here is the witness that the bridge never asks for a Room object. */
 function message({ id = 'm1', from = 'wxid_owner', text = 'hello', type = types.Message.Text, self = false,
-  room = undefined, contactType = types.Contact.Unknown, date = new Date('2026-11-18T10:00:00Z') } = {}) {
-  return { id, self: () => self, room: () => room, type: () => type, text: () => text, date: () => date,
+  roomId, contactType = types.Contact.Unknown, date = new Date('2026-11-18T10:00:00Z') } = {}) {
+  return { id, self: () => self, room: () => { throw new TypeError('this.roomRawPayload is not a function'); },
+    type: () => type, text: () => text, date: () => date, payload: roomId ? { roomId } : {},
     talker: () => ({ id: from, type: () => contactType }) };
 }
 
@@ -194,7 +199,7 @@ test('only 1:1 text messages from another contact become events', async () => {
   const { bridge, json, login } = await started();
   try {
     const bot = await login();
-    bot.emit('message', message({ id: 'room', room: { id: 'r@chatroom' } }));
+    bot.emit('message', message({ id: 'room', roomId: 'r@chatroom' }));
     bot.emit('message', message({ id: 'self', self: true }));
     bot.emit('message', message({ id: 'image', type: types.Message.Image }));
     bot.emit('message', message({ id: 'official-type', from: 'wxid_x', contactType: types.Contact.Official }));
@@ -708,7 +713,7 @@ test('run.sh puts the container on its own network, creating it only when missin
 
 // --- step 23: the family group (design-steward 7.7.11) --------------------------------------
 const ROOM = 'r1@chatroom';
-const roomMessage = (options = {}) => message({ room: { id: options.roomId ?? ROOM }, from: 'wxid_m1', ...options });
+const roomMessage = (options = {}) => message({ roomId: options.roomId ?? ROOM, from: 'wxid_m1', ...options });
 const withRooms = async (s, rooms = [{ room_ref: ROOM, prefix: '@管家' }], owner = 'wxid_owner') =>
   assert.equal((await s.json('/rooms', { method: 'PUT', body: { owner_ref: owner, rooms } }))[0], 200);
 
@@ -780,4 +785,32 @@ test('group: sends go to bound rooms only, one queue with the gap, and a room\'s
   assert.deepEqual(bot.said.map(x => x.text), ['a1', 'a2', 'a3']);
   assert.deepEqual(slept, [10000, 10000]);
   await s.bridge.close();
+});
+
+test('group: a message whose room() throws still reaches the ring, because the payload carries the room id', async () => {
+  // The live puppet's own message: `room()` raises the TypeError Wechaty's mixin raises
+  // when the puppet answers no room payload, and `payload.roomId` is the room information
+  // that survives. The throwing `room()` is the witness: a bridge that calls it loses the
+  // message (and logs `message skipped`), so both paths are exercised here.
+  const live = (id, roomId) => ({
+    id, self: () => false, type: () => types.Message.Text, text: () => '@管家 武侠那个项目做到哪了',
+    date: () => new Date('2026-11-18T10:00:00Z'), payload: roomId ? { roomId } : {},
+    talker: () => ({ id: 'wxid_m1', type: () => types.Contact.Unknown }),
+    room() { throw new TypeError('this.roomRawPayload is not a function'); },
+  });
+  const logs = [];
+  const s = await started({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    bot.emit('message', live('live-group', ROOM));
+    bot.emit('message', live('live-direct'));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.room_ref ?? null, e.sender_ref, e.message_ref, e.text]), [
+      ['group_message', ROOM, 'wxid_m1', 'live-group', '武侠那个项目做到哪了'],
+      ['message', null, 'wxid_m1', 'live-direct', '@管家 武侠那个项目做到哪了'],
+    ]);
+    assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
+    assert.equal(s.bridge.state.phase, 'logged_in');
+  } finally { await s.bridge.close(); }
 });

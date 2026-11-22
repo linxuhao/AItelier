@@ -226,6 +226,47 @@ def test_a_check_only_post_judges_like_the_post_but_uses_no_budget_and_records_n
     assert len(out_rows(world, "media")) == before
 
 
+def test_the_check_only_post_and_the_post_ask_the_very_same_predicates(world, monkeypatch):
+    """Review F2 (director 552): the dry run send_media asks before a fetch and the authoritative
+    post are one judgement, not two copies - both modes call the same group_turn, exit_check and
+    send_refusal (with the same arguments) and answer whatever those answer. A rule changed in
+    one of them changes both."""
+    group_ready_plain(world, monkeypatch)
+    gask(world, "q1")
+    group_turn(world)
+    seen = []
+    real = {name: getattr(state_groups.StateGroups, name) for name in ("group_turn", "exit_check", "send_refusal")}
+
+    def spy(name, answer=None):
+        def call(self, conn, *args):
+            seen.append((name, args[:-1] if name != "group_turn" else args))
+            got = real[name](self, conn, *args)
+            return got if answer is None else answer
+        return call
+
+    def both(caption="一只猫"):
+        seen.clear()
+        check = execute(world.steward, "post_group_media", {"request_key": "pin-chk", "turn": "gt1", "kind": "image",
+                        "caption": caption, "check_only": True}, allow_write=True)
+        asked_by_check = list(seen)
+        seen.clear()
+        post = post_media(world, caption=caption, key=f"pin-{len(asked_by_check)}-{caption}")
+        return check, post, asked_by_check, list(seen)
+
+    monkeypatch.setattr(state_groups.StateGroups, "group_turn", spy("group_turn"))
+    monkeypatch.setattr(state_groups.StateGroups, "exit_check", spy("exit_check"))
+    monkeypatch.setattr(state_groups.StateGroups, "send_refusal", spy("send_refusal", "group_quota_account"))
+    check, post, by_check, by_post = both()
+    assert check == post == {"refused": "group_quota_account"}
+    assert by_check == by_post and [name for name, _ in by_check] == ["group_turn", "exit_check", "send_refusal"]
+    monkeypatch.setattr(state_groups.StateGroups, "exit_check", spy("exit_check", "pinned_reason"))
+    check, post, by_check, by_post = both("另一句")
+    assert check == post == {"refused": "withheld", "reason": "pinned_reason"}
+    assert by_check == by_post
+    assert out_rows(world, "media") == []
+
+
+# --- the one media-types table ---------------------------------------------------------------
 # --- the one media-types table ---------------------------------------------------------------
 
 def test_python_reads_the_same_media_types_table_as_the_host():

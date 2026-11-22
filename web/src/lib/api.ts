@@ -911,10 +911,14 @@ export interface StewardSchedule {
    *  when the reminder was made (no steward turn); `target_unbound` once that group is unbound. */
   target?: 'owner' | 'family_group'; target_channel?: OwnerChannelName | null; target_group_ref?: string | null;
   target_unbound?: boolean;
+  /** Step 23.1: the target group's name; 'group' for a one-time reminder a family member made in
+   *  that group (the dashboard shows who: created_by_label). */
+  target_group_label?: string | null; created_via?: 'group' | null; created_by_label?: string | null;
 }
 export interface StewardScheduleFields {
   title?: string; instruction?: string; schedule?: StewardScheduleSpec; tz?: string; enabled?: boolean;
-  target?: 'owner' | 'family_group'; channel?: OwnerChannelName;
+  /** Step 23.1: group_ref names the group (required when several are bound). */
+  target?: 'owner' | 'family_group'; channel?: OwnerChannelName; group_ref?: string;
 }
 export function listStewardSchedules(): Promise<StewardSchedule[]> {
   return _get<{schedules?: StewardSchedule[]}>('/api/steward/schedules').then(r => r.schedules ?? []);
@@ -989,7 +993,9 @@ export function unbindOwnerChannel(channel: OwnerChannelName): Promise<unknown> 
 export function setDefaultOwnerChannel(channel: OwnerChannelName | null): Promise<unknown> {
   return _put('/api/steward/channels/default', {channel});
 }
-// ── The family group (step 23, design 7.7). Owner session only. One group per channel.
+// ── The family groups (step 23, design 7.7; step 23.1, 7.7.24: up to groups_per_channel groups
+//    a channel, each named apart). Owner session only. Every per-group call names its group_ref
+//    (URL-encoded); the code is issued per channel, for a named group.
 export interface GroupMember { sender_ref: string; label: string; named: boolean }
 export interface GroupRecord {
   message_id: string; direction: 'in' | 'out'; kind: string; accepted: number; sender_ref: string | null;
@@ -1002,52 +1008,66 @@ export interface OwnerGroup {
   messages_30d: number; last_message_at: string | null; members: GroupMember[];
   messages?: GroupRecord[]; family_note?: {text: string; updated_at: string} | null; family_memory?: FamilyMemoryEntry[];
 }
-export function listOwnerGroups(channel?: OwnerChannelName): Promise<{groups: OwnerGroup[]}> {
-  return _get('/api/steward/groups' + (channel ? '?channel=' + encodeURIComponent(channel) : ''));
+const groupPath = (channel: OwnerChannelName, groupRef: string) =>
+  '/api/steward/groups/' + encodeURIComponent(channel) + '/' + encodeURIComponent(groupRef);
+/** Every bound group; with channel and groupRef, that one group's records, note and memory too. */
+export function listOwnerGroups(channel?: OwnerChannelName, groupRef?: string): Promise<{groups: OwnerGroup[]; groups_per_channel: number}> {
+  return _get('/api/steward/groups' + (channel && groupRef
+    ? '?channel=' + encodeURIComponent(channel) + '&group_ref=' + encodeURIComponent(groupRef) : ''));
 }
-export function createGroupCode(channel: OwnerChannelName, label?: string): Promise<{code: string; expires_at: string}> {
-  return _post('/api/steward/groups/' + encodeURIComponent(channel) + '/code', label ? {label} : undefined);
+export function createGroupCode(channel: OwnerChannelName, label: string): Promise<{code: string; expires_at: string}> {
+  return _post('/api/steward/groups/' + encodeURIComponent(channel) + '/code', {label});
 }
-export function unbindOwnerGroup(channel: OwnerChannelName): Promise<unknown> {
-  return _del('/api/steward/groups/' + encodeURIComponent(channel));
+export function unbindOwnerGroup(channel: OwnerChannelName, groupRef: string): Promise<unknown> {
+  return _del(groupPath(channel, groupRef));
 }
-export function clearGroupRecords(channel: OwnerChannelName): Promise<unknown> {
-  return _post('/api/steward/groups/' + encodeURIComponent(channel) + '/clear');
+export function clearGroupRecords(channel: OwnerChannelName, groupRef: string): Promise<unknown> {
+  return _post(groupPath(channel, groupRef) + '/clear');
 }
-export function nameGroupMember(channel: OwnerChannelName, senderRef: string, label: string): Promise<unknown> {
-  return _put('/api/steward/groups/' + encodeURIComponent(channel) + '/members/' + encodeURIComponent(senderRef), {label});
+export function nameGroupMember(channel: OwnerChannelName, groupRef: string, senderRef: string, label: string): Promise<unknown> {
+  return _put(groupPath(channel, groupRef) + '/members/' + encodeURIComponent(senderRef), {label});
 }
-export function setFamilyNote(channel: OwnerChannelName, text: string): Promise<unknown> {
-  return _put('/api/steward/groups/' + encodeURIComponent(channel) + '/family-note', {text});
+export function setFamilyNote(channel: OwnerChannelName, groupRef: string, text: string): Promise<unknown> {
+  return _put(groupPath(channel, groupRef) + '/family-note', {text});
 }
-export function deleteFamilyMemory(channel: OwnerChannelName, entryId?: string): Promise<unknown> {
-  return _del('/api/steward/groups/' + encodeURIComponent(channel) + '/family-memory' + (entryId ? '?entry_id=' + encodeURIComponent(entryId) : ''));
+export function deleteFamilyMemory(channel: OwnerChannelName, groupRef: string, entryId?: string): Promise<unknown> {
+  return _del(groupPath(channel, groupRef) + '/family-memory' + (entryId ? '?entry_id=' + encodeURIComponent(entryId) : ''));
 }
 
-// ── The family lists (step 25 C4, design 7.9.5). Owner session only. Everyone in the family
-//    group sees everything on them; adding passes the group's exit check (422 "withheld: <kind>").
+// ── The family lists (step 25 C4, design 7.9.5). Owner session only. Step 23.1: each group has its
+//    own two lists; everyone in that group sees everything on them; adding passes the group's exit
+//    check (422 "withheld: <kind>"). A group is {channel, group_ref}; `unassigned` the items no group
+//    owns (made before step 23.1). An unbound group's lists are shown and removed, never added to.
 export type FamilyListName = 'shopping' | 'todo';
 export interface FamilyListItem {
   item_id: string; list: FamilyListName; text: string; added_by: string | null; added_by_role: 'owner' | 'member' | 'steward';
   added_via: 'group' | 'owner_dm' | 'dashboard'; added_at: string; done: boolean; done_at: string | null; done_by: string | null;
 }
+export interface FamilyListGroup { channel: OwnerChannelName; group_ref: string; label: string | null; bound: boolean }
+export type FamilyListScope = {channel: OwnerChannelName; group_ref: string} | 'unassigned';
+const listQuery = (scope: FamilyListScope, first = '?') => scope === 'unassigned' ? first + 'unassigned=true'
+  : first + 'channel=' + encodeURIComponent(scope.channel) + '&group_ref=' + encodeURIComponent(scope.group_ref);
+/** The groups that have lists to show (bound ones, unbound ones that keep items) and the count of unassigned items. */
+export function listFamilyListGroups(): Promise<{groups: FamilyListGroup[]; unassigned: number}> {
+  return _get('/api/steward/lists/groups');
+}
 // At most 100 checked items of a list are shown, newest first; done_total counts a list's checked
 // items and done_more how many of them are not shown (director 505).
-export function listFamilyLists(): Promise<{lists: Record<FamilyListName, FamilyListItem[]>;
+export function listFamilyLists(scope: FamilyListScope): Promise<{group: FamilyListGroup | null; lists: Record<FamilyListName, FamilyListItem[]>;
   done_total?: Partial<Record<FamilyListName, number>>; done_more?: Partial<Record<FamilyListName, number>>}> {
-  return _get('/api/steward/lists');
+  return _get('/api/steward/lists' + listQuery(scope));
 }
-export function addFamilyListItems(list: FamilyListName, items: string[]): Promise<{items: FamilyListItem[]}> {
-  return _post('/api/steward/lists/' + encodeURIComponent(list) + '/items', {items});
+export function addFamilyListItems(scope: FamilyListScope, list: FamilyListName, items: string[]): Promise<{items: FamilyListItem[]}> {
+  return _post('/api/steward/lists/' + encodeURIComponent(list) + '/items' + listQuery(scope), {items});
 }
-export function checkFamilyListItems(itemIds: string[], done: boolean): Promise<unknown> {
-  return _post('/api/steward/lists/check', {item_ids: itemIds, done});
+export function checkFamilyListItems(scope: FamilyListScope, itemIds: string[], done: boolean): Promise<unknown> {
+  return _post('/api/steward/lists/check' + listQuery(scope), {item_ids: itemIds, done});
 }
-export function removeFamilyListItem(itemId: string): Promise<unknown> {
-  return _del('/api/steward/lists/items/' + encodeURIComponent(itemId));
+export function removeFamilyListItem(scope: FamilyListScope, itemId: string): Promise<unknown> {
+  return _del('/api/steward/lists/items/' + encodeURIComponent(itemId) + listQuery(scope));
 }
-export function clearDoneFamilyListItems(list?: FamilyListName): Promise<{cleared: number}> {
-  return _post('/api/steward/lists/clear-done' + (list ? '?list_name=' + encodeURIComponent(list) : ''));
+export function clearDoneFamilyListItems(scope: FamilyListScope, list?: FamilyListName): Promise<{cleared: number}> {
+  return _post('/api/steward/lists/clear-done' + listQuery(scope) + (list ? '&list_name=' + encodeURIComponent(list) : ''));
 }
 
 /** Where a steward-conversation message came from ('in') or was mirrored to ('out'). */

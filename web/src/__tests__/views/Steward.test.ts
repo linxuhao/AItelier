@@ -649,21 +649,21 @@ describe('reminders', () => {
   const card = (container: HTMLElement, id: string) => container.querySelector(`[data-schedule="${id}"]`) as HTMLElement;
   const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const form = () => ({onchange: vi.fn(), onclose: vi.fn()});
+  const G = (group_ref: string, label: string) => ({channel: 'wechat', group_ref, label});
   beforeEach(() => { api.previewStewardSchedule.mockResolvedValue(runs); api.listOwnerGroups.mockResolvedValue({groups: []}); });
 
-  it('step 25 C11: the family group is chosen only while one is bound, and the words go as written', async () => {
+  it('step 25 C11 / 23.1: a group is chosen only while it is bound, one choice per group, and the words go as written', async () => {
     const p = form();
     const view = render(StewardScheduleForm, p);
-    const group = () => view.getByLabelText('The family group') as HTMLInputElement;
     await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
-    expect(group().disabled).toBe(true);
+    expect(view.container.querySelector('[data-schedule-group]')).toBeNull();
     expect(view.getByText('Bind a family group on the Channels tab to send reminders there.')).toBeTruthy();
     cleanup();
-    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群'), G('r2@chatroom', '老家群')]});
     api.createStewardSchedule.mockImplementation(async (fields: object) => schedule({...fields, schedule_id: 'sch-g', version: 1}));
     const again = render(StewardScheduleForm, p);
-    const pick = again.getByLabelText('The family group') as HTMLInputElement;
-    await waitFor(() => expect(pick.disabled).toBe(false));
+    const pick = await waitFor(() => again.getByLabelText('Group «老家群»') as HTMLInputElement);
+    expect(again.getByLabelText('Group «家庭群»')).toBeTruthy();
     await fireEvent.click(pick);
     await fireEvent.input(again.getByLabelText('Title'), {target: {value: '吃药'}});
     await fireEvent.input(again.getByLabelText('Words posted in the family group'), {target: {value: '该吃药了'}});
@@ -671,18 +671,19 @@ describe('reminders', () => {
     await fireEvent.input(again.container.querySelector('[data-schedule-at]') as HTMLInputElement, {target: {value: '2030-01-02T09:30'}});
     await fireEvent.click(again.getByRole('button', {name: 'Save'}));
     await waitFor(() => expect(api.createStewardSchedule).toHaveBeenCalledWith({title: '吃药', instruction: '该吃药了',
-      schedule: {kind: 'once', at: new Date('2030-01-02T09:30').toISOString()}, tz: browserZone, target: 'family_group'}));
+      schedule: {kind: 'once', at: new Date('2030-01-02T09:30').toISOString()}, tz: browserZone, target: 'family_group',
+      group_ref: 'r2@chatroom'}));
   });
 
-  it('review F1/F4: editing a group reminder re-points it when its group was unbound or another channel is chosen', async () => {
+  it('review F1/F4, step 23.1: editing a group reminder re-points it when its group was unbound or another group is chosen', async () => {
     const save = async (row: StewardSchedule, pick?: string) => {
       api.updateStewardSchedule.mockResolvedValueOnce(row);
       const view = render(StewardScheduleForm, {...form(), row});
       await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
       await new Promise(r => setTimeout(r, 0));
       if (pick) {
-        const select = await waitFor(() => view.container.querySelector('[data-schedule-channel]') as HTMLSelectElement);
-        await fireEvent.change(select, {target: {value: pick}});
+        const radio = await waitFor(() => view.container.querySelector(`[data-schedule-group="${pick}"]`) as HTMLInputElement);
+        await fireEvent.click(radio);
       }
       await fireEvent.click(view.getByRole('button', {name: 'Save'}));
       await waitFor(() => expect(api.updateStewardSchedule).toHaveBeenCalled());
@@ -690,28 +691,29 @@ describe('reminders', () => {
       cleanup(); api.updateStewardSchedule.mockClear(); api.listOwnerGroups.mockClear();
       return fields;
     };
-    const group = {target: 'family_group' as const, target_channel: 'wechat' as const, instruction: '该吃药了'};
-    // Its group unbound, another bound on Slack now: re-pointed there (the old channel is not sent).
-    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'slack'}]});
+    const group = {target: 'family_group' as const, target_channel: 'wechat' as const, target_group_ref: 'r1@chatroom',
+      target_group_label: '家庭群', instruction: '该吃药了'};
+    // Its group unbound, another bound now: re-pointed (the unbound group is not sent; the backend
+    // takes the one bound group, or answers group_required).
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r9@chatroom', '新群')]});
     const unbound = await save(schedule({...group, target_unbound: true, enabled: false}));
     expect(unbound.target).toBe('family_group');
-    expect(unbound.channel).toBeUndefined();
-    // A group on each channel, the other one chosen: target and channel both go.
-    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'slack'}, {channel: 'wechat'}]});
-    const moved = await save(schedule({...group, target_unbound: false}), 'slack');
-    expect([moved.target, moved.channel]).toEqual(['family_group', 'slack']);
+    expect(unbound.group_ref).toBeUndefined();
+    // Two groups, the other one chosen: target and group_ref both go.
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群'), G('r2@chatroom', '老家群')]});
+    const moved = await save(schedule({...group, target_unbound: false}), 'r2@chatroom');
+    expect([moved.target, moved.group_ref]).toEqual(['family_group', 'r2@chatroom']);
     // Nothing about the group changed: no target, the recorded group is kept.
-    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群'), G('r2@chatroom', '老家群')]});
     const kept = await save(schedule({...group, target_unbound: false}));
-    expect([kept.target, kept.channel]).toEqual([undefined, undefined]);
+    expect([kept.target, kept.group_ref]).toEqual([undefined, undefined]);
   });
 
   it('step 25 C11: a 422 withheld says the group may not see it; the list marks group reminders and an unbound group', async () => {
-    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群')]});
     api.createStewardSchedule.mockRejectedValue(new ApiError(422, '', null, {code: 'withheld', reason: 'private_project: the name or id of a project that is not public'}));
     const view = render(StewardScheduleForm, form());
-    const pick = view.getByLabelText('The family group') as HTMLInputElement;
-    await waitFor(() => expect(pick.disabled).toBe(false));
+    const pick = await waitFor(() => view.getByLabelText('Group «家庭群»') as HTMLInputElement);
     await fireEvent.click(pick);
     await fireEvent.input(view.getByLabelText('Title'), {target: {value: 't'}});
     await fireEvent.input(view.getByLabelText('Words posted in the family group'), {target: {value: '看看家庭账本'}});
@@ -721,13 +723,18 @@ describe('reminders', () => {
       'The family group may not see this: private_project: the name or id of a project that is not public'));
     cleanup();
     api.listStewardSchedules.mockResolvedValue([
-      schedule({schedule_id: 'sch-g', title: '吃药', target: 'family_group', target_unbound: false}),
+      schedule({schedule_id: 'sch-g', title: '吃药', target: 'family_group', target_unbound: false, target_group_label: '老家群'}),
       schedule({schedule_id: 'sch-u', title: '倒垃圾', target: 'family_group', target_unbound: true, enabled: false}),
       schedule({schedule_id: 'sch-o', title: 'Mine'}),
+      schedule({schedule_id: 'sch-m', title: '家人建的提醒 · 老家群 · 01-02 08:00', target: 'family_group', target_unbound: false,
+        target_group_label: '老家群', created_via: 'group', created_by_label: '二姨', instruction: '明早带伞'}),
     ]);
     const list = render(StewardSchedules);
     await list.findByText('吃药');
-    expect(card(list.container, 'sch-g').querySelector('[data-target-group]')?.textContent).toBe('To the family group');
+    // Step 23.1: each group reminder names its group; one a family member made says who and where.
+    expect(card(list.container, 'sch-g').querySelector('[data-target-group]')?.textContent).toBe('To «老家群»');
+    expect(card(list.container, 'sch-m').querySelector('[data-made-by-member]')?.textContent).toBe('Made by 二姨 in «老家群»');
+    expect(card(list.container, 'sch-g').querySelector('[data-made-by-member]')).toBeNull();
     expect(card(list.container, 'sch-g').querySelector('[data-group-unbound]')).toBeNull();
     expect(card(list.container, 'sch-u').querySelector('[data-group-unbound]')?.textContent).toBe('Group unbound');
     expect(card(list.container, 'sch-o').querySelector('[data-target-group]')).toBeNull();
@@ -837,10 +844,9 @@ describe('reminders', () => {
   // request to the steward - it must never reach the family group.
   const BRIEF_TEXT = "Write today's daily brief following the brief rules and send it to the owner with send_user_message.";
   const groupForm = async () => {
-    api.listOwnerGroups.mockResolvedValue({groups: [{channel: 'wechat'}]});
+    api.listOwnerGroups.mockResolvedValue({groups: [G('r1@chatroom', '家庭群')]});
     const view = render(StewardScheduleForm, form());
-    const group = view.getByLabelText('The family group') as HTMLInputElement;
-    await waitFor(() => expect(group.disabled).toBe(false));
+    const group = await waitFor(() => view.getByLabelText('Group «家庭群»') as HTMLInputElement);
     return {view, group, owner: view.getByLabelText('Me (the steward reminds me)') as HTMLInputElement,
       brief: view.getByRole('button', {name: 'Daily brief at 8:00'}) as HTMLButtonElement,
       text: () => view.container.querySelector('textarea') as HTMLTextAreaElement};

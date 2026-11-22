@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { createStewardSchedule, listOwnerGroups, previewStewardSchedule, updateStewardSchedule,
-    type OwnerChannelName, type StewardSchedule, type StewardScheduleFields, type StewardScheduleSpec } from '../lib/api';
+    type OwnerGroup, type StewardSchedule, type StewardScheduleFields, type StewardScheduleSpec } from '../lib/api';
   import { SCHEDULE_PRESETS, SCHEDULE_REFUSALS, browserTimeZone, formatRunAt, fromLocalInput,
     scheduleConflict, scheduleRefusal, toLocalInput } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
@@ -18,12 +18,14 @@
     at = $state(''), expr = $state(''), tz = $state(browserTimeZone()), baseVersion = $state(0);
   let busy = $state(false), error = $state(''), conflict = $state<StewardSchedule | null>(null);
   let preview = $state<string[] | null>(null), previewError = $state('');
-  // Step 25 C11 (design 7.9.4): 「发到：我 / 家庭群」. The family group can be chosen only while one
-  // is bound; with a group on each channel the owner names the channel.
-  let target = $state<'owner' | 'family_group'>('owner'), channel = $state<OwnerChannelName | ''>('');
-  let groups = $state<OwnerChannelName[]>([]);
+  // Step 25 C11 (design 7.9.4), step 23.1 (7.7.24): 「发到：我 / <群名>…」 - one choice per bound
+  // group, sent as its group_ref. A group can be chosen only while it is bound.
+  let dest = $state<string>('owner');
+  let groups = $state<Pick<OwnerGroup, 'channel' | 'group_ref' | 'label'>[]>([]);
+  const target = $derived<'owner' | 'family_group'>(dest === 'owner' ? 'owner' : 'family_group');
   onMount(() => {
-    listOwnerGroups().then(r => { groups = (r.groups ?? []).map(g => g.channel); }).catch(() => { groups = []; });
+    listOwnerGroups().then(r => { groups = (r.groups ?? []).map(g => ({channel: g.channel, group_ref: g.group_ref, label: g.label})); })
+      .catch(() => { groups = []; });
   });
   // A new reminder runs on the browser's zone; an edited one keeps the zone it has.
   function fill(source: StewardSchedule) {
@@ -31,7 +33,7 @@
     at = source.schedule.kind === 'once' ? toLocalInput(source.schedule.at) : '';
     expr = source.schedule.kind === 'cron' ? source.schedule.expr : '';
     tz = source.tz; baseVersion = source.version;
-    target = source.target ?? 'owner'; channel = source.target_channel ?? '';
+    dest = source.target === 'family_group' ? (source.target_group_ref ?? 'owner') : 'owner';
   }
   const initial = untrack(() => row);
   if (initial) fill(initial);
@@ -60,15 +62,16 @@
     if (busy) return;
     busy = true; error = ''; conflict = null;
     const fields: StewardScheduleFields = {title: title.trim(), instruction: instruction.trim(), schedule, tz};
-    // Sent only when it says something: a reminder to the group (created or re-pointed), or one
+    // Sent only when it says something: a reminder to a group (created or re-pointed), or one
     // turned back to the owner. An edit that keeps the target keeps the group it recorded, unless
-    // that group was unbound or another channel's group was chosen: then it is re-pointed to the
-    // group bound now (review F1/F4). A channel no group is bound on now is not sent.
+    // that group was unbound or another group was chosen: then it is re-pointed to the group chosen
+    // (review F1/F4, step 23.1). A group not bound now is never sent.
     const was = initial?.target ?? 'owner';
+    const chosen = groups.find(g => g.group_ref === dest);
     const regroup = !!initial && was === 'family_group' && target === 'family_group'
-      && (!!initial.target_unbound || (!!channel && channel !== (initial.target_channel ?? '')));
+      && (!!initial.target_unbound || (!!chosen && chosen.group_ref !== (initial.target_group_ref ?? '')));
     if (initial ? target !== was || regroup : target === 'family_group') fields.target = target;
-    if (fields.target === 'family_group' && channel && groups.includes(channel)) fields.channel = channel;
+    if (fields.target === 'family_group' && chosen) fields.group_ref = chosen.group_ref;
     try {
       const saved = initial ? await updateStewardSchedule(initial.schedule_id, baseVersion, fields)
         : await createStewardSchedule(fields);
@@ -107,16 +110,17 @@
   <label>{t('steward.schedTitle')}<input type="text" maxlength="200" bind:value={title} /></label>
   <fieldset class="kind" data-schedule-target>
     <legend>{t('steward.schedTarget')}</legend>
-    <label><input type="radio" name="schedule-target" value="owner" bind:group={target} /> {t('steward.schedTargetOwner')}</label>
-    <label><input type="radio" name="schedule-target" value="family_group" bind:group={target}
-      disabled={!groups.length && initial?.target !== 'family_group'} /> {t('steward.schedTargetGroup')}</label>
+    <label><input type="radio" name="schedule-target" value="owner" bind:group={dest} /> {t('steward.schedTargetOwner')}</label>
+    {#each groups as g (g.channel + ' ' + g.group_ref)}
+      <label><input type="radio" name="schedule-target" value={g.group_ref} bind:group={dest} data-schedule-group={g.group_ref} />
+        {t('steward.schedTargetGroup').replace('{name}', g.label ?? g.group_ref)}</label>
+    {/each}
+    {#if initial?.target === 'family_group' && !groups.some(g => g.group_ref === dest) && dest !== 'owner'}
+      <label><input type="radio" name="schedule-target" value={dest} bind:group={dest} />
+        {t('steward.schedTargetGroup').replace('{name}', initial.target_group_label ?? dest)} · {t('steward.schedGroupUnbound')}</label>
+    {/if}
     {#if !groups.length}<small class="hint">{t('steward.schedTargetNoGroup')}</small>{/if}
   </fieldset>
-  {#if target === 'family_group' && groups.length > 1}
-    <label>{t('steward.schedTargetChannel')}<select bind:value={channel} data-schedule-channel>
-      {#each groups as g (g)}<option value={g}>{g}</option>{/each}
-    </select></label>
-  {/if}
   {#if target === 'family_group'}
     <label>{t('steward.schedGroupText')}<textarea rows="3" maxlength="500" bind:value={instruction}></textarea></label>
     <small class="hint">{t('steward.schedGroupTextHelp')}</small>

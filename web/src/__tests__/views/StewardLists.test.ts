@@ -7,8 +7,11 @@ import { langStore } from '../../stores/i18n';
 
 const api = vi.hoisted(() => ({
   listFamilyLists: vi.fn(), addFamilyListItems: vi.fn(), checkFamilyListItems: vi.fn(), removeFamilyListItem: vi.fn(),
-  clearDoneFamilyListItems: vi.fn(),
+  clearDoneFamilyListItems: vi.fn(), listFamilyListGroups: vi.fn(),
 }));
+// Step 23.1 (7.9.5): the lists are a group's - one bound group here unless a test says otherwise.
+const A = {channel: 'wechat', group_ref: 'r1@chatroom', label: '家庭群', bound: true};
+const SCOPE_A = {channel: 'wechat', group_ref: 'r1@chatroom'};
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
 import type { FamilyListItem } from '../../lib/api';
 import StewardLists from '../../views/StewardLists.svelte';
@@ -25,6 +28,7 @@ describe('StewardLists', () => {
       item('li-2', '鸡蛋', {done: true, done_at: '2026-11-21T11:00:00Z', done_by: '管家'})], todo: []}});
     for (const fn of [api.addFamilyListItems, api.checkFamilyListItems, api.removeFamilyListItem, api.clearDoneFamilyListItems])
       fn.mockResolvedValue({});
+    api.listFamilyListGroups.mockResolvedValue({groups: [A], unassigned: 0});
   });
 
   it('shows both lists with who added and who checked each item', async () => {
@@ -93,7 +97,7 @@ describe('StewardLists', () => {
     const input = view.container.querySelector('[data-list-input="todo"]') as HTMLInputElement;
     await fireEvent.input(input, {target: {value: '交水费，修水龙头'}});
     await fireEvent.submit(input.closest('form') as HTMLFormElement);
-    await waitFor(() => expect(api.addFamilyListItems).toHaveBeenCalledWith('todo', ['交水费', '修水龙头']));
+    await waitFor(() => expect(api.addFamilyListItems).toHaveBeenCalledWith(SCOPE_A, 'todo', ['交水费', '修水龙头']));
     // One action at a time: the next control is usable once the list was read again.
     const ready = async (selector: string) => {
       const el = await waitFor(() => {
@@ -104,11 +108,11 @@ describe('StewardLists', () => {
       await fireEvent.click(el);
     };
     await ready('[data-item-check="li-1"]');
-    await waitFor(() => expect(api.checkFamilyListItems).toHaveBeenCalledWith(['li-1'], true));
+    await waitFor(() => expect(api.checkFamilyListItems).toHaveBeenCalledWith(SCOPE_A, ['li-1'], true));
     await ready('[data-item-remove="li-2"]');
-    await waitFor(() => expect(api.removeFamilyListItem).toHaveBeenCalledWith('li-2'));
+    await waitFor(() => expect(api.removeFamilyListItem).toHaveBeenCalledWith(SCOPE_A, 'li-2'));
     await ready('[data-list-clear="shopping"]');
-    await waitFor(() => expect(api.clearDoneFamilyListItems).toHaveBeenCalledWith('shopping'));
+    await waitFor(() => expect(api.clearDoneFamilyListItems).toHaveBeenCalledWith(SCOPE_A, 'shopping'));
   });
 
   it('a refused add (withheld) is shown', async () => {
@@ -119,5 +123,36 @@ describe('StewardLists', () => {
     await fireEvent.input(input, {target: {value: '家庭账本'}});
     await fireEvent.submit(input.closest('form') as HTMLFormElement);
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('withheld'));
+  });
+
+  it('step 23.1: two groups - a choice above the lists reads each group\'s own; an unbound group is view-and-remove only', async () => {
+    const B = {channel: 'wechat', group_ref: 'r2@chatroom', label: '老家群', bound: true};
+    const gone = {channel: 'wechat', group_ref: 'r0@chatroom', label: '旧群', bound: false};
+    api.listFamilyListGroups.mockResolvedValue({groups: [A, B, gone], unassigned: 1});
+    api.listFamilyLists.mockImplementation(async (scope: {group_ref?: string} | string) => ({
+      group: null, lists: {shopping: [item('li-' + (typeof scope === 'string' ? 'u' : scope.group_ref), typeof scope === 'string' ? '旧条目'
+        : scope.group_ref === 'r2@chatroom' ? '酱油' : scope.group_ref === 'r0@chatroom' ? '面包' : '牛奶')], todo: []}}));
+    const view = render(StewardLists);
+    await view.findByText('牛奶');
+    expect(api.listFamilyLists).toHaveBeenLastCalledWith(SCOPE_A);
+    const pick = view.container.querySelector('[data-list-group]') as HTMLSelectElement;
+    expect([...pick.options].map(o => o.textContent)).toEqual(['家庭群', '老家群', '«旧群» (unbound: view and remove only)',
+      'Unassigned (from before each group had its own lists)']);
+    await fireEvent.change(pick, {target: {value: 'wechat r2@chatroom'}});
+    await view.findByText('酱油');
+    expect(view.queryByText('牛奶')).toBeNull();
+    expect(view.container.querySelector('[data-list-input="shopping"]')).not.toBeNull();
+    await fireEvent.change(pick, {target: {value: 'wechat r0@chatroom'}});
+    await view.findByText('面包');
+    expect(view.container.querySelector('[data-list-input="shopping"]')).toBeNull();
+    expect(view.container.querySelector('[data-item-remove]')).not.toBeNull();
+  });
+
+  it('step 23.1: no group bound and nothing unassigned - the page says to bind one, no lists', async () => {
+    api.listFamilyListGroups.mockResolvedValue({groups: [], unassigned: 0});
+    const view = render(StewardLists);
+    await waitFor(() => expect(view.container.querySelector('[data-lists-no-group]')).not.toBeNull());
+    expect(view.container.querySelector('[data-list]')).toBeNull();
+    expect(api.listFamilyLists).not.toHaveBeenCalled();
   });
 });

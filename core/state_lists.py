@@ -15,7 +15,9 @@ dashboard shows them as unassigned). Who may do what:
   .group_turn - the same gate as the family memory): show, add, check / uncheck. This is
   step 23's one explicit write exception besides the family memory (owner 2026-11-21);
 - the steward in an owner turn (its request carries no header): show, add, check, remove;
-- the owner on the dashboard (owner session): everything, and clearing the done items.
+- the owner on the dashboard (owner session): everything, and clearing the done items - for an
+  unbound group's items and the items no group owns only show, remove and clear (and the
+  unassigned ones move into a bound group).
 
 Who added or checked an item is taken by the backend, never from the call: in a group turn
 the asker the audience record names (one sender: that member's dashboard name, else
@@ -342,13 +344,19 @@ class StateLists:
     def check_items(self, item_ids, done=True, project_id=None, request_key=None, turn=None, as_owner=False,
                     group=None, unassigned=False):
         """Check (done) or uncheck items of one group; an id that is not on its lists (another
-        group's too) is answered in `unknown`."""
+        group's too) is answered in `unknown`. Only a bound group's items: an unbound group's and
+        the items no group owns are only shown and removed (group_unbound, director 602 defect 5 -
+        the dashboard says so and offers no tick)."""
         ids = [i for i in dict.fromkeys(item_ids or []) if isinstance(i, str) and i]
         if not ids or len(ids) > LIST_LIMITS["per_check"]:
             raise StateGraphError(f"invalid_request: 1 to {LIST_LIMITS['per_check']} item_ids")
         moment = _now()
         with self.store.transaction(write=True) as conn:
             role, ref, label, via, where = self._caller(conn, turn, as_owner, project_id, group, unassigned)
+            if where == (None, None) or conn.execute("SELECT 1 FROM state_owner_groups WHERE channel=? AND group_ref=? "
+                                                     "AND revoked_at IS NULL", where).fetchone() is None:
+                raise StateGraphError("group_unbound: only a bound group's items are checked; these are only shown "
+                                      "and removed")
             request_hash = _hash(["check", ids, bool(done), via, ref, *where])
             replay = self._keyed(conn, "check_list_items", request_key, request_hash)
             if replay is not None:

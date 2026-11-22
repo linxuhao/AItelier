@@ -618,15 +618,16 @@ def _member_checked_milk_then_unbound(world):
 def test_review_d1_rechecking_an_item_after_unbind_never_names_someone_who_did_not_check_it(world, clock):
     """A re-check of an already-checked item changes nothing: after the unbind forgot who
     checked 牛奶, neither the owner (dashboard, owner turn) nor a new member after a rebinding
-    becomes its 「done_by」 - it stays null (「曾由一位成员勾掉」)."""
+    becomes its 「done_by」 - it stays null (「曾由一位成员勾掉」). While the group is unbound
+    the dashboard does not check its items at all (director 602 defect 5)."""
     view, milk = _member_checked_milk_then_unbound(world)
     whole = ("SELECT done_at, done_by_role, done_by_ref, done_by_label, added_by_ref, added_by_label "
              "FROM state_steward_list_items WHERE item_id=?")
     before = rows(world, whole, (milk,))
     assert before[0][1:] == ("member", None, None, None, None)
     clock.moment += timedelta(minutes=5)
-    assert world.owner.lists.check_items([milk], as_owner=True, group={"channel": "wechat", "group_ref": ROOM}
-                                         )["items"][0]["done_by"] is None
+    refused(lambda: world.owner.lists.check_items([milk], as_owner=True, group={"channel": "wechat", "group_ref": ROOM}),
+            "group_unbound")
     assert rows(world, whole, (milk,)) == before
     # A new member, named, after the group is bound again (its lists come back, 7.9.5).
     code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
@@ -929,6 +930,33 @@ def test_the_migration_gives_the_old_items_to_the_one_bound_group(tmp_path, cloc
     with db.get_connection() as conn:
         assert [tuple(r) for r in conn.execute("SELECT item_id, channel, group_ref FROM state_steward_list_items")] == [
             ("li-old", "wechat", "r1@chatroom")]
+
+
+def test_director_602_5_an_unbound_groups_and_unassigned_items_are_shown_and_removed_never_checked(world, clock):
+    """Director 602 defect 5: the dashboard's label says an unbound group's lists are view and
+    remove only; the backend holds the owner's session to that too (group_unbound), and to the
+    items no group owns. Removing and clearing still work; nothing changes on a refused tick."""
+    bound_group(world)
+    milk = add(world.steward, ["牛奶"], key="k-milk")["items"][0]["item_id"]
+    eggs = add(world.steward, ["鸡蛋"], key="k-eggs")["items"][0]["item_id"]
+    world.owner.lists.check_items([eggs], as_owner=True)
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_via,added_at) "
+                     "VALUES('li-u1','shopping','酱油','steward','owner_dm','2027-01-01T00:00:00+00:00')")
+        conn.commit()
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
+    group = {"channel": "wechat", "group_ref": ROOM}
+    state = "SELECT item_id, done_at, done_by_label, deleted_at FROM state_steward_list_items ORDER BY item_id"
+    before = rows(world, state)
+    for done in (True, False):
+        refused(lambda: world.owner.lists.check_items([milk, eggs], done=done, as_owner=True, group=group),
+                "group_unbound")
+        refused(lambda: world.owner.lists.check_items(["li-u1"], done=done, as_owner=True, unassigned=True),
+                "group_unbound")
+    assert rows(world, state) == before
+    assert world.owner.lists.remove_items([milk], as_owner=True, group=group)["removed"] == [milk]
+    assert world.owner.lists.clear_done(group=group)["cleared"] == 1
+    assert world.owner.lists.remove_items(["li-u1"], as_owner=True, unassigned=True)["removed"] == ["li-u1"]
 
 
 def test_review_f2_the_owner_moves_unassigned_items_into_a_bound_groups_lists(world, clock, client):

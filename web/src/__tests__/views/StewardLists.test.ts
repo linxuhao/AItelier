@@ -149,6 +149,26 @@ describe('StewardLists', () => {
     expect(view.container.querySelector('[data-item-remove]')).not.toBeNull();
   });
 
+  it('director 602 (5): an unbound group\'s items and the unassigned ones are not ticked - shown and removed only', async () => {
+    const gone = {channel: 'wechat', group_ref: 'r0@chatroom', label: '旧群', bound: false};
+    api.listFamilyListGroups.mockResolvedValue({groups: [A, gone], unassigned: 1});
+    api.listFamilyLists.mockImplementation(async (scope: {group_ref?: string} | string) => ({group: null,
+      lists: {shopping: [item(typeof scope === 'string' ? 'li-u' : scope.group_ref === 'r0@chatroom' ? 'li-0' : 'li-1',
+        typeof scope === 'string' ? '旧条目' : scope.group_ref === 'r0@chatroom' ? '面包' : '牛奶')], todo: []}}));
+    const view = render(StewardLists);
+    await view.findByText('牛奶');
+    const box = (id: string) => view.container.querySelector(`[data-item-check="${id}"]`) as HTMLInputElement;
+    await waitFor(() => expect(box('li-1').disabled).toBe(false));
+    const pick = view.container.querySelector('[data-list-group]') as HTMLSelectElement;
+    for (const [value, id, text] of [['wechat r0@chatroom', 'li-0', '面包'], ['unassigned', 'li-u', '旧条目']]) {
+      await fireEvent.change(pick, {target: {value}});
+      await view.findByText(text);
+      expect(box(id).disabled).toBe(true);
+      expect(view.container.querySelector(`[data-item-remove="${id}"]`)).not.toBeNull();
+    }
+    expect(api.checkFamilyListItems).not.toHaveBeenCalled();
+  });
+
   it('review F2: an unassigned item moves into a bound group\'s lists (never an unbound one); a group\'s items offer no move', async () => {
     const B = {channel: 'wechat', group_ref: 'r2@chatroom', label: '老家群', bound: true};
     const gone = {channel: 'wechat', group_ref: 'r0@chatroom', label: '旧群', bound: false};

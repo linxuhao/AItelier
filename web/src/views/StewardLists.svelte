@@ -23,7 +23,8 @@
   const scope = $derived<FamilyListScope | null>(chosen === 'unassigned' ? 'unassigned'
     : (() => { const g = groups.find(x => keyOf(x) === chosen); return g ? {channel: g.channel, group_ref: g.group_ref} : null; })());
   const current = $derived(groups.find(x => keyOf(x) === chosen));
-  // Items are added to a bound group's lists only.
+  // Items are added to, and checked on, a bound group's lists only: an unbound group's and the
+  // unassigned ones are shown and removed (director 602 defect 5; the backend refuses the rest).
   const addable = $derived(!!current?.bound);
   // Unassigned items are moved into a bound group's lists by the owner (review F2).
   const boundGroups = $derived(groups.filter(g => g.bound));
@@ -102,7 +103,7 @@
       <ul>
         {#each items as item (item.item_id)}
           <li class:done={item.done} data-item={item.item_id}>
-            <label class="check"><input type="checkbox" checked={item.done} disabled={busy} data-item-check={item.item_id}
+            <label class="check"><input type="checkbox" checked={item.done} disabled={busy || !addable} data-item-check={item.item_id}
               onchange={(event) => void run(() => checkFamilyListItems(scope!, [item.item_id], event.currentTarget.checked))} />
               <span class="text">{item.text}</span></label>
             <small class="who" data-item-who>{item.added_by ? t('steward.listAddedBy').replace('{who}', item.added_by).replace('{when}', when(item.added_at)) : t('steward.listAddedByFormer').replace('{when}', when(item.added_at))}{#if item.done} · {item.done_by ? t('steward.listDoneBy').replace('{who}', item.done_by) : t('steward.listDoneByFormer')}{/if}</small>

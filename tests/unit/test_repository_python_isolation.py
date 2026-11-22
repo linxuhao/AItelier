@@ -186,8 +186,9 @@ def test_actual_entry_timeout_reaps_the_owned_group_when_the_direct_child_dies(t
     # when the direct child dies, so its corpse can still exist here even
     # though the group kill reached it (measured on kernel 6.8: /proc state Z,
     # os.kill(pid, 0) succeeds; iss-c0dd52cd4ad94dbf). The 2 s bound is far
-    # below the survivor's own 20 s life, so a genuinely live `sleep 20`
-    # (state S) cannot satisfy it; only a kill, then a reap, can.
+    # below the survivor's own 20 s life, so a live `sleep 20` (state S) cannot
+    # satisfy it; the killed-but-not-yet-reaped corpse (state Z) already does --
+    # reaping it is PID 1's job, not this file's.
     import time
     deadline = time.monotonic() + 2.0
     state = _grandchild_state(survivor)

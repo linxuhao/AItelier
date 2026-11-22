@@ -37,7 +37,11 @@ python -m pytest -q -p no:cacheprovider -m "not network and not docker and not b
 ```
 
 The slow tier is not part of the default run, so whoever relies on the default
-run as a gate must run `-m slow` as a second job.
+run as a gate must run `-m slow` as a second job. The platform's repository gate
+(`aitelier/tools/run_tests/impl.py`) runs plain `pytest` and has no such job
+yet: until one exists, a gate run of this repository does not run the driver,
+director and web JS suites, the write-opening mutation rows, the skillflow
+absence gate or the prose self-proof poles.
 
 The node suites need `integrations/dsh-driver/node_modules` to resolve. In the
 image that is `/opt/aitelier-dsh/node_modules`; a worktree mounted into a test
@@ -46,8 +50,9 @@ container needs the (untracked) symlink
 
 ## Parallel runs (pytest-xdist)
 
-`pyproject.toml` pins `pytest-xdist` and `pytest-timeout`, so images built after
-that change carry both. Images built before it have neither.
+`pyproject.toml` pins `pytest-xdist`, so images built after that change carry it.
+Images built before it do not. `pytest-timeout` is deliberately not pinned; see
+the end of this section.
 
 ```bash
 python -m pytest -q -p no:cacheprovider -n 4 --dist loadfile --basetemp=/tmp/xb -m "not network and not docker and not baked_toolchain and not slow and not serial"
@@ -75,17 +80,27 @@ Run them in a separate, non-parallel invocation, as above:
 - `tests/unit/test_dsh_todo_package.py::test_the_core_forwards_are_the_package_modules_with_aitelier_hooks`:
   order-dependent. `test_gate_deferral_execution_points.py` reloads
   `core.gate_deferral` in place, and loadfile can schedule that file first on
-  the same worker. `--timeout <seconds>`
-(pytest-timeout) bounds a hung row.
+  the same worker.
 
-Installing pytest-timeout has a side effect: `core/repository_executor_entry.py`
+`tests/integration/test_loop_stack_watchdog.py` used to leave
+`api.main.app.state._test_mode` set to True after its `[main]` app rows, which
+made `may_read_private` trust anonymous requests in every later file on the same
+worker; when loadfile put `tests/unit/test_private_read_verdict_at_execution.py`
+after it, that file's two `[main]` rows failed. The flag is now restored by the
+test that sets it.
+
+pytest-timeout, where installed, bounds a hung row with `--timeout <seconds>`.
+Installing it has a side effect: `core/repository_executor_entry.py`
 adds `--timeout=120 --timeout-method=thread` to repository-gate pytest runs that
 request `pytest_timeout` whenever the plugin is importable. To try the plugins
 in an older image, install them into a directory on `PYTHONPATH`. The gate's
 child process builds its own environment and does not see that directory, so
 installing pytest-timeout that way makes every gate test fail with
 `unrecognized arguments: --timeout=120`. Install only `pytest-xdist execnet`
-for such runs.
+for such runs. Because pyproject dependencies go into the product image, pinning
+pytest-timeout would switch that 120 s gate limit on for every target repository,
+and two slow-tier rows take longer than 120 s. It stays unpinned until the owner
+accepts that.
 
 ## Sharding by measured duration
 
@@ -93,7 +108,13 @@ for such runs.
 N shards by measured seconds from `tools/test_durations.json`. Files the
 durations file does not name are charged its median. Regenerate the file from
 `--durations=0` logs with `tools/shard_by_duration.py measure LOG[:LIST] ...`.
-The committed file was seeded from the 2026-11-21 full-suite audit shards.
+`:LIST` spreads the part of a log's total that `--durations` did not list over
+the files of LIST, which only makes sense for a serial log: in an xdist (`-n`) log
+the total is wall time, so `measure` ignores LIST there and warns. A
+`--durations=0` log lists every row and needs no LIST.
+The committed file holds the default tier (plain `pytest`, without `slow`)
+after the State template change, measured 2026-11-22 under `-n 4`; files with no
+default-tier row are absent and charged the median.
 
 ## State database templates
 

@@ -257,7 +257,7 @@ test('restart: a group question still in the inbox opens a group turn; the owner
 });
 
 test('restart in the middle of a group turn: the guard still reads the group from the session log', async () => {
-  const events = script([ev('turn/start'), ev('user/message', group('MID_TURN', 'r1', 'q-mid')),
+  const events = script([ev('turn/start', { turn: 7 }), ev('user/message', group('MID_TURN', 'r1', 'q-mid')),
     ev('assistant/message', { message: { id: 'a', content: [{ type: 'tool-call', id: 't', name: 'portfolio_projects' }] } }),
     ev('tool/result', { message: { id: 't' } })]);
   const g = turns();
@@ -271,6 +271,35 @@ test('restart in the middle of a group turn: the guard still reads the group fro
   assert.equal(g.current.calls, 1);
   assert.equal(g.guard('memory_note'), groupTurnRefusal);
   assert.deepEqual(texts(payload.agent.inbox.list), ['OWNER_MID']);
+});
+
+test('audience: a later step whose open turn is another turn reads as an unknown group, never the owner\'s', async () => {
+  // Guards a future DSH event-order change, not a defect reachable today: createGroupSetup runs
+  // on every turn's first step, so a step-2 payload finds this object's bookkeeping for its turn,
+  // or reads it back from the session log. Were DSH to claim a later step of a turn whose first
+  // step this object never saw, or the log's open turn to be a later one, the audience must fail
+  // closed - {kind: 'group', unknown: true}, the narrower rules (7.7.6a two) - never the
+  // owner's; and a reader that does not recognise `unknown` must leave it where it is.
+  const events = script([ev('turn/start', { turn: 7 }), ev('user/message', group('Q7')), ev('turn/end', { turn: 7 }),
+    ev('turn/start', { turn: 8 })]);
+  const g = turns();
+  g.turnOpened(8);
+  const setup = createGroupSetup({ turns: g, groups: {}, createUserMessage: m => m, fold: () => 0 });
+  const payload = { step: 2, turn: 7, agent: { inbox: fakeInbox(), session: { snapshotEvents: () => events } } };
+  const decision = await setup.step(payload, { kind: 'enter', messages: [message('OWNER_ON_7')] });
+  // (a) The audience of the turn, from split(): the log's open turn 8 is no resume of turn 7, so
+  // what this turn is nobody's this object can name - the owner's input is not this turn's.
+  assert.deepEqual(g.current.audience, { kind: 'group', unknown: true });
+  assert.deepEqual(decision.messages, []);
+  assert.deepEqual(texts(payload.agent.inbox.list), ['OWNER_ON_7'], 'it goes back for the next turn');
+  assert.equal(g.current.questions.length, 0);
+  // (b) A reader that does not recognise `unknown` - one written against the two kinds alone, as
+  // the steward's own audience readers are (they ask only whether `kind` is 'owner': lib/catalog.mjs,
+  // lib/connections.mjs) - leaves the audience in place instead of replacing it with the owner's.
+  const reader = audience => audience.kind === 'group' ? audience : { kind: 'owner' };
+  assert.deepEqual(reader(g.current.audience), { kind: 'group', unknown: true });
+  // The condition itself: a fresh object reads no resume out of a log whose open turn is 8.
+  assert.equal(turns().resume(events, 7), false);
 });
 
 // The first step's setup (7.7.3 item 6): a fake host and agent around createGroupSetup.

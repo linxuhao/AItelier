@@ -225,10 +225,12 @@ export class GroupTurns {
   }
 
   /** A restart in the middle of a turn: its audience, questions and calls so far, from the
-   *  session log (the group tag is persisted with the turn's messages), never from memory. */
+   *  session log (the group tag is persisted with the turn's messages), never from memory.
+   *  Only this turn's open span: a log whose open turn is 8 says nothing about turn 7, so it is
+   *  no resume of turn 7 (an audience it cannot place reads as a group, 7.7.6a two). */
   resume(events, turn) {
     const open = turnSpans(events).findLast(span => span.end === undefined);
-    if (!open) return false;
+    if (!open || open.turn !== turnKey(turn)) return false;
     this.current = { turn: turnKey(turn) ?? open.turn, audience: open.audience, calls: open.calls, merged: open.questionIds.length,
       ownerWaiting: false, questions: open.audience.unknown ? [] : [...open.questionIds] };
     return true;
@@ -244,8 +246,11 @@ export class GroupTurns {
       // Owner input a group turn put back opens this turn, whatever else came with it.
       const waited = messages.some(m => !isGroup(m) && !this.isNeutral(m) && this.waiting.has(m.id));
       const first = waited ? undefined : messages.find(isGroup);
+      // A later step whose turn this object has no bookkeeping for (a log it could not read it
+      // back from) is nobody's it can name: the same shape as any unknown audience, never the
+      // owner's (a first step's input with no group tag is the owner's, 7.7.3 item 1).
       const audience = first ? { kind: 'group', channel: first.source.channel, group_ref: first.source.group_ref,
-        label: first.source.group_label } : { kind: 'owner' };
+        label: first.source.group_label } : step === 1 ? { kind: 'owner' } : { kind: 'group', unknown: true };
       this.current = { turn: turnKey(turnId), audience, calls: 0, merged: 0, ownerWaiting: false, questions: [] };
     }
     const turn = this.current, keep = [], back = [];

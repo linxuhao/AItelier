@@ -154,11 +154,13 @@ test('guard: an unknown audience reads as a group; an owner turn never gets the 
   assert.equal(g.guard('family_memory_show'), familyRefusal);
 });
 
-test('pause: after a group turn the five writes wait for the owner; a broken pause file is in effect', () => {
+test('pause: after a group turn the paused writes wait for the owner; a broken pause file is in effect', () => {
   const g = turns();
   g.pause();
   g.split([message('a director letter')], 1);
   for (const name of PAUSED_TOOLS) assert.equal(g.guard(name), pausedRefusal, name);
+  // 7.8.8: a turn nobody's message opened (a letter, a reminder) proposes no connection change.
+  assert.equal(g.guard('propose_connection_change'), pausedRefusal);
   for (const name of ['ask_owner', 'portfolio_inbox', 'memory_search']) assert.equal(g.guard(name), undefined, name);
   g.unpause();
   assert.equal(g.guard('memory_note'), undefined);
@@ -587,16 +589,20 @@ test('channels: a refused group message is final, its notice goes to the group, 
     { accepted: false, reason: 'unavailable' });
 });
 
-test('channels (step 24, 7.8.9): a reply that decided a confirmation sends the backend\'s one line into the group - accepted or over quota', async () => {
+test('channels (step 24, 7.8.9): a reply that decided a confirmation sends the backend\'s one line into the group - accepted, or a cancel over quota', async () => {
   const line = '已确认 K7Q2A，正在执行。';
   const w = groupWorld({ relay: { message_id: 'g2', sender_role: 'member', sender_label: '成员甲', duplicate: false,
     confirmation: { code: 'K7Q2A', action: 'confirm', outcome: 'confirmed' }, confirmation_line: line, confirmation_line_message_id: 'gout' } });
   assert.deepEqual(await inbound(w, { text: '确认 K7Q2A' }), { accepted: true });
   assert.deepEqual(w.sent, [['group', 'r1', line]]);
   assert.equal(w.woken.length, 1, 'the reply is still a question: it wakes the steward, which runs it');
-  const over = groupWorld({ relay: { refused: 'member_quota', confirmation: { code: 'K7Q2A', outcome: 'confirmed' }, confirmation_line: line } });
-  assert.deepEqual(await inbound(over, { text: '确认 K7Q2A' }), { accepted: false, reason: 'member_quota' });
-  assert.deepEqual(over.sent, [['group', 'r1', line]]);
+  // Over quota the backend refuses only a reply that did not confirm (a confirming one is a
+  // question past the quotas): its line is sent and nothing wakes.
+  const cancelled = '已取消 K7Q2A，不会执行。';
+  const over = groupWorld({ relay: { refused: 'member_quota', confirmation: { code: 'K7Q2A', outcome: 'cancelled' }, confirmation_line: cancelled } });
+  assert.deepEqual(await inbound(over, { text: '取消 K7Q2A' }), { accepted: false, reason: 'member_quota' });
+  assert.deepEqual(over.sent, [['group', 'r1', cancelled]]);
+  assert.equal(over.woken.length, 0);
   // No line from the backend (the group's send budget is spent): nothing extra is sent.
   const spent = groupWorld({ relay: { message_id: 'g3', confirmation: { code: 'K7Q2A', outcome: 'confirmed' } } });
   await inbound(spent, { text: '确认 K7Q2A' });

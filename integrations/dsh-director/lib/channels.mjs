@@ -727,8 +727,10 @@ export function createOwnerChannels({ host, groups, log = () => {}, replies = ch
       } else log('group_bind_refused', { ...seen, reason: String(result?.refused ?? 'duplicate') });
       return { accepted: result?.bound === true };
     }
-    // Step 24 (7.8.9): the sender's reply decided a confirmation of theirs (before any quota);
-    // the group gets the backend's one line, which its send budget already counted.
+    // Step 24 (7.8.9): the sender's reply decided a confirmation of theirs (past the account
+    // cap, before the group and member quotas; a confirming reply is always accepted, so its
+    // 「正在执行」 comes with a wake); the group gets the backend's one line, which its send
+    // budget already counted.
     if (result?.confirmation_line) await sendGroupLine(channel, groupRef, result.confirmation_line);
     if (result?.refused) {
       log('group_message_refused', { ...seen, reason: String(result.refused) });

@@ -143,7 +143,10 @@ QUOTA_NOTICE = "问得太多了，过一会儿再问。"
 # code's words, never the model's.
 CONFIRMATION_LINES = MappingProxyType({
     "confirmed": "已确认 {code}，正在执行。", "cancelled": "已取消 {code}，不会执行。",
-    "expired": "{code} 已过期，未执行；请重新请求。", "refused": "{code} 未执行（{refusal}）。"})
+    "expired": "{code} 已过期，未执行；请重新请求。",
+    # The only refusals here are about the message's time (a group message is never undated):
+    # fixed words, never the internal token (review F4).
+    "refused": "{code} 未执行：消息时间不对，请重新回复。"})
 BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
                "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
                "让我记住的事只在本群用，30 天后删。")
@@ -633,29 +636,32 @@ class StateGroups:
                 keep("code_retired")
                 self._log("account code retired: posted in the group", channel, group_ref, sender_ref)
                 return {"refused": "code_in_group"}
+            account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
+                                   (channel,)).fetchone()
+            role = "owner" if account is not None and account[0] == sender_ref else "member"
+            label = self._member(conn, channel, group_ref, sender_ref, role)
+            hour = (moment - timedelta(hours=1)).isoformat()
+            # The account's outbound cap comes first: past it nothing can go out, so the message
+            # decides no confirmation either (a reply's record stays pending; review F1/F2).
+            sent = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND direction='out' "
+                               "AND at>?", (channel, hour))
+            if sent >= GROUP_LIMITS["account_out_per_hour"]:
+                keep("over_quota", role=role)
+                self._log("group_quota_account", channel, group_ref, sender_ref, size)
+                return {"refused": "group_quota_account", "sender_role": role}
             # Step 24 (7.8.9 step 4): the exact reply to a pending confirmation of this sender in
-            # this group, decided in this transaction and before the quotas.
+            # this group, decided in this transaction and before the group and member quotas. A
+            # reply that confirmed is a question past those quotas too: it must wake the steward
+            # that runs it, or the group's 「正在执行」 line would be false.
             decided = confirmations.match_reply(conn, body, channel=channel, sender_ref=sender_ref,
                                                 conversation_ref=group_ref, written_at=written, message_id=message_id)
             extra = {}
             if decided is not None:
                 extra["confirmation"] = decided
                 if self.send_refusal(conn, channel, group_ref, moment) is None:
-                    line = CONFIRMATION_LINES[decided["outcome"]].format(code=decided["code"],
-                                                                         refusal=decided.get("refusal"))
+                    line = CONFIRMATION_LINES[decided["outcome"]].format(code=decided["code"])
                     extra.update(confirmation_line=line, confirmation_line_message_id=self._out_row(
                         conn, channel, group_ref, "confirmation_line", line, moment))
-            account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
-                                   (channel,)).fetchone()
-            role = "owner" if account is not None and account[0] == sender_ref else "member"
-            label = self._member(conn, channel, group_ref, sender_ref, role)
-            hour = (moment - timedelta(hours=1)).isoformat()
-            sent = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND direction='out' "
-                               "AND at>?", (channel, hour))
-            if sent >= GROUP_LIMITS["account_out_per_hour"]:
-                keep("over_quota", role=role)
-                self._log("group_quota_account", channel, group_ref, sender_ref, size)
-                return {"refused": "group_quota_account", "sender_role": role, **extra}
             asked = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
                                 "direction='in' AND accepted=1 AND at>?", (channel, group_ref, hour))
             mine = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
@@ -663,7 +669,7 @@ class StateGroups:
                                (channel, group_ref, sender_ref, hour))
             over = ("group_quota" if asked >= GROUP_LIMITS["group_per_hour"]
                     else "member_quota" if role == "member" and mine >= GROUP_LIMITS["member_per_hour"] else None)
-            if over:
+            if over and (decided or {}).get("outcome") != "confirmed":
                 keep("over_quota", role=role)
                 self._log(over, channel, group_ref, sender_ref, size)
                 notices = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? "

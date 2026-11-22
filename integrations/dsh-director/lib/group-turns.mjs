@@ -38,7 +38,9 @@ export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfol
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
  *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
-export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose']));
+export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose',
+  // 7.8.8: a connection change waits for the owner too.
+  'propose_connection_change']));
 export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed); your last words are your reply to the group';
 export const familyRefusal = 'family memory is for group turns only';
 export const pausedRefusal = 'a group turn ran since your owner last wrote; this waits until your owner writes';

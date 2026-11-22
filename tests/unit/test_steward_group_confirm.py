@@ -7,7 +7,9 @@ record and the questions the turn took), its conversation the group; the text is
 says `@<管家> 确认 K…`, is at most one WeChat message (1400), passes the group exit check in
 the same transaction (else `withheld`: nothing created to confirm, nothing sent, the text kept
 for the owner) and spends the group's send budget (20 an hour, apart from the 60 questions).
-The exact reply is decided in relay_group_message before the quotas, and the group gets one
+The exact reply is decided in relay_group_message past the account cap and before the group and
+member quotas (a confirming reply is a question past those, so it always wakes the turn that
+runs it), and the group gets one
 line written by code."""
 from __future__ import annotations
 
@@ -241,13 +243,78 @@ def test_the_reply_is_decided_before_the_quotas_and_cancel_works_the_same_way(wo
     other = request(world, question, {"to": "b@example.com"})["code"]
     for n in range(state_groups.GROUP_LIMITS["member_per_hour"] - 1):
         gask(world, f"fill{n}", f"问题 {n}")
-    over = gask(world, "c1", f"确认 {code}")
-    assert over["refused"] == "member_quota" and over["confirmation"]["outcome"] == "confirmed"
-    assert over["confirmation_line"] == f"已确认 {code}，正在执行。"
+    # Past the member quota a cancel is decided and refused: its line needs no turn.
     cancelled = gask(world, "c2", f"取消 {other}")
-    assert cancelled["confirmation"]["outcome"] == "cancelled"
+    assert cancelled["refused"] == "member_quota" and cancelled["confirmation"]["outcome"] == "cancelled"
     assert cancelled["confirmation_line"] == f"已取消 {other}，不会执行。"
     assert status_of(world, other) == "cancelled"
+    # A reply that confirmed is a question past the quotas: 「正在执行」 always comes with a wake
+    # (review F1/F2) - never a refused message the steward never sees.
+    over = gask(world, "c1", f"确认 {code}")
+    assert "refused" not in over and over["message_id"] and over["confirmation"]["outcome"] == "confirmed"
+    assert over["confirmation_line"] == f"已确认 {code}，正在执行。"
+    assert record(world, code)["confirm_message_ref"] == over["message_id"]
+
+
+def test_past_the_group_quota_a_confirming_reply_is_still_the_question_that_runs_it(world, monkeypatch):
+    group_ready(world, monkeypatch)
+    question = gask(world, "q1")["message_id"]
+    group_turn(world)
+    code = request(world, question)["code"]
+    now = state_channels._now().isoformat()
+    with world.db.get_connection() as conn:
+        for n in range(state_groups.GROUP_LIMITS["group_per_hour"]):
+            conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,"
+                         "sender_ref,body,at) VALUES(?,'wechat',?,'in','question',1,?,'x',?)",
+                         (f"i{n}", ROOM, MEMBER2, now))
+        conn.commit()
+    assert gask(world, "plain", "还有一个问题")["refused"] == "group_quota"
+    answer = gask(world, "ok", f"确认 {code}")
+    assert "refused" not in answer and answer["message_id"]
+    assert answer["confirmation_line"] == f"已确认 {code}，正在执行。"
+
+
+def test_past_the_account_cap_a_reply_decides_nothing_and_its_line_never_refuses_it(world, monkeypatch):
+    group_ready(world, monkeypatch)
+    question = gask(world, "q1")["message_id"]
+    group_turn(world)
+    code = request(world, question)["code"]
+    cap = state_groups.GROUP_LIMITS["account_out_per_hour"]
+    now = state_channels._now().isoformat()
+
+    def fill(upto):
+        with world.db.get_connection() as conn:
+            have = conn.execute("SELECT COUNT(*) FROM state_group_messages WHERE direction='out'").fetchone()[0]
+            for n in range(have, upto):
+                conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,"
+                             "body,at) VALUES(?,'wechat',?,'out','reply',1,'x',?)", (f"o{n}", ROOM, now))
+            conn.commit()
+    fill(cap)
+    # At the cap nothing can go out: the reply is refused before it decides; the record waits.
+    refused = gask(world, "late", f"确认 {code}")
+    assert refused["refused"] == "group_quota_account" and "confirmation" not in refused
+    assert "confirmation_line" not in refused and status_of(world, code) == "pending"
+    with world.db.get_connection() as conn:
+        conn.execute("DELETE FROM state_group_messages WHERE message_id=?", (f"o{cap - 1}",))
+        conn.commit()
+    # One below the cap: the line makes the cap, and its own reply is still the accepted question.
+    answer = gask(world, "ok", f"确认 {code}")
+    assert "refused" not in answer and answer["message_id"]
+    assert answer["confirmation_line"] == f"已确认 {code}，正在执行。" and status_of(world, code) == "confirmed"
+
+
+def test_a_group_confirmation_that_never_reached_the_group_shows_as_not_delivered(world, monkeypatch):
+    group_ready(world, monkeypatch)
+    question = gask(world, "q1")["message_id"]
+    group_turn(world)
+    created = request(world, question)
+    code = created["code"]
+    assert execute(world.steward, "cancel_steward_confirmation", {"code": code}, allow_write=True)["status"] == "cancelled"
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT body, original, withheld_reason FROM state_group_messages WHERE direction='out' "
+                           "AND request_key=?", (f"confirm:{code}",)).fetchone()
+    # Kept (the send budget still counts it), marked for the owner's transcript.
+    assert tuple(row) == (created["text"], created["text"], "not_delivered")
 
 
 def test_a_group_code_is_never_confirmed_in_a_private_chat_nor_a_private_one_in_the_group(world, monkeypatch):
@@ -279,6 +346,18 @@ def test_a_late_reply_in_the_group_is_expired(world, monkeypatch):
     answer = gask(world, "late", f"确认 {code}", at=late.isoformat())
     assert answer["confirmation"]["outcome"] == "expired"
     assert answer["confirmation_line"] == f"{code} 已过期，未执行；请重新请求。"
+
+
+def test_a_reply_from_the_future_is_refused_in_plain_words(world, monkeypatch):
+    group_ready(world, monkeypatch)
+    question = gask(world, "q1")["message_id"]
+    group_turn(world)
+    code = request(world, question)["code"]
+    ahead = (state_channels._now() + sconf.CLOCK_SKEW + timedelta(minutes=5)).isoformat()
+    answer = gask(world, "skew", f"确认 {code}", at=ahead)
+    assert answer["confirmation"]["refusal"] == "confirmation_clock_skew"
+    # The family group never reads the internal token (review F4).
+    assert answer["confirmation_line"] == f"{code} 未执行：消息时间不对，请重新回复。"
 
 
 # --- 25.3 calendar (7.9.6): a stub calendar MCP behind the gateway ------------------------------------

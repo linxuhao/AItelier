@@ -384,7 +384,9 @@ class StateStewardConfirmations:
         """(requester, group) of a group turn (7.8.9): the recorded audience is a group bound
         now; every sender of the turn - the record's and the turn's questions' - is ONE
         sender_ref, else ambiguous_requester; `message_id` is an accepted question of that
-        group from that sender, else no_requester."""
+        group from that sender, else no_requester. The audience keeps the turn's senders, not
+        its question ids: that `message_id` is a question OF THIS TURN rests on the plugin,
+        which passes the turn's newest question."""
         from core.state_groups import StateGroups
         row = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1").fetchone()
         group = StateGroups._live_group(conn, row["channel"], row["group_ref"]) if row is not None else None
@@ -403,7 +405,8 @@ class StateStewardConfirmations:
                                   "the one who wants it asks again alone")
         sender = next(iter(senders))
         if not any(q["message_id"] == message_id and q["sender_ref"] == sender for q in questions):
-            raise StateGraphError("no_requester: an outward action starts only from a question of this turn")
+            raise StateGraphError("no_requester: an outward action starts only from an accepted group question "
+                                  "of the person who asked")
         account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
                                (row["channel"],)).fetchone()
         kind = "owner" if account is not None and account[0] == sender else "member"
@@ -441,8 +444,14 @@ class StateStewardConfirmations:
                 if _has_tables(conn) else None
             if row is None:
                 raise StateNotFound(f"unknown_code: no confirmation {code}")
-            conn.execute("UPDATE state_steward_confirmations SET status='cancelled' WHERE code=? AND status='pending'",
-                         (code,))
+            voided = conn.execute("UPDATE state_steward_confirmations SET status='cancelled' WHERE code=? "
+                                  "AND status='pending'", (code,)).rowcount
+            if voided and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                                       "name='state_group_messages'").fetchone() is not None:
+                # A group's copy keeps its outbound row (the send budget still counts it); the
+                # owner's transcript shows it never reached the group.
+                conn.execute("UPDATE state_group_messages SET withheld_reason='not_delivered', original=body "
+                             "WHERE direction='out' AND kind='confirmation' AND request_key=?", (f"confirm:{code}",))
             status = conn.execute("SELECT status FROM state_steward_confirmations WHERE code=?", (code,)).fetchone()[0]
         return {"code": code, "status": status}
 

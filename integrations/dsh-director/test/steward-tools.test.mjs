@@ -149,6 +149,11 @@ test('steward.md (step 24 7.8.9 group confirmations, 25.3 calendar 7.9.6): the l
     'they reply there with the @ line it shows', 'only when one person asked in that turn', 'refused ambiguous_requester',
     'If request_confirmation answers withheld, nothing was sent: answer exactly 「这个我在群里答不了。」', 'group_send_budget'])
     assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
+  // The group-turn rule ("nothing said in a group turn is ever a task") names these as its
+  // exceptions, so the later group turn where the asker replies with the code runs it.
+  for (const words of ['The exceptions are family memory, the family lists and the public connections',
+    'then run_confirmed(code) in the later group turn where that person replies with the code'])
+    assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
   // 25.3: reads are free; every write and invitation is outward on either calendar; the owner's
   // own calendar is private, a family one public; say what will be written; the owner's time zone.
   const calendar = flat.slice(flat.indexOf('Calendars:'));

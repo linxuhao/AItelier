@@ -191,6 +191,7 @@ def test_one_peak_record_names_the_process_that_holds_the_memory(tmp_path, cgrou
         limit = (cgroup / "memory.max").read_text().strip()
         if limit == "max":
             assert record["memory_max_b"] is None
+            assert record["memory_peak_share_of_max"] is None
         else:
             assert record["memory_max_b"] == int(limit)
             assert 0 < record["memory_peak_share_of_max"] <= 1

@@ -19,11 +19,12 @@ without the repository gate noticing.
 
 The director suite (``integrations/dsh-director``) used to be a second row here. It was
 removed because ``tests/integration/test_driver_node_suite_runs.py`` already runs every
-one of its tests: the driver suite's ``plugin-boundary.test.mjs`` imports all 20
-director test files (and its third test fails when the director's npm script names a
+one of its tests: the driver suite's ``plugin-boundary.test.mjs`` imports every
+director test file (and its third test fails when the director's npm script names a
 file it does not import), so the driver row's ``pass == tests`` check is red whenever a
-director test is. Measured 2026-11-22: the director suite alone ran 403 tests, and all
-403 test names (with their nesting) appear among the driver run's 693.
+director test is. Measured 2026-11-22 at ``0685a65908``: the director suite alone ran
+424 tests, and all 424 test names (with their nesting) appear among the driver run's
+725.
 
 Dependencies: the suite resolves only the node standard library and files inside this
 repository. It imports ``integrations/wechat-bridge/bridge.mjs``, whose HTTP layer takes

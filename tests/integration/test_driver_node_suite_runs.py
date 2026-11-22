@@ -4,13 +4,14 @@ What it runs: exactly ``node --test --test-concurrency=2`` (argv
 ``[<node>, "--test", "--test-concurrency=2"]``) with the working directory set to
 ``integrations/dsh-driver``. That is the driver suite's full ``node --test`` discovery,
 and nothing else is run. The discovery includes ``plugin-boundary.test.mjs``, which
-imports all 20 test files of ``integrations/dsh-director``, so this row runs the director
+imports every test file of ``integrations/dsh-director``, so this row runs the director
 suite too (there is no separate director row).
 
 Concurrency 2 runs two test files at a time. At node's default, a 2-CPU container gets
 concurrency 1 and the suite took 338 s; at 2 three runs of this row in a 2-CPU container
 took 163 s, 166 s and 221 s (host load 5-16) and all three were green, 693/693
-(measured 2026-11-22).
+(measured 2026-11-22, before the rebase onto main; at ``0685a65908`` the suite is 725
+tests and one run took 199 s at host load 12-23).
 
 Why: nothing else executes this suite. The pytest-side guard
 ``tests/unit/test_driver_suite_lists_its_files.py`` reads the suite's file list and its

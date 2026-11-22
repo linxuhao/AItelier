@@ -43,9 +43,10 @@ The `serial` rows pass in a plain serial run, so plain `pytest` needs no second
 invocation; only parallel runs split them out (see "Parallel runs" below).
 
 The director suite has no row of its own. The driver row's discovery includes
-`integrations/dsh-driver/plugin-boundary.test.mjs`, which imports all 20 director test
-files, so the driver row runs every director test (measured 2026-11-22: the 403 tests
-of the director suite run alone all appear, by name, among the driver run's 693). The
+`integrations/dsh-driver/plugin-boundary.test.mjs`, which imports every director test
+file the director's npm script names, so the driver row runs every director test
+(measured 2026-11-22 at `0685a65908`: the 424 tests of the director suite run alone all
+appear, by name, among the driver run's 725). The
 driver row runs node with `--test-concurrency=2`; in a 2-CPU container node's default
 is 1, which took about twice as long.
 

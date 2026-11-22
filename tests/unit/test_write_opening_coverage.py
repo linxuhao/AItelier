@@ -228,19 +228,25 @@ def mutate(_write_handlers, monkeypatch):
 
 
 def _gate_run(action, mutate, tmp_path, state_db_copy):
-    """(red, report) for `action` under its mutation. The sentinel runs here; if it
-    stays green, the exercising files run in a nested pytest under the same mutation."""
-    state = mutate(action)
-    try:
-        test_performing_a_write_action_leaves_the_project_private(action, tmp_path, state_db_copy)
-    except Exception as exc:    # any non-pass is what made the nested run exit non-zero
-        return True, {**state, "sentinel": f"{type(exc).__name__}: {exc}"[:1500]}
+    """(red, report) for `action` under its mutation. A covered action's sentinel runs
+    here; if it stays green, the exercising files run in a nested pytest under the
+    same mutation. An exempt action has no sentinel (open_project opens the project
+    by itself, so its sentinel is red with no mutation): only the nested run counts."""
+    state = None
+    if action in _covered_actions():
+        state = mutate(action)
+        try:
+            test_performing_a_write_action_leaves_the_project_private(action, tmp_path,
+                                                                      state_db_copy)
+        except Exception as exc:    # any non-pass is what made the nested run exit non-zero
+            return True, {**state, "sentinel": f"{type(exc).__name__}: {exc}"[:1500]}
     files = _exercising_files(action)
     rc, report = _mutation_run(action, files)
-    # The nested run is judged by its own report alone: the sentinel's count stays
-    # apart, or a nested run that never reached its tests would pass on it.
-    report["sentinel_fired"] = state["fired"]
-    report["sentinel"] = f"green, fired {state['fired']}; ran {[f.name for f in files]}"
+    if state is not None:
+        # The nested run is judged by its own report alone: the sentinel's count stays
+        # apart, or a nested run that never reached its tests would pass on it.
+        report["sentinel_fired"] = state["fired"]
+        report["sentinel"] = f"green, fired {state['fired']}; ran {[f.name for f in files]}"
     return _nested_red(rc, report), report
 
 

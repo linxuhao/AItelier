@@ -399,6 +399,44 @@ class StateLists:
             result = {"removed": removed, "unknown": [i for i in ids if i not in removed]}
             return self._record(conn, "remove_list_items", request_key, request_hash, result)
 
+    def assign_items(self, item_ids, group):
+        """The dashboard's 「移到群」 (7.9.5, review F2): unassigned items (made before step 23.1
+        while no group or several were bound) join a BOUND group's lists - the owner names it.
+        Each item passes that group's exit check again (it becomes the group's to read; one hit
+        refuses the whole move, withheld: <kind>) and the group's open_per_list bound
+        (list_full). An id that is not an unassigned item is answered in `unknown`."""
+        self.steward._owner()
+        ids = [i for i in dict.fromkeys(item_ids or []) if isinstance(i, str) and i]
+        if not ids or len(ids) > LIST_LIMITS["per_check"]:
+            raise StateGraphError(f"invalid_request: 1 to {LIST_LIMITS['per_check']} item_ids")
+        if group is None:
+            raise StateGraphError("group_required: name the bound group the items move to")
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            where = self._named_group(conn, group, False, any_group=False)
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(f"SELECT * FROM state_steward_list_items WHERE item_id IN ({marks}) AND channel IS NULL "
+                                "AND deleted_at IS NULL", ids).fetchall()
+            for row in rows:
+                reason = self.groups.exit_check(conn, row["text"], moment)
+                if reason is not None:
+                    from core.state_groups import WITHHELD_REASONS
+                    raise StateGraphError(f"withheld: {reason} ({WITHHELD_REASONS[reason]}); nothing was moved")
+            for name in LISTS:
+                moving = sum(1 for r in rows if r["list"] == name and r["done_at"] is None)
+                open_now = conn.execute("SELECT COUNT(*) FROM state_steward_list_items WHERE list=? AND channel=? AND "
+                                        "group_ref=? AND deleted_at IS NULL AND done_at IS NULL",
+                                        (name, *where)).fetchone()[0]
+                if moving and open_now + moving > LIST_LIMITS["open_per_list"]:
+                    raise StateConflict(f"list_full: at most {LIST_LIMITS['open_per_list']} open items on a list; "
+                                        "check or remove some first")
+            for row in rows:
+                conn.execute("UPDATE state_steward_list_items SET channel=?, group_ref=? WHERE item_id=? AND "
+                             "channel IS NULL", (*where, row["item_id"]))
+            moved = [r["item_id"] for r in rows]
+        return {"assigned": moved, "unknown": [i for i in ids if i not in moved],
+                "group": {"channel": where[0], "group_ref": where[1]}}
+
     def clear_done(self, list=None, group=None, unassigned=False):
         """The dashboard's 「清空已完成」: remove every checked item of one group (of one list or both)."""
         self.steward._owner()

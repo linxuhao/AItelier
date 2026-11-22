@@ -486,6 +486,19 @@ def remove_list_item(item_id: str, channel: Channel | None = None, group_ref: st
                                                           unassigned=unassigned))
 
 
+class ListAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+@router.post("/lists/assign", dependencies=[Depends(authz.require_writer)])
+def assign_list_items(body: ListAssign, channel: Channel, group_ref: str, service=Depends(get_service)):
+    """Unassigned items (from before each group had its own lists) join a bound group's lists."""
+    _owner(service)
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.assign_items(body.item_ids, group))
+
+
 @router.post("/lists/clear-done", dependencies=[Depends(authz.require_writer)])
 def clear_done_list_items(list_name: ListName | None = None, channel: Channel | None = None,
                           group_ref: str | None = None, unassigned: bool = False, service=Depends(get_service)):

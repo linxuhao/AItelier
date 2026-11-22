@@ -1066,6 +1066,10 @@ export function checkFamilyListItems(scope: FamilyListScope, itemIds: string[], 
 export function removeFamilyListItem(scope: FamilyListScope, itemId: string): Promise<unknown> {
   return _del('/api/steward/lists/items/' + encodeURIComponent(itemId) + listQuery(scope));
 }
+/** Unassigned items join a bound group's lists (review F2); `unknown` names ids that were not unassigned. */
+export function assignFamilyListItems(group: {channel: OwnerChannelName; group_ref: string}, itemIds: string[]): Promise<{assigned: string[]; unknown: string[]}> {
+  return _post('/api/steward/lists/assign' + listQuery(group), {item_ids: itemIds});
+}
 export function clearDoneFamilyListItems(scope: FamilyListScope, list?: FamilyListName): Promise<{cleared: number}> {
   return _post('/api/steward/lists/clear-done' + listQuery(scope) + (list ? '&list_name=' + encodeURIComponent(list) : ''));
 }

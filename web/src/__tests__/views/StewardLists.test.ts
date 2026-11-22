@@ -7,7 +7,7 @@ import { langStore } from '../../stores/i18n';
 
 const api = vi.hoisted(() => ({
   listFamilyLists: vi.fn(), addFamilyListItems: vi.fn(), checkFamilyListItems: vi.fn(), removeFamilyListItem: vi.fn(),
-  clearDoneFamilyListItems: vi.fn(), listFamilyListGroups: vi.fn(),
+  clearDoneFamilyListItems: vi.fn(), listFamilyListGroups: vi.fn(), assignFamilyListItems: vi.fn(),
 }));
 // Step 23.1 (7.9.5): the lists are a group's - one bound group here unless a test says otherwise.
 const A = {channel: 'wechat', group_ref: 'r1@chatroom', label: '家庭群', bound: true};
@@ -26,7 +26,8 @@ describe('StewardLists', () => {
     cleanup(); vi.resetAllMocks(); langStore.set('en');
     api.listFamilyLists.mockResolvedValue({lists: {shopping: [item('li-1', '牛奶'),
       item('li-2', '鸡蛋', {done: true, done_at: '2026-11-21T11:00:00Z', done_by: '管家'})], todo: []}});
-    for (const fn of [api.addFamilyListItems, api.checkFamilyListItems, api.removeFamilyListItem, api.clearDoneFamilyListItems])
+    for (const fn of [api.addFamilyListItems, api.checkFamilyListItems, api.removeFamilyListItem, api.clearDoneFamilyListItems,
+      api.assignFamilyListItems])
       fn.mockResolvedValue({});
     api.listFamilyListGroups.mockResolvedValue({groups: [A], unassigned: 0});
   });
@@ -146,6 +147,23 @@ describe('StewardLists', () => {
     await view.findByText('面包');
     expect(view.container.querySelector('[data-list-input="shopping"]')).toBeNull();
     expect(view.container.querySelector('[data-item-remove]')).not.toBeNull();
+  });
+
+  it('review F2: an unassigned item moves into a bound group\'s lists (never an unbound one); a group\'s items offer no move', async () => {
+    const B = {channel: 'wechat', group_ref: 'r2@chatroom', label: '老家群', bound: true};
+    const gone = {channel: 'wechat', group_ref: 'r0@chatroom', label: '旧群', bound: false};
+    api.listFamilyListGroups.mockResolvedValue({groups: [A, B, gone], unassigned: 1});
+    api.listFamilyLists.mockImplementation(async (scope: unknown) => ({group: null,
+      lists: {shopping: [item(scope === 'unassigned' ? 'li-u' : 'li-1', scope === 'unassigned' ? '旧条目' : '牛奶')], todo: []}}));
+    const view = render(StewardLists);
+    await view.findByText('牛奶');
+    expect(view.container.querySelector('[data-item-assign]')).toBeNull();
+    await fireEvent.change(view.container.querySelector('[data-list-group]') as HTMLSelectElement, {target: {value: 'unassigned'}});
+    await view.findByText('旧条目');
+    const move = view.container.querySelector('[data-item-assign="li-u"]') as HTMLSelectElement;
+    expect([...move.options].map(o => o.textContent)).toEqual(['Move to group…', '家庭群', '老家群']);
+    await fireEvent.change(move, {target: {value: 'wechat r2@chatroom'}});
+    await waitFor(() => expect(api.assignFamilyListItems).toHaveBeenCalledWith({channel: 'wechat', group_ref: 'r2@chatroom'}, ['li-u']));
   });
 
   it('step 23.1: no group bound and nothing unassigned - the page says to bind one, no lists', async () => {

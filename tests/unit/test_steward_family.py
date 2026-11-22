@@ -906,3 +906,39 @@ def test_the_migration_gives_the_old_items_to_the_one_bound_group(tmp_path, cloc
     with db.get_connection() as conn:
         assert [tuple(r) for r in conn.execute("SELECT item_id, channel, group_ref FROM state_steward_list_items")] == [
             ("li-old", "wechat", "r1@chatroom")]
+
+
+def test_review_f2_the_owner_moves_unassigned_items_into_a_bound_groups_lists(world, clock, client):
+    """7.9.5 (review F2): items the migration left without a group (none or several bound when
+    the column came) are shown under 「未归属」 and the owner moves them into a bound group -
+    the owner's session alone, a bound group only, the group's exit check and bound again."""
+    two_groups(world)
+    with world.db.get_connection() as conn:
+        for item_id, text in (("li-u1", "牛奶"), ("li-u2", "酱油"), ("li-u3", "看 /home/x")):
+            conn.execute("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_via,added_at) "
+                         "VALUES(?,'shopping',?,'steward','owner_dm','2027-01-01T00:00:00+00:00')", (item_id, text))
+        conn.commit()
+    to_a = "/api/steward/lists/assign?channel=wechat&group_ref=" + ROOM
+    steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
+    assert client.post(to_a, json={"item_ids": ["li-u1"]}, headers=steward).status_code == 403
+    assert client.post("/api/steward/lists/assign", json={"item_ids": ["li-u1"]},
+                       headers=OWNER_HEADERS).status_code == 422, "the group is named"
+    # One withheld text refuses the whole move: nothing moved.
+    bad = client.post(to_a, json={"item_ids": ["li-u1", "li-u3"]}, headers=OWNER_HEADERS)
+    assert bad.status_code == 422 and bad.json()["detail"].startswith("withheld"), bad.text
+    assert rows(world, "SELECT COUNT(*) FROM state_steward_list_items WHERE channel IS NULL") == [(3,)]
+    moved = client.post(to_a, json={"item_ids": ["li-u1", "li-u2", "li-x"]}, headers=OWNER_HEADERS)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["assigned"] == ["li-u1", "li-u2"] and moved.json()["unknown"] == ["li-x"]
+    assert [i["text"] for i in show(world.steward, group="家庭群")["lists"]["shopping"]] == ["牛奶", "酱油"]
+    assert show(world.steward, group="老家群")["lists"]["shopping"] == []
+    # An item of a group is no longer unassigned: moving it again is unknown, it stays in A.
+    again = client.post("/api/steward/lists/assign?channel=wechat&group_ref=" + ROOM2, json={"item_ids": ["li-u1"]},
+                        headers=OWNER_HEADERS)
+    assert again.json()["assigned"] == [] and again.json()["unknown"] == ["li-u1"]
+    # An unbound group takes no items.
+    world.owner.groups.unbind_owner_group("wechat", ROOM2)
+    gone = client.post("/api/steward/lists/assign?channel=wechat&group_ref=" + ROOM2, json={"item_ids": ["li-u3"]},
+                       headers=OWNER_HEADERS)
+    assert gone.status_code == 404, gone.text
+    assert world.owner.lists.list_groups()["unassigned"] == 1

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { addFamilyListItems, checkFamilyListItems, clearDoneFamilyListItems, listFamilyListGroups, listFamilyLists,
+  import { addFamilyListItems, assignFamilyListItems, checkFamilyListItems, clearDoneFamilyListItems, listFamilyListGroups, listFamilyLists,
     removeFamilyListItem, type FamilyListGroup, type FamilyListItem, type FamilyListName, type FamilyListScope } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
   // The family lists (step 25 C4, design 7.9.5): shopping and to-do, shared with a family group
@@ -25,6 +25,12 @@
   const current = $derived(groups.find(x => keyOf(x) === chosen));
   // Items are added to a bound group's lists only.
   const addable = $derived(!!current?.bound);
+  // Unassigned items are moved into a bound group's lists by the owner (review F2).
+  const boundGroups = $derived(groups.filter(g => g.bound));
+  function assign(itemId: string, key: string) {
+    const g = boundGroups.find(x => keyOf(x) === key);
+    if (g) void run(() => assignFamilyListItems({channel: g.channel, group_ref: g.group_ref}, [itemId]));
+  }
   let alive = true;
   async function load() {
     try {
@@ -100,6 +106,13 @@
               onchange={(event) => void run(() => checkFamilyListItems(scope!, [item.item_id], event.currentTarget.checked))} />
               <span class="text">{item.text}</span></label>
             <small class="who" data-item-who>{item.added_by ? t('steward.listAddedBy').replace('{who}', item.added_by).replace('{when}', when(item.added_at)) : t('steward.listAddedByFormer').replace('{when}', when(item.added_at))}{#if item.done} · {item.done_by ? t('steward.listDoneBy').replace('{who}', item.done_by) : t('steward.listDoneByFormer')}{/if}</small>
+            {#if scope === 'unassigned' && boundGroups.length}
+              <select class="assign" disabled={busy} data-item-assign={item.item_id} aria-label={t('steward.listAssign')}
+                onchange={(event) => assign(item.item_id, event.currentTarget.value)}>
+                <option value="">{t('steward.listAssign')}</option>
+                {#each boundGroups as g (keyOf(g))}<option value={keyOf(g)}>{g.label ?? g.group_ref}</option>{/each}
+              </select>
+            {/if}
             <button type="button" class="outline danger" disabled={busy} data-item-remove={item.item_id}
               onclick={() => void run(() => removeFamilyListItem(scope!, item.item_id))}>{t('steward.listRemove')}</button>
           </li>
@@ -131,5 +144,6 @@
   .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}
   .add{display:flex;gap:8px;margin:0;}.add input{margin:0;font-size:13px;}
   .error{color:var(--pico-del-color);}
+  .assign{width:auto;margin:0;padding:2px 8px;font-size:12px;}
   .pick{display:flex;gap:8px;align-items:center;font-size:12px;margin:0 0 8px;}.pick select{width:auto;margin:0;font-size:13px;}
 </style>

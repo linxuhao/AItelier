@@ -656,8 +656,9 @@ def _state_only_app(root: Path):
 
 
 def _full_app(root: Path):
+    # The caller's _test_mode(app) sets the flag and restores it; setting it here
+    # leaked True into later files on the same worker (anonymous private reads).
     from api.main import app
-    app.state._test_mode = True
     return app
 
 

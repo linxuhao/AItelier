@@ -10,14 +10,21 @@ that asked for it (`create_steward_confirmation`); this module
   owner's browser session wrote on the dashboard (`state_steward_dashboard_messages`,
   recorded when it was written) is the dashboard; anything else - the owner's terminal
   (CLI_OWNER_ACTOR), a letter, a reminder - is `no_requester`;
+- in a group turn (step 23's audience record is a bound group), the requester is the ONE
+  sender of the turn's questions and the conversation is that group; questions of two
+  senders are `ambiguous_requester`. The text says `<@管家> 确认 <code>`, is at most one
+  WeChat message (1400 characters), passes the group exit check in the same transaction
+  (else nothing is created or sent: `withheld`, the text kept for the owner) and spends
+  the group's send budget (core.state_groups: an outbound row, request key confirm:<code>);
 - stores the canonical JSON of the arguments and its hash
   sha256(conn_uid \\0 generation \\0 raw_name \\0 canonical arguments);
 - writes, by code, the text the requester reads: a fixed header that alone carries the
   reply phrase, then every argument (short ones first), every control, bidirectional or
   zero-width character shown as an escape;
 - matches the requester's exact reply `确认 <code>` / `取消 <code>` inside the
-  transaction that writes the reply message (core.state_channels), on the same
-  channel and sender, within 10 minutes;
+  transaction that writes the reply message (core.state_channels; a group's:
+  core.state_groups.relay_group_message, before its quotas), on the same channel,
+  conversation and sender, within 10 minutes;
 - lets the gateway CONSUME one confirmed record whose hash equals the call it is about
   to forward (api/steward_gateway.py): one confirmation, one forward, never retried.
 
@@ -54,7 +61,7 @@ TTL = timedelta(minutes=10)             # to confirm, and from confirming to run
 CLOCK_SKEW = timedelta(minutes=2)       # a channel time this far ahead of now still counts
 KEPT = timedelta(days=30)
 PENDING_MAX = 3                         # per requester at a time
-TEXT_MAX = 4000                         # a private chat or the dashboard (a group: 1400, step 23)
+TEXT_MAX = 4000                         # a private chat or the dashboard (a group: GROUP_LIMITS reply_chars)
 SHORT_MAX = 200
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE = re.compile(r"K[0-9A-HJKMNP-TV-Z]{4}")
@@ -117,9 +124,11 @@ def _value_text(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def confirmation_text(code: str, label: str, raw_name: str, arguments: dict) -> str:
+def confirmation_text(code: str, label: str, raw_name: str, arguments: dict, mention: str | None = None) -> str:
     """Written by code, never the model: the header (the only place the reply phrase is),
-    then the short fields (one line, at most 200 characters) and then the long ones."""
+    then the short fields (one line, at most 200 characters) and then the long ones. In a
+    group the reply phrase starts with the group's @ prefix (`mention`): only an @-message
+    reaches the steward, and the bridge compares what follows it."""
     short, long = [], []
     for key in sorted(arguments):
         text = _value_text(arguments[key])
@@ -127,8 +136,9 @@ def confirmation_text(code: str, label: str, raw_name: str, arguments: dict) -> 
             short.append(f"{_shown(key)}：{_shown(text)}")
         else:
             long.append(f"{_shown(key)}（长文）：\n{_shown(text, keep_newlines=True)}")
+    at = f"{_shown(mention)} " if mention else ""
     header = (f"请确认（{code}，10 分钟内有效）：用「{_shown(label)}」执行 {_shown(raw_name)}。"
-              f"回复「{CONFIRM}{code}」执行，「{CANCEL}{code}」作废。")
+              f"回复「{at}{CONFIRM}{code}」执行，「{at}{CANCEL}{code}」作废。")
     return "\n".join([header, *short, *long, "—— 以上是全部内容 ——"])
 
 
@@ -191,13 +201,17 @@ def _requester_key(record) -> tuple:
 
 
 # ---------------------------------------------------------------- matching a reply
-def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | None, message_id: str | None = None):
+def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | None, message_id: str | None = None,
+                conversation_ref=None):
     """In the transaction that writes a person's message: when the whole message (ends
     stripped) is `确认 <code>` / `取消 <code>` for a PENDING record of this very requester
-    (channel and sender; the dashboard: the owner's browser session, server time), decide
-    it. None for an ordinary message - also a code of someone else, of another channel,
-    or no longer pending. `written_at` is the channel's time (None: undated); `message_id`
-    the reply being written, kept as the record's confirm_message_ref when it decides."""
+    (channel, conversation and sender; the dashboard: the owner's browser session, server
+    time), decide it. None for an ordinary message - also a code of someone else, of
+    another channel or conversation (a group's code answered in a private chat, or the
+    other way round), or no longer pending. `conversation_ref` is the group for a group
+    message, else the sender's private chat (its sender_ref). `written_at` is the channel's
+    time (None: undated); `message_id` the reply being written, kept as the record's
+    confirm_message_ref when it decides."""
     if not isinstance(body, str) or not _has_tables(conn):
         return None
     phrase = body.strip()
@@ -208,8 +222,9 @@ def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | 
     else:
         return None
     row = conn.execute("SELECT * FROM state_steward_confirmations WHERE code=?", (code,)).fetchone()
+    conversation = conversation_ref if conversation_ref is not None else sender_ref
     if row is None or row["status"] != "pending" or row["channel"] != channel or (
-            channel != DASHBOARD and row["sender_ref"] != sender_ref):
+            channel != DASHBOARD and (row["sender_ref"] != sender_ref or row["conversation_ref"] != conversation)):
         return None
     out = {"code": code, "action": action}
     now = _utcnow()
@@ -259,22 +274,24 @@ def finish(conn, code: str, ok: bool, summary: str | None) -> None:
 class StateStewardConfirmations:
     """The steward host's two commands and the owner's list (7.8.9, 7.8.10)."""
 
-    def __init__(self, store, actor, driver_id=None, steward=None):
-        self.store, self.actor, self.driver_id, self.steward = store, actor, driver_id, steward
+    def __init__(self, store, actor, driver_id=None, steward=None, groups=None):
+        self.store, self.actor, self.driver_id, self.steward, self.groups = store, actor, driver_id, steward, groups
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
             ensure_schema(store.db)
 
-    def create(self, name, arguments, requester_message_id, audience="owner"):
+    def create(self, name, arguments, requester_message_id, audience="owner", question_ids=None):
         """The host's request for one confirmation: {code, text, channel, reply_to_message_id,
-        expires_at}. Refused: no_requester, not an allowed outward tool of a connection this
-        turn may use, too many pending, too long to confirm, invalid arguments."""
+        expires_at} (a group's also group_ref). Refused: no_requester, ambiguous_requester,
+        not an allowed outward tool of a connection this turn may use, too many pending, too
+        long to confirm, invalid arguments, a group's send budget or account cap; a group's
+        text the exit check holds back answers {refused: withheld} (nothing created to confirm,
+        nothing to send). `question_ids` (a group turn): every question the turn took - the
+        audience record names only its first step's senders."""
         from core import state_steward_connections as sc
         from core.state_steward import steward_project
-        if audience != "owner":
-            # Confirmations in a group turn (7.8.9's group requester, 7.7.7 exit check, group
-            # wording and budget) are not built yet (24.2).
-            raise StateGraphError("ambiguous_requester: confirmations in a group are not available yet")
+        if audience not in ("owner", "group"):
+            raise StateGraphError("invalid_request: audience is owner or group")
         if not isinstance(name, str) or not name.startswith(sc.PUBLIC_PREFIX):
             raise StateGraphError("not_outward: not a connection tool")
         parts = sc.split_name(name[len(sc.PUBLIC_PREFIX):])
@@ -289,9 +306,14 @@ class StateStewardConfirmations:
             ensure_tables(conn)
             # The turn's audience is step 23's record (core.state_groups), the one the gateway
             # judges by; the host's word alone is not enough. No record is not the owner's.
-            if sc.audience_of(conn) != "owner":
-                raise StateGraphError("ambiguous_requester: this turn is not recorded as the owner's")
-            requester = requester_of(conn, requester_message_id, home)
+            recorded = sc.audience_of(conn)
+            if recorded != audience:
+                raise StateGraphError(f"ambiguous_requester: this turn is not recorded as the {audience}'s")
+            group = None
+            if audience == "owner":
+                requester = requester_of(conn, requester_message_id, home)
+            else:
+                requester, group = self._group_requester(conn, requester_message_id, question_ids)
             connection = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
             entry = next((e for e in sc.effective(conn) if e["conn_id"] == conn_id and e["gw_name"] == gw), None)
             if connection is None or entry is None:
@@ -308,6 +330,13 @@ class StateStewardConfirmations:
                 raise StateGraphError("argument_blocked")
             conn.execute("DELETE FROM state_steward_confirmations WHERE created_at<?", (_iso(now - KEPT),))
             conn.execute("DELETE FROM state_steward_dashboard_messages WHERE at<?", (_iso(now - KEPT),))
+            moment = None
+            if group is not None:
+                from core import state_groups
+                moment = state_groups._now()
+                refusal = self.groups.send_refusal(conn, group["channel"], group["group_ref"], moment)
+                if refusal is not None:
+                    raise StateGraphError(refusal)
             pending = conn.execute(
                 "SELECT COUNT(*) FROM state_steward_confirmations WHERE status='pending' AND created_at>=? AND channel=? "
                 "AND conversation_ref IS ? AND sender_ref IS ?",
@@ -316,19 +345,70 @@ class StateStewardConfirmations:
             if pending >= PENDING_MAX:
                 raise StateGraphError(f"too_many_pending: at most {PENDING_MAX} confirmations wait for one person")
             code = _new_code(conn)
-            text = confirmation_text(code, connection["label"], entry["raw_name"], arguments)
-            if len(text) > TEXT_MAX:
+            text = confirmation_text(code, connection["label"], entry["raw_name"], arguments,
+                                     mention=group["mention_prefix"] if group is not None else None)
+            limit = TEXT_MAX
+            if group is not None:
+                from core.state_groups import GROUP_LIMITS
+                limit = GROUP_LIMITS["reply_chars"]  # one WeChat message (7.7.7)
+            if len(text) > limit:
                 raise StateGraphError(f"too_long_to_confirm: the confirmation would be {len(text)} characters; "
-                                      f"at most {TEXT_MAX} - ask for a shorter text, or the owner does it on the dashboard")
+                                      f"at most {limit} - ask for a shorter text, or the owner does it on the dashboard")
+            withheld = self.groups.exit_check(conn, text, moment) if group is not None else None
             conn.execute("INSERT INTO state_steward_confirmations(code,conn_id,raw_name,gw_name,args_json,args_sha256,"
                          "requester_kind,channel,conversation_ref,sender_ref,requester_message_id,audience,message_text,"
-                         "status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
+                         "status,created_at,result) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (code, conn_id, entry["raw_name"], gw, canonical.decode("utf-8"),
                           args_hash(connection["conn_uid"], connection["generation"], entry["raw_name"], canonical),
                           requester["kind"], requester["channel"], requester["conversation_ref"], requester["sender_ref"],
-                          requester_message_id, audience, text, _iso(now)))
+                          requester_message_id, audience, text,
+                          # A withheld text is kept for the owner's panel and can never be confirmed.
+                          "cancelled" if withheld else "pending", _iso(now),
+                          json.dumps({"withheld": withheld}) if withheld else None))
+            if withheld:
+                from core.state_groups import WITHHELD_REASONS
+                result = {"refused": "withheld", "reason": WITHHELD_REASONS[withheld]}
+            elif group is not None:
+                # The group's copy is one outbound row first (the send budget and the account's
+                # hourly cap count it); the host sends it with this request key.
+                self.groups._out_row(conn, group["channel"], group["group_ref"], "confirmation", text, moment,
+                                     request_key=f"confirm:{code}")
+        if withheld:
+            # Committed above (the code a live-code hit retired, the kept text); nothing is sent.
+            return result
         return {"code": code, "status": "pending", "text": text, "channel": requester["channel"],
+                **({"group_ref": group["group_ref"]} if group is not None else {}),
                 "reply_to_message_id": requester_message_id, "expires_at": _iso(now + TTL)}
+
+    def _group_requester(self, conn, message_id, question_ids):
+        """(requester, group) of a group turn (7.8.9): the recorded audience is a group bound
+        now; every sender of the turn - the record's and the turn's questions' - is ONE
+        sender_ref, else ambiguous_requester; `message_id` is an accepted question of that
+        group from that sender, else no_requester."""
+        from core.state_groups import StateGroups
+        row = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1").fetchone()
+        group = StateGroups._live_group(conn, row["channel"], row["group_ref"]) if row is not None else None
+        if group is None:
+            raise StateGraphError("ambiguous_requester: this turn is not a bound group's")
+        ids = [i for i in (question_ids or []) if isinstance(i, str) and i][:20]
+        if isinstance(message_id, str) and message_id not in ids:
+            ids.append(message_id)
+        questions = conn.execute(
+            f"SELECT message_id, sender_ref FROM state_group_messages WHERE message_id IN ({','.join('?' * len(ids))}) "
+            "AND direction='in' AND accepted=1 AND channel=? AND group_ref=?",
+            (*ids, row["channel"], row["group_ref"])).fetchall() if ids else []
+        senders = set(json.loads(row["sender_refs_json"])) | {q["sender_ref"] for q in questions}
+        if len(senders) != 1:
+            raise StateGraphError("ambiguous_requester: the questions of this turn come from more than one person; "
+                                  "the one who wants it asks again alone")
+        sender = next(iter(senders))
+        if not any(q["message_id"] == message_id and q["sender_ref"] == sender for q in questions):
+            raise StateGraphError("no_requester: an outward action starts only from a question of this turn")
+        account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
+                               (row["channel"],)).fetchone()
+        kind = "owner" if account is not None and account[0] == sender else "member"
+        return ({"kind": kind, "channel": row["channel"], "conversation_ref": row["group_ref"], "sender_ref": sender},
+                dict(group))
 
     def get(self, code):
         """One record for run_confirmed: the stored public name and arguments, and its status."""

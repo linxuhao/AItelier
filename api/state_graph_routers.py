@@ -3,7 +3,8 @@ from fastapi import Depends, Request
 
 from api.authz import (identity_resolved_once, is_via_cloudflare, may_read_private, request_actor,
                        request_identity, require_reader, require_writer)
-from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
+from api.dependencies import (get_db_manager_on_loop, get_workspace_manager_on_loop, get_skillflow,
+                              get_config_registry)
 from core.state_commands import GROUP_TURN_ACTIONS
 from core.state_service import StateService
 
@@ -36,7 +37,7 @@ def authenticated_is_admin(request) -> bool:
 READ_AS_HEADER = "X-AItelier-Read-As"
 
 
-def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_workspace_manager)):
+def get_service(request: Request, db=Depends(get_db_manager_on_loop), ws=Depends(get_workspace_manager_on_loop)):
     from api.mcp_router import _start_driver
     # WHO this request is is recorded ONCE, from the raw credential and not from
     # any route declaration, and travels into the service so `execute` can consult

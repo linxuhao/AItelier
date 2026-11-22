@@ -81,9 +81,11 @@ RUN ldd --version | head -n 1 \
     && ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node \
     && ! ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node | grep -q 'not found'
 COPY --chmod=0444 bridge.mjs main.mjs qr-svg.mjs ./
-# The bridge's own node suite runs HERE and nowhere else: the aitelier image has no bridge
-# dependencies, so no pytest gate can run it, and a bridge change would otherwise reach an image
-# untested. The suite reads run.sh and test-fixtures/login-qr.svg from its own directory (it drives
+# The bridge's own node suite runs HERE and nowhere else: the repository's node gate runs only the
+# projects the repo-root node_projects.json names (web, integrations/dsh, integrations/dsh-driver),
+# and the bridge is not among them, so a bridge change would otherwise reach an image untested. The
+# gate installs a project's own dependencies, which is why the aitelier image's dependency set is not
+# the reason. The suite reads run.sh and test-fixtures/login-qr.svg from its own directory (it drives
 # run.sh with a stand-in `docker`), so those are inputs too. They are removed in the same layer:
 # the runtime stage below ships sources only.
 COPY --chmod=0444 bridge.test.mjs qr-svg.test.mjs run.sh ./

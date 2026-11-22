@@ -136,10 +136,13 @@ def test_sync_without_a_default_channel_writes_nothing_and_assigns_no_code(world
     assert ledger(world) == [] and pushed_rows(world) == []
 
 
-def test_a_question_open_less_than_two_minutes_waits_then_is_pushed_with_a_code(world):
-    ask(world, world.alpha, "alpha", "q1", "用方案 A 还是 B？", ago=timedelta(seconds=90))
+def test_a_question_open_less_than_thirty_seconds_waits_then_is_pushed_with_a_code(world):
+    # WAIT was 2 minutes while the host only polled every minute; the host now looks on the
+    # question's own event and once more just after WAIT, so the owner chose 30 s (2026-11-22).
+    assert oq.WAIT == timedelta(seconds=30)
+    ask(world, world.alpha, "alpha", "q1", "用方案 A 还是 B？", ago=timedelta(seconds=20))
     assert sync(world)["messages"] == [] and ledger(world) == []
-    tick(world, seconds=31)
+    tick(world, seconds=11)
     out = sync(world)
     assert out["default_channel"] == "wechat" and len(out["messages"]) == 1
     body = out["messages"][0]["body"]
@@ -149,6 +152,44 @@ def test_a_question_open_less_than_two_minutes_waits_then_is_pushed_with_a_code(
     # The push is the steward's own message in its conversation, under the fixed subject.
     assert [r["message_id"] for r in pushed_rows(world)] == [out["messages"][0]["message_id"]]
     assert sync(world)["messages"] == [], "pushed once"
+
+
+def question_events(world):
+    with world.db.get_connection() as conn:
+        return [(r[0], json.loads(r[1])) for r in conn.execute(
+            "SELECT project_id,payload_json FROM state_events WHERE event_type=? ORDER BY seq", (oq.QUESTION_EVENT,))]
+
+
+def test_a_question_asked_withdrawn_or_answered_elsewhere_writes_one_event_in_the_stewards_project(world):
+    """The host's push trigger (design 7.6.2): the change only, never which project, id or text."""
+    execute(world.alpha, "send_user_message", {"request_key": "note", "project_id": "alpha", "subject": "FYI",
+                                               "body": "no question here"}, allow_write=True)
+    assert question_events(world) == [], "a message without a question block is no signal"
+    ask(world, world.alpha, "alpha", "q1", "问题一")
+    assert question_events(world) == [(HOME, {"change": "asked"})]
+    # A replay of the same request is State's replay: no second signal.
+    execute(world.alpha, "send_user_message", {"request_key": "ask-alpha-q1-问题一", "project_id": "alpha",
+                                               "subject": "Question for you", "body": "",
+                                               "segments": [{"kind": "question", "id": "q1", "text": "问题一"}]},
+            allow_write=True)
+    ask(world, world.beta, "beta", "q2", "问题二")
+    execute(world.beta, "withdraw_user_question", {"request_key": "w-q2", "project_id": "beta",
+                                                   "message_id": question_ids(world, "beta")[0], "segment_id": "q2",
+                                                   "reason": "不用了"}, allow_write=True)
+    sync(world)
+    code = ledger(world)[0]["code_no"]
+    relay(world, channel_message(world, f"Q{code} 用 A", "wx-1"))
+    assert [e[1]["change"] for e in question_events(world)] == ["asked", "asked", "withdrawn", "answered"]
+    assert {e[0] for e in question_events(world)} == {HOME}
+    # The steward's own questions are never pushed: its project writes no signal for them.
+    execute(world.steward, "send_user_message", {"request_key": "home-ask", "project_id": HOME, "subject": "Q",
+                                                 "body": "", "segments": [{"kind": "question", "id": "h1", "text": "?"}]},
+            allow_write=True)
+    assert len(question_events(world)) == 4
+
+
+def question_ids(world, project):
+    return [q["message_id"] for q in open_questions(world, project)]
 
 
 def test_the_push_and_its_ledger_commit_together_and_an_unmirrored_push_is_handed_back(world, monkeypatch):

@@ -17,7 +17,7 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
+import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
   mediaRootFrom } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
@@ -961,7 +961,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         if (steward && raw.events?.some(e => CHANNEL_LOGIN_EVENTS.has(e.event_type))) await loginRequests();
         // Schedule changes re-arm the clock and are no model turn either (step 16).
         if (steward) void scheduleTimer?.refresh();
-        const quiet = steward ? new Set([...MEMORY_REQUEST_EVENTS, ...SCHEDULE_EVENTS, ...CHANNEL_LOGIN_EVENTS]) : MEMORY_REQUEST_EVENTS;
+        // Step 22: a director's question asked, withdrawn or answered: the push clock looks now
+        // (and once more after the backend's wait), no model turn (design-steward 7.6.2).
+        const questionEvents = steward ? (raw.events ?? []).filter(e => OWNER_QUESTION_EVENTS.has(e.event_type)) : [];
+        if (questionEvents.length) void questionsTimer?.changed({ asked: questionEvents.some(e => e.payload?.change === 'asked') });
+        const quiet = steward ? new Set([...MEMORY_REQUEST_EVENTS, ...SCHEDULE_EVENTS, ...CHANNEL_LOGIN_EVENTS, ...OWNER_QUESTION_EVENTS]) : MEMORY_REQUEST_EVENTS;
         const result = steward && raw.events?.some(e => quiet.has(e.event_type))
           ? { ...raw, events: raw.events.filter(e => !quiet.has(e.event_type)) } : raw;
         // Steering starts an idle agent or queues input at the next active step.

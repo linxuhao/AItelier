@@ -16,6 +16,7 @@ from core.db_manager import DBManager
 from core.state_attempts import StateAttempts
 from core.state_claims import ClaimError, StateClaims
 from core.state_graph import StateConflict, StateGraphStore
+from tests.support import state_template
 
 ARTIFACT = "a" * 40
 ACTOR = "director-reconciler"
@@ -27,8 +28,8 @@ def spec(k):
 
 
 @pytest.fixture
-def system(tmp_path):
-    store = StateGraphStore(DBManager(str(tmp_path / "state.db")), project_read_trusted=True)
+def system(tmp_path, state_db_copy):
+    store = StateGraphStore(DBManager(state_db_copy(state_template.dbm_graph_attempts, tmp_path / "state.db")), project_read_trusted=True)
     store.create_project("game", "Long-running game")
     store.add_nodes("game", [spec("a"), spec("d")])
     attempts = StateAttempts(store)

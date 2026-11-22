@@ -14,6 +14,7 @@ from core.state_commands import REQUESTS, describe, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 CRIT = {"id": "c", "kind": "test", "description": "d"}
 BASE = {"key": "n", "goal": "G", "acceptance": [CRIT]}
@@ -64,8 +65,8 @@ def build_from_schema(item, values):
 
 
 @pytest.fixture
-def svc(tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="fixture",
+def svc(tmp_path, state_db_copy):
+    service = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")), actor="fixture",
                            project_read_trusted=True)
     service.create_project("p", "Owned temporary project")
     return service

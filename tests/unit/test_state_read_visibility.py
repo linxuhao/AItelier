@@ -40,6 +40,7 @@ import core.state_commands as state_commands
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from tests.support.legacy_driver_note import seed_section
+from tests.support import state_template
 
 # The owner's ruling of 2026-09-22 opened the working notes for an OPENED
 # project, by name. These six note reads are public now.
@@ -115,9 +116,9 @@ class TestClassification:
 
 
 @pytest.fixture
-def gated(tmp_path, monkeypatch):
+def gated(tmp_path, monkeypatch, state_db_copy):
     """Anonymous visitor: the gate is armed and nothing verifies."""
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")),
+    service = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")),
                            actor="visibility-test", project_read_trusted=True)
     service.create_project("p", "P")
     service.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": [

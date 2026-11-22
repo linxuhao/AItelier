@@ -14,6 +14,7 @@ from core.dsh_driver import DshDrivers, fallback_restart
 from core.dsh_host import supervise
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support import state_template
 
 SLEEPER = [sys.executable, '-c', 'import time; time.sleep(90)']
 
@@ -25,8 +26,8 @@ async def eventually(check, seconds=5):
 
 
 @pytest.fixture
-def db(tmp_path):
-    db = StateDatabase(str(tmp_path / 'state.sqlite'))
+def db(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state, tmp_path / 'state.sqlite'))
     StateService(db, actor='fixture', project_read_trusted=True).store.create_project('alpha', 'Alpha')
     return db
 

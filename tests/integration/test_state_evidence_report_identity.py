@@ -8,10 +8,11 @@ from core.state_graph import StateConflict
 from core.state_service import StateService
 from tests.integration.test_composed_product_delivery_cycle import (
     behavior, git, independent_report, seed_repo, sha)
+from tests.support import state_template
 
 
 @pytest.fixture
-def candidate(tmp_path, monkeypatch):
+def candidate(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     repo = tmp_path / "repo"
     artifact = seed_repo(repo)
@@ -21,7 +22,7 @@ def candidate(tmp_path, monkeypatch):
     test_log.write_text(json.dumps({
         "returncode": tested.returncode, "stdout": tested.stdout,
         "tree": git(repo, "rev-parse", "HEAD^{tree}")}))
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")),
+    service = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")),
                            actor="independent-checker", project_read_trusted=True)
     service.create_project("delivery", "criterion report integrity")
     service.store.add_nodes("delivery", [{

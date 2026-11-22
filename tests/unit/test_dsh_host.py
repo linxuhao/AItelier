@@ -18,6 +18,7 @@ from core.dsh_host import (EXIT_LOG_LINES, EXIT_RECORD_LIMIT, STARTUP_ERROR_LIMI
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support import state_template
 
 
 async def eventually(check):
@@ -58,8 +59,8 @@ async def journal(capsys, condition, seconds=20):
 
 
 @pytest.fixture
-def runtimes(tmp_path):
-    db = StateDatabase(str(tmp_path / 'state.sqlite'))
+def runtimes(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / 'state.sqlite'))
     StateService(db, actor='fixture', project_read_trusted=True).store.create_project('alpha', 'Alpha')
     registry = DriverRegistry(db, 'host-fixture-pepper-' * 3)
     registry.seed('fixture-owner')

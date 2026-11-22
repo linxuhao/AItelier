@@ -13,13 +13,14 @@ from core.state_commands import _driver_defaults, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 ISSUE = {"request_key": "k1", "kind": "defect", "title": "t", "body": "b"}
 
 
 @pytest.fixture
-def world(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def world(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
     owner = StateService(db, actor="fixture", project_read_trusted=True)
     owner.create_project("alpha", "alpha")
     owner.create_project("beta", "beta")

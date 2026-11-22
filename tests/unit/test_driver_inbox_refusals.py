@@ -33,13 +33,14 @@ from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError, StateNotFound, now
 from core.state_service import StateService
+from tests.support import state_template
 
 BASE_WITNESS_DETAIL = "invalid_request"  # what 9bdc8f389de68bde8d99395a3bd339e2b1f2409d answered
 
 
 @pytest.fixture
-def peers(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def peers(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
     seed = StateService(db, actor="fixture", project_read_trusted=True)
     seed.create_project("alpha", "alpha")
     registry = DriverRegistry(db, "test-only-pepper-not-a-production-secret")

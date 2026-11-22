@@ -20,6 +20,7 @@ from core.state_commands import _filter_catalog, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 OPENED = ["b-open-1", "d-open-2", "e-open-3", "g-open-4"]
 # The LAST id overall is unopened: the writer's last page and the anonymous
@@ -29,8 +30,8 @@ ALL = sorted(OPENED + UNOPENED)
 
 
 @pytest.fixture
-def service(tmp_path):
-    svc = StateService(StateDatabase(str(tmp_path / "state.sqlite")),
+def service(tmp_path, state_db_copy):
+    svc = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")),
                        actor="paging-agree", project_read_trusted=True)
     for pid in ALL:
         svc.create_project(pid, f"Title {pid} {'OPEN' if pid in OPENED else 'SECRETTITLE'}")

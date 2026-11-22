@@ -20,6 +20,7 @@ from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, execute, is_publi
 from core.state_database import StateDatabase
 from core.state_graph import StateConflict, StateGraphError, StateGraphStore
 from core.state_service import StateService
+from tests.support import state_template
 
 
 def node(k, deps=None, priority=0):
@@ -29,15 +30,15 @@ def node(k, deps=None, priority=0):
 
 
 @pytest.fixture
-def store(tmp_path):
-    result = StateGraphStore(DBManager(str(tmp_path / "state.sqlite")), project_read_trusted=True)
+def store(tmp_path, state_db_copy):
+    result = StateGraphStore(DBManager(state_db_copy(state_template.dbm_graph, tmp_path / "state.sqlite")), project_read_trusted=True)
     result.create_project("game", "Game")
     return result
 
 
 @pytest.fixture
-def service(tmp_path):
-    return StateService(StateDatabase(str(tmp_path / "host.sqlite")), actor="director-a",
+def service(tmp_path, state_db_copy):
+    return StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "host.sqlite")), actor="director-a",
                         project_read_trusted=True)
 
 

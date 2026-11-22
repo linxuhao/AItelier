@@ -237,9 +237,18 @@ def _gate_run(action, mutate, tmp_path, state_db_copy):
         return True, {**state, "sentinel": f"{type(exc).__name__}: {exc}"[:1500]}
     files = _exercising_files(action)
     rc, report = _mutation_run(action, files)
-    report["fired"] = report.get("fired", 0) + state["fired"]
+    # The nested run is judged by its own report alone: the sentinel's count stays
+    # apart, or a nested run that never reached its tests would pass on it.
+    report["sentinel_fired"] = state["fired"]
     report["sentinel"] = f"green, fired {state['fired']}; ran {[f.name for f in files]}"
-    return rc != 0, report
+    return _nested_red(rc, report), report
+
+
+def _nested_red(rc, report):
+    """A nested run is red only when its tests ran and failed (pytest exit 1) with the
+    mutation fired in that run. A run that could not collect or start (exit 2, 4) or
+    timed out (124) ran no test under the mutation, so it proves nothing."""
+    return rc == 1 and report.get("fired", 0) > 0
 
 
 @pytest.mark.parametrize("action", _covered_actions())
@@ -302,6 +311,23 @@ def test_a_nested_run_that_cannot_start_keeps_its_stderr_command_and_exit(tmp_pa
     assert "file or directory not found" in report["stderr_tail"], report
     assert str(missing) in report["cmd"], report
     assert "-p mutation_gate" in report["cmd"], report
+
+
+def test_a_nested_run_that_cannot_start_is_not_red_on_the_sentinel_count(tmp_path, monkeypatch):
+    """The sentinel stays green after firing (it misses the action) and the nested run
+    over the exercising files cannot start. No test ran under the mutation there, so
+    the row must not count as red, and the sentinel's count must not stand in for the
+    nested run's own."""
+    missing = tmp_path / "no_such_file_zz.py"
+    monkeypatch.setattr(sys.modules[__name__], "test_performing_a_write_action_leaves_the_project_private",
+                        lambda action, tmp_path, state_db_copy: None)
+    monkeypatch.setattr(sys.modules[__name__], "_exercising_files", lambda action: [missing])
+    red, report = _gate_run("heartbeat", lambda action: {"target": "t", "fired": 3, "error": None},
+                            tmp_path, None)
+    assert report["rc"] == 4, report
+    assert not red, report
+    assert report["fired"] == 0, report
+    assert report["sentinel_fired"] == 3, report
 
 
 @pytest.mark.parametrize("action", sorted(WRITE_REQUESTS))

@@ -14,6 +14,7 @@ from core.state_database import StateDatabase
 from core.state_driver_guide import STATE_DRIVER_GUIDE
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 CRIT = [{"id": "c1", "kind": "test", "description": "works"}]
 SUBJECT = ("measured 2026-11-08: the report dir ~/.AItelier/reports/att-9f2 is gone; "
@@ -24,8 +25,8 @@ DEFINITION = ("the subject object was measurably absent at the named artifact; t
 
 
 @pytest.fixture
-def svc(tmp_path):
-    s = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="alice@example.test",
+def svc(tmp_path, state_db_copy):
+    s = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")), actor="alice@example.test",
                      project_read_trusted=True)
     s.create_project("p", "P")
     s.create_project("q", "Q")

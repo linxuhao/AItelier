@@ -9,6 +9,7 @@ from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
+from tests.support import state_template
 
 
 SCOPE={'phase':'overworld'}
@@ -39,8 +40,8 @@ def bind(s,nk,did,rev=1,bid='b1',expected=1,purpose='implements'):
 
 
 @pytest.fixture
-def service(tmp_path):
-    s=StateService(StateDatabase(str(tmp_path/'state.sqlite')),actor='test-author',project_read_trusted=True);s.create_project('game','Game')
+def service(tmp_path, state_db_copy):
+    s=StateService(StateDatabase(state_db_copy(state_template.state, tmp_path/'state.sqlite')),actor='test-author',project_read_trusted=True);s.create_project('game','Game')
     return s
 
 

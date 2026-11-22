@@ -11,6 +11,7 @@ from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.state_graph import StateGraphError, StateNotFound
+from tests.support import state_template
 
 
 TOKEN = 'isolated-design-search-token-' + 'x'*40
@@ -28,8 +29,8 @@ def baseline(s, ids, name='b1', previous=None):
 
 
 @pytest.fixture
-def service(tmp_path):
-    s=StateService(StateDatabase(str(tmp_path/'state.sqlite')), actor='test-author',
+def service(tmp_path, state_db_copy):
+    s=StateService(StateDatabase(state_db_copy(state_template.state, tmp_path/'state.sqlite')), actor='test-author',
                    project_read_trusted=True)
     s.create_project('game','Game')
     return s

@@ -16,11 +16,21 @@ each action:
 3. requires the run to go RED *and* the mutation to have FIRED > 0 times — a
    green with fired == 0 is meaningless and is treated as a failure.
 
+The run happens IN THIS PROCESS: the row installs the plugin's own mutation
+(`mutation_gate.pytest_configure`, undone at teardown) and calls the sentinel
+`test_performing_a_write_action_leaves_the_project_private[action]` directly.
+That is what each nested `pytest -x -p mutation_gate <sentinel> <files>` run used
+to amount to: `-x` stopped it at the sentinel's red, so the exercising files
+never ran. Only when the sentinel stays green under the mutation does the row
+still start the nested pytest over the exercising files, as `-x` would have
+gone on to them.
+
 `open_project` is the only exemption, named with its reason; the meta-test
 proves that dropping the exemption would turn the gate red naming it.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -31,7 +41,12 @@ from pathlib import Path
 
 import pytest
 
+import core.state_commands as state_commands
+import core.state_database as state_database
+import core.state_service as state_service
+import mutation_gate
 from core.state_commands import WRITE_REQUESTS
+from tests.support import state_template
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -77,24 +92,44 @@ _SCOPE_MODULE_NAMES = ("test_state_project_privacy.py",
                        "test_state_read_visibility.py")
 
 
-def _organic_witnesses(action):
-    """Sorted test files under tests/ that really exercise `action`: the action
-    appears as a quoted string or a direct call `name(`. This module and the
-    three always-included privacy modules never count (they would make the
-    witness requirement always true)."""
-    pattern = re.compile(rf"[\"']{re.escape(action)}[\"']|"
-                         rf"(?<![A-Za-z0-9_]){re.escape(action)}\(")
+@functools.cache
+def _candidate_sources():
+    """(path, text) of every test file a witness may come from, read once per
+    process: the tree does not change under the scan.
+    This module and the three always-included privacy modules never count (they
+    would make the witness requirement always true)."""
     own = Path(__file__).resolve()
-    hits = []
+    sources = []
     for path in (REPO / "tests").rglob("test_*.py"):
         if path.resolve() == own or path.name in _SCOPE_MODULE_NAMES:
             continue
         try:
-            if pattern.search(path.read_text(encoding="utf-8")):
-                hits.append(path)
+            sources.append((path, path.read_text(encoding="utf-8")))
         except UnicodeDecodeError:
             continue
-    return sorted(hits)
+    return tuple(sources)
+
+
+_NAME = "[A-Za-z_][A-Za-z0-9_]*"
+# A quoted name "x" / 'x' (the closing quote is only looked at, so it can open the
+# next one), or a direct call x( not preceded by an identifier character.
+_QUOTED_OR_CALLED = re.compile(rf"[\"']({_NAME})(?=[\"'])|(?<![A-Za-z0-9_])({_NAME})\(")
+
+
+@functools.cache
+def _source_names():
+    """(path, names) per candidate file: every name it quotes or calls, found in one
+    pass per file instead of one regex search per action and file."""
+    return tuple((path, frozenset(quoted or called
+                                  for quoted, called in _QUOTED_OR_CALLED.findall(text)))
+                 for path, text in _candidate_sources())
+
+
+def _organic_witnesses(action):
+    """Sorted test files under tests/ that really exercise `action`: the action
+    appears as a quoted string or a direct call `name(`."""
+    assert re.fullmatch(_NAME, action), f"write action '{action}' is not an identifier"
+    return sorted(path for path, names in _source_names() if action in names)
 
 
 def _exercising_files(action):
@@ -127,23 +162,11 @@ def _mutation_run(action, files):
         env["STATE_MUTATION_ACTION"] = action
         env["STATE_MUTATION_FIRE"] = str(fire)
         env.pop("PYTEST_CURRENT_TEST", None)
+        # The sentinel is not in this run: the caller ran it in-process under the
+        # same mutation and it stayed green, so this is the rest of what the old
+        # `pytest -x <sentinel> <files>` run went on to: the exercising files.
         cmd = [sys.executable, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider",
-               "-p", "mutation_gate",
-               # The sentinel for THIS action FIRST (only — the whole module
-               # would recurse into nested mutation runs): it is the red the
-               # criterion demands, and -x keeps every run bounded. Exempted
-               # actions have no sentinel case (they are not in the gate), so
-               # their mutation runs against the exercising files alone.
-               *([f"tests/unit/test_write_opening_coverage.py::"
-                  f"test_performing_a_write_action_leaves_the_project_private[{action}]"]
-                                  if action in _covered_actions() else []),
-               # Only the sentinel node runs under the mutation: it is the
-               # derived red for every action, and importing every exercising
-               # file per action would multiply the suite's runtime for no
-               # extra verdict. THAT the exercising files exist (organic
-               # coverage) is asserted statically and named in the report.
-
-               *[str(f) for f in files]]
+               "-p", "mutation_gate", *[str(f) for f in files]]
         cmd_line = " ".join(cmd)
         try:
             proc = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True,
@@ -169,20 +192,83 @@ def _mutation_run(action, files):
         return rc, report
 
 
+@pytest.fixture(scope="module")
+def _write_handlers(_state_templates, tmp_path_factory):
+    """The `_handlers` table of one trusted probe service: what the plugin infects
+    from. Built once per module on a template copy; the plugin's own probe builds a
+    fresh schema, which costs seconds per action."""
+    path = _state_templates.copy(state_template.state,
+                                 tmp_path_factory.mktemp("write-handlers") / "probe.sqlite")
+    return state_commands._handlers(StateService(StateDatabase(path), project_read_trusted=True))
+
+
+@pytest.fixture
+def mutate(_write_handlers, monkeypatch):
+    """`mutate(action)` installs in THIS process the mutation `-p mutation_gate`
+    installs in a nested run, by calling the plugin's own `pytest_configure`, so
+    the infected callable and the opening are the plugin's, not a copy. Teardown
+    restores the original callable. Returns the plugin's live report dict."""
+    def install(action):
+        handler = _write_handlers[action]
+        owner, name = type(handler.__self__), handler.__name__
+        monkeypatch.setattr(owner, name, getattr(owner, name))    # teardown restores it
+        monkeypatch.setattr(mutation_gate, "_STATE",
+                            {"action": None, "target": None, "fired": 0, "error": None})
+        monkeypatch.setenv("STATE_MUTATION_ACTION", action)
+        monkeypatch.delenv("STATE_MUTATION_FIRE", raising=False)
+        with monkeypatch.context() as m:
+            # Hand the plugin the table derived once above instead of its probe.
+            m.setattr(state_database, "StateDatabase", lambda path: None)
+            m.setattr(state_service, "StateService", lambda db, **kwargs: None)
+            m.setattr(state_commands, "_handlers", lambda probe: _write_handlers)
+            mutation_gate.pytest_configure(None)
+        assert mutation_gate._STATE["target"] == f"{owner.__module__}.{owner.__qualname__}.{name}"
+        return mutation_gate._STATE
+    return install
+
+
+def _gate_run(action, mutate, tmp_path, state_db_copy):
+    """(red, report) for `action` under its mutation. A covered action's sentinel runs
+    here; if it stays green, the exercising files run in a nested pytest under the
+    same mutation. An exempt action has no sentinel (open_project opens the project
+    by itself, so its sentinel is red with no mutation): only the nested run counts."""
+    state = None
+    if action in _covered_actions():
+        state = mutate(action)
+        try:
+            test_performing_a_write_action_leaves_the_project_private(action, tmp_path,
+                                                                      state_db_copy)
+        except Exception as exc:    # any non-pass is what made the nested run exit non-zero
+            return True, {**state, "sentinel": f"{type(exc).__name__}: {exc}"[:1500]}
+    files = _exercising_files(action)
+    rc, report = _mutation_run(action, files)
+    if state is not None:
+        # The nested run is judged by its own report alone: the sentinel's count stays
+        # apart, or a nested run that never reached its tests would pass on it.
+        report["sentinel_fired"] = state["fired"]
+        report["sentinel"] = f"green, fired {state['fired']}; ran {[f.name for f in files]}"
+    return _nested_red(rc, report), report
+
+
+def _nested_red(rc, report):
+    """A nested run is red only when its tests ran and failed (pytest exit 1) with the
+    mutation fired in that run. A run that could not collect or start (exit 2, 4) or
+    timed out (124) ran no test under the mutation, so it proves nothing."""
+    return rc == 1 and report.get("fired", 0) > 0
+
+
 @pytest.mark.parametrize("action", _covered_actions())
-def test_a_write_action_that_opens_the_project_goes_red(action):
+def test_a_write_action_that_opens_the_project_goes_red(action, mutate, tmp_path, state_db_copy):
     assert _organic_witnesses(action), (
         f"write action '{action}' has no organic test witness: the always-included "
         f"privacy modules do not count as a witness, so a mutation that makes "
         f"'{action}' open the project could go entirely unnoticed")
-    files = _exercising_files(action)
-    rc, report = _mutation_run(action, files)
-    names = [f.name for f in files]
+    red, report = _gate_run(action, mutate, tmp_path, state_db_copy)
     assert report.get("fired", 0) > 0, (
-        f"mutation for '{action}' (infected {report.get('target')}) FIRED 0 TIMES over "
-        f"{names} — this green would prove nothing; widen or fix the scope. {report}")
-    assert rc != 0, (
-        f"mutation making '{action}' open the project ran GREEN over {names}: no test "
+        f"mutation for '{action}' (infected {report.get('target')}) FIRED 0 TIMES — "
+        f"this green would prove nothing; widen or fix the scope. {report}")
+    assert red, (
+        f"mutation making '{action}' open the project ran GREEN: no test "
         f"notices '{action}' opening a project. {report}")
 
 
@@ -201,7 +287,8 @@ def test_the_exemption_is_named_justified_and_inside_the_table():
 
 
 @pytest.mark.parametrize("action", sorted(EXEMPT))
-def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action):
+def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action, mutate, tmp_path,
+                                                                         state_db_copy):
     """Remove `action` from EXEMPT and the parametrized gate above picks it up
     and demands red for it. This test runs the same mutation machinery for the
     exempted action and pins that the mutation genuinely fires — so the gate's
@@ -210,10 +297,9 @@ def test_dropping_an_exemption_would_turn_the_gate_red_naming_the_action(action)
     assert _organic_witnesses(action), (
         f"exempted action '{action}' has no organic test witness: the always-included "
         f"privacy modules do not count as a witness")
-    files = _exercising_files(action)
-    rc, report = _mutation_run(action, files)
+    red, report = _gate_run(action, mutate, tmp_path, state_db_copy)
     assert report.get("fired", 0) > 0, f"'{action}' mutation never fired: {report}"
-    assert rc != 0, (f"dropping the exemption for '{action}' would leave the gate facing a "
+    assert red, (f"dropping the exemption for '{action}' would leave the gate facing a "
                      f"GREEN run — the exemption would be untestable; investigate. "
                      f"{report}")
 
@@ -231,6 +317,23 @@ def test_a_nested_run_that_cannot_start_keeps_its_stderr_command_and_exit(tmp_pa
     assert "file or directory not found" in report["stderr_tail"], report
     assert str(missing) in report["cmd"], report
     assert "-p mutation_gate" in report["cmd"], report
+
+
+def test_a_nested_run_that_cannot_start_is_not_red_on_the_sentinel_count(tmp_path, monkeypatch):
+    """The sentinel stays green after firing (it misses the action) and the nested run
+    over the exercising files cannot start. No test ran under the mutation there, so
+    the row must not count as red, and the sentinel's count must not stand in for the
+    nested run's own."""
+    missing = tmp_path / "no_such_file_zz.py"
+    monkeypatch.setattr(sys.modules[__name__], "test_performing_a_write_action_leaves_the_project_private",
+                        lambda action, tmp_path, state_db_copy: None)
+    monkeypatch.setattr(sys.modules[__name__], "_exercising_files", lambda action: [missing])
+    red, report = _gate_run("heartbeat", lambda action: {"target": "t", "fired": 3, "error": None},
+                            tmp_path, None)
+    assert report["rc"] == 4, report
+    assert not red, report
+    assert report["fired"] == 0, report
+    assert report["sentinel_fired"] == 3, report
 
 
 @pytest.mark.parametrize("action", sorted(WRITE_REQUESTS))
@@ -291,6 +394,8 @@ _ARGUMENT_SEEDS = {
     "offer_handoff": {"claim_id": "claim-mutation", "package": {"next_step": "x"}},
     # Presence v2: a takeover reason is 20..300 characters.
     "take_over_claim": {"reason": "mutation sentinel takeover reason"},
+    # A payload hash is 64 hex characters, or pydantic refuses before the handler runs.
+    "retire_context_run_protection": {"expected_payload_hash": "0" * 64},
 }
 
 
@@ -330,8 +435,8 @@ def _best_effort_arguments(action):
 
 
 @pytest.mark.parametrize("action", _covered_actions())
-def test_performing_a_write_action_leaves_the_project_private(action, tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "m.sqlite")),
+def test_performing_a_write_action_leaves_the_project_private(action, tmp_path, state_db_copy):
+    service = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "m.sqlite")),
                            actor="mutation-sentinel", project_read_trusted=True)
     service.create_project("mutation-target", "T")
     service.store.add_nodes("mutation-target", [{"key": "a", "goal": "G", "acceptance": [

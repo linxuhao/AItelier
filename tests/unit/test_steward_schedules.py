@@ -25,6 +25,7 @@ from core.state_database import StateDatabase
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import StateService
 from core.state_steward import ScheduleConflict, ScheduleInvalid, preview_schedule
+from tests.support import state_template
 
 HOME = "aitelier-home"
 OWNER = "owner@example.com"
@@ -55,8 +56,8 @@ def clock(monkeypatch):
 
 
 @pytest.fixture
-def world(tmp_path, clock):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def world(tmp_path, clock, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, "steward-schedule-pepper-" * 3)
     registry.seed("steward-schedule-owner-cli-token")
     seeder = StateService(db, actor="fixture", project_read_trusted=True)

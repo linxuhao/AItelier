@@ -10,6 +10,7 @@ from core.db_manager import DBManager
 from core.state_graph import StateGraphStore, StateConflict, StateGraphError
 from core.state_attempts import StateAttempts, SCHEMA
 from core.state_external import ExternalAttempts
+from tests.support import state_template
 
 ARTIFACT='a'*64
 REPORT='b'*64
@@ -29,9 +30,10 @@ def spec(k,deps=None):
 
 
 @pytest.fixture
-def system(tmp_path, monkeypatch):
+def system(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setenv('AITELIER_HOME', str(tmp_path/'home'))
-    s=StateGraphStore(DBManager(str(tmp_path/'state.db')),project_read_trusted=True)
+    s=StateGraphStore(DBManager(state_db_copy(state_template.dbm_graph_attempts, tmp_path/'state.db')),
+                      project_read_trusted=True)
     s.create_project('game','Game');s.add_nodes('game',[spec('a'),spec('b',['a']),spec('independent')])
     a=StateAttempts(s);e=ExternalAttempts(a,'director@example')
     e._test_report_dir = tmp_path/'terminal-reports'

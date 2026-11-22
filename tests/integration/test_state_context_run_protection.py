@@ -18,6 +18,7 @@ from core.state_commands import describe, execute
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support import state_template
 
 
 ACTION = "retire_context_run_protection"
@@ -33,9 +34,9 @@ def call(service, action, **args):
 
 
 @pytest.fixture
-def system(tmp_path, monkeypatch):
+def system(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
-    db = DBManager(str(tmp_path / "state.db"))
+    db = DBManager(state_db_copy(state_template.dbm_state, tmp_path / "state.db"))
     sf = SkillFlow(str(tmp_path / "engine.db"))
     sf.register_graph(PipelineGraph(name="fixture", begin="work", steps=[StepNode(id="work")]))
     ws = WorkspaceManager(str(tmp_path / "ws"), str(tmp_path / "projects"))

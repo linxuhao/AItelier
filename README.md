@@ -556,6 +556,8 @@ pytest tests/ -v               # full suite: 11,529 tests (default addopts selec
 
 Counts are what `pytest --collect-only -q <path>` reports on this tree, measured 2026-11-09 at `f52d8747`; each number belongs to the path named on its own line, and they drift as tests are added. Run them only in a throwaway container (see `AGENTS.md`), never inside the production container.
 
+Plain `pytest` selects every tier (it is the repository gate); for a fast local run add `-m "not network and not docker and not baked_toolchain and not slow"`. Tiers, parallel runs and duration-based sharding: [tests/README.md](tests/README.md).
+
 ## Web Frontend
 
 A **Svelte 5 + Vite** SPA (`web/src/`); the compiled bundle (`web/dist/`) is served directly by the FastAPI backend. It ships in **8 languages** (en, zh-CN, zh-TW, ja, ko, fr, de, es) with live language switching.

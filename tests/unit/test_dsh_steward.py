@@ -19,6 +19,7 @@ from core.dsh_driver import (DshDrivers, RESERVED_ROLES, compaction_config, comp
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support import state_template
 
 STEWARD_PROJECT = "aitelier-home"
 STEWARD = {"route": "steward-route", "reasoning_effort": "high",
@@ -45,8 +46,8 @@ def roles_file(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def runtime(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def runtime(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     service = StateService(db, actor="fixture", project_read_trusted=True)
     service.store.create_project("alpha", "Alpha")
     service.store.create_project(STEWARD_PROJECT, "Home")

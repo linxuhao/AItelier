@@ -16,6 +16,7 @@ from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.state_graph import StateNotFound
 from core.state_commands import execute
+from tests.support import state_template
 
 
 def spec(key):
@@ -23,11 +24,11 @@ def spec(key):
 
 
 @pytest.fixture
-def system(tmp_path,monkeypatch):
+def system(tmp_path,monkeypatch, state_db_copy):
     monkeypatch.setenv('AITELIER_HOME',str(tmp_path/'home'))
     sf=SkillFlow(str(tmp_path/'engine.sqlite'))
     sf.register_graph(PipelineGraph(name='feature',begin='work',steps=[StepNode(id='work')]))
-    db=DBManager(str(tmp_path/'host.sqlite'));service=StateService(db,sf=sf,project_read_trusted=True)
+    db=DBManager(state_db_copy(state_template.dbm_state, tmp_path/'host.sqlite'));service=StateService(db,sf=sf,project_read_trusted=True)
     service.create_project('game','Game');service.create_project('other','Other')
     service.store.add_nodes('game',[spec('a'),spec('b')]);service.store.add_nodes('other',[spec('other')])
     yield SimpleNamespace(sf=sf,db=db,s=service,tmp=tmp_path)

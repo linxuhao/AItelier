@@ -22,6 +22,7 @@ from core.drivers import DriverRegistry, presence_of
 from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support import state_template
 
 ROOT = Path(__file__).resolve().parents[2]
 PEPPER = "presence-test-pepper-" * 3
@@ -111,8 +112,8 @@ def test_environment_defaults_overrides_and_bad_values(monkeypatch):
 
 # -- fixtures ------------------------------------------------------------------
 @pytest.fixture
-def world(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def world(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
     seed = StateService(db, actor="fixture", project_read_trusted=True)
     seed.create_project("alpha", "alpha")
     seed.create_project("beta", "beta")

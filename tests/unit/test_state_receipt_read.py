@@ -52,6 +52,7 @@ from core.state_commands import ProjectPrivate, execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support import state_template
 
 ADMIN = {"X-AItelier-Admin-Token": "off-tunnel-admin"}
 ARTIFACT = "a" * 64
@@ -117,7 +118,7 @@ def accept(service, reports: Path, project_id: str, node_key="goal", artifact=AR
 
 
 @pytest.fixture
-def http(tmp_path, monkeypatch):
+def http(tmp_path, monkeypatch, state_db_copy):
     """The product app's HTTP surface over an isolated State database.
 
     The gate is ARMED, so a client with no credential is a genuinely anonymous
@@ -125,7 +126,7 @@ def http(tmp_path, monkeypatch):
     deployment has. The lifespan is deliberately not entered (no scheduler, no
     claim recovery): the HTTP entry is the thing under test, not the backend.
     """
-    state_db = StateDatabase(str(tmp_path / "state.sqlite"))
+    state_db = StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite"))
     ws = WorkspaceManager(str(tmp_path / "ws"))
     monkeypatch.setattr(authz, "gate_enabled", lambda: True)
     monkeypatch.setattr(authz, "WRITERS", set())

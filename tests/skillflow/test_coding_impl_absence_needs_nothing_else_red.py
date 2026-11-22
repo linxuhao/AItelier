@@ -10,7 +10,7 @@
 #     the absence gate.
 #   * the absence gate's own lap limit — `test_gate_absent -> test` carries
 #     `max_loop: 100`, counted over the whole run. With a 60 s wait the laps
-#     run out before the default 3 h ceiling, and the run ended on the
+#     run out before a 3 h ceiling, and the run ended on the
 #     engine's "Gate 'test_gate_absent': cycle limit exceeded". It must end on
 #     the absence sentence instead.
 #
@@ -19,13 +19,20 @@
 # "NOTHING was measured", so nothing was measured anywhere: the run waits at
 # the absence gate and spends no implement cycle.
 import json
+from pathlib import Path
+
+import pytest
 
 from core import gate_deferral
+from skillflow import PipelineGraph
 from skillflow.output_targets import git
 from tests.gate_fixture import (GATE_PY, HarnessRig, assert_repo_gate_calls,
                                 embed_env)
 from tests.skillflow.test_coding_impl_gate_absence import (
     _SILENT_TAIL, _drive, _gate_calls, _wire)
+
+# Same real-round absence gate as the module above: 10-170 s per row.
+pytestmark = pytest.mark.slow
 
 # The gate owns its controlled fixture settings: `core/repository_executor_entry`
 # builds the gate child's environment from scratch (HOME, PATH, PYTHONPATH,
@@ -83,7 +90,9 @@ def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
     counter = tmp_path / "calls.txt"
     try:
-        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=30, wait=5,
+        # A 10 s ceiling with a 5 s wait is about 3 gate runs: the wall has to
+        # fire once to be observed, so more laps only fire it again.
+        sf, run_id = _wire(tmp_path, monkeypatch, episode_max=10, wait=5,
                            counter=counter, tail=_GATE_TAIL, pytest_wall_seconds=2)
         rig.hold()
         project = sf._workspace.get_project_code_path("p", run_id=run_id)
@@ -116,16 +125,46 @@ def test_a_pytest_wall_behind_a_busy_gate_waits_at_the_absence_gate(
     assert any(f.startswith("pytest:timed out") for f in report["failures"])
 
 
+# The absence edge's lap limit as `configs/coding_impl.yaml` ships it, and the
+# limit the laps row below drives instead (see its docstring).
+_SHIPPED_ABSENCE_MAX_LOOP = 100
+_DRIVEN_ABSENCE_MAX_LOOP = 5
+# The laps row's own wait and episode ceiling. The product defaults are
+# 300 s and 12600 s (`core/gate_deferral.py`); the row sets these instead.
+_ROW_WAIT = 60
+_ROW_CEILING = 10800
+
+
 def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch):
-    """Wait 60 s, the default 3 h ceiling, a gate that never answers: 100 laps
-    of 90 s fit inside the ceiling, so the edge's limit is what ends the run."""
+    """Wait 60 s, a 3 h ceiling, a gate that never answers: the
+    edge's lap limit runs out inside the ceiling, so the limit is what ends
+    the run, and it must end naming the absence, not on the engine's cycle
+    limit.
+
+    The shipped limit is 100. The code path that ends the run
+    (`gate_deferral.absence_laps_spent` reading the engine's seeded
+    `skillflow_edge_counts` row) is the same at any limit, so the run drives
+    the loaded graph with the edge's limit set to 5. The only shipped value
+    it pins is the YAML's `max_loop: 100`; the wait and the ceiling are the
+    row's own (`_ROW_WAIT`, `_ROW_CEILING`), and it checks that 100 laps of
+    the lap length this run measured (3 ticks of 30 s) fit inside that
+    ceiling. That check assumes the episode clock tracks elapsed time; the
+    pole C rows in `test_coding_impl_gate_absence.py` pin that."""
+    shipped = PipelineGraph.from_yaml(
+        Path(__file__).resolve().parents[2] / "configs" / "coding_impl.yaml")
+    edges = [t for step in shipped.steps if step.id == "test_gate_absent"
+             for t in step.transitions]
+    assert [(t.to, t.max_loop) for t in edges] == [
+        ("test", _SHIPPED_ABSENCE_MAX_LOOP)], edges
+
     observations = []
     counter = tmp_path / "calls.txt"
-    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=10800, wait=60,
-                       counter=counter, tail=_SILENT_TAIL,
-                       gate_observations=observations)
-    assert gate_deferral.wait_seconds() == 60
-    assert gate_deferral.episode_max_seconds() == 10800
+    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=_ROW_CEILING,
+                       wait=_ROW_WAIT, counter=counter, tail=_SILENT_TAIL,
+                       gate_observations=observations,
+                       absence_max_loop=_DRIVEN_ABSENCE_MAX_LOOP)
+    assert gate_deferral.wait_seconds() == _ROW_WAIT
+    assert gate_deferral.episode_max_seconds() == _ROW_CEILING
     implement_runs, statuses, outcomes, nodes = _drive(
         sf, run_id, monkeypatch, ticks=400, clock_step=30, second_driver=False)
     run = sf.get_run(run_id)
@@ -141,11 +180,21 @@ def test_the_absence_gate_laps_run_out_naming_the_absence(tmp_path, monkeypatch)
     assert "cycle limit" not in reason.lower()
     assert reason.startswith(gate_deferral.ABSENCE_TERMINAL), reason
     assert gate_deferral.absent_terminal_names_no_failure(reason)
-    # The baseline ran separately; the episode is the first test plus 100 re-runs.
-    assert outcomes.count("reacquire") == 100
-    assert_repo_gate_calls(observations, counter, tests=101, measured="unmeasured")
+    # The baseline ran separately; the episode is the first test plus one
+    # re-run per lap.
+    laps = _DRIVEN_ABSENCE_MAX_LOOP
+    assert outcomes.count("reacquire") == laps
+    assert_repo_gate_calls(observations, counter, tests=laps + 1,
+                           measured="unmeasured")
     # And the sentence counts those gate runs, not the ticks that looked.
-    assert reason.endswith("(run_tests.sh, 101 gate run(s))"), reason
+    assert reason.endswith(f"(run_tests.sh, {laps + 1} gate run(s))"), reason
+    # Every lap took the same number of ticks, and the shipped limit's laps
+    # of that length end before the ceiling would.
+    at = [i for i, outcome in enumerate(outcomes) if outcome == "reacquire"]
+    lap_ticks = {b - a for a, b in zip(at, at[1:])}
+    assert len(lap_ticks) == 1, outcomes
+    lap_seconds = lap_ticks.pop() * 30
+    assert _SHIPPED_ABSENCE_MAX_LOOP * lap_seconds < _ROW_CEILING, lap_seconds
 
 
 def test_an_unattributable_red_ends_the_run_on_its_own_terminal(

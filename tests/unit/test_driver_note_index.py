@@ -16,15 +16,16 @@ from core.state_driver_index import MAX_ASSERTION_CHARS
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
 from tests.support.legacy_driver_note import seed_informational_entry, seed_section
+from tests.support import state_template
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECK_SCRIPT = REPO_ROOT / "scripts" / "check_driver_note_index.py"
 
 
 @pytest.fixture
-def service(tmp_path):
+def service(tmp_path, state_db_copy):
     db_path = tmp_path / "state.sqlite"
-    svc = StateService(StateDatabase(str(db_path)), actor="director@example.test",
+    svc = StateService(StateDatabase(state_db_copy(state_template.state, db_path)), actor="director@example.test",
                        project_read_trusted=True)
     svc.create_project("aitelier", "AItelier")
     svc.create_project("wuxia-myth", "Wuxia")

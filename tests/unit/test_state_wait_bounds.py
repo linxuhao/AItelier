@@ -135,6 +135,9 @@ from typing import NamedTuple, Optional
 
 import pytest
 
+# An audit of another test file's source (test_state_wait_contention.py).
+pytestmark = pytest.mark.meta
+
 # Default target: the real module, resolved relative to this test file so it works
 # from any working directory.  A copy (as the witnesses make) is passed explicitly.
 DEFAULT_MODULE = Path(__file__).resolve().with_name("test_state_wait_contention.py")

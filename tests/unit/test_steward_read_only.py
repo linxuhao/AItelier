@@ -35,6 +35,7 @@ from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 HOME = "aitelier-home"
 PEPPER = "steward-fixture-pepper-" * 3
@@ -61,13 +62,13 @@ def _private_inbox_refusal(action):
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, state_db_copy):
     table = copy.deepcopy(load_roles())
     table["steward"] = copy.deepcopy(STEWARD)
     roles = tmp_path / "roles.json"
     roles.write_text(json.dumps(table))
     monkeypatch.setattr(dsh_driver, "ROLES_FILE", roles)
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, PEPPER)
     registry.seed(OWNER_TOKEN)
     owner = StateService(db, actor="fixture", project_read_trusted=True)
@@ -127,6 +128,7 @@ def test_the_steward_is_refused_every_write_outside_the_whitelist(world, action)
     assert not world.owner.store.is_project_archived("alpha")
 
 
+@pytest.mark.meta
 def test_the_steward_write_whitelist_is_exactly_these_actions():
     """Enumerated, not derived: both inbox acknowledgements are named here and nothing
     else moved (resolve stays out of both)."""

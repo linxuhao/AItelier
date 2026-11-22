@@ -49,6 +49,7 @@ from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 ADMIN = "adm-Quartz9-Lantern-2026-secret"
 EXTERNAL = "ext-Harbor4-Meridian-7741-token"
@@ -158,8 +159,8 @@ def secrets(monkeypatch):
 
 
 @pytest.fixture
-def world(tmp_path, secrets):
-    path = str(tmp_path / "state.sqlite")
+def world(tmp_path, secrets, state_db_copy):
+    path = state_db_copy(state_template.state_registry, tmp_path / "state.sqlite")
     seed = service(path, "fixture")
     seed.create_project("alpha", "Alpha")
     # beta has a member of its own, so a valid project-mailbox send to it is
@@ -174,9 +175,9 @@ def world(tmp_path, secrets):
 
 
 @pytest.fixture
-def p3_world(tmp_path, secrets):
+def p3_world(tmp_path, secrets, state_db_copy):
     """Project p with nodes a, b, c, and two registered drivers, for the P3 notice path."""
-    path = str(tmp_path / "p3.sqlite")
+    path = state_db_copy(state_template.state_registry, tmp_path / "p3.sqlite")
     owner = service(path, "authorized-state-operator", is_admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": "a", **NODE}, {"key": "b", **NODE},

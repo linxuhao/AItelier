@@ -182,13 +182,19 @@ def test_one_peak_record_names_the_process_that_holds_the_memory(tmp_path, cgrou
         assert record["interval_s"] == 1.0
         assert record["utc"].endswith("Z") and "T" in record["utc"]
 
-        # The peak itself, in bytes, MiB, and as a share of memory.max (the
-        # disposable container is run with --memory 2g, so a limit exists).
+        # The peak itself, in bytes, MiB, and as a share of memory.max. The limit
+        # is whatever this container was given (--memory 2g, 3g, ...), read from
+        # the same cgroup file the recorder reads; "max" means no limit.
         peak = record["memory_peak_b"]
         assert isinstance(peak, int) and peak > 0
         assert record["memory_peak_mib"] == round(peak / MIB, 3)
-        assert record["memory_max_b"] == 2 * 1024 * MIB
-        assert 0 < record["memory_peak_share_of_max"] <= 1
+        limit = (cgroup / "memory.max").read_text().strip()
+        if limit == "max":
+            assert record["memory_max_b"] is None
+            assert record["memory_peak_share_of_max"] is None
+        else:
+            assert record["memory_max_b"] == int(limit)
+            assert 0 < record["memory_peak_share_of_max"] <= 1
 
         # The decomposition: the peak was made partly of anonymous memory, and
         # the record carried the fault counters and the event counters too.

@@ -6,10 +6,11 @@ import pytest
 from api import authz, dependencies, mcp_router, state_graph_routers
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support import state_template
 
 @pytest.fixture
-def wire(client, tmp_path, monkeypatch):
-    db = StateDatabase(str(tmp_path / "isolated.sqlite"))
+def wire(client, tmp_path, monkeypatch, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state, tmp_path / "isolated.sqlite"))
     svc = StateService(db, actor="owner:test", project_read_trusted=True)
     svc.create_project("alpha", "alpha")
     svc.create_project("beta", "beta")

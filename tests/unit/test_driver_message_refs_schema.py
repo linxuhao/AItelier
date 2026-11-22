@@ -13,6 +13,7 @@ from core.state_database import StateDatabase
 from core.state_driver_guide import STATE_DRIVER_GUIDE
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 NODE = {"goal": "G", "acceptance": [{"id": "c", "kind": "test", "description": "d"}]}
 REF_KEYS = ("node_key", "attempt_id", "issue_id", "claim_id", "subagent_id")
@@ -20,8 +21,8 @@ INBOX_TABLES = ("driver_inbox_messages", "driver_inbox_deliveries", "driver_inbo
 
 
 @pytest.fixture
-def peers(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def peers(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
     seed = StateService(db, actor="fixture", project_read_trusted=True)
     seed.create_project("alpha", "alpha")
     seed.create_project("beta", "beta")

@@ -672,6 +672,15 @@ test('send_media(url) refused after its fetch takes back only what that call sto
     assert.deepEqual(files(t), []);
     assert.equal(t.calls.files.length, 0);
   }
+  // A fetch answering a row the library already held (a duplicate) did not create it: kept.
+  const held = toolWorld({ mediaKinds: ['file'] });
+  await held.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
+  const earlier = await held.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => png(64, 64));
+  held.media.fetch = async request => { held.fetched.push(request); return { ...earlier, duplicate: true }; };
+  held.ledger.record(DRAW, { value: { unnamed } });
+  assert.deepEqual(await held.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
+  assert.equal(held.fetched.length, 1);
+  assert.ok(held.library.lookup(earlier.ref), 'a duplicate answer is never withdrawn');
   // The library's withdraw leaves an inbound row alone.
   const kept = await mine.library.ingest({ ...owner, messageRef: 'in-1', index: 0 }, async () => png(5, 5));
   assert.deepEqual(mine.library.withdraw(kept.ref), { removed: 0 });

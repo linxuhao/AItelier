@@ -889,13 +889,22 @@ export function stateRefusal(error) {
  *  text into the requester's conversation as a reply to their message (a chat channel's
  *  message goes back to that channel, exactly as written - `exact`, never shaped or cut).
  *  deliver is refused unless the text reached the requester: the message written, and for a
- *  chat channel's requester the channel took it (the mirror is awaited, not fired). */
-export function confirmOps(request, { project, mirror = () => {} }) {
+ *  chat channel's requester the channel took it (the mirror is awaited, not fired). A
+ *  family-group requester's text (`groupRef`; the backend already stored it as the group's
+ *  outbound row, request key confirm:<code>) goes only into that group through `groupSend`
+ *  (the plugin's group send, the bridge's queue), never into the owner's conversation. */
+export function confirmOps(request, { project, mirror = () => {}, groupSend }) {
   return {
-    create: ({ name, arguments: args, requesterMessageId, audience }, signal) =>
+    create: ({ name, arguments: args, requesterMessageId, audience, questionIds }, signal) =>
       request('/api/state/commands/create_steward_confirmation', { name, arguments: args,
-        requester_message_id: requesterMessageId, audience }, signal).then(r => r?.result ?? r, stateRefusal),
-    async deliver({ code, text, replyTo, channel }, signal) {
+        requester_message_id: requesterMessageId, audience, ...(questionIds ? { question_ids: questionIds } : {}) }, signal)
+        .then(r => r?.result ?? r, stateRefusal),
+    async deliver({ code, text, replyTo, channel, groupRef }, signal) {
+      if (groupRef) {
+        let ok = false;
+        try { ok = typeof groupSend === 'function' && await groupSend(channel, groupRef, text) === true; } catch { ok = false; }
+        return ok ? { group_ref: groupRef, sent: true } : { refused: 'not_delivered', reason: 'group_send_failed' };
+      }
       let sent;
       try {
         sent = await request('/api/state/commands/send_user_message', { request_key: `confirm:${code}`, project_id: project,

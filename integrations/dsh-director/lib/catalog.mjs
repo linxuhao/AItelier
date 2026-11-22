@@ -18,7 +18,8 @@
  *   once (`resyncDue`), which leads to a fallback restart.
  * - External content: once a connection tool's result reached the session, the turn is
  *   marked `external` (written before the result is released; unreadable = marked) until
- *   a turn that a person's message opens. While marked, an `egress` tool is refused, and
+ *   a turn that a person's message opens - the owner's (`humanInput`) or a family-group
+ *   question (`personMessage`, step 23's tag; 7.8.8). While marked, an `egress` tool is refused, and
  *   the steward's own writes are refused in a turn without a person's message; with one,
  *   the host marks what it writes (`externalContent()`).
  * - The requester (step 24.1b, 7.8.9): the newest person's message of the turn's input,
@@ -40,10 +41,12 @@ const prefixOf = (server, connId) => `mcp__${server}__${connId}__`;
 export class StewardCatalog {
   /** @param host host.catalog: { connections(signal), resyncDue(effectiveHash, signal), humanInput(text) }
    *  @param audience () => the open turn's audience ({kind: 'owner'} or a group), step 23's.
-   *  @param registryNames () => names currently registered (all scopes the root sees). */
+   *  @param registryNames () => names currently registered (all scopes the root sees).
+   *  @param personMessage (message) => whether a logged user message is a person's by its tag
+   *    (a family-group question); it opens a turn like the owner's but names no requester here. */
   constructor({ host, stateDir, rootSession, server = 'sw', audience = () => undefined, registryNames, log = () => {},
-    now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
-    Object.assign(this, { host, rootSession, server, audience, registryNames, log, now, sleep });
+    now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), personMessage = () => false }) {
+    Object.assign(this, { host, rootSession, server, audience, registryNames, log, now, sleep, personMessage });
     this.file = join(stateDir, 'steward-turn.json');
     this.writes = new Set([...NATIVE_WRITES, ...(Array.isArray(host.writes) ? host.writes : [])]);
     this.state = this.#load();
@@ -90,11 +93,12 @@ export class StewardCatalog {
     } else if (event?.type === 'assistant/message') this.assistantInTurn = true;
     else if (event?.type === 'user/message') {
       const text = (event.data?.message?.content ?? event.data?.content ?? []).filter(b => b?.type === 'text').map(b => b.text ?? '').join('');
-      let human = false;
+      let human = false, tagged = false;
       try { human = this.host.humanInput(text) === true; } catch { human = false; }
-      if (!human) return;
+      try { tagged = !human && this.personMessage(event.data) === true; } catch { tagged = false; }
+      if (!human && !tagged) return;
       let requester;
-      try { requester = this.host.requesterOf?.(text); } catch { requester = undefined; }
+      try { requester = human ? this.host.requesterOf?.(text) : undefined; } catch { requester = undefined; }
       // A person's message that OPENS the turn clears the mark; one that arrives mid-turn
       // only lets this turn's own writes through.
       this.state = { ...this.state, human: true, ...(this.assistantInTurn ? {} : { external: false }),

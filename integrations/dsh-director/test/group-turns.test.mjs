@@ -75,25 +75,53 @@ test('audience: a group turn merges at most five questions of its group', () => 
 
 test('guard: in a group turn only the group tools, at most six calls; anything new is refused', () => {
   // Each name as a turn's first call (every call counts, so a 7th refused call would read answerNow).
-  // The deferred MCP tools are named here on purpose (step 24.1a): the guard is an allowlist over
-  // every tool the scope presents, so search_tools/call_tool are refused by name in a group turn
-  // and no connection the gateway serves can be reached through them there.
-  for (const name of [...STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n)), 'search_tools', 'call_tool',
-    'a_tool_added_next_year']) {
+  // Step 24 (iss-7e0949291b584b42, 7.8.8): search_tools and call_tool are group tools now - what
+  // they reach is the turn's catalog, public connections only (the catalog and the gateway's
+  // audience check); the connection-configuration tools stay refused, and so does anything new.
+  for (const name of [...STEWARD_TOOLS.filter(n => !GROUP_TOOLS.has(n)), 'connections_list', 'connection_tools',
+    'connection_refresh', 'propose_connection_change', 'a_tool_added_next_year']) {
     const g = turns();
     g.split([group('q')], 1);
     assert.equal(g.guard(name), groupTurnRefusal, name);
   }
   const g2 = turns();
   g2.split([group('q')], 1);
-  for (const name of ['portfolio_projects', 'portfolio_project', 'family_memory_note', 'family_memory_show', 'portfolio_project', 'portfolio_project'])
+  for (const name of ['portfolio_projects', 'search_tools', 'family_memory_note', 'call_tool', 'request_confirmation', 'run_confirmed'])
     assert.equal(g2.guard(name), undefined, name);
-  assert.equal(g2.guard('portfolio_project'), answerNow);
+  assert.equal(g2.guard('search_tools'), answerNow, 'the discovery tools count toward the six like any call');
+});
+
+test('guard (step 24, 7.8.8): a group turn calls its PUBLIC connection tools - direct or nested - within the six top-level calls', () => {
+  const PUBLIC = 'mcp__sw__calfam__create_event', PRIVATE = 'mcp__sw__calme__create_event';
+  let catalog = new Set([PUBLIC, 'mcp__sw__calfam__list_events']);
+  const g = new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'group-turns-')), limits: GROUP_LIMITS, connectionTools: () => catalog });
+  g.split([group('q')], 1);
+  // The private connection's name is not in a group turn's catalog: refused by name, counted.
+  assert.equal(g.guard(PRIVATE), groupTurnRefusal);
+  assert.equal(g.guard(PRIVATE, { nested: true }), groupTurnRefusal, 'nor through call_tool');
+  assert.equal(g.guard('handoff', { nested: true }), groupTurnRefusal, 'call_tool reaches no tool the group may not call');
+  assert.equal(g.guard('mcp__sw__calfam__list_events'), undefined, 'a direct call of a public one');
+  assert.equal(g.guard('call_tool'), undefined);
+  assert.equal(g.guard(PUBLIC, { nested: true }), undefined, 'the call_tool target itself');
+  assert.equal(g.current.calls, 3, 'the nested calls are not counted again');
+  for (let n = 0; n < 3; n += 1) assert.equal(g.guard('run_confirmed'), undefined);
+  assert.equal(g.guard(PUBLIC, { nested: true }), undefined, 'the sixth call\'s own nested call still runs');
+  assert.equal(g.guard('call_tool'), answerNow, 'the seventh top-level call');
+  assert.equal(g.current.calls, 7);
+  // A catalog that cannot be read gives nothing beyond the group tools.
+  catalog = undefined;
+  const h = new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'group-turns-')), limits: GROUP_LIMITS, connectionTools: () => { throw new Error('x'); } });
+  h.split([group('q')], 1);
+  assert.equal(h.guard(PUBLIC, { nested: true }), groupTurnRefusal);
+  // An owner turn: the group whitelist does not apply (the catalog's own guard does), nothing counted.
+  h.split([message('owner')], 1);
+  assert.equal(h.guard(PRIVATE), undefined);
+  assert.equal(h.current.calls, 0);
 });
 
 test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
-  assert.deepEqual([...GROUP_TOOLS].sort(), ['family_memory_note', 'family_memory_show', 'list_add', 'list_check', 'list_show',
-    'portfolio_project', 'portfolio_projects']);
+  assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'list_add', 'list_check', 'list_show',
+    'portfolio_project', 'portfolio_projects', 'request_confirmation', 'run_confirmed', 'search_tools']);
   for (const name of ['list_show', 'list_add', 'list_check']) {
     const g = turns();
     g.split([group('q')], 1);
@@ -126,11 +154,13 @@ test('guard: an unknown audience reads as a group; an owner turn never gets the 
   assert.equal(g.guard('family_memory_show'), familyRefusal);
 });
 
-test('pause: after a group turn the five writes wait for the owner; a broken pause file is in effect', () => {
+test('pause: after a group turn the paused writes wait for the owner; a broken pause file is in effect', () => {
   const g = turns();
   g.pause();
   g.split([message('a director letter')], 1);
   for (const name of PAUSED_TOOLS) assert.equal(g.guard(name), pausedRefusal, name);
+  // 7.8.8: a turn nobody's message opened (a letter, a reminder) proposes no connection change.
+  assert.equal(g.guard('propose_connection_change'), pausedRefusal);
   for (const name of ['ask_owner', 'portfolio_inbox', 'memory_search']) assert.equal(g.guard(name), undefined, name);
   g.unpause();
   assert.equal(g.guard('memory_note'), undefined);
@@ -557,6 +587,26 @@ test('channels: a refused group message is final, its notice goes to the group, 
   failing.ready();
   assert.deepEqual(await failing.service.inbound({ channel: 'wechat', senderRef: 's', messageRef: 'r', text: 't', conversationRef: 'r1' }),
     { accepted: false, reason: 'unavailable' });
+});
+
+test('channels (step 24, 7.8.9): a reply that decided a confirmation sends the backend\'s one line into the group - accepted, or a cancel over quota', async () => {
+  const line = '已确认 K7Q2A，正在执行。';
+  const w = groupWorld({ relay: { message_id: 'g2', sender_role: 'member', sender_label: '成员甲', duplicate: false,
+    confirmation: { code: 'K7Q2A', action: 'confirm', outcome: 'confirmed' }, confirmation_line: line, confirmation_line_message_id: 'gout' } });
+  assert.deepEqual(await inbound(w, { text: '确认 K7Q2A' }), { accepted: true });
+  assert.deepEqual(w.sent, [['group', 'r1', line]]);
+  assert.equal(w.woken.length, 1, 'the reply is still a question: it wakes the steward, which runs it');
+  // Over quota the backend refuses only a reply that did not confirm (a confirming one is a
+  // question past the quotas): its line is sent and nothing wakes.
+  const cancelled = '已取消 K7Q2A，不会执行。';
+  const over = groupWorld({ relay: { refused: 'member_quota', confirmation: { code: 'K7Q2A', outcome: 'cancelled' }, confirmation_line: cancelled } });
+  assert.deepEqual(await inbound(over, { text: '取消 K7Q2A' }), { accepted: false, reason: 'member_quota' });
+  assert.deepEqual(over.sent, [['group', 'r1', cancelled]]);
+  assert.equal(over.woken.length, 0);
+  // No line from the backend (the group's send budget is spent): nothing extra is sent.
+  const spent = groupWorld({ relay: { message_id: 'g3', confirmation: { code: 'K7Q2A', outcome: 'confirmed' } } });
+  await inbound(spent, { text: '确认 K7Q2A' });
+  assert.deepEqual(spent.sent, []);
 });
 
 // The group reply path strips the system clock lines the steward copied to the start of its

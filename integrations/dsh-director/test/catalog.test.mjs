@@ -148,6 +148,25 @@ test('external content: egress tools wait for a person, own writes need one in t
   assert.equal(catalog.refusal(exec('mcp__sw__media__web_search', 'child')), undefined, 'non-root sessions are refused by discovery');
 });
 
+test('external content (7.8.8): a family-group question opens a turn like a person\'s message - the mark clears, no requester is named', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'catalog-'));
+  const host = { connections: async () => JSON.parse(JSON.stringify(CACHE)), resyncDue: async () => {}, humanInput: human,
+    requesterOf: () => 'never-for-a-group' };
+  const catalog = new StewardCatalog({ host, stateDir: dir, rootSession: 'root', registryNames: () => CACHE.effective_tools,
+    audience: () => ({ kind: 'group', channel: 'wechat', group_ref: 'room1' }), personMessage: m => m?.source?.kind === 'dsh-director-group' });
+  await catalog.preStep();
+  catalog.observe({ type: 'turn/start', seq: 1 });
+  catalog.markExternal();
+  catalog.observe({ type: 'turn/start', seq: 2 });
+  // An untagged message (a letter) does not; a tagged group question does.
+  catalog.observe({ type: 'user/message', data: { content: [{ type: 'text', text: '{"group_turn":{}}' }], source: { kind: 'dsh-director-runtime-event' } } });
+  assert.equal(catalog.externalSeen, true);
+  catalog.observe({ type: 'user/message', data: { content: [{ type: 'text', text: '{"group_turn":{}}' }], source: { kind: 'dsh-director-group' } } });
+  assert.equal(catalog.externalSeen, false);
+  assert.equal(catalog.refusal(exec('mcp__sw__media__web_search')), undefined);
+  assert.equal(catalog.requester, undefined, 'a group turn\'s requester is its question, never an owner message id');
+});
+
 test('the mark survives a restart; a record that cannot be read counts as marked', () => {
   const dir = mkdtempSync(join(tmpdir(), 'catalog-'));
   assert.equal(fixture({ stateDir: dir }).catalog.externalSeen, false, 'no record: nothing read');

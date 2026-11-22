@@ -27,7 +27,13 @@ What the backend decides here, in code, never the model nor the message text:
   call) after that row fired for that due time, to the group the row recorded if that binding
   still stands, through the same exit check, at most group_notices_per_hour per group (apart
   from the 60 questions) and within the account's 120 outbound messages an hour. No model
-  turn: the host sends it like a reply.
+  turn: the host sends it like a reply;
+- confirmations of outward actions asked for in the group (step 24, design-steward 7.8.9,
+  core.state_steward_confirmations): the requester's exact reply (the @ prefix taken off by
+  the bridge) is decided in relay_group_message BEFORE the quotas, and the group gets one
+  line written here (`confirmation_line`); a confirmation's text and that line are outbound
+  rows held to group_sends_per_hour per group (`group_send_budget`, apart from the 60
+  questions) and to the account's 120.
 
 None of these writes a State event and none notifies a subscriber: a group message must
 never reach the steward as an owner-audience runtime event (7.7.7). Logs carry channel,
@@ -46,6 +52,7 @@ from types import MappingProxyType
 
 from core.message_body_guard import refuse_credential_body
 from core import state_channels
+from core import state_steward_confirmations as confirmations
 from core.state_channels import (BODY_MAX_BYTES, CHANNELS, CODE_TTL, _code_hash, _require_utf8, _written_at,
                                  digit_windows, require_bound)
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
@@ -110,7 +117,12 @@ GROUP_LIMITS = MappingProxyType({
     # questions: a group gets at most 60 + 1 + 1 + 20 + 6 = 88 messages an hour, under the
     # bridge's 90 backstop; every one also counts toward account_out_per_hour.
     "group_notices_per_hour": 6,
+    # Step 24 (design-steward 7.8.9): the 20 of that sum - confirmation texts and the lines
+    # deciding them (later also send_media's files), apart from the 60 questions.
+    "group_sends_per_hour": 20,
 })
+# The outbound kinds group_sends_per_hour counts.
+GROUP_SEND_KINDS = ("confirmation", "confirmation_line")
 # The family memory (7.7.8a, director 420): bounded, the same 30 days as the group rows.
 FAMILY_LIMITS = MappingProxyType({"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000})
 # Step 0 item 1 (7.7.11) decides this: True only if the owner's id in a group is NOT the
@@ -127,6 +139,14 @@ WITHHELD_REASONS = MappingProxyType({"live_code": "a live binding code", "privat
                                      "the name or id of a project that is not public",
                                      "host_path": "a path on the host"})
 QUOTA_NOTICE = "问得太多了，过一会儿再问。"
+# The line a group gets when the requester's reply decided a confirmation (7.8.9 step 4):
+# code's words, never the model's.
+CONFIRMATION_LINES = MappingProxyType({
+    "confirmed": "已确认 {code}，正在执行。", "cancelled": "已取消 {code}，不会执行。",
+    "expired": "{code} 已过期，未执行；请重新请求。",
+    # The only refusals here are about the message's time (a group message is never undated):
+    # fixed words, never the internal token (review F4).
+    "refused": "{code} 未执行：消息时间不对，请重新回复。"})
 BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
                "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
                "让我记住的事只在本群用，30 天后删。")
@@ -278,6 +298,21 @@ class StateGroups:
 
     def _pepper(self):
         return self.channels._code_key()
+
+    def send_refusal(self, conn, channel, group_ref, moment):
+        """Whether one more confirmation text or deciding line may go into this group now:
+        group_send_budget (group_sends_per_hour of GROUP_SEND_KINDS this hour), or
+        group_quota_account (the account's outbound cap), or None."""
+        hour = (moment - timedelta(hours=1)).isoformat()
+        kinds = ",".join("?" * len(GROUP_SEND_KINDS))
+        if self._count(conn, f"SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
+                       f"direction='out' AND kind IN ({kinds}) AND at>?",
+                       (channel, group_ref, *GROUP_SEND_KINDS, hour)) >= GROUP_LIMITS["group_sends_per_hour"]:
+            return "group_send_budget"
+        if self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND direction='out' AND at>?",
+                       (channel, hour)) >= GROUP_LIMITS["account_out_per_hour"]:
+            return "group_quota_account"
+        return None
 
     def _live_group_codes(self, conn, moment):
         return {row["code_hash"]: row["channel"] for row in conn.execute(
@@ -551,7 +586,11 @@ class StateGroups:
         {message_id, sender_role, sender_label, duplicate} - or a refusal: group_not_bound,
         undated, stale, code_in_group (a live ACCOUNT code it carries is retired, nothing of
         the body is kept, nothing is answered), group_quota / member_quota (with notice and
-        notice_message_id when the hour's one notice is due), group_quota_account."""
+        notice_message_id when the hour's one notice is due), group_quota_account. A message
+        that is exactly the sender's reply to a confirmation of theirs in this group (step 24,
+        7.8.9) is decided before the quotas: the answer then carries `confirmation` and, when
+        the group's send budget allows, `confirmation_line` (and its message id) for the host
+        to send."""
         if channel not in CHANNELS:
             raise StateGraphError("invalid_channel")
         _require_utf8("body", body, "invalid_body")
@@ -602,12 +641,27 @@ class StateGroups:
             role = "owner" if account is not None and account[0] == sender_ref else "member"
             label = self._member(conn, channel, group_ref, sender_ref, role)
             hour = (moment - timedelta(hours=1)).isoformat()
+            # The account's outbound cap comes first: past it nothing can go out, so the message
+            # decides no confirmation either (a reply's record stays pending; review F1/F2).
             sent = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND direction='out' "
                                "AND at>?", (channel, hour))
             if sent >= GROUP_LIMITS["account_out_per_hour"]:
                 keep("over_quota", role=role)
                 self._log("group_quota_account", channel, group_ref, sender_ref, size)
                 return {"refused": "group_quota_account", "sender_role": role}
+            # Step 24 (7.8.9 step 4): the exact reply to a pending confirmation of this sender in
+            # this group, decided in this transaction and before the group and member quotas. A
+            # reply that confirmed is a question past those quotas too: it must wake the steward
+            # that runs it, or the group's 「正在执行」 line would be false.
+            decided = confirmations.match_reply(conn, body, channel=channel, sender_ref=sender_ref,
+                                                conversation_ref=group_ref, written_at=written, message_id=message_id)
+            extra = {}
+            if decided is not None:
+                extra["confirmation"] = decided
+                if self.send_refusal(conn, channel, group_ref, moment) is None:
+                    line = CONFIRMATION_LINES[decided["outcome"]].format(code=decided["code"])
+                    extra.update(confirmation_line=line, confirmation_line_message_id=self._out_row(
+                        conn, channel, group_ref, "confirmation_line", line, moment))
             asked = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
                                 "direction='in' AND accepted=1 AND at>?", (channel, group_ref, hour))
             mine = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
@@ -615,12 +669,12 @@ class StateGroups:
                                (channel, group_ref, sender_ref, hour))
             over = ("group_quota" if asked >= GROUP_LIMITS["group_per_hour"]
                     else "member_quota" if role == "member" and mine >= GROUP_LIMITS["member_per_hour"] else None)
-            if over:
+            if over and (decided or {}).get("outcome") != "confirmed":
                 keep("over_quota", role=role)
                 self._log(over, channel, group_ref, sender_ref, size)
                 notices = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? "
                                       "AND direction='out' AND kind='quota_notice' AND at>?", (channel, group_ref, hour))
-                result = {"refused": over, "sender_role": role}
+                result = {"refused": over, "sender_role": role, **extra}
                 if notices < GROUP_LIMITS["notice_per_hour"]:
                     result.update(notice=QUOTA_NOTICE, notice_message_id=self._out_row(
                         conn, channel, group_ref, "quota_notice", QUOTA_NOTICE, moment))
@@ -628,7 +682,7 @@ class StateGroups:
             keep("question", accepted=1, role=role, text=body)
             self._retain(conn, moment)
         self._log("message accepted", channel, group_ref, sender_ref, size)
-        return {"message_id": message_id, "sender_role": role, "sender_label": label, "duplicate": False}
+        return {"message_id": message_id, "sender_role": role, "sender_label": label, "duplicate": False, **extra}
 
     def exit_check(self, conn, text, moment):
         """The reason a reply may not go to the group, or None (7.7.7): a live code of

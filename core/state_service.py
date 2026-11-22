@@ -218,7 +218,8 @@ class StateService:
                                                    inbox=self.driver_inbox, channels=self.channels)
         # Step 24.1b: outward actions confirmed by the person who asked.
         from core.state_steward_confirmations import StateStewardConfirmations
-        self.steward_confirmations = StateStewardConfirmations(self.store, actor, driver_id, steward=self.steward)
+        self.steward_confirmations = StateStewardConfirmations(self.store, actor, driver_id, steward=self.steward,
+                                                               groups=self.groups)
         # Multi-driver P3: reclaim (abandon / take over), the record-only
         # subagent registry and point-to-point handoffs. Each is the one writer
         # of its table (enforcement: core.state_enforcement.enforced).

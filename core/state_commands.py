@@ -1372,8 +1372,11 @@ class CreateStewardConfirmation(Request):
     name: str = Field(min_length=1, max_length=100, description="the tool's public name mcp__sw__<conn_id>__<gw_name>")
     arguments: dict[str, Any] = Field(description="the exact arguments the tool will run with")
     requester_message_id: str = Field(min_length=1, max_length=100, description=(
-        "the newest owner message of this turn (a chat channel's or the dashboard's)"))
+        "the newest owner message of this turn (a chat channel's or the dashboard's); in a group turn the "
+        "newest question of the turn"))
     audience: str = Field(default="owner", min_length=1, max_length=260)
+    question_ids: list[str] | None = Field(default=None, max_length=20, description=(
+        "a group turn: every question the turn took (its requester is their one sender)"))
 
 
 class GetStewardConfirmation(Request):

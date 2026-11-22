@@ -97,6 +97,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const stewardCatalog = catalogHost && roles[rootRole].catalog === 'host' ? new StewardCatalog({ host: catalogHost,
     stateDir: config.stateDir, rootSession: config.sessionId, log: line => ctx.logger.warn(line),
     audience: () => groupTurns?.audience(),
+    // A family-group question opens a turn as a person's message does (7.8.8).
+    personMessage: message => message?.source?.kind === GROUP_SOURCE,
     registryNames: () => ctx.tools.schemas().map(schema => schema.name) }) : undefined;
   installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, rootRole, roles,
     texts: { sectionName: labels.sectionPrefix + ':tool-discovery', section: texts.toolDiscoverySection,
@@ -181,11 +183,15 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     pausedTools: Array.isArray(host.groups?.pausedTools) ? host.groups.pausedTools : [],
     // The root session's clock line enters a step inside the group hook (it registers later, so
     // it runs inner): nobody's input, never a reason to put a turn's input back.
-    neutralKinds: [labels.clock] }) : undefined;
+    neutralKinds: [labels.clock],
+    // Step 24 (7.8.8): the connection tools a group turn may call are the catalog's (public only then).
+    connectionTools: () => stewardCatalog?.catalog(config.sessionId) }) : undefined;
   if (groupTurns) {
     // Synchronous, keyed on the caller's session; call_tool reaches the same guard. The turn DSH
-    // has open keys the bookkeeping: a group turn's call count is that turn's, from 0.
-    ctx.tools.guard(exec => exec.agent?.session?.id === config.sessionId ? groupTurns.guard(exec.name) : undefined);
+    // has open keys the bookkeeping: a group turn's call count is that turn's, from 0, and counts
+    // only top-level calls (a call_tool's or run_confirmed's own call carries exec.parent).
+    ctx.tools.guard(exec => exec.agent?.session?.id === config.sessionId
+      ? groupTurns.guard(exec.name, { nested: exec.parent !== undefined }) : undefined);
     ctx.on('session/event', (session, event) => {
       if (session.id === config.sessionId && event.type === 'turn/start') groupTurns.turnOpened(event.data?.turn);
     });
@@ -694,7 +700,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // Step 24.1b (design-steward 7.8.9): outward actions confirmed by the person who asked,
     // when the host's catalog provides confirmations.
     if (stewardCatalog && catalogHost.confirm) registerConfirmTools(scope, { ctx, defineTool, jsonOutput,
-      HarnessError: llm.HarnessError, confirm: catalogHost.confirm, catalog: stewardCatalog });
+      HarnessError: llm.HarnessError, confirm: catalogHost.confirm, catalog: stewardCatalog,
+      // A group turn's requester is one of its askers (7.8.9): the questions it took, newest last.
+      groupQuestions: () => { const turn = groupTurns?.open(); return turn?.audience.kind === 'group' ? [...turn.questions] : undefined; } });
     // Step 24.1c (design-steward 7.8.10a): the steward reads its connections and proposes
     // changes to them, when the host's catalog provides those operations.
     if (stewardCatalog && catalogHost.manage) registerConnectionTools(scope, { defineTool, jsonOutput,

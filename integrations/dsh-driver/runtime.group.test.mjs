@@ -468,3 +468,229 @@ test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry th
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+// ---- step 24 (design-steward 7.8.8, 7.8.9): the production wiring of a group confirmation ----
+// The AItelier adapter over a recording State server, a WeChat-shaped channel and connection
+// tools registered under the gateway's names. One group turn: a public connection read through
+// call_tool (allowed, and call_tool with its target counts as ONE of the 6 calls), a private one
+// (refused), request_confirmation (the turn's question reaches create, the text goes into the
+// group through the plugin's group send), three more public reads (the 6th call still runs).
+// Then the asker's 「确认 K…」 opens a second group turn, which runs the confirmed call.
+const CONFIRM_PROVIDER = String.raw`
+import { createRequire } from 'node:module';
+const require = createRequire(process.env.AITELIER_DSH_ENTRY);
+const { LlmAdapter } = await import(require.resolve('@deepseek-ai/dsh-llm'));
+export const name = 'fixture-group-confirm-provider';
+export const inject = ['llm'];
+const tool = (id, name, args) => ({ type: 'tool-call', id, name, arguments: JSON.stringify(args) });
+const read = conn => ({ name: 'mcp__sw__' + conn + '__list_events', arguments: { day: 'sat' } });
+const CHAIN = { c1: ['c2', 'call_tool', read('calme')],
+  c2: ['c3', 'request_confirmation', { name: 'mcp__sw__calfam__create_event', arguments: { title: '周六聚餐' } }],
+  c3: ['c4', 'call_tool', read('calfam')], c4: ['c5', 'call_tool', read('calfam')], c5: ['c6', 'call_tool', read('calfam')] };
+export function apply(ctx) {
+  const done = new Set();
+  const once = (key, make) => done.has(key) ? undefined : (done.add(key), make());
+  class FixtureAdapter extends LlmAdapter {
+    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 64000 }, defaultMaxTokens: 1024 }; }
+    async *stream(options) {
+      const all = JSON.stringify(options.messages), last = options.messages.at(-1);
+      let block;
+      if (options.purpose === 'compaction' || !options.tools?.length || options.sessionId !== 'gcf-root') block = { type: 'text', text: 'Fixture.' };
+      else if (last?.role === 'tool' && CHAIN[last.toolCallId]) { const [id, name, args] = CHAIN[last.toolCallId]; block = once(id, () => tool(id, name, args)); }
+      else if (last?.role === 'tool' && last.toolCallId === 'c6') block = { type: 'text', text: 'GROUP_CONFIRM_SENT' };
+      else if (last?.role === 'tool' && last.toolCallId === 'r1') block = { type: 'text', text: 'GROUP_RAN' };
+      else if (all.includes('CONFIRM_FLOW') && !done.has('c1')) block = once('c1', () => tool('c1', 'call_tool', read('calfam')));
+      else if (all.includes('确认 K7Q2A') && !done.has('r1')) block = once('r1', () => tool('r1', 'run_confirmed', { code: 'K7Q2A' }));
+      block ??= { type: 'text', text: 'Done.' };
+      yield { type: 'block-start', index: 0, blockType: block.type };
+      if (block.type === 'text') yield { type: 'text-delta', index: 0, text: block.text };
+      else yield { type: 'tool-call-delta', index: 0, id: block.id, name: block.name, argumentsDelta: block.arguments };
+      yield { type: 'block-end', index: 0, block };
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 10 } };
+      yield { type: 'finish', reason: { kind: block.type === 'text' ? 'stop' : 'tool-calls' } };
+    }
+  }
+  ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
+  ctx.on('session/event', (session, event) => {
+    if (session.id === 'gcf-root' && ['tool/result', 'turn/end'].includes(event.type))
+      void fetch(process.env.AITELIER_URL + '/test/event', { method: 'POST', body: JSON.stringify(event) }).catch(() => {});
+  });
+}
+`;
+
+// The connection tools under the gateway's names (mcp__sw__<conn>__<tool>): each run is recorded.
+const SW_TOOLS = String.raw`
+import { createRequire } from 'node:module';
+const require = createRequire(process.env.AITELIER_DSH_ENTRY);
+const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
+export const name = 'fixture-sw-tools';
+export const inject = ['tools'];
+export function apply(ctx) {
+  for (const name of ['mcp__sw__calfam__list_events', 'mcp__sw__calfam__create_event', 'mcp__sw__calme__list_events'])
+    ctx.tools.register(defineTool({ name, description: 'fixture ' + name,
+      parameters: { day: { type: 'string' }, title: { type: 'string' } },
+      output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      async execute(args) {
+        await fetch(process.env.AITELIER_URL + '/test/mcp', { method: 'POST', body: JSON.stringify({ name, args }) }).catch(() => {});
+        return { ok: 'SW_OK ' + name };
+      } }));
+}
+`;
+
+// The family member asks, and once the steward's group reply went out, replies with the code.
+const CONFIRM_CHANNEL = String.raw`
+export const name = 'fixture-group-confirm-channel';
+export const inject = ['ownerChannels'];
+const post = (path, body) => fetch(process.env.AITELIER_URL + path, { method: 'POST', body: JSON.stringify(body) }).then(r => r.json()).catch(() => ({}));
+export function apply(ctx) {
+  ctx.on('dispose', ctx.ownerChannels.register({ name: 'wechat', status: () => ({ connected: true }),
+    async send(text, options) { await post('/test/send', { text, options }); return {}; },
+    async sendGroup(room, text) { await post('/test/group-send', { room, text }); return { ref: 'g-out' }; },
+    async setRooms(rooms) { await post('/test/rooms', rooms); } }));
+  const ask = (ref, text) => ctx.ownerChannels.inbound({ channel: 'wechat', senderRef: 'wxid_m1', messageRef: ref, text,
+    at: new Date().toISOString(), conversationRef: 'r1@chatroom' });
+  void (async () => {
+    await post('/test/inbound', await ask('gm-1', '@管家 CONFIRM_FLOW 周六帮我们在家庭日历上建个聚餐'));
+    await post('/test/wait-first-reply', {});
+    await post('/test/inbound', await ask('gm-2', '确认 K7Q2A'));
+  })();
+}
+`;
+
+test('real pinned DSH, the AItelier adapter: a group turn calls public connection tools, requests a confirmation into the group, and the asker\'s reply runs it', { timeout: 180000 }, async (t) => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;
+  const here = dirname(fileURLToPath(import.meta.url));
+  const directory = await mkdtemp(join(homedir(), 'dsh-group-confirm-'));
+  const seen = { state: [], events: [], groupSends: [], inbound: [], mcp: [] };
+  let output = '', proc, firstReply;
+  const replied = new Promise(resolve => { firstReply = resolve; });
+  const CODE = 'K7Q2A', TEXT = '@管家 确认 K7Q2A：在「家庭日历」create_event title=周六聚餐';
+  const created = { title: '周六聚餐' };
+  const connections = { effective_hash: 'h1',
+    effective_tools: ['mcp__sw__calfam__list_events', 'mcp__sw__calfam__create_event', 'mcp__sw__calme__list_events'],
+    connections: [
+      { conn_id: 'calfam', visibility: 'public', usable: true, tools: [
+        { name: 'mcp__sw__calfam__list_events', outward: false, egress: false },
+        { name: 'mcp__sw__calfam__create_event', outward: true, egress: true }] },
+      { conn_id: 'calme', visibility: 'private', usable: true, tools: [{ name: 'mcp__sw__calme__list_events', outward: false, egress: false }] }] };
+  let relays = 0;
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString();
+    const body = raw ? JSON.parse(raw) : {};
+    const send = (value, status = 200) => { res.statusCode = status; res.setHeader('content-type', 'application/json'); res.end(typeof value === 'string' ? value : JSON.stringify(value)); };
+    const url = req.url;
+    if (url === '/test/event') { seen.events.push(body); return send({}); }
+    if (url === '/test/group-send') { seen.groupSends.push(body); return send({}); }
+    if (url === '/test/inbound') { seen.inbound.push(body); return send({}); }
+    if (url === '/test/mcp') { seen.mcp.push(body); return send({}); }
+    if (url === '/test/wait-first-reply') { await replied; return send({}); }
+    if (url.startsWith('/test/')) return send({});
+    seen.state.push({ path: url, body });
+    if (url === '/api/drivers/me') return send({ driver_id: 'drv-gcf' });
+    if (url === '/api/state/schema') return send({ operations: {} });
+    if (url.endsWith('/context')) return send({ project_id: 'aitelier-home', driver_id: 'drv-gcf', event_seq: 1, nodes: [],
+      project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'fixture', runtime_skill: 'fixture' });
+    if (url.endsWith('/activity') || url.endsWith('/heartbeat')) return send({ ok: true });
+    if (url === '/api/state/query/wait_for_state_change') return; // parks: no owner message in this run
+    if (url.startsWith('/api/state/commands/')) {
+      const name = url.slice('/api/state/commands/'.length);
+      if (name === 'relay_group_message') {
+        relays += 1;
+        if (relays === 1) return send({ result: { message_id: 'gq1', sender_role: 'member', sender_label: '成员甲' } });
+        return send({ result: { message_id: 'gq2', sender_role: 'member', sender_label: '成员甲',
+          confirmation: { code: CODE, action: 'confirm', outcome: 'confirmed' }, confirmation_line: `已确认 ${CODE}，正在执行。`,
+          confirmation_line_message_id: 'gl1' } });
+      }
+      if (name === 'set_steward_turn_audience') return send({ result: { recorded: true } });
+      if (name === 'create_steward_confirmation') return send({ result: { code: CODE, status: 'pending', text: TEXT, channel: 'wechat',
+        group_ref: 'r1@chatroom', reply_to_message_id: body.requester_message_id, expires_at: '2099-01-01T00:00:00Z' } });
+      if (name === 'get_steward_confirmation') return send({ result: { code: CODE, status: 'confirmed',
+        name: 'mcp__sw__calfam__create_event', arguments: created } });
+      if (name === 'cancel_steward_confirmation') return send({ result: { code: body.code, status: 'cancelled' } });
+      if (name === 'post_group_reply') {
+        if (body.question_id === 'gq1') setTimeout(firstReply, 200);
+        return send({ result: { message_id: 'go-' + body.question_id, channel: 'wechat', group_ref: 'r1@chatroom', text: body.body, withheld: false } });
+      }
+      if (['report_channel_status', 'record_channel_delivery'].includes(name)) return send({ recorded: true });
+      if (name === 'complete_steward_memory_request') return send({});
+      return send({ detail: 'unexpected ' + name }, 422);
+    }
+    if (url.startsWith('/api/state/query/')) {
+      const name = url.slice('/api/state/query/'.length);
+      if (name === 'list_steward_connections') return send({ result: connections });
+      if (name === 'list_owner_groups') return send({ result: { owner_refs: { wechat: 'wxid_owner' },
+        groups: [{ channel: 'wechat', group_ref: 'r1@chatroom', label: '家庭群', mention_prefix: '@管家' }] } });
+      if (name === 'list_group_recent') return send({ result: { recent: [] } });
+      if (name === 'list_owner_channels') return send({ default_channel: null, channels: [
+        { channel: 'wechat', bound: true, sender_ref: 'wxid_owner', bound_at: 't', revoked_at: null, is_default: false }] });
+      if (name === 'list_user_conversation') return send({ messages: [], next_cursor: null });
+      return send({ result: {} });
+    }
+    send({ detail: url }, 404);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const profile = join(directory, 'home/profiles/driver');
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(directory, 'provider.mjs'), CONFIRM_PROVIDER);
+    await writeFile(join(directory, 'sw-tools.mjs'), SW_TOOLS);
+    await writeFile(join(directory, 'channel.mjs'), CONFIRM_CHANNEL);
+    await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
+    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
+      { id: 'hmr', disabled: true },
+      ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
+      { insert: [{ id: 'fixture', name: join(directory, 'provider.mjs') },
+        { id: 'fixture-sw-tools', name: join(directory, 'sw-tools.mjs') },
+        { id: 'dsh-director', name: join(here, '../dsh-director/index.mjs') },
+        { id: 'aitelier-driver', name: join(here, 'runtime.mjs') },
+        { id: 'dsh-channel-wechat', name: join(directory, 'channel.mjs') }] },
+    ]));
+    const token = join(directory, 'token');
+    await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutCallerMode(process.env),
+      DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
+      AITELIER_DRIVER_ID: 'drv-gcf', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 'gcf-root',
+      AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
+      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } });
+    proc.stdout.on('data', chunk => output += chunk);
+    proc.stderr.on('data', chunk => output += chunk);
+    const commands = name => seen.state.filter(s => s.path === '/api/state/commands/' + name);
+    const resultOf = id => JSON.stringify(seen.events.find(e => e.type === 'tool/result' && e.data.message.toolCallId === id)?.data.message ?? null);
+    const deadline = Date.now() + 120000;
+    while (!commands('post_group_reply').some(s => s.body.question_id === 'gq2') && Date.now() < deadline && proc.exitCode === null)
+      await new Promise(resolve => setTimeout(resolve, 100));
+    const trace = '\n' + JSON.stringify(seen.state.map(s => s.path)).slice(0, 2000) + '\n' + ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'r1'].map(id => id + ' ' + resultOf(id).slice(0, 300)).join('\n') + '\n' + output.slice(-3000);
+    assert.ok(commands('post_group_reply').some(s => s.body.question_id === 'gq2'), 'the second group turn never replied' + trace);
+    assert.deepEqual(seen.inbound, [{ accepted: true }, { accepted: true }]);
+    // The public connection's tool ran through call_tool (the catalog reached the group guard);
+    // the private one was refused and never ran.
+    assert.match(resultOf('c1'), /SW_OK mcp__sw__calfam__list_events/, trace);
+    assert.doesNotMatch(resultOf('c2'), /SW_OK/, trace);
+    assert.ok(!seen.mcp.some(m => m.name === 'mcp__sw__calme__list_events'), 'the private connection ran in a group turn');
+    // call_tool and its target are ONE of the 6 calls: the 6th top-level call still runs.
+    for (const id of ['c4', 'c5', 'c6']) assert.match(resultOf(id), /SW_OK mcp__sw__calfam__list_events/, id + trace);
+    // request_confirmation: the turn's question is the requester, and the turn's questions reach the backend.
+    assert.deepEqual(commands('create_steward_confirmation').map(s => [s.body.name, s.body.requester_message_id, s.body.audience, s.body.question_ids]),
+      [['mcp__sw__calfam__create_event', 'gq1', 'group', ['gq1']]], trace);
+    assert.match(resultOf('c3'), /K7Q2A[^]*pending/, trace);
+    assert.deepEqual(commands('cancel_steward_confirmation'), []);
+    // The text went into the group through the plugin's group send (the adapter's groupSend),
+    // never to the owner; then the group reply; then the code's 「已确认」 line.
+    assert.equal(seen.groupSends[0]?.text, TEXT, trace);
+    assert.ok(seen.groupSends[1]?.text.endsWith('GROUP_CONFIRM_SENT'), trace);
+    assert.ok(seen.groupSends.some(s => s.text === `已确认 ${CODE}，正在执行。`), trace);
+    assert.ok(seen.groupSends.every(s => s.room === 'r1@chatroom'));
+    assert.ok(!commands('send_user_message').some(s => s.body.body?.includes('K7Q2A')), 'the confirmation went to the owner');
+    // The reply opened a group turn (a person's message: the outside-content mark is cleared) and
+    // run_confirmed ran the stored call.
+    assert.match(resultOf('r1'), /SW_OK mcp__sw__calfam__create_event/, trace);
+    assert.deepEqual(seen.mcp.filter(m => m.name === 'mcp__sw__calfam__create_event').map(m => m.args), [created]);
+  } finally {
+    if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});

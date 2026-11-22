@@ -81,7 +81,9 @@ def test_group_limits_are_pinned_code_constants_that_no_environment_variable_cha
                                         "notice_per_hour": 1, "fresh_minutes": 10, "retention_days": 30,
                                         "reply_chars": 1400,
                                         # Step 25 C11 (7.9.4): the owner's group reminders, apart.
-                                        "group_notices_per_hour": 6}
+                                        "group_notices_per_hour": 6,
+                                        # Step 24 (7.8.9): confirmation texts and their lines, apart.
+                                        "group_sends_per_hour": 20}
     with pytest.raises(TypeError):
         fresh.GROUP_LIMITS["group_per_hour"] = 1
     assert dict(fresh.FAMILY_LIMITS) == {"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000}

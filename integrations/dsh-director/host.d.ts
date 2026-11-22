@@ -294,7 +294,10 @@ export interface DirectorHost {
    *    run_confirmed are registered only with it. create stores the exact call and answers
    *    the code and the text (written by code) the requester reads; deliver sends that text
    *    into the requester's conversation (a reply to their message) and is refused unless it
-   *    reached them (`channel` is the requester's: a chat channel's mirror must take it);
+   *    reached them (`channel` is the requester's: a chat channel's mirror must take it). In a
+   *    family-group turn create gets audience 'group' and the turn's question ids
+   *    (`questionIds`, newest last; the requester is their one sender) and answers the group
+   *    (`group_ref`), which deliver gets as `groupRef` and sends into, through the group send;
    *    cancel voids a pending record whose text did not arrive; get answers the stored
    *    record ({status, name, arguments}) run_confirmed runs. Refusals are {refused}.
    *  - manage (optional, step 24.1c, design-steward 7.8.10a): connections_list,
@@ -313,9 +316,10 @@ export interface DirectorHost {
     writes?: string[];
     requesterOf?(text: string): string | undefined;
     confirm?: {
-      create(request: { name: string; arguments: object; requesterMessageId: string; audience: string }, signal?: AbortSignal):
-        Promise<{ code: string; text: string; channel: string; reply_to_message_id: string; expires_at: string } | { refused: string }>;
-      deliver(message: { code: string; text: string; replyTo: string; channel: string }, signal?: AbortSignal):
+      create(request: { name: string; arguments: object; requesterMessageId: string; audience: string; questionIds?: string[] },
+        signal?: AbortSignal): Promise<{ code: string; text: string; channel: string; group_ref?: string; reply_to_message_id: string;
+        expires_at: string } | { refused: string; reason?: string }>;
+      deliver(message: { code: string; text: string; replyTo: string; channel: string; groupRef?: string }, signal?: AbortSignal):
         Promise<{ message_id: string } | { refused: string; reason?: string }>;
       cancel(code: string, signal?: AbortSignal): Promise<unknown>;
       get(code: string, signal?: AbortSignal): Promise<{ status: string; name: string; arguments: object } | { refused: string }>;

@@ -36,6 +36,10 @@ dependencies = [
     # while supported 1.x upgrades remain allowed and the real async-semantics
     # alarm keeps running.
     "pytest-asyncio>=1.0,<2",
+    # Test-speed tiers (tests/README.md): xdist runs the suite across workers
+    # (`-n 4 --dist loadfile`). Exact pin: a test instrument, upgraded
+    # deliberately, never by a rebuild.
+    "pytest-xdist==3.8.0",
     "fastapi>=0.136",
     "typer>=0.24",
     # Upper bound is load-bearing: litellm 1.106.x imports mcp.types.CacheableResult at

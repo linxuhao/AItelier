@@ -703,8 +703,9 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
      *  current binding (the host's read-only check; a host it cannot reach is `unavailable`,
      *  transient like inbound's) - otherwise channel_sender_not_bound and `open` is never
      *  called, so not one byte of a stranger's is fetched; (2) idempotent by (channel,
-     *  messageRef, index): a stored one answers its ref without calling `open`; (3) only then
-     *  `open()` gives the bytes, held to the library's limits and type table. Answers {ref,
+     *  messageRef, index): a stored one answers its ref (a refused one its refusal) without
+     *  calling `open`; (3) only then `open({signal})` gives the bytes, held to the library's
+     *  limits, deadlines and type table. Answers {ref,
      *  kind, mime, size, durationMs?} or {refused}. A group message has no media in 24.2
      *  (refused unsupported), nor does a host without a media library. */
     async storeMedia(meta = {}, open) {
@@ -732,7 +733,9 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
 
   // ---- media (step 24.2) ----
   // The message with its attachments checked and its placeholder lines written, or undefined
-  // when an attachment is outside the closed set (or names a ref the library does not hold).
+  // when an attachment is outside the closed set (or names a ref the library does not hold,
+  // or - a group message - a ref that is not that group's own: an owner's file never becomes
+  // a group message's attachment, design-steward 7.8.12 "受众标签").
   const withAttachments = async message => {
     if (message.attachments === undefined) return message;
     const list = message.attachments;
@@ -751,6 +754,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       let row;
       try { row = await media?.resolve?.(item.ref); } catch { row = undefined; }
       if (!row) return invalidAttachments(message);
+      if (message.conversationRef !== undefined && row.audience !== `group:${message.channel}:${message.conversationRef}`)
+        return invalidAttachments(message);
       kept.push({ kind: row.kind ?? item.kind, ref: item.ref, ...(text(row.mime) ? { mime: row.mime } : {}),
         ...(Number.isInteger(row.size) ? { size: row.size } : {}), ...(Number.isInteger(row.durationMs) ? { durationMs: row.durationMs } : {}) });
     }

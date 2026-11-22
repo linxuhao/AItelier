@@ -6,6 +6,7 @@ tightened rules, the media root the DSH host gives every driver process, and the
 media-types table the host's JS and this Python both read."""
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -18,7 +19,7 @@ from starlette.routing import Route
 from api import steward_gateway as gw
 from core import media_types, state_channels, state_groups
 from core.state_commands import READ_REQUESTS, STEWARD_WRITE_ACTIONS, WRITER_ONLY_READS, execute
-from core.state_graph import StateGraphError
+from core.state_graph import StateGraphError, canonical
 from tests.unit.test_steward_connections import FakeUpstream, add, discover, allow, rpc, body_of, server, world  # noqa: F401
 from tests.unit.test_steward_group_confirm import ROOM, MEMBER, OWNER_WX, gask, group_turn, out_rows
 from tests.unit.test_steward_oauth_confirm import bind_slack, relay
@@ -67,8 +68,14 @@ def test_a_message_without_attachments_is_answered_and_stored_exactly_as_before(
     source = execute(world.steward, "message_sources", {"message_ids": [answer["message_id"]]})["sources"][answer["message_id"]]
     assert "attachments" not in source
     assert set(source) == {"direction", "channel", "sender_ref", "channel_message_ref", "at", "error", "channel_at"}
-    # The request hash of a request without attachments is the one before step 24.2: a replay
-    # under the same key with the same body is a duplicate, not an idempotency conflict.
+    # The request hash of a request without attachments is the one before step 24.2 (pinned
+    # independently of the code that computes it): a request relayed before the deploy and
+    # replayed after it is a duplicate, not an idempotency conflict.
+    with world.db.get_connection() as conn:
+        stored = [r[0] for r in conn.execute("SELECT payload_json FROM driver_inbox_requests WHERE operation=? AND request_key=?",
+                                             ("relay_owner_message", "relay-c3"))]
+    pre_24_2 = hashlib.sha256(canonical(["slack", "U0OWNER", "c3", "你好"]).encode("utf-8")).hexdigest()
+    assert stored == [pre_24_2]
     assert relay(world, "你好", "c3")["duplicate"] is True
 
 

@@ -338,11 +338,15 @@ export interface DirectorHost {
    *  send_media; undeclared (the built-in local host), neither tool is registered and
    *  storeMedia answers {refused: 'unsupported'}.
    *  - ingest: the library's one way in (no binding check: storeMedia makes that one first) -
-   *    idempotent by (channel, messageRef, index) without calling `open`, then open()'s bytes
-   *    counted against the limits, typed by media-types.json, an image's pixels and a voice's
-   *    length (ffprobe) checked; {ref, kind, mime, size, durationMs?, duplicate?} or {refused:
-   *    too_large | type | unsupported | gone | unavailable}. `audience` is 'owner' or
-   *    'group:<channel>:<group_ref>'; `source` 'in' (a channel's) or 'generated'.
+   *    idempotent by (channel, messageRef, index) without calling `open` (a stored one answers
+   *    its ref, a refused one the same refusal), then open({signal})'s bytes under deadlines
+   *    (first byte, whole file: a stalled source is aborted, `unavailable`), counted against the
+   *    limits, typed by media-types.json, an image's pixels and a voice's streams and length
+   *    (ffprobe; a video stream is `type`) checked; {ref, kind, mime, size, durationMs?,
+   *    duplicate?} or {refused: too_large | type | unsupported | gone | unavailable,
+   *    duplicate?}. `audience` is 'owner', 'group:<channel>:<group_ref>' or
+   *    'project:<project_id>'; `source` 'in' (a channel's) or 'generated' (held to the
+   *    outbound limit). `signal`: the caller giving up stops waiting (`unavailable`).
    *  - resolve: a ref's row with its absolute `path`, `kind` and `ext` (undefined: unknown or gone).
    *  - read: a ref's bytes (media_call fills them in as base64, host-side).
    *  - fetch: a file a connection's tool result named, through the backend gateway's
@@ -353,8 +357,9 @@ export interface DirectorHost {
    *  - setProtected (optional): refs the library must not clean (a relay not committed yet). */
   media?: {
     ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
-      open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>): Promise<{ ref: string; kind: 'image' | 'voice' | 'file';
-      mime: string; size: number; durationMs?: number; duplicate?: boolean } | { refused: string }>;
+      open: (options: { signal: AbortSignal }) => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>,
+      options?: { signal?: AbortSignal }): Promise<{ ref: string; kind: 'image' | 'voice' | 'file';
+      mime: string; size: number; durationMs?: number; duplicate?: boolean } | { refused: string; duplicate?: boolean }>;
     resolve(ref: string): Promise<undefined | { ref: string; path: string; kind: 'image' | 'voice' | 'file'; ext: string; mime: string;
       size: number; durationMs?: number; audience: string; sha256: string; file: string }>;
     read(ref: string): Promise<undefined | { row: object; bytes: Uint8Array }>;

@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aitelierHost } from './runtime.mjs';
-import { channelOps, groupOps, mediaOps, mediaRootFrom, withAttachmentLines } from './steward-host.mjs';
+import { channelOps, groupOps, mediaOps, mediaRootFrom, stateWake, withAttachmentLines } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 
@@ -98,4 +98,21 @@ test('a wake shows each owner message\'s attachments one line each, from the sou
   assert.equal(await withAttachmentLines(async () => { throw new Error('down'); }, result), result, 'a failed read leaves the wake as it was');
   const none = { events: [{ event_type: 'x' }] };
   assert.equal(await withAttachmentLines(async () => { throw new Error('not called'); }, none), none);
+});
+
+test('a wake\'s id is the digest of the batch as State answered it: with or without the attachment lines, a replay is the same wake', async () => {
+  const result = { events: [{ event_type: 'user_message_received' }], driver_inbox: [{ message_id: 'u1', sender_kind: 'user', body: '[语音 0:23]' }] };
+  const inbox = { items: [] };
+  const request = async () => ({ result: { sources: { u1: { attachments: [{ kind: 'voice', ref: 'm_3f9a000000000000', durationMs: 23000 }] } } } });
+  const read = stateWake(result, inbox, await withAttachmentLines(request, result));
+  const failed = stateWake(result, inbox, await withAttachmentLines(async () => { throw new Error('down'); }, result));
+  assert.ok(read.text.includes('m_3f9a000000000000') && !failed.text.includes('m_3f9a000000000000'));
+  assert.equal(read.id, failed.id, 'the read succeeding once and failing once is still one wake');
+  assert.match(read.id, /^state:[0-9a-f]{40}$/);
+  // Without a media library the wake is the one it always was (text and id).
+  const plain = stateWake(result, inbox);
+  assert.equal(plain.text, 'AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox }));
+  assert.equal(plain.id, read.id);
+  // A batch that grew is a new wake.
+  assert.notEqual(stateWake({ ...result, events: [...result.events, { event_type: 'x' }] }, inbox).id, plain.id);
 });

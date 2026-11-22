@@ -18,7 +18,7 @@ import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './mod
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
-  replyToLetter, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
+  replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
   mediaRootFrom } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
@@ -978,11 +978,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         await sync();
         // The id is the payload's digest (plugin step 7): a replay from the same cursor that
         // returns the same batch is recognised and not delivered twice; a batch that grew
-        // has a new id and is delivered. Stable across restarts: it depends on nothing local.
+        // has a new id and is delivered. Stable across restarts: it depends on nothing local
+        // (stateWake: not on the attachment lines either).
         // Step 24.2 (7.8.12): each owner message's attachments as one line each, from its source row.
         const shown = steward && library ? await withAttachmentLines(request, result) : result;
-        const text = 'AItelier runtime event:\n' + JSON.stringify({ ...shown, project_inbox: inbox });
-        await notify(text, { id: 'state:' + createHash('sha256').update(text).digest('hex').slice(0, 40) });
+        const { text, id } = stateWake(result, inbox, shown);
+        await notify(text, { id });
       };
       const inbox = await projectInbox();
       // Native goal rounds start/continue the director; bootstrap is not a human

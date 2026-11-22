@@ -40,11 +40,22 @@ function counted(head, total, chunk = MiB) {
   })();
   return state;
 }
-const fakeProbe = (dir, seconds) => {
-  const path = join(dir, `ffprobe-${String(seconds).replace(/[^0-9a-z.]/gi, '_')}`);
-  writeFileSync(path, `#!/bin/sh\necho ${seconds}\n`); chmodSync(path, 0o755);
+/** An ffprobe that answers like `-show_entries format=duration:stream=codec_type:
+ *  stream_disposition=attached_pic -of json` would: one audio stream, plus `streams`. */
+const fakeProbe = (dir, seconds, streams = []) => {
+  const path = join(dir, `ffprobe-${String(seconds).replace(/[^0-9a-z.]/gi, '_')}-${streams.length}-${Math.random().toString(16).slice(2, 8)}`);
+  const answer = JSON.stringify({ streams: [{ codec_type: 'audio', disposition: { attached_pic: 0 } }, ...streams], format: { duration: String(seconds) } });
+  writeFileSync(path, `#!/bin/sh\ncat <<'EOF'\n${answer}\nEOF\n`); chmodSync(path, 0o755);
   return path;
 };
+const VIDEO = { codec_type: 'video', disposition: { attached_pic: 0 } };
+const COVER = { codec_type: 'video', disposition: { attached_pic: 1 } };
+/** The first bytes of an ordinary MP4 video (ftyp isom, as ffmpeg/x264 writes it), an MP4 one
+ *  (mp42), a Matroska/WebM one, and an M4A. */
+const mp4Video = () => Buffer.concat([Buffer.from('000000206674797069736f6d0000020069736f6d69736f32617663316d703431', 'hex'), Buffer.alloc(100)]);
+const mp42 = () => Buffer.concat([Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex'), Buffer.alloc(100)]);
+const mkv = () => Buffer.concat([Buffer.from('1a45dfa3a34286810142f7810142f2810442f381084282886d6174726f736b61', 'hex'), Buffer.alloc(100)]);
+const m4a = () => Buffer.concat([Buffer.from('0000001c667479704d344120000002004d34412069736f6d69736f32', 'hex'), Buffer.alloc(100)]);
 const owner = { channel: 'wechat', audience: 'owner', source: 'in' };
 
 // --- the library ------------------------------------------------------------------------
@@ -141,6 +152,110 @@ test('library limits: a voice\'s length is measured with ffprobe (configurable);
   assert.deepEqual(await long.ingest({ ...owner, messageRef: 'v', index: 0 }, async () => wav()), { refused: 'too_large' });
   const broken = createMediaLibrary({ root: root(), ffprobe: fakeProbe(dir, 'N/A') });
   assert.deepEqual(await broken.ingest({ ...owner, messageRef: 'v', index: 0 }, async () => wav()), { refused: 'unsupported' });
+});
+
+test('library limits: a container holding a video stream is type, whatever its first bytes (isom, mp42, webm/matroska, ogg); cover art is not video', async () => {
+  const dir = root();
+  // The first bytes alone take these for audio (the table is shared with audio-only files) ...
+  for (const bytes of [mp4Video(), mp42(), mkv(), m4a()]) assert.equal(sniff(bytes)?.kind, 'voice');
+  // ... so ffprobe's streams decide: a video stream is refused `type`, inbound or generated.
+  const video = createMediaLibrary({ root: root(), ffprobe: fakeProbe(dir, '12.0', [VIDEO]) });
+  for (const [i, bytes] of [mp4Video(), mp42(), mkv(), Buffer.concat([Buffer.from('4f67675300020000', 'hex'), Buffer.alloc(100)])].entries())
+    assert.deepEqual(await video.ingest({ ...owner, messageRef: 'v', index: i }, async () => bytes), { refused: 'type' }, String(i));
+  assert.deepEqual(await video.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => mp4Video()), { refused: 'type' });
+  assert.equal(video.rows.length, 0, 'no video was stored');
+  assert.deepEqual(readdirSync(video.home).filter(n => n.startsWith('.incoming')), [], 'no partial file is left');
+  // Audio in the same containers, or audio with an attached cover picture, is a voice.
+  const audio = createMediaLibrary({ root: root(), ffprobe: fakeProbe(dir, '12.0') });
+  assert.equal((await audio.ingest({ ...owner, messageRef: 'a', index: 0 }, async () => m4a())).kind, 'voice');
+  assert.equal((await audio.ingest({ ...owner, messageRef: 'a', index: 1 }, async () => mkv())).kind, 'voice');
+  const cover = createMediaLibrary({ root: root(), ffprobe: fakeProbe(dir, '12.0', [COVER]) });
+  assert.equal((await cover.ingest({ ...owner, messageRef: 'c', index: 0 }, async () => mp4Video())).kind, 'voice');
+});
+
+test('library: a refusal is the attachment\'s answer for good - a replay (an hour later, after a restart) answers it again without open; unavailable is not kept', async () => {
+  let clock = Date.parse('2026-11-22T10:00:00Z');
+  const r = root();
+  const limits = { ...MEDIA_LIMITS, inbound_per_channel_hour: 1 };
+  const lib = createMediaLibrary({ root: r, limits, now: () => clock });
+  let opened = 0;
+  const open = async () => { opened += 1; return png(10, 10 + opened); };
+  assert.ok((await lib.ingest({ ...owner, messageRef: 'a', index: 0 }, open)).ref);
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'b', index: 0 }, open), { refused: 'too_large' }, 'over the hourly limit');
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'b', index: 1 }, async () => zip()), { refused: 'too_large' }, 'over the hourly limit');
+  clock += 3601 * 1000;
+  const before = opened;
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'b', index: 0 }, open), { refused: 'too_large', duplicate: true },
+    'the hour has passed, and the replay still gets the first answer');
+  assert.equal(opened, before, 'open() was not called');
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 't', index: 0 }, async () => zip()), { refused: 'type' });
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'u', index: 0 }, async () => { throw new Error('ECONNRESET'); }), { refused: 'unavailable' });
+  // A restart reads the refusals back with the rows; a transient failure was never kept.
+  const again = createMediaLibrary({ root: r, limits, now: () => clock });
+  assert.equal(again.rows.length, 1, 'refusals are not rows');
+  assert.deepEqual(await again.ingest({ ...owner, messageRef: 't', index: 0 }, async () => { throw new Error('not called'); }), { refused: 'type', duplicate: true });
+  assert.deepEqual(await again.ingest({ ...owner, messageRef: 'b', index: 0 }, async () => { throw new Error('not called'); }), { refused: 'too_large', duplicate: true });
+  assert.ok((await again.ingest({ ...owner, messageRef: 'u', index: 0 }, open)).ref, 'unavailable is asked again');
+  // Kept as long as the files are (retention), then gone with the index's other old lines.
+  clock += (MEDIA_LIMITS.retention_days + 1) * 24 * 3600 * 1000;
+  again.cleanup();
+  assert.ok(!readFileSync(again.indexFile, 'utf8').includes('"refused"'));
+});
+
+test('library: a source that stalls is cut by its deadline (unavailable, transient), and the ingests behind it still complete', async () => {
+  const lib = createMediaLibrary({ root: root(), deadlines: { firstByteMs: 200, totalMs: 400 } });
+  let signalled;
+  const stalled = async ({ signal }) => { signalled = signal; return (async function* () { yield png(); await new Promise(() => {}); })(); };
+  const silent = async () => (async function* () { await new Promise(() => {}); })();
+  const hanging = () => new Promise(() => {});
+  const started = Date.now();
+  const a = lib.ingest({ ...owner, messageRef: 'a', index: 0 }, stalled);
+  const b = lib.ingest({ channel: 'slack', audience: 'owner', source: 'in', messageRef: 'b', index: 0 }, async () => png(7, 7));
+  const c = lib.ingest({ ...owner, messageRef: 'c', index: 0 }, silent);
+  const d = lib.ingest({ ...owner, messageRef: 'd', index: 0 }, hanging);
+  const e = lib.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => png(9, 9));
+  assert.deepEqual(await a, { refused: 'unavailable' }, 'the stalled body: the total deadline');
+  assert.equal(signalled.aborted, true, 'open() was told to stop');
+  assert.ok((await b).ref, 'the next ingest completes');
+  assert.deepEqual(await c, { refused: 'unavailable' }, 'no first byte');
+  assert.deepEqual(await d, { refused: 'unavailable' }, 'open() itself never answers');
+  assert.ok((await e).ref);
+  assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+  // A deadline is transient: the replay fetches again.
+  assert.ok((await lib.ingest({ ...owner, messageRef: 'a', index: 0 }, async () => png(3, 3))).ref);
+  // A caller that gives up stops waiting for the lane, and its turn fetches nothing.
+  const slow = createMediaLibrary({ root: root(), deadlines: { firstByteMs: 300, totalMs: 300 } });
+  const first = slow.ingest({ ...owner, messageRef: 'x', index: 0 }, silent);
+  const controller = new AbortController();
+  let fetched = false;
+  const queued = slow.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => { fetched = true; return png(); }, { signal: controller.signal });
+  controller.abort();
+  assert.deepEqual(await queued, { refused: 'unavailable' });
+  await first;
+  await slow.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => png(4, 4));
+  assert.equal(fetched, false);
+});
+
+test('library: a generated file (send_media) is held to the outbound limit, not the inbound per-kind ones', async () => {
+  const dir = root();
+  const lib = createMediaLibrary({ root: root(), ffprobe: fakeProbe(dir, '130.0') });
+  const generated = { channel: 'generated', audience: 'owner', source: 'generated' };
+  assert.ok((await lib.ingest(generated, async () => png(100, 100, 22 * MiB))).ref, 'a 22 MiB generated image');
+  assert.equal((await lib.ingest(generated, async () => wav())).durationMs, 130000, 'a generated voice over 2 minutes');
+  assert.deepEqual(await lib.ingest(generated, async () => pdf(26 * MiB)), { refused: 'too_large' }, 'over 25 MiB');
+  // The same bytes inbound are still held to the inbound limits (also when deduplicated).
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'i', index: 0 }, async () => png(100, 100, 22 * MiB)), { refused: 'too_large' });
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'v', index: 0 }, async () => wav()), { refused: 'too_large' });
+});
+
+test('library: the audiences are owner, a group and (a director\'s subdirectory, 24.2b) a project; anything else is invalid', async () => {
+  const lib = createMediaLibrary({ root: root(), userId: 'd-drv1' });
+  const stored = await lib.ingest({ channel: 'director', audience: 'project:p-1', source: 'in' }, async () => png());
+  assert.match(stored.ref, REF_PATTERN);
+  assert.equal(lib.lookup(stored.ref).audience, 'project:p-1');
+  assert.equal(covers({ kind: 'group', channel: 'wechat', group_ref: 'r1' }, lib.lookup(stored.ref)), false, 'a group turn never covers it');
+  for (const audience of ['project:', 'group:', 'everyone', '', undefined])
+    assert.deepEqual(await lib.ingest({ channel: 'director', audience, source: 'in' }, async () => png()), { refused: 'invalid_media' }, String(audience));
 });
 
 test('library: open() refusals pass on (gone, too_large); any other failure is unavailable (transient)', async () => {
@@ -297,6 +412,21 @@ test('inbound: anything outside the closed set refuses the message and the host 
     const answer = await w.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'x', text: '', attachments });
     assert.deepEqual(answer, { accepted: false, reason: 'invalid_inbound' }, JSON.stringify(attachments));
   }
+  assert.equal(w.calls.relay.length, 0);
+});
+
+test('inbound: a group message takes only its own group\'s refs - an owner\'s file never becomes a group attachment', async () => {
+  const w = channelWorld();
+  const { ref: ownerRef } = await w.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'm1', index: 0, kind: 'image' }, async () => png());
+  const { ref: otherGroup } = await w.library.ingest({ channel: 'wechat', audience: 'group:wechat:room-2', source: 'in' }, async () => png(6, 6));
+  const { ref: ownGroup } = await w.library.ingest({ channel: 'wechat', audience: 'group:wechat:room-1', source: 'in' }, async () => png(8, 8));
+  const group = attachments => w.service.inbound({ channel: 'wechat', senderRef: 'wxid_member', messageRef: 'g1', text: '',
+    conversationRef: 'room-1', attachments });
+  assert.deepEqual(await group([{ kind: 'image', ref: ownerRef }]), { accepted: false, reason: 'invalid_inbound' });
+  assert.deepEqual(await group([{ kind: 'image', ref: otherGroup }]), { accepted: false, reason: 'invalid_inbound' });
+  // Its own group's ref, and a refused item, pass the check (this world has no groups service).
+  assert.deepEqual(await group([{ kind: 'image', ref: ownGroup }]), { accepted: false, reason: 'no_groups' });
+  assert.deepEqual(await group([{ kind: 'image', refused: 'unsupported' }]), { accepted: false, reason: 'no_groups' });
   assert.equal(w.calls.relay.length, 0);
 });
 

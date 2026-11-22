@@ -874,7 +874,7 @@ export function mediaOps({ request, library, gatewayFetch }) {
         const detail = await response.json().catch(() => null);
         return { refused: typeof detail?.detail === 'string' ? detail.detail : `fetch_${response.status}` };
       }
-      return library.ingest({ channel: 'generated', audience, source: 'generated' }, () => response.body);
+      return library.ingest({ channel: 'generated', audience, source: 'generated' }, () => response.body, { signal });
     },
     postGroup: ({ turn, kind, caption }, signal) => request('/api/state/commands/post_group_media', {
       request_key: `group-media:${turn}:${randomUUID()}`, turn, kind, ...(caption ? { caption } : {}) }, signal)
@@ -905,6 +905,16 @@ export async function withAttachmentLines(request, result, signal) {
     const files = sources?.[m?.message_id]?.attachments;
     return Array.isArray(files) && files.length ? { ...m, attachments: files.map(attachmentLine) } : m;
   }) };
+}
+
+/** One State batch's wake (plugin step 7; step 24.2): its text - `shown`, the batch with its
+ *  attachment lines, when given - and its id, the digest of the batch AS STATE ANSWERED IT.
+ *  The id never depends on the lines (a separate read that may fail, and only a host with a
+ *  media library adds them), so a replay of the same batch has the same id either way. */
+export function stateWake(result, inbox, shown = result) {
+  const payload = 'AItelier runtime event:\n' + JSON.stringify({ ...result, project_inbox: inbox });
+  const id = 'state:' + createHash('sha256').update(payload).digest('hex').slice(0, 40);
+  return { id, text: shown === result ? payload : 'AItelier runtime event:\n' + JSON.stringify({ ...shown, project_inbox: inbox }) };
 }
 
 /** Step 24.1a (design-steward 7.8.8): the line the host writes first into a letter the

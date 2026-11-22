@@ -214,7 +214,9 @@ def _grandchild_state(pid):
 
     Read from /proc/<pid>/stat rather than `os.kill(pid, 0)` because a ZOMBIE
     answers signal 0: the contract here is that the detached grandchild was
-    KILLED AND COLLECTED, not merely that it stopped running. The comm field is
+    KILLED -- a state of X or Z, or no /proc entry at all ('gone'), means the
+    kernel no longer runs it; collecting the corpse is PID 1's job, not this
+    file's, so a witness must not wait for a reap. The comm field is
     wrapped in parentheses and may itself contain them, so the state is the
     first field after the LAST ')'. Anything unreadable is reported by name
     instead of raising, so a failed contract is a legible line rather than an

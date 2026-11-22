@@ -988,6 +988,17 @@ class DriverInbox:
         Every row carries the message's `created_at` (UTC, when the backend wrote
         it): the time a reader compares its own clock with.
 
+        Every row also carries `sender_kind`, the same discriminator the
+        conversation read (`list_user_conversation`) projects: 'user' for a
+        message the project's user wrote - the one writer of that half,
+        `write_user_half` (the dashboard, a chat channel's relay, a channel
+        answer to a pushed question), whose rows are `channel='user'` with no
+        sender driver - and 'driver' for everything else in an inbox: a driver's
+        or director's letter, a steward's or host's message, a system notice. A
+        wake built from these rows (wait_for_state_change's `driver_inbox`) is
+        how a host tells the owner's own words from a letter, so the key is on
+        every row, never only on some.
+
         The page is the OLDEST `limit` deliveries above `after` (the ascending
         forward keyset a waiting driver polls with) unless `newest` is true, which
         answers the NEWEST `limit` deliveries instead, newest first. `newest` is
@@ -1042,7 +1053,7 @@ class DriverInbox:
             # COUNT(*) over the same WHERE clause, never a page fetched into Python:
             # the answer must not cost the caller the whole backlog.
             matched_total=conn.execute("SELECT COUNT(*) FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE "+where, bound).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.created_at,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.created_at,CASE WHEN m.channel='user' AND m.sender_driver_id IS NULL THEN 'user' ELSE 'driver' END AS sender_kind,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)

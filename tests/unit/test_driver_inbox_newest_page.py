@@ -53,7 +53,7 @@ ROWS = 7
 BASE_ROW_KEYS = {
     "delivery_id", "message_id", "target_driver_id", "seq", "status", "version",
     "thread_id", "sender_driver_id", "project_id", "kind", "delivery_mode",
-    "subject", "body", "refs_json", "created_at"}
+    "subject", "body", "refs_json", "created_at", "sender_kind"}
 
 BASE_RESPONSE_KEYS = {"driver_id", "messages", "next_after", "truncated"}
 

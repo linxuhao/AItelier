@@ -239,6 +239,8 @@ def test_python_reads_the_same_media_types_table_as_the_host():
     assert "new URL('../media-types.json', import.meta.url)" in source
     assert media_types.limits()["outbound_bytes"] == 25 * 1024 * 1024
     assert media_types.limits()["image_pixels"] == 40_000_000
+    # Review F4: the gateway's body bound is the table's, the one media_call counts against.
+    assert gw.MAX_BODY == media_types.limits()["call_body_bytes"] == 40 * 1024 * 1024
     # No office document, archive or executable type in v1.
     assert not {"application/zip", "application/msword", "application/x-msdownload"} & {t["mime"] for t in table["types"]}
 

@@ -97,7 +97,9 @@ PATH = "/api/steward/mcp"
 SUPPORTED_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 SERVER_INFO = {"name": "aitelier-steward-gateway", "version": "1"}
 LIST_CHANGED = {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
-MAX_BODY = 40 * 1024 * 1024
+# The one bound, shared with the steward host's media_call (media-types.json limits.call_body_bytes,
+# 40 MiB): it refuses a call whose base64 would not fit before sending it.
+MAX_BODY = media_types.limits()["call_body_bytes"]
 STREAMS_PER_DRIVER = 4
 SERVED_KEPT = 64  # sessions whose last listed hash is remembered (a killed client sends no DELETE)
 KEEPALIVE_SECONDS = 15.0

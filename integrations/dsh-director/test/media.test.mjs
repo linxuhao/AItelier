@@ -528,6 +528,28 @@ test('media_call refusals: not this turn\'s tool, an outward tool, an unknown re
   assert.deepEqual(await t.run('media_call', { name: OCR, media: { image_base64: theirs.ref } }), { text: 'OCR: 你好' }, 'its own group\'s ref');
 });
 
+test('media_call: files whose base64 would not fit one gateway call are refused before any call; just under the bound goes through', async () => {
+  // Review F4: two legal files can make a body over the gateway's 40 MiB bound (a bare 413 there).
+  // The plugin counts arguments + base64 + envelope against the same limit (media-types.json).
+  assert.equal(MEDIA_LIMITS.call_body_bytes, 40 * MiB);
+  const t = toolWorld();
+  const pair = async (each, tag) => {
+    const refs = [];
+    for (const index of [0, 1]) refs.push((await t.library.ingest({ ...owner, messageRef: tag, index }, async () => pdf(each))).ref);
+    return { a: refs[0], b: refs[1] };
+  };
+  const big = await pair(Math.ceil(41 * MiB * 3 / 8), 'big');      // 2 x 15.4 MiB: 41 MiB once encoded
+  const refused = await t.run('media_call', { name: OCR, media: big });
+  assert.equal(refused.refused, 'media_too_large_for_one_call');
+  assert.match(refused.reason, /fewer refs per call/);
+  assert.equal(t.executed.length, 0, 'no call was made');
+  const fits = await pair(Math.floor(39 * MiB * 3 / 8), 'fits');   // 2 x 14.6 MiB: 39 MiB once encoded
+  assert.deepEqual(await t.run('media_call', { name: OCR, media: fits }), { text: 'OCR: 你好' });
+  assert.equal(t.executed.length, 1);
+  const sent = Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: OCR, arguments: t.executed[0].arguments } }));
+  assert.ok(sent > 38 * MiB && sent < MEDIA_LIMITS.call_body_bytes, `${sent}`);
+});
+
 test('send_media(url): only a url a connection tool returned in this turn, fetched through that connection, sent to this turn\'s requester', async () => {
   const t = toolWorld();
   await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });

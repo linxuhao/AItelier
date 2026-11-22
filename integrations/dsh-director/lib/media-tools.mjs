@@ -23,10 +23,13 @@
  *    channel's kinds, and for a group the backend's budget and caption check as a dry run
  *    (postGroup checkOnly); postGroup without checkOnly stays the authoritative record at send.
  */
-import { covers, audienceLabel, REF_PATTERN, MEDIA_TYPES } from './media.mjs';
+import { covers, audienceLabel, REF_PATTERN, MEDIA_TYPES, MEDIA_LIMITS } from './media.mjs';
 
 const URL_IN_TEXT = /https?:\/\/[^\s"'<>\\`)\]}]+/g;
 const CAPTION_CHARS = 1000;
+// What a nested tools/call carries besides its arguments (the JSON-RPC envelope, the gateway's
+// prefixed tool name, _meta): a conservative allowance on top of the arguments' own JSON.
+const CALL_ENVELOPE_BYTES = 64 * 1024;
 const KIND_BY_EXT = new Map(MEDIA_TYPES.map(type => [type.ext, type.kind]));
 
 /** The kind a url's file name says (its extension in the shared media-types table), or
@@ -92,7 +95,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       const map = args.media;
       if (!map || typeof map !== 'object' || Array.isArray(map) || !Object.keys(map).length || Object.keys(map).length > 5)
         return { refused: 'invalid_media', reason: 'media maps 1 to 5 argument names to refs' };
-      const turn = audience(), filled = { ...given };
+      const turn = audience(), filled = { ...given }, files = [];
       for (const [param, ref] of Object.entries(map)) {
         if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(param) || typeof ref !== 'string' || !REF_PATTERN.test(ref))
           return { refused: 'invalid_media', reason: `media.${param}: an argument name and an m_ ref` };
@@ -101,8 +104,20 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         if (!covers(turn, row)) return { refused: 'not_visible_in_this_turn', reason: `${ref} is not usable in this conversation` };
         const file = await media.read(ref);
         if (!file) return { refused: 'unknown_ref', reason: `${ref} is not in the media library (kept 30 days)` };
-        filled[param] = Buffer.from(file.bytes).toString('base64');
+        files.push([param, file.bytes]);
+        filled[param] = '';
       }
+      // The whole call must fit the gateway's body bound (one shared limit): the arguments' JSON
+      // with each file's base64 (4 characters per 3 bytes) and the envelope, counted before
+      // anything is encoded or sent - over it the gateway would answer a bare 413.
+      const bodyBytes = Buffer.byteLength(JSON.stringify(filled)) + CALL_ENVELOPE_BYTES
+        + files.reduce((sum, [, bytes]) => sum + 4 * Math.ceil(bytes.length / 3), 0);
+      if (bodyBytes > MEDIA_LIMITS.call_body_bytes) {
+        const mib = n => (n / 1048576).toFixed(1);
+        return { refused: 'media_too_large_for_one_call', reason: `these files make a call of about ${mib(bodyBytes)} MiB once encoded, `
+          + `over the ${mib(MEDIA_LIMITS.call_body_bytes)} MiB one call can carry: send fewer refs per call` };
+      }
+      for (const [param, bytes] of files) filled[param] = Buffer.from(bytes).toString('base64');
       const result = await ctx.tools.execute({ name: args.name, arguments: filled, agent: exec.agent,
         callId: exec.callId + ':media_call', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
       outcomes.set(exec.token, result);

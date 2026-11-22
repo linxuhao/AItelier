@@ -19,7 +19,7 @@ Two concerns ride in it, and each file's hunks serve one of them:
 Every hunk applies to a blob pin.json pins, and upstream/ is the pristine snapshot.
 
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..f12626b 100644
+index ec6c930..650b659 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -9,14 +9,21 @@ use std::{
@@ -678,6 +678,42 @@ index ec6c930..f12626b 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
+@@ -558,7 +1107,7 @@ mod tests {
+         );
+         let error = result.unwrap_err();
+         assert!(error.is::<SessionEnded>());
+-        assert_eq!(failure_message("read a sync page", &error), SESSION_ENDED);
++        assert_eq!(failure_message("read a sync page", false, &error), SESSION_ENDED);
+         assert_eq!(steps, ["attempt", "reconnect", "attempt", "renew"]);
+     }
+ 
+@@ -611,7 +1160,7 @@ mod tests {
+         let error = result.unwrap_err();
+         assert!(!error.is::<SessionEnded>());
+         assert_eq!(
+-            failure_message("read a sync page", &error),
++            failure_message("read a sync page", false, &error),
+             "Neo could not read a sync page: Sync service returned -1"
+         );
+         assert_eq!(steps, ["attempt"]);
+@@ -619,7 +1168,7 @@ mod tests {
+         let stopped = anyhow::Error::new(AccountInterrupted::Stopped).context("Account is stopped");
+         let (result, steps) = scripted_recovery(vec![Err(stopped)], Ok(()));
+         assert_eq!(
+-            failure_message("read a sync page", &result.unwrap_err()),
++            failure_message("read a sync page", false, &result.unwrap_err()),
+             "Neo could not read a sync page: Account stopped"
+         );
+         assert_eq!(steps, ["attempt"]);
+@@ -632,7 +1181,7 @@ mod tests {
+             Ok(()),
+         );
+         assert_eq!(
+-            failure_message("read a sync page", &result.unwrap_err()),
++            failure_message("read a sync page", false, &result.unwrap_err()),
+             "Neo could not read a sync page"
+         );
+         assert_eq!(steps, ["attempt", "reconnect", "attempt"]);
 @@ -742,6 +1291,162 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }

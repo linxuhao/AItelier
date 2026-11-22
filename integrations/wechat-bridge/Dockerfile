@@ -47,7 +47,11 @@ RUN node --input-type=module -e " \
       console.log('neo-fork: ' + pin.files.length + ' pinned blobs match ' + pin.upstream.commit);" \
     && git apply --check /fork-input/0001-incoming-message-types.patch \
     && git apply /fork-input/0001-incoming-message-types.patch
-RUN cargo build --release --locked --manifest-path native/Cargo.toml --target-dir native/target
+# The Rust test target is built and run here too: the patch changes this crate's own
+# signatures, and a build-only stage cannot notice a test that no longer compiles
+# (2026-11-22: four call sites sat at the old arity and nothing ever compiled them).
+RUN cargo build --release --locked --manifest-path native/Cargo.toml --target-dir native/target \
+    && cargo test --release --locked --lib --manifest-path native/Cargo.toml --target-dir native/target
 # dist/ is not committed upstream, so rebuild it from the patched TypeScript. The addon is
 # put where the package's own tests look for it, then those tests run against this stage's
 # addon: the fork is the thing the image later ships, and it is tested before it is copied.

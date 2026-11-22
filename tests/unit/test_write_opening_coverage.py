@@ -11,8 +11,8 @@ each action:
 1. requires a real ORGANIC test witness (a test file outside this module and the
    always-included privacy modules that names or calls the action) and refuses
    to pass without one;
-2. runs them under the `mutation_gate` plugin, which makes that one action open
-   the project every time it runs;
+2. runs this module's sentinel for the action (below) under the `mutation_gate`
+   plugin, which makes that one action open the project every time it runs;
 3. requires the run to go RED *and* the mutation to have FIRED > 0 times — a
    green with fired == 0 is meaningless and is treated as a failure.
 
@@ -21,6 +21,7 @@ proves that dropping the exemption would turn the gate red naming it.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -77,24 +78,30 @@ _SCOPE_MODULE_NAMES = ("test_state_project_privacy.py",
                        "test_state_read_visibility.py")
 
 
-def _organic_witnesses(action):
-    """Sorted test files under tests/ that really exercise `action`: the action
-    appears as a quoted string or a direct call `name(`. This module and the
-    three always-included privacy modules never count (they would make the
-    witness requirement always true)."""
-    pattern = re.compile(rf"[\"']{re.escape(action)}[\"']|"
-                         rf"(?<![A-Za-z0-9_]){re.escape(action)}\(")
+@functools.cache
+def _candidate_sources():
+    """(path, text) of every test file a witness may come from, read once per
+    process: the scan below runs ~260 times and the tree does not change under it.
+    This module and the three always-included privacy modules never count (they
+    would make the witness requirement always true)."""
     own = Path(__file__).resolve()
-    hits = []
+    sources = []
     for path in (REPO / "tests").rglob("test_*.py"):
         if path.resolve() == own or path.name in _SCOPE_MODULE_NAMES:
             continue
         try:
-            if pattern.search(path.read_text(encoding="utf-8")):
-                hits.append(path)
+            sources.append((path, path.read_text(encoding="utf-8")))
         except UnicodeDecodeError:
             continue
-    return sorted(hits)
+    return tuple(sources)
+
+
+def _organic_witnesses(action):
+    """Sorted test files under tests/ that really exercise `action`: the action
+    appears as a quoted string or a direct call `name(`."""
+    pattern = re.compile(rf"[\"']{re.escape(action)}[\"']|"
+                         rf"(?<![A-Za-z0-9_]){re.escape(action)}\(")
+    return sorted(path for path, text in _candidate_sources() if pattern.search(text))
 
 
 def _exercising_files(action):
@@ -176,9 +183,11 @@ def test_a_write_action_that_opens_the_project_goes_red(action):
         f"write action '{action}' has no organic test witness: the always-included "
         f"privacy modules do not count as a witness, so a mutation that makes "
         f"'{action}' open the project could go entirely unnoticed")
-    files = _exercising_files(action)
-    rc, report = _mutation_run(action, files)
-    names = [f.name for f in files]
+    # Only the sentinel runs: under -x the nested run stopped at the sentinel's red
+    # before any witness file executed, so passing them only cost collection time.
+    # A sentinel that does not fire is now a named failure below, not a fallback.
+    rc, report = _mutation_run(action, [])
+    names = [f"test_performing_a_write_action_leaves_the_project_private[{action}]"]
     assert report.get("fired", 0) > 0, (
         f"mutation for '{action}' (infected {report.get('target')}) FIRED 0 TIMES over "
         f"{names} — this green would prove nothing; widen or fix the scope. {report}")

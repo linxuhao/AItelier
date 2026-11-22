@@ -1386,8 +1386,9 @@ class CreateStewardConfirmation(Request):
 
 class GetStewardConfirmation(Request):
     code: str = Field(min_length=5, max_length=5)
-    # Step 23.1 (7.8.9 step 5): the turn run_confirmed runs in (the plugin's open turn).
-    turn: str = Field(min_length=1, max_length=64)
+    # Step 23.1 (7.8.9 step 5): the turn run_confirmed runs in (the plugin's open turn); it arms
+    # the record for that turn. Without it (director 602 defect 8): the read-only read of before.
+    turn: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class CancelStewardConfirmation(Request):

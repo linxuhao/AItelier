@@ -36,8 +36,9 @@ and no record reads as not the owner's (fail closed). `tools/call` is judged in 
 connection usable, tool allowed and unchanged, private connection only in an `owner`
 turn, no blocked argument (at any depth; on a public connection also no `url` / `*_url`
 key anywhere in the arguments unless the owner unblocked that path), daily cap, an
-outward tool consumes one confirmation its requester gave for exactly these arguments
-(core.state_steward_confirmations, 24.1b) - and, in the same write transaction, a
+outward tool consumes one confirmation its requester gave for exactly these arguments and
+that run_confirmed armed in its own turn (core.state_steward_confirmations, 24.1b; the
+gateway itself judges no turn, director 602 claim 7) - and, in the same write transaction, a
 pending ledger row is reserved (so two concurrent calls never both pass the last unit
 of a cap) and the confirmation consumed; then forwarded, and the row completed. An
 outward call is forwarded once and never retried. When an owner turn's call consumed a
@@ -802,7 +803,7 @@ class Gateway:
                  "argument_blocked": "an argument of this call is blocked by your owner",
                  "daily_cap_reached": "this tool reached its daily limit",
                  "confirmation_required": "an outward tool runs only after the requester confirms "
-                                          "(call request_confirmation first)",
+                                          "(call request_confirmation, then run_confirmed with the code)",
                  "invalid_arguments": "the arguments are not canonical JSON text"}
         if refusal:
             logger.info("steward gateway: tools/call %s refused %s", name, refusal)

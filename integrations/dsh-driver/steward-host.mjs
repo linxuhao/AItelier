@@ -1006,8 +1006,10 @@ export function confirmOps(request, { project, mirror = () => {}, groupSend }) {
     },
     cancel: (code, signal) => request('/api/state/commands/cancel_steward_confirmation', { code }, signal)
       .then(r => r?.result ?? r, stateRefusal),
-    // Step 23.1 (7.8.9 step 5): the turn run_confirmed runs in.
-    get: (code, signal, { turn } = {}) => request('/api/state/commands/get_steward_confirmation', { code, turn: String(turn ?? '') }, signal)
+    // Step 23.1 (7.8.9 step 5): the turn run_confirmed runs in (it arms the record for that turn);
+    // none known is sent as none - the backend's read-only read (director 602 defect 8).
+    get: (code, signal, { turn } = {}) => request('/api/state/commands/get_steward_confirmation',
+      { code, ...(turn === undefined || turn === null || turn === '' ? {} : { turn: String(turn) }) }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };
 }

@@ -409,6 +409,7 @@ def test_a_calendar_write_marked_outward_needs_the_askers_confirmation_in_owner_
         "name": "mcp__sw__calme__create_event", "arguments": event,
         "requester_message_id": dashboard(world, "周六聚餐加到我的日历", "o-1")["message_id"]}, allow_write=True)["code"]
     assert dashboard(world, f"确认 {code}", "o-2")["confirmation"]["outcome"] == "confirmed"
+    assert status_of(world, code) == "confirmed"  # run_confirmed's read in o1 arms it
     assert "result" in call("calme__create_event", event)
     assert status_of(world, code) == "done"
 
@@ -427,6 +428,7 @@ def test_a_calendar_write_marked_outward_needs_the_askers_confirmation_in_owner_
     asked = request(world, question, event, name="mcp__sw__calfam__create_event")
     assert "@管家 确认" in asked["text"] and "attendees" in asked["text"]
     assert gask(world, "c1", f"确认 {asked['code']}")["confirmation"]["outcome"] == "confirmed"
+    assert status_of(world, asked["code"]) == "confirmed"  # armed in the group's own turn gt1
     assert "result" in call("calfam__create_event", event)
     assert upstream.methods.count("tools/call") == before + 1
     assert call("calfam__create_event", event)["error"]["data"]["code"] == "confirmation_required", "one confirmation, one write"
@@ -482,12 +484,13 @@ def test_two_groups_a_code_confirmed_in_one_group_runs_only_in_that_groups_turn(
     assert upstream.methods.count("tools/call") == before + 1
 
 
-def test_an_owner_turns_direct_call_that_takes_a_groups_confirmation_is_told_whose_it_was(world, server, upstream,
-                                                                                        monkeypatch):
+def test_an_owner_turn_that_runs_a_groups_confirmation_is_told_whose_it_was_and_a_direct_call_takes_none(
+        world, server, upstream, monkeypatch):
     """Review PRIV-1 (director 581): an owner turn may run what a family group confirmed, but
-    never silently - a direct call with the same arguments (not run_confirmed) that consumes a
-    group's record gets, first in its result, the group and who confirmed it; on a tool error
-    and on an upstream JSON-RPC error too. The owner's own record adds nothing."""
+    never silently - run_confirmed's read in the owner's turn arms the group's record, and the
+    call that consumes it gets, first in its result, the group and who confirmed it; on a tool
+    error and on an upstream JSON-RPC error too. The owner's own record adds nothing. Director 602
+    claim 7: a direct call with the same arguments that no run_confirmed armed consumes nothing."""
     calendar_ready(world, monkeypatch)
     event = {"title": "周六聚餐", "start": "2026-11-28T18:00:00+08:00"}
     line = "[This action was asked for and confirmed in the family group 「家庭群」 by 成员甲; it ran in your owner's turn.]"
@@ -502,6 +505,10 @@ def test_an_owner_turns_direct_call_that_takes_a_groups_confirmation_is_told_who
         assert gask(world, f"c-{ref}", f"确认 {asked}")["confirmation"]["outcome"] == "confirmed"
         execute(world.steward, "set_steward_turn_audience", {"turn": f"o-{ref}", "audience": "owner"},
                 allow_write=True)
+        before = upstream.methods.count("tools/call")
+        assert call("calfam__create_event", event)["error"]["data"]["code"] == "confirmation_required"
+        assert upstream.methods.count("tools/call") == before, "a direct call that nothing armed sends nothing"
+        assert status_of(world, asked) == "confirmed"  # run_confirmed's read in the owner's turn arms it
         return asked
 
     asked = group_confirmed("1")
@@ -530,5 +537,84 @@ def test_an_owner_turns_direct_call_that_takes_a_groups_confirmation_is_told_who
         "name": "mcp__sw__calfam__create_event", "arguments": event,
         "requester_message_id": dashboard(world, "周六聚餐加到家庭日历", "o-9")["message_id"]}, allow_write=True)["code"]
     assert dashboard(world, f"确认 {code}", "o-10")["confirmation"]["outcome"] == "confirmed"
+    assert status_of(world, code) == "confirmed"
     answer = call("calfam__create_event", event)
-    assert "family group" not in json.dumps(answer, ensure_ascii=False)
+    assert "result" in answer and "family group" not in json.dumps(answer, ensure_ascii=False)
+
+
+def test_the_gateway_judges_a_consumption_by_the_calls_own_turn_never_the_one_audience_row(world, server, upstream,
+                                                                                          monkeypatch):
+    """Director 602 claim 7: the gateway's request carries no turn, so it never reads the one-row
+    turn audience record: run_confirmed's read names the call's own turn and arms the record for
+    it, and only an armed record is consumed. A record armed in group A's turn still runs when
+    the audience row was overwritten before the call (a refusal there would leave it live for
+    10 minutes); an owner audience never makes every record consumable (its scope is never
+    empty): a group's record nobody armed is not taken by an owner turn's direct call, nor is
+    another group's. An arming older than ARMED is not consumed."""
+    calendar_ready(world, monkeypatch)
+    code = world.owner.groups.issue_group_code("wechat", "老家群")["code"]
+    execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": "r2@chatroom",
+                                                "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
+            allow_write=True)
+    event = {"title": "周六聚餐", "start": "2026-11-28T18:00:00+08:00"}
+
+    def call():
+        return body_of(rpc(server, world, "tools/call", {"name": "calfam__create_event", "arguments": event}))[0]
+
+    def get(code, turn):
+        return execute(world.steward, "get_steward_confirmation", {"code": code, "turn": turn}, allow_write=True)
+
+    question = gask(world, "q1", "周六聚餐加到家庭日历")["message_id"]
+    group_turn(world, turn="ga")
+    asked = request(world, question, event, name="mcp__sw__calfam__create_event")["code"]
+    assert gask(world, "c1", f"确认 {asked}")["confirmation"]["outcome"] == "confirmed"
+    # An owner audience with the record not armed: nothing is consumed.
+    execute(world.steward, "set_steward_turn_audience", {"turn": "o1", "audience": "owner"}, allow_write=True)
+    before = upstream.methods.count("tools/call")
+    assert call()["error"]["data"]["code"] == "confirmation_required"
+    # So in group B's turn.
+    execute(world.steward, "set_steward_turn_audience", {"turn": "gb", "audience": "group", "group": {
+        "channel": "wechat", "group_ref": "r2@chatroom"}, "sender_refs": [MEMBER2]}, allow_write=True)
+    assert call()["error"]["data"]["code"] == "confirmation_required"
+    assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
+    # A's own turn arms it; the arming is the record's, so a later audience row changes nothing.
+    group_turn(world, turn="ga2")
+    assert get(asked, "ga2")["status"] == "confirmed"
+    armed = record(world, asked)
+    assert (armed["armed_turn"], armed["armed_owner"]) == ("ga2", 0)
+    execute(world.steward, "set_steward_turn_audience", {"turn": "gb2", "audience": "group", "group": {
+        "channel": "wechat", "group_ref": "r2@chatroom"}, "sender_refs": [MEMBER2]}, allow_write=True)
+    answer = call()
+    assert "result" in answer and "family group" not in json.dumps(answer, ensure_ascii=False)
+    assert upstream.methods.count("tools/call") == before + 1 and record(world, asked)["status"] == "done"
+    # An arming older than ARMED is not consumed.
+    question = gask(world, "q2", "再加一次")["message_id"]
+    group_turn(world, turn="ga3")
+    late = request(world, question, event, name="mcp__sw__calfam__create_event")["code"]
+    assert gask(world, "c2", f"确认 {late}")["confirmation"]["outcome"] == "confirmed"
+    assert get(late, "ga3")["status"] == "confirmed"
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_confirmations SET armed_at=? WHERE code=?",
+                     (sconf._iso(sconf._utcnow() - sconf.ARMED - timedelta(seconds=1)), late))
+        conn.commit()
+    assert call()["error"]["data"]["code"] == "confirmation_required"
+
+
+def test_a_read_without_a_turn_is_the_old_read_only_one_and_arms_nothing(world, server, upstream, monkeypatch):
+    """Director 602 defect 8: a caller of get_steward_confirmation that cannot name a turn gets the
+    read of before step 23.1 - name, arguments and status, no error - and nothing it returns can
+    be consumed: the read arms nothing."""
+    calendar_ready(world, monkeypatch)
+    event = {"title": "周六聚餐", "start": "2026-11-28T18:00:00+08:00"}
+    execute(world.steward, "set_steward_turn_audience", {"turn": "o1", "audience": "owner"}, allow_write=True)
+    code = execute(world.steward, "create_steward_confirmation", {
+        "name": "mcp__sw__calfam__create_event", "arguments": event,
+        "requester_message_id": dashboard(world, "周六聚餐加到家庭日历", "o-1")["message_id"]}, allow_write=True)["code"]
+    assert dashboard(world, f"确认 {code}", "o-2")["confirmation"]["outcome"] == "confirmed"
+    read = execute(world.steward, "get_steward_confirmation", {"code": code}, allow_write=True)
+    assert (read["status"], read["name"], read["arguments"]) == ("confirmed", "mcp__sw__calfam__create_event", event)
+    assert record(world, code)["armed_turn"] is None
+    before = upstream.methods.count("tools/call")
+    answer = body_of(rpc(server, world, "tools/call", {"name": "calfam__create_event", "arguments": event}))[0]
+    assert answer["error"]["data"]["code"] == "confirmation_required"
+    assert upstream.methods.count("tools/call") == before and record(world, code)["status"] == "confirmed"

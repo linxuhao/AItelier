@@ -187,4 +187,8 @@ test('step 23.1 (7.8.9 step 5): run_confirmed\'s read names the turn it runs in'
   const got = await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A', undefined, { turn: '12' });
   assert.deepEqual(calls.map(c => c.body), [{ code: 'K7Q2A', turn: '12' }]);
   assert.equal(got.group, '家庭群');
+  // Director 602 defect 8: no open turn is sent as none (the backend's read-only read), never as ''.
+  await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A', undefined, {});
+  await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A');
+  assert.deepEqual(calls.slice(1).map(c => c.body), [{ code: 'K7Q2A' }, { code: 'K7Q2A' }]);
 });

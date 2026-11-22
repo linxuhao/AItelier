@@ -776,8 +776,11 @@ test('media end to end with the real bridge module: an owner\'s photo stored, a 
   let fetches = 0;
   bot.start = async () => {};
   bot.stop = async () => {};
-  bot.puppet = { messageSendFile: async (to, box) => {
-    if (box.name.endsWith('.silk')) { refusedSilk.push(box.name); throw new Error('voice refused'); }
+  // The fork's live session encodes the voice bar: encodeVoice(pcmBase64) -> {voice, durationMs}
+  // (16 kHz mono 16-bit: 32 bytes a millisecond).
+  bot.puppet = { session: { encodeVoice: async pcm => ({ voice: Buffer.from('SILK').toString('base64'),
+    durationMs: Buffer.from(pcm, 'base64').length / 32 }) }, messageSendFile: async (to, box) => {
+    if (box.name.endsWith('.silk')) { refusedSilk.push(box.name); throw new Error('WeChat rejected the media send'); }
     sent.push({ to, name: box.name, bytes: box.bytes });
     return 'out-' + sent.length;
   } };
@@ -807,7 +810,8 @@ test('media end to end with the real bridge module: an owner\'s photo stored, a 
     assert.deepEqual(channels.received[3].attachments, [{ kind: 'image', ref: 'm_0000000000000001' }]);
     assert.equal(channels.opened[0].bytes.toString(), 'PHOTO');
     assertClosedSet(channels.received);
-    // A WAV (the only voice the fork encodes): the voice bar is tried, refused, and the same bytes go as a file.
+    // A 16 kHz mono 16-bit WAV (the only voice the fork encodes): the voice bar - its SILK named
+    // '<durationMs>.silk' - is tried, refused, and the same bytes go as a file.
     const audio = Buffer.alloc(44 + 320);
     audio.write('RIFF', 0, 'latin1'); audio.writeUInt32LE(36 + 320, 4); audio.write('WAVE', 8, 'latin1'); audio.write('fmt ', 12, 'latin1');
     audio.writeUInt32LE(16, 16); audio.writeUInt16LE(1, 20); audio.writeUInt16LE(1, 22); audio.writeUInt32LE(16000, 24);
@@ -816,7 +820,7 @@ test('media end to end with the real bridge module: an owner\'s photo stored, a 
     writeFileSync(file, audio);
     assert.deepEqual(await channels.registered.sendFile({ to: 'wxid_owner', kind: 'voice', mime: 'audio/wav', name: 'voice-e2e.wav', path: file }),
       { ref: 'out-1' });
-    assert.deepEqual(refusedSilk, ['voice-e2e.silk'], 'the voice bar was tried first');
+    assert.deepEqual(refusedSilk, ['10.silk'], 'the voice bar was tried first');
     assert.deepEqual(sent.map(x => [x.to, x.name, x.bytes.equals(audio)]), [['wxid_owner', 'voice-e2e.wav', true]]);
   } finally { await channel.stop(); await bridge.close(); }
 });

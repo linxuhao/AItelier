@@ -75,16 +75,21 @@ const WAV_HEADER_SLACK = 4096;
  *  messages forever. */
 export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
 /** A puppet error that says this message will never be handed over (neo's refusal of a peer it
- *  has not observed, an expired or unknown message): 410 gone at once. `createBridge({isGone})`
- *  replaces it should the fork name its refusals otherwise. */
-export const isGoneError = error => /observed peer|expired|not found/i.test(String(error?.message ?? error));
-/** Whether a voice's bytes are something the fork can encode as a voice bar (a WAV). Anything
- *  else goes straight out as a file; `createBridge({voiceEncodable})` replaces the rule. */
-export const isWav = bytes => wavByteRate(bytes.subarray(0, 4096)) !== undefined;
-/** The FileBox name decides what the fork sends (the platform director's interface): `.silk` a
- *  voice bar (the addon encodes), one of these an image, anything else a file attachment. */
+ *  has not observed, an expired or unknown message; the fork's "payload is no longer cached"
+ *  and its refusal of a message of another WeChat type): 410 gone at once.
+ *  `createBridge({isGone})` replaces it should the fork name its refusals otherwise. */
+export const isGoneError = error =>
+  /observed peer|expired|not found|no longer cached|from a WeChat message of type/i.test(String(error?.message ?? error));
+/** The FileBox name decides what the fork sends (its messageSendFile): `.silk`/`.sil`/`.slk`/`.amr`
+ *  a voice bar (the length in ms is the name's leading number), one of these an image, anything
+ *  else a file attachment. */
 export const IMAGE_EXTENSIONS = Object.freeze(['jpg', 'jpeg', 'png', 'gif', 'webp']);
-const IMAGE_MIME_EXTENSIONS = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
+const VOICE_EXTENSIONS = ['silk', 'sil', 'slk', 'amr'];
+/** What the fork can send as a voice bar or an image bubble, nothing else (it transcodes
+ *  nothing): a voice bar is SILK its encodeVoice made from 16 kHz mono 16-bit PCM of at most
+ *  voiceMaxMs; an image bubble is a real JPEG of at most imageMaxBytes (the crate's small tier).
+ *  Anything else goes as a file attachment. */
+export const MEDIA_SEND = Object.freeze({ voiceSampleRate: 16_000, voiceMaxMs: 60_000, imageMaxBytes: 64 * 1024 });
 const MEDIA_KINDS = ['image', 'voice', 'file'];
 /** POST /login's bounds: at least minGapMs between two accepted requests, at most perHour
  *  in any hour and perDay in any 24 hours (counted in this process's memory: a restart starts
@@ -215,42 +220,57 @@ export function wavByteCap(head, limits = MEDIA_LIMITS) {
   return rate ? Math.min(limits.voiceWavMax, WAV_HEADER_SLACK + Math.ceil(rate * limits.voiceMs / 1000)) : limits.voiceWavUnknown;
 }
 
-/** A voice's length from its WAV header and size, or undefined when it is not a WAV. */
-export function wavDurationMs(bytes) {
-  const rate = wavByteRate(bytes.subarray(0, 4096));
-  return rate ? Math.round(Math.max(0, bytes.length - 44) * 1000 / rate) : undefined;
+/** An arriving voice's length: the fork names its WAV `<durationMs>ms.wav`, so the name says it;
+ *  a name that does not falls back to the WAV header's byte rate (`head`, `size` bytes in all). */
+export function inboundVoiceMs(name, head, size) {
+  const named = /^(\d{1,9})ms\.wav$/i.exec(String(name ?? ''));
+  if (named && Number(named[1]) > 0) return Number(named[1]);
+  const rate = wavByteRate(head);
+  return rate ? Math.round(Math.max(0, size - 44) * 1000 / rate) : undefined;
 }
 
-/** The default name of a voice's FileBox: its stem and `.silk` (the fork encodes and reads the
- *  length from the SILK stream). `createBridge({voiceFileName})` replaces it, e.g. with
- *  `voiceNameWithLength` should the fork read the length from the name. */
-export const voiceFileName = ({ stem }) => `${stem}.silk`;
-export const voiceNameWithLength = ({ stem, durationMs }) => Number.isInteger(durationMs) && durationMs > 0
-  ? `${stem}-${durationMs}ms.silk` : `${stem}.silk`;
+/** The PCM a voice bar is encoded from: the data chunk of a RIFF/WAVE file that is PCM, mono,
+ *  16 kHz, 16-bit and at most `limits.voiceMaxMs` long; undefined for anything else, which then
+ *  goes as a file (nothing is resampled here, and the fork's encoder takes only that). */
+export function voicePcm(bytes, limits = MEDIA_SEND) {
+  if (bytes.length < 44 || bytes.toString('latin1', 0, 4) !== 'RIFF' || bytes.toString('latin1', 8, 12) !== 'WAVE') return undefined;
+  let format, data;
+  for (let at = 12; at + 8 <= bytes.length;) {
+    const id = bytes.toString('latin1', at, at + 4), size = bytes.readUInt32LE(at + 4), end = at + 8 + size;
+    if (end > bytes.length) return undefined;
+    if (id === 'fmt ' && !format) format = bytes.subarray(at + 8, end);
+    if (id === 'data' && !data) data = bytes.subarray(at + 8, end);
+    at = end + (size & 1);
+  }
+  if (!format || format.length < 16 || !data || !data.length || data.length % 2) return undefined;
+  if (format.readUInt16LE(0) !== 1 || format.readUInt16LE(2) !== 1 || format.readUInt32LE(4) !== limits.voiceSampleRate
+    || format.readUInt16LE(14) !== 16) return undefined;
+  return data.length * 1000 / (limits.voiceSampleRate * 2) > limits.voiceMaxMs ? undefined : data;
+}
+
+/** Whether `bytes` can go as an image bubble: a real JPEG (FF D8 FF) of at most imageMaxBytes. */
+export const isBubbleJpeg = (bytes, limits = MEDIA_SEND) =>
+  bytes.length >= 3 && bytes.length <= limits.imageMaxBytes && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 
 const cleanName = name => String(name ?? '').replace(/[\\/\u0000-\u001f\u007f]/g, '_').trim().slice(-120);
 const splitName = name => {
   const dot = name.lastIndexOf('.');
   return dot > 0 ? [name.slice(0, dot), name.slice(dot + 1).toLowerCase()] : [name, ''];
 };
-/** The FileBox names to send one file under, in order, each with what it goes out as: an image
- *  under an image extension (its own, or the one its mime names); a voice first as `.silk` (a
- *  voice bar), then - should that be refused or fail - the same bytes under its own name as a
- *  file; a file under its own name, with `.bin` added when that name would make the fork send
- *  it as an image or a voice bar. A voice the fork cannot encode (`encodable` false: not a WAV)
- *  goes only as a file. Undefined when an image has no image extension or mime. */
-export function sendNames({ kind, mime, name, durationMs, encodable = true }, voiceName = voiceFileName) {
+/** How to send one file, in order until one goes, each step with what it goes out as. An image
+ *  that is a bubble JPEG first as an image (under its own .jpg/.jpeg name, else `<stem>.jpg`); a
+ *  voice whose bytes are voice-bar PCM (`voicePcm`) first as a voice bar (`pcm`: the bridge
+ *  encodes it and names the SILK `<durationMs>.silk` only then); then, and for everything else
+ *  at once, the same bytes as a file under their own name, with `.bin` added when that name
+ *  would make the fork send it as an image or a voice bar. */
+export function sendPlan({ kind, name, bytes }, limits = MEDIA_SEND) {
   const clean = cleanName(name) || kind;
   const [stem, extension] = splitName(clean);
-  const asFile = IMAGE_EXTENSIONS.includes(extension) || extension === 'silk' ? `${clean}.bin` : clean;
-  if (kind === 'image') {
-    if (IMAGE_EXTENSIONS.includes(extension)) return [{ as: 'image', name: clean }];
-    const fromMime = IMAGE_MIME_EXTENSIONS[String(mime ?? '').toLowerCase()];
-    return fromMime ? [{ as: 'image', name: `${stem}.${fromMime}` }] : undefined;
-  }
-  if (kind === 'voice') return encodable ? [{ as: 'voice', name: voiceName({ stem, durationMs }) }, { as: 'file', name: asFile }]
-    : [{ as: 'file', name: asFile }];
-  return [{ as: 'file', name: asFile }];
+  const asFile = { as: 'file', name: IMAGE_EXTENSIONS.includes(extension) || VOICE_EXTENSIONS.includes(extension) ? `${clean}.bin` : clean };
+  if (kind === 'image' && isBubbleJpeg(bytes, limits))
+    return [{ as: 'image', name: extension === 'jpg' || extension === 'jpeg' ? clean : `${stem}.jpg` }, asFile];
+  const pcm = kind === 'voice' ? voicePcm(bytes, limits) : undefined;
+  return pcm ? [{ as: 'voice', pcm }, asFile] : [asFile];
 }
 
 /** Whether this WeChat message is one the owner could have written to the bot:
@@ -298,8 +318,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS,
   groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
-  mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, voiceName = voiceFileName, fetchLimits = MEDIA_FETCH,
-  isGone = isGoneError, voiceEncodable = isWav }) {
+  mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, fetchLimits = MEDIA_FETCH, isGone = isGoneError,
+  mediaSend = MEDIA_SEND }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
@@ -597,8 +617,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   /** A local (tmpfs) failure: never the media's fault, so never counted against it. */
   const local = error => Object.assign(error instanceof Error ? error : new Error(String(error)), { local: true });
 
-  /** The live attachment's bytes into `file` (tmpfs), counted as they come: {size, mime} or
-   *  {too_large} at the kind's bound (a voice: 2 min 5 s of WAV by its header's rate). `signal`
+  /** The live attachment's bytes into `file` (tmpfs), counted as they come: {size, mime,
+   *  durationMs?} or {too_large} at the kind's bound (a voice: 2 min 5 s of WAV by its header's
+   *  rate; its length from the fork's `<durationMs>ms.wav` name, else that rate). `signal`
    *  abandons it at once (the source destroyed); `firstByte` is called with each chunk. The
    *  file is opened before the puppet is asked; the caller deletes it. */
   const spool = async (entry, file, signal, firstByte) => {
@@ -626,7 +647,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         try { await handle.write(bytes); } catch (error) { throw local(error); }
       }
       if (cap === undefined && size > wavByteCap(head, mediaLimits)) return { too_large: true };
-      return { size, mime: kind === 'voice' ? 'audio/wav' : box.mediaType };
+      if (kind !== 'voice') return { size, mime: box.mediaType };
+      return { size, mime: 'audio/wav', durationMs: inboundVoiceMs(box.name, head, size) };
     } finally {
       await handle.close().catch(error => log('media file not closed: ' + short(error)));
       // Leaving early (the cut, a deadline, the client gone) stops the source.
@@ -634,7 +656,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     }
   };
 
-  /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out. 404:
+  /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out (a
+   *  voice with its length in `x-voice-duration-ms` when known). 404:
    *  not live (never was, or its event left the ring); 410 gone: another login's message, a
    *  refusal `isGone` recognises, or one that failed fetchLimits.attempts times; 503: another
    *  fetch is running (busy, one at a time), or this one failed, ran out of time or lost its
@@ -682,7 +705,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       }
       if (spooled.too_large) { release(); return reply(response, 413, { error: 'too_large' }); }
       response.writeHead(200, { 'content-type': typeof spooled.mime === 'string' && spooled.mime ? spooled.mime : 'application/octet-stream',
-        'content-length': String(spooled.size), 'cache-control': 'no-store' });
+        'content-length': String(spooled.size), 'cache-control': 'no-store',
+        ...(spooled.durationMs === undefined ? {} : { 'x-voice-duration-ms': String(spooled.durationMs) }) });
       if (!spooled.size) { release(); return response.end(); }
       // The client has the whole answer once it has content-length bytes, which may be before
       // the read stream reaches its end: release as the last byte is read.
@@ -694,29 +718,47 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     } finally { release(); }
   }
 
-  /** Sends `bytes` under each of `names` in turn until one goes (a voice bar refused or failed
-   *  goes again as a file): [200, {ref, sent_as}]. A peer neo no longer knows is recipient_unknown. */
-  async function deliverFile(say, bytes, names) {
+  /** The FileBox of one voice bar: `pcm` through the fork's encoder - the live session's
+   *  encodeVoice(pcmBase64) -> {voice, durationMs} (base64 SILK) - named `<durationMs>.silk`, the
+   *  name the fork's messageSendFile reads the length from. Throws when there is no encoder, it
+   *  refuses, or its note is not one of at most voiceMaxMs: the caller then sends a file. */
+  async function voiceBox(pcm) {
+    const session = bot?.puppet?.session;
+    if (typeof session?.encodeVoice !== 'function') throw new Error('the puppet has no voice encoder');
+    const note = await session.encodeVoice(pcm.toString('base64'));
+    const durationMs = note?.durationMs;
+    if (typeof note?.voice !== 'string' || !note.voice || !Number.isSafeInteger(durationMs) || durationMs <= 0
+      || durationMs > mediaSend.voiceMaxMs) throw new Error('the voice encoder gave no note a voice bar can carry');
+    return makeFileBox(Buffer.from(note.voice, 'base64'), `${durationMs}.silk`);
+  }
+
+  /** Sends `bytes` by each step of `plan` (sendPlan) in turn until one goes (a voice bar or an
+   *  image refused or failed goes again as a file): [200, {ref, sent_as}]. A peer neo no longer
+   *  knows is recipient_unknown; a send whose outcome the fork calls uncertain may have gone, so
+   *  it is a failed send and nothing is sent again. */
+  async function deliverFile(say, bytes, plan) {
     let failure;
-    for (const [i, { as, name }] of names.entries()) {
+    for (const [i, step] of plan.entries()) {
       try {
-        const sent = await say(makeFileBox(bytes, name));
-        return [200, { ref: sent?.id ?? null, sent_as: as }];
+        const box = step.as === 'voice' ? await voiceBox(step.pcm) : makeFileBox(bytes, step.name);
+        const sent = await say(box);
+        return [200, { ref: sent?.id ?? null, sent_as: step.as }];
       } catch (error) {
         if (/observed peer/.test(String(error?.message))) return [409, { error: 'recipient_unknown' }];
+        if (/outcome is uncertain/.test(String(error?.message))) throw error;
         failure = error;
-        if (i + 1 < names.length) log(`sending as ${as} failed (${short(error)}); sending it as ${names[i + 1].as}`);
+        if (i + 1 < plan.length) log(`sending as ${step.as} failed (${short(error)}); sending it as ${plan[i + 1].as}`);
       }
     }
     throw failure;
   }
 
-  async function sendFile({ to, room }, bytes, names) {
-    if (room) return groupSend(room, target => deliverFile(box => target.say(box), bytes, names));
+  async function sendFile({ to, room }, bytes, plan) {
+    if (room) return groupSend(room, target => deliverFile(box => target.say(box), bytes, plan));
     if (!state.logged_in || !bot) return [409, { error: 'not_logged_in' }];
     const contact = await bot.Contact.find({ id: to });
     if (!contact) return [409, { error: 'recipient_unknown' }];
-    return deliverFile(box => contact.say(box), bytes, names);
+    return deliverFile(box => contact.say(box), bytes, plan);
   }
 
   const readBytes = (request, limit) => new Promise((resolve, reject) => {
@@ -791,12 +833,11 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         const query = url.searchParams;
         const to = query.get('to') ?? '', room = query.get('room') ?? '', kind = query.get('kind') ?? '';
         const mime = query.get('mime') ?? '', name = query.get('name') ?? '';
-        const names = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
-          ? sendNames({ kind, mime, name, durationMs: kind === 'voice' ? wavDurationMs(bytes) : undefined,
-            encodable: kind !== 'voice' || voiceEncodable(bytes) }, voiceName) : undefined;
-        if (!names || !bytes.length || Boolean(to) === Boolean(room)) return reply(response, 400, { error: 'bad_request' });
+        const plan = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
+          ? sendPlan({ kind, name, bytes }, mediaSend) : undefined;
+        if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return reply(response, 400, { error: 'bad_request' });
         if (typeof makeFileBox !== 'function') return reply(response, 501, { error: 'not_supported' });
-        const [status, result] = await sendFile({ to, room }, bytes, names);
+        const [status, result] = await sendFile({ to, room }, bytes, plan);
         return reply(response, status, result);
       }
       if (request.method === 'POST' && url.pathname === '/login') {

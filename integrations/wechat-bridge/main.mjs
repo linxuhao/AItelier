@@ -38,7 +38,7 @@ catch (error) { log(error.message); process.exit(78); }
 const makeBot = () => WechatyBuilder.build({ puppet: new PuppetNeo() });
 const skipLogin = process.env.WECHAT_BRIDGE_SKIP_LOGIN === '1';
 // Step 24.2: POST /send-file hands the fork a FileBox whose name says what it goes out as
-// (bridge.mjs sendNames).
+// (bridge.mjs sendPlan; a voice bar is the SILK the live session's encodeVoice made).
 const makeFileBox = (bytes, name) => FileBox.fromBuffer(bytes, name);
 const bridge = createBridge({ makeBot, types, token, log, renderQr: qrSvg, loginEnabled: !skipLogin, makeFileBox });
 

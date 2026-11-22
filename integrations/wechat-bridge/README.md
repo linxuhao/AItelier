@@ -201,9 +201,13 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   login since it started, and only the last 2048 of them), `400 bad_request`, `413
   body_too_large` (over 64 KiB), `502 send_failed`.
 
-Step 24.2 media (design-steward 7.8.12 "微信"; the fork's interface as the platform
-director gave it: `messageFile`/`messageImage`/`messageVoice` → FileBox, a voice as WAV;
-`messageSendFile(conversationId, fileBox)` with the kind taken from the FileBox name):
+Step 24.2 media (design-steward 7.8.12 "微信"; the fork's delivered interface:
+`messageFile`/`messageImage`/`messageVoice` → FileBox - a voice as RIFF/WAVE 1 channel 16000
+Hz 16-bit named `<durationMs>ms.wav`, an image named `<messageId>.jpg|.png` by its bytes;
+`messageSendFile(conversationId, fileBox)` with the carrier taken from the FileBox name:
+`.silk`/`.sil`/`.slk`/`.amr` a voice bar whose length is the name's leading milliseconds,
+`.jpg`/`.jpeg`/`.png`/`.gif`/`.webp` an image, anything else a file; and the live session's
+`encodeVoice(pcmBase64)` → `{voice, durationMs}`, base64 SILK):
 
 - A 1:1 image, voice or file is an event with `text: ""` and `attachments: [{media_id,
   kind, mime?, name?, size?}]` - a description only, nothing is fetched on arrival. Over the
@@ -213,19 +217,28 @@ director gave it: `messageFile`/`messageImage`/`messageVoice` → FileBox, a voi
   when its appmsg XML is in the payload and says type 6 with no quote; the fork filing 49
   under Wechaty's `Unknown` is accepted by the raw type.
 - `GET /media/<media_id>` (`<seq>.<index>`; anything else is `404`) → the bytes (a voice as
-  `audio/wav`), fetched from WeChat now and held in `/tmp` only while answering. `404
+  `audio/wav`, with its length in `x-voice-duration-ms`: the milliseconds the fork's
+  `<durationMs>ms.wav` name states, else the WAV header's byte rate), fetched from WeChat now
+  and held in `/tmp` only while answering. `404
   not_found` (its event left the ring, or never was), `410 gone` (another login's message,
-  a puppet refusal the bridge recognises - `observed peer`, `expired`, `not found` - or the
-  5th failed fetch of the same media_id), `503 busy` (another fetch is running), `503
+  a puppet refusal the bridge recognises - `observed peer`, `expired`, `not found`, `no longer
+  cached`, a message of another WeChat type - or the 5th failed fetch of the same media_id), `503 busy` (another fetch is running), `503
   unavailable` (any other failure: the puppet, `/tmp`, no first byte in 30 s, not whole in
   120 s, or the client went away - the lock is released and the partial deleted), `413
   too_large` (more bytes than the bound; a voice over 2 min 5 s of WAV by its header's rate).
 - `POST /send-file?to=<wxid>|room=<room>&kind=image|voice|file&mime=&name=` with the
-  file's bytes as the body (at most 25 MiB, `413 body_too_large`) → `{ref, sent_as}`. An
-  image goes under an image extension, a file under its own name (`.bin` added when that
-  name would read as an image or a voice); a voice that is a WAV first as `<stem>.silk` (a
-  voice bar), and when that is refused or fails, the same bytes again under its own name as
-  a file (`sent_as: "file"`); a voice in any other format goes as a file at once. Group sends share the group queue and its backstop.
+  file's bytes as the body (at most 25 MiB, `413 body_too_large`) → `{ref, sent_as}`. The
+  fork transcodes nothing, so only what it can carry is tried as a bubble: an image that is
+  a real JPEG (`FF D8 FF`) of at most 64 KiB (the crate's small tier) goes first as an image
+  (its own `.jpg`/`.jpeg` name, else `<stem>.jpg`); a voice that is a PCM WAV, mono, 16 kHz,
+  16-bit and at most 60 s goes first as a voice bar - its PCM through `encodeVoice`, the
+  SILK named `<durationMs>.silk`. When the encoder is missing or refuses, or the puppet
+  refuses the bubble, the same bytes go again as a file (`sent_as: "file"`); everything
+  else (PNG, GIF, WebP, a larger JPEG, a WAV of another shape or longer, another format)
+  goes as a file at once. A file goes under its own name, `.bin` added when that name would
+  read as an image or a voice. A send the fork reports as `outcome is uncertain` may have
+  gone, so it is `502 send_failed` and nothing is sent again. Group sends share the group
+  queue and its backstop.
 
 Message texts are never logged.
 

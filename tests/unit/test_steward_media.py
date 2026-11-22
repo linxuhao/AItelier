@@ -414,6 +414,23 @@ def test_fetch_refuses_a_url_not_seen_in_this_turn_another_origin_or_connection_
     assert fetch(server, world, CAT).json()["detail"] == "url_not_seen"
 
 
+def test_fetch_is_the_stewards_alone_an_anonymous_caller_and_the_owners_session_are_refused(world, server, upstream):
+    """Design 7.8.18: only the steward's token enters /fetch - the director's token (above), no
+    token at all, and the owner's own session (the CLI's admin token, under either header, or the
+    dashboard through Cloudflare Access) are each 403, for a url the steward itself may fetch."""
+    media_ready(world, server, upstream, CAT)
+    owner_cli = "media-fetch-owner-cli-token"
+    world.registry.seed(owner_cli)
+    assert world.registry.lookup_token(owner_cli)["driver_id"] == "owner-cli"
+    url = f"{server.url}{gw.PATH}/media/fetch"
+    for headers in ({}, {"X-AItelier-Driver-Token": owner_cli}, {"X-AItelier-Admin-Token": owner_cli},
+                    {"Cf-Access-Jwt-Assertion": "owner-session", "Cf-Access-Authenticated-User-Email": "owner@example.com"}):
+        got = httpx.get(url, params={"url": CAT}, headers=headers, timeout=30)
+        assert (got.status_code, got.json()["detail"]) == (403, "steward_gateway_forbidden"), (headers, got.status_code, got.text)
+    assert upstream.file_headers == [], "nothing was fetched for them"
+    assert fetch(server, world, CAT).status_code == 200
+
+
 def test_fetch_refuses_a_malformed_url_or_redirect_location_as_a_bad_url_not_a_500(world, server, upstream):
     """Review F1: a url a result named that urlsplit cannot take (port out of range, an unclosed
     [ ) - asked for, or met as a redirect's Location - is a JSON refusal, never a 500. So is one
@@ -444,20 +461,3 @@ def test_fetch_is_on_the_gateways_port_alone(world, server, upstream):
     other = httpx.get(f"{server.main_url}{gw.PATH}/media/fetch", params={"url": CAT},
                       headers={"X-AItelier-Driver-Token": world.tokens["steward"]}, timeout=30)
     assert other.status_code == 404
-def test_fetch_is_the_stewards_alone_an_anonymous_caller_and_the_owners_session_are_refused(world, server, upstream):
-    """Design 7.8.18: only the steward's token enters /fetch - the director's token (above), no
-    token at all, and the owner's own session (the CLI's admin token, under either header, or the
-    dashboard through Cloudflare Access) are each 403, for a url the steward itself may fetch."""
-    media_ready(world, server, upstream, CAT)
-    owner_cli = "media-fetch-owner-cli-token"
-    world.registry.seed(owner_cli)
-    assert world.registry.lookup_token(owner_cli)["driver_id"] == "owner-cli"
-    url = f"{server.url}{gw.PATH}/media/fetch"
-    for headers in ({}, {"X-AItelier-Driver-Token": owner_cli}, {"X-AItelier-Admin-Token": owner_cli},
-                    {"Cf-Access-Jwt-Assertion": "owner-session", "Cf-Access-Authenticated-User-Email": "owner@example.com"}):
-        got = httpx.get(url, params={"url": CAT}, headers=headers, timeout=30)
-        assert (got.status_code, got.json()["detail"]) == (403, "steward_gateway_forbidden"), (headers, got.status_code, got.text)
-    assert upstream.file_headers == [], "nothing was fetched for them"
-    assert fetch(server, world, CAT).status_code == 200
-
-

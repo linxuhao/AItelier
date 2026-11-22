@@ -16,11 +16,16 @@ them out.
       listed rows are summed per file. With :LIST (the file list that shard
       ran), the part of the shard's total that --durations did not list is
       spread evenly over every file of that list, so files too fast to be
-      listed still get a share.
+      listed still get a share. That residual needs a serial log: in an xdist
+      (-n) log the "in Ns" total is wall time while the rows add up over all
+      workers, so LIST is ignored for such a log, with a warning. A log run with
+      --durations=0 --durations-min=0 lists every row and needs no LIST.
 
-The committed tools/test_durations.json was seeded from the six shard logs of
-the 2026-11-21 full-suite audit (main 10a5c970c6, loaded host). Re-measure on
-an idle host with --durations=0 and regenerate it when the suite shifts.
+The committed tools/test_durations.json holds the default tier only (plain
+`pytest`, which deselects `slow`), measured 2026-11-22 after the State template
+change with -n 4 --dist loadfile --durations=0 --durations-min=0 on a loaded
+host. Files with no default-tier row are absent and so charged the median.
+Regenerate it when the suite shifts.
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ REPO = Path(__file__).resolve().parents[1]
 DEFAULT_DURATIONS = REPO / "tools" / "test_durations.json"
 ROW = re.compile(r"^\s*([0-9.]+)s\s+(?:call|setup|teardown)\s+([^:\s]+\.py)::")
 TOTAL = re.compile(r"\bin ([0-9.]+)s\b")
+XDIST = re.compile(r"^bringing up nodes\.\.\.$|\[gw\d+\]|\bcreated: \d+/\d+ workers\b", re.M)
 
 
 def measure(specs: list[str]) -> dict[str, float]:
@@ -49,7 +55,10 @@ def measure(specs: list[str]) -> dict[str, float]:
                 listed[row.group(2)] = listed.get(row.group(2), 0.0) + float(row.group(1))
         for name, value in listed.items():
             seconds[name] = seconds.get(name, 0.0) + value
-        if listing:
+        if listing and XDIST.search(text):
+            print(f"# {log}: an xdist log; its total is wall time, so {listing} "
+                  "gets no residual share", file=sys.stderr)
+        elif listing:
             files = Path(listing).read_text(encoding="utf-8").split()
             totals = TOTAL.findall(text)
             if files and totals:

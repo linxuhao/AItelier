@@ -1,8 +1,30 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..06c97f6 100644
+index ec6c930..4bf8c2c 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
-@@ -55,6 +55,44 @@ struct TextMessage {
+@@ -9,14 +9,18 @@ use std::{
+     time::{Duration, SystemTime, UNIX_EPOCH},
+ };
+ use wechat_protocol::{
+-    is_session_rejected, wire, AccountInterrupted, AccountPushConnection, DeviceProfile,
+-    LoginAttempt, LoginStatus, NativeClient, NativeOptions, Service, ServiceRejected,
+-    TextSendOptions,
++    is_session_rejected,
++    media::{CdnClient, MediaQuality, PreparedImageUpload, PreparedUpload, UploadedMedia},
++    media_send::{MediaSendResult, SendStatus},
++    silk, wire, AccountInterrupted, AccountPushConnection, DeviceProfile, LoginAttempt,
++    LoginStatus, NativeClient, NativeOptions, Service, ServiceRejected, TextSendOptions,
+ };
+ 
+ const DEVICE_NAME: &str = "Puppet Neo";
+ /// Error text TypeScript receives when WeChat no longer accepts this session.
+ const SESSION_ENDED: &str = "Neo session ended by WeChat";
++/// One CDN upload's HTTP timeout. The crate accepts 1 ms to 120 s.
++const CDN_TIMEOUT: Duration = Duration::from_secs(60);
+ 
+ /// WeChat rejected the session's credentials and rejected one renewal.
+ #[derive(Debug)]
+@@ -55,6 +59,44 @@ struct TextMessage {
      timestamp: u32,
  }
  
@@ -47,7 +69,204 @@ index ec6c930..06c97f6 100644
  #[derive(Default, Serialize)]
  struct SelfProfile {
      nickname: Option<String>,
-@@ -324,7 +362,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+@@ -69,6 +111,29 @@ enum Operation {
+     PollIncoming,
+     Sync { scene: u32 },
+     SendText { destination: String, text: String },
++    /// A voice note: already-encoded SILK bytes and how long they play for.
++    SendVoice {
++        destination: String,
++        duration_ms: u32,
++        encoded: String,
++    },
++    /// An ordinary file: its bytes and the name WeChat shows for it.
++    SendFile {
++        destination: String,
++        file_name: String,
++        bytes: String,
++    },
++    /// An image message: the picture and, when the caller has them, WeChat's two
++    /// smaller representations of it.
++    SendImage {
++        destination: String,
++        file_name: String,
++        original: String,
++        standard: Option<String>,
++        thumbnail: Option<String>,
++    },
++    /// 16 kHz mono signed-16-bit little-endian PCM to one SILK voice note.
++    EncodeVoice { pcm: String },
+     LookupSelf,
+     Logout,
+     Close,
+@@ -117,6 +182,66 @@ impl NeoSession {
+         self.task(Operation::SendText { destination, text })
+     }
+ 
++    /// Send one voice note. `encoded` is base64 SILK V3 at 16 kHz mono; the account's
++    /// own note profile bounds it to one minute.
++    #[napi]
++    pub fn send_voice(
++        &self,
++        destination: String,
++        duration_ms: u32,
++        encoded: String,
++    ) -> AsyncTask<NeoTask> {
++        self.task(Operation::SendVoice {
++            destination,
++            duration_ms,
++            encoded,
++        })
++    }
++
++    /// Send one ordinary file. `bytes` is base64; a file WeChat's single-request upload
++    /// cannot carry (over 25 MiB) is refused by the crate rather than truncated.
++    #[napi]
++    pub fn send_file(
++        &self,
++        destination: String,
++        file_name: String,
++        bytes: String,
++    ) -> AsyncTask<NeoTask> {
++        self.task(Operation::SendFile {
++            destination,
++            file_name,
++            bytes,
++        })
++    }
++
++    /// Send one image message. `original`, `standard` and `thumbnail` are base64 JPEGs;
++    /// WeChat's image message wants three representations, so a caller that has only one
++    /// supplies it and the crate decides whether it fits the image-message profile.
++    #[napi]
++    pub fn send_image(
++        &self,
++        destination: String,
++        file_name: String,
++        original: String,
++        standard: Option<String>,
++        thumbnail: Option<String>,
++    ) -> AsyncTask<NeoTask> {
++        self.task(Operation::SendImage {
++            destination,
++            file_name,
++            original,
++            standard,
++            thumbnail,
++        })
++    }
++
++    /// Encode 16 kHz mono signed-16-bit little-endian PCM, base64, into one base64 SILK
++    /// voice note, so a caller with audio can produce what `sendVoice` carries.
++    #[napi]
++    pub fn encode_voice(&self, pcm: String) -> AsyncTask<NeoTask> {
++        self.task(Operation::EncodeVoice { pcm })
++    }
++
+     #[napi]
+     pub fn lookup_self(&self) -> AsyncTask<NeoTask> {
+         self.task(Operation::LookupSelf)
+@@ -167,6 +292,10 @@ impl Task for NeoTask {
+             Operation::PollIncoming => "wait for incoming message notifications",
+             Operation::Sync { .. } => "read a sync page",
+             Operation::SendText { .. } => "prepare a text send",
++            Operation::SendVoice { .. } => "prepare a voice send",
++            Operation::SendFile { .. } => "prepare a file send",
++            Operation::SendImage { .. } => "prepare an image send",
++            Operation::EncodeVoice { .. } => "encode a voice note",
+             Operation::LookupSelf => "look up the account profile",
+             Operation::Logout => "log out",
+             Operation::Close => "close the session",
+@@ -284,6 +413,88 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+                 account.request_blocking(|request| request.send_text(&destination, &text, &send))
+             }))
+         }
++        Operation::SendVoice {
++            destination,
++            duration_ms,
++            encoded,
++        } => {
++            let account = session.account.as_ref().context("No active session")?;
++            let encoded = STANDARD
++                .decode(&encoded)
++                .context("The voice note is not base64")?;
++            let created_at = now_seconds()?;
++            let client_id = media_client_id()?;
++            let result = account.request_blocking(|request| {
++                request.send_voice(&destination, &client_id, created_at, duration_ms, &encoded)
++            })?;
++            Ok(media_send_result(&result))
++        }
++        Operation::SendFile {
++            destination,
++            file_name,
++            bytes,
++        } => {
++            let account = session.account.as_ref().context("No active session")?;
++            let bytes = STANDARD.decode(&bytes).context("The file is not base64")?;
++            let upload = upload_file(account, &bytes, &file_name, &destination)?;
++            let created_at = now_seconds()?;
++            let client_id = media_client_id()?;
++            let result = account.request_blocking(|request| {
++                request.send_file(&destination, &client_id, created_at, &upload, None)
++            })?;
++            Ok(media_send_result(&result))
++        }
++        Operation::SendImage {
++            destination,
++            file_name,
++            original,
++            standard,
++            thumbnail,
++        } => {
++            let account = session.account.as_ref().context("No active session")?;
++            let original = STANDARD
++                .decode(&original)
++                .context("The image is not base64")?;
++            let smaller = |bytes: Option<String>| match bytes {
++                Some(bytes) => STANDARD
++                    .decode(&bytes)
++                    .context("An image representation is not base64"),
++                None => Ok(original.clone()),
++            };
++            let standard = smaller(standard)?;
++            let thumbnail = smaller(thumbnail)?;
++            let prepared = PreparedImageUpload::prepare(
++                &original,
++                &standard,
++                &thumbnail,
++                &file_name,
++                &destination,
++            )?;
++            let cdn = cdn_client(account)?;
++            let upload = cdn.upload_image(&prepared)?;
++            let client_id = media_client_id()?;
++            let result = account
++                .request_blocking(|request| request.send_image(&destination, &client_id, &upload))?;
++            Ok(media_send_result(&result))
++        }
++        Operation::EncodeVoice { pcm } => {
++            let pcm = STANDARD.decode(&pcm).context("The audio is not base64")?;
++            ensure!(
++                !pcm.is_empty() && pcm.len() % 2 == 0,
++                "Audio must be 16-bit samples"
++            );
++            let samples: Vec<i16> = pcm
++                .chunks_exact(2)
++                .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
++                .collect();
++            let encoded = silk::encode(&samples)?;
++            // `validate_framing` answers the note's length in milliseconds.
++            let duration_ms = silk::validate_framing(&encoded)?;
++            Ok(json!({
++                "voice": STANDARD.encode(&encoded),
++                "durationMs": duration_ms,
++            }))
++        }
+         Operation::LookupSelf => lookup_self(session),
+         Operation::Logout => {
+             session.incoming = None;
+@@ -324,7 +535,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
          .own_username;
      let cursor = session.received_cursor.clone();
      let batch = connection(session)?.sync(&cursor, scene)?;
@@ -56,11 +275,59 @@ index ec6c930..06c97f6 100644
      session.received_cursor = batch.cursor;
      Ok(json!({ "messages": messages, "continuation": batch.continuation }))
  }
-@@ -451,15 +489,45 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+@@ -451,15 +662,93 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      }
  }
  
 -fn text_messages(commands: Vec<wire::SyncCommand>, username: &str) -> Vec<TextMessage> {
++/// One CDN client for this account. The upload hosts come from the session; the bytes
++/// then go straight to the CDN, not through the account's request queue.
++fn cdn_client(account: &NativeClient) -> Result<CdnClient> {
++    let config = account.request_blocking(|request| request.cdn_config())?;
++    CdnClient::new(config, CDN_TIMEOUT)
++}
++
++/// Prepare and upload one ordinary file. WeChat's single-request upload carries at most
++/// 25 MiB, and the crate refuses more instead of sending part of the file.
++fn upload_file(
++    account: &NativeClient,
++    bytes: &[u8],
++    file_name: &str,
++    destination: &str,
++) -> Result<UploadedMedia> {
++    let prepared = PreparedUpload::prepare(bytes, MediaQuality::File, file_name, destination)?;
++    cdn_client(account)?.upload(&prepared)
++}
++
++fn now_seconds() -> Result<u32> {
++    Ok(u32::try_from(
++        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
++    )?)
++}
++
++/// Media sends are correlated by a client ID string, and WeChat's voice profile wants 16
++/// to 128 characters of `[A-Za-z0-9_-]`: 32 hex characters serve every carrier.
++fn media_client_id() -> Result<String> {
++    let mut random = [0; 16];
++    openssl::rand::rand_bytes(&mut random)?;
++    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
++}
++
++/// The addon's report on one media send. Only `ServerAccepted` means WeChat took it; a
++/// reply that does not correlate with the client ID this addon chose is uncertain.
++fn media_send_result(result: &MediaSendResult) -> Value {
++    let status = match &result.status {
++        SendStatus::ServerAccepted => "accepted",
++        SendStatus::Rejected => "rejected",
++        SendStatus::NeedsReview => "uncertain",
++    };
++    json!({
++        "status": status,
++        "serviceCode": result.service_code,
++        "serverMessageId": result.server_message_id,
++    })
++}
++
 +fn incoming_messages(commands: Vec<wire::SyncCommand>, username: &str) -> Vec<IncomingMessage> {
      commands
          .into_iter()
@@ -104,7 +371,7 @@ index ec6c930..06c97f6 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
-@@ -742,6 +810,103 @@ mod tests {
+@@ -742,6 +1031,103 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }
  
@@ -208,7 +475,7 @@ index ec6c930..06c97f6 100644
      #[test]
      fn closing_without_a_session_resets_state() {
          let mut session = Session {
-@@ -756,7 +921,7 @@ mod tests {
+@@ -756,7 +1142,7 @@ mod tests {
  
      #[test]
      fn unhandled_sync_commands_are_skipped() {
@@ -218,10 +485,10 @@ index ec6c930..06c97f6 100644
                  id: 9999,
                  payload: vec![42],
 diff --git a/src/native.ts b/src/native.ts
-index eea2d34..6cdf763 100644
+index eea2d34..8eea6d9 100644
 --- a/src/native.ts
 +++ b/src/native.ts
-@@ -22,6 +22,31 @@ export interface IncomingText {
+@@ -22,6 +22,44 @@ export interface IncomingText {
    timestamp: number
  }
  
@@ -250,23 +517,60 @@ index eea2d34..6cdf763 100644
 +  timestamp: number
 +}
 +
++/**
++ * What the addon says happened to one media send. Only `accepted` means WeChat took the
++ * message; a reply that does not correlate with the client id the addon chose is
++ * `uncertain`, which a caller must not blindly resend.
++ */
++export interface MediaSend {
++  status: 'accepted' | 'rejected' | 'uncertain'
++  /** WeChat's own code, when it answered a media request with one. */
++  serviceCode?: number
++  /** The server id of a message WeChat accepted. */
++  serverMessageId?: string | null
++}
++
  export interface Session {
    startLogin(): Promise<{ png: string }>
    pollLogin(): Promise<
-@@ -30,7 +55,7 @@ export interface Session {
+@@ -30,8 +68,20 @@ export interface Session {
    >
    heartbeat(): Promise<{ sync: boolean, intervalMs: number }>
    pollIncoming(): Promise<boolean>
 -  sync(scene: 1 | 6 | 7): Promise<{ messages: IncomingText[], continuation: boolean }>
 +  sync(scene: 1 | 6 | 7): Promise<{ messages: IncomingMessage[], continuation: boolean }>
    sendText(destination: string, text: string): Promise<{ status: 'accepted' | 'rejected' | 'uncertain' }>
++  /** One voice note: base64 SILK V3 at 16 kHz mono, and how long it plays for. */
++  sendVoice(destination: string, durationMs: number, encoded: string): Promise<MediaSend>
++  /** One ordinary file: the name WeChat shows, and the bytes, base64. */
++  sendFile(destination: string, fileName: string, bytes: string): Promise<MediaSend>
++  /**
++   * One image message. WeChat's image message carries three JPEG representations of the
++   * same picture; a caller that has only the picture supplies it and the two smaller
++   * slots keep it, so the addon's own bounds decide whether the bytes fit.
++   */
++  sendImage(destination: string, fileName: string, original: string, standard?: string, thumbnail?: string): Promise<MediaSend>
++  /** 16 kHz mono signed-16-bit little-endian PCM, base64, to one base64 SILK note. */
++  encodeVoice(pcm: string): Promise<{ voice: string, durationMs: number }>
    lookupSelf(): Promise<SelfProfile>
    logout(): Promise<{ accepted: boolean }>
+   close(): Promise<void>
+@@ -68,6 +118,10 @@ export function openNativeSession(): Session {
+     pollIncoming: async () => JSON.parse(await addon.pollIncoming()),
+     sync: async (scene) => JSON.parse(await addon.sync(scene)),
+     sendText: async (destination, text) => JSON.parse(await addon.sendText(destination, text)),
++    sendVoice: async (destination, durationMs, encoded) => JSON.parse(await addon.sendVoice(destination, durationMs, encoded)),
++    sendFile: async (destination, fileName, bytes) => JSON.parse(await addon.sendFile(destination, fileName, bytes)),
++    sendImage: async (destination, fileName, original, standard, thumbnail) => JSON.parse(await addon.sendImage(destination, fileName, original, standard, thumbnail)),
++    encodeVoice: async (pcm) => JSON.parse(await addon.encodeVoice(pcm)),
+     lookupSelf: async () => JSON.parse(await addon.lookupSelf()),
+     logout: async () => JSON.parse(await addon.logout()),
+     close: async () => { await addon.close() },
 diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
-index 9da9e02..414f487 100644
+index 9da9e02..4d1a76b 100644
 --- a/src/puppet-neo.ts
 +++ b/src/puppet-neo.ts
-@@ -2,10 +2,33 @@ import { setTimeout as delay } from 'node:timers/promises'
+@@ -2,10 +2,40 @@ import { setTimeout as delay } from 'node:timers/promises'
  import { Puppet, types, type payloads, type PuppetOptions } from 'wechaty-puppet'
  import jsQR from 'jsqr'
  import { PNG } from 'pngjs'
@@ -275,6 +579,13 @@ index 9da9e02..414f487 100644
  
  const CACHE_LIMIT = 2048
  
++/**
++ * The file a send carries, as Wechaty's FileBox interface describes it: a name and the
++ * bytes. Taken from the Puppet method's own signature, so this file needs no second
++ * dependency to say what it accepts.
++ */
++export type FileBoxInterface = Parameters<Puppet['messageSendFile']>[1]
++
 +/**
 + * A message as the addon carried it: Wechaty's payload, plus WeChat's own type and
 + * the raw bytes behind it, so a consumer can see what arrived and not only its text.
@@ -301,7 +612,36 @@ index 9da9e02..414f487 100644
  function putRecent<T>(cache: Map<string, T>, id: string, value: T) {
    cache.delete(id)
    cache.set(id, value)
-@@ -39,7 +62,7 @@ export class PuppetNeo extends Puppet {
+@@ -15,6 +45,28 @@ function putRecent<T>(cache: Map<string, T>, id: string, value: T) {
+   }
+ }
+ 
++/**
++ * The carrier a file's own name asks for. WeChat has three of these, and the name is all
++ * this puppet can go by: a voice note is SILK (or what a caller named as one), a picture
++ * is a picture, and everything else is a file.
++ */
++function carrier(name: string): 'voice' | 'image' | 'file' {
++  const extension = name.slice(name.lastIndexOf('.') + 1).toLowerCase()
++  if (['silk', 'sil', 'slk', 'amr'].includes(extension)) return 'voice'
++  if (['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(extension)) return 'image'
++  return 'file'
++}
++
++/**
++ * How long a voice note plays: the milliseconds its name states (`1200.silk` is 1.2 s),
++ * since SILK is not read here to measure it. WeChat's voice profile lasts at most a
++ * minute, and a note whose name states no length is sent as one second.
++ */
++function voiceDuration(name: string): number {
++  const stated = Number.parseInt(name, 10)
++  return Number.isSafeInteger(stated) && stated > 0 ? Math.min(stated, 60_000) : 1000
++}
++
+ function decodeQr(encoded: string) {
+   const bytes = Buffer.from(encoded, 'base64')
+   if (bytes.length < 24 || bytes.length > 1024 * 1024 ||
+@@ -39,7 +91,7 @@ export class PuppetNeo extends Puppet {
    private pendingSends = new Set<Promise<unknown>>()
    private readonly contacts = new Map<string, payloads.Contact>()
    private readonly rooms = new Map<string, true>()
@@ -310,7 +650,7 @@ index 9da9e02..414f487 100644
  
    constructor(options: PuppetOptions = {}) {
      super(options)
-@@ -125,14 +148,46 @@ export class PuppetNeo extends Puppet {
+@@ -125,14 +177,46 @@ export class PuppetNeo extends Puppet {
    override async contactRawPayload(id: string): Promise<payloads.Contact> {
      if (id === this.currentUserId) return this.selfContact(id)
      const contact = this.contacts.get(id)
@@ -359,7 +699,47 @@ index 9da9e02..414f487 100644
    override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
      if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
      const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
-@@ -236,7 +291,16 @@ export class PuppetNeo extends Puppet {
+@@ -150,6 +234,39 @@ export class PuppetNeo extends Puppet {
+     }
+   }
+ 
++  /**
++   * Send one file to a peer or group: the conversation id is the peer's own WeChat id,
++   * or a group's `@chatroom` id. The file's name picks WeChat's carrier (see `carrier`),
++   * and the bytes the caller already has are what is sent: Neo fetches no URL and
++   * transcodes nothing, so WeChat refuses bytes that do not fit the carrier it chose -
++   * an image message, for one, carries JPEG only, and only inside its own small bounds.
++   */
++  override async messageSendFile(conversationId: string, file: FileBoxInterface): Promise<void> {
++    if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
++    const name = file.name
++    const bytes = (await file.toBuffer()).toString('base64')
++    const session = this.session
++    let send
++    switch (carrier(name)) {
++      case 'voice':
++        send = session.sendVoice(conversationId, voiceDuration(name), bytes)
++        break
++      case 'image':
++        send = session.sendImage(conversationId, name, bytes)
++        break
++      default:
++        send = session.sendFile(conversationId, name, bytes)
++    }
++    this.pendingSends.add(send)
++    try {
++      const result = await send
++      if (result.status === 'uncertain') throw new Error('WeChat media send outcome is uncertain')
++      if (result.status === 'rejected') throw new Error('WeChat rejected the media send')
++    } finally {
++      this.pendingSends.delete(send)
++    }
++  }
++
+   private async stopServing(): Promise<void> {
+     this.abort?.abort()
+     await this.run
+@@ -236,7 +353,16 @@ export class PuppetNeo extends Puppet {
        for (const item of page.messages) {
          if (this.messages.has(item.id)) continue
          this.rememberContact(item.talker)
@@ -378,19 +758,20 @@ index 9da9e02..414f487 100644
            putRecent(this.rooms, item.room, true)
            putRecent(this.messages, item.id, { ...text, roomId: item.room })
 diff --git a/test/ding-dong.test.ts b/test/ding-dong.test.ts
-index 72e7b75..65687d2 100644
+index 72e7b75..485aa6b 100644
 --- a/test/ding-dong.test.ts
 +++ b/test/ding-dong.test.ts
-@@ -4,7 +4,7 @@ import { test } from 'node:test'
+@@ -4,7 +4,8 @@ import { test } from 'node:test'
  import { types, type payloads } from 'wechaty-puppet'
  import qrTerminal from 'qrcode-terminal'
  import PuppetNeo from 'wechaty-puppet-neo'
 -import type { IncomingText, SelfProfile, Session } from '../src/native.js'
-+import type { IncomingMessage, IncomingText, SelfProfile, Session } from '../src/native.js'
++import type { IncomingMessage, IncomingText, MediaSend, SelfProfile, Session } from '../src/native.js'
++import type { FileBoxInterface } from '../src/puppet-neo.js'
  
  const username = 'fixture-self'
  const sender = 'fixture-peer'
-@@ -12,6 +12,8 @@ const room = 'fixture-room@chatroom'
+@@ -12,17 +13,21 @@ const room = 'fixture-room@chatroom'
  const member = 'fixture-member'
  const direct: IncomingText = { id: 'fixture-message', talker: sender, listener: username, text: 'ding', timestamp: 1700000000 }
  const inRoom: IncomingText = { id: 'fixture-room-message', talker: member, room, text: 'ding', timestamp: 1700000001 }
@@ -399,7 +780,12 @@ index 72e7b75..65687d2 100644
  // The native addon's error for a session WeChat no longer accepts (SESSION_ENDED).
  const SESSION_ENDED = 'Neo session ended by WeChat'
  const profile: SelfProfile = { nickname: 'Fixture Name', alias: 'fixture-alias', avatar: null }
-@@ -22,7 +24,7 @@ interface Script {
+ 
+ interface Script {
+   send?: 'accepted' | 'uncertain'
++  /** What every media send reports: a voice note, a file or an image. */
++  media?: MediaSend['status']
+   profile?: SelfProfile | 'fails'
    /** Thrown by every heartbeat after the first, which then comes due quickly. */
    laterHeartbeat?: Error
    /** Delivered by the first NewSync after login. */
@@ -408,10 +794,83 @@ index 72e7b75..65687d2 100644
    /** Thrown by NewSync instead of delivering messages. */
    laterSync?: Error
  }
-@@ -190,6 +192,77 @@ test('group text names the group and the member, and the reply goes to the group
+@@ -62,6 +67,22 @@ function scriptedSession(trace: unknown[], script: Script = {}): Session {
+       trace.push(['send', destination, text])
+       return { status: script.send ?? 'accepted' }
+     },
++    async sendVoice(destination, durationMs, encoded) {
++      trace.push(['send-voice', destination, durationMs, encoded])
++      return { status: script.media ?? 'accepted' }
++    },
++    async sendFile(destination, fileName, bytes) {
++      trace.push(['send-file', destination, fileName, bytes])
++      return { status: script.media ?? 'accepted' }
++    },
++    async sendImage(destination, fileName, original) {
++      trace.push(['send-image', destination, fileName, original])
++      return { status: script.media ?? 'accepted' }
++    },
++    async encodeVoice(pcm) {
++      trace.push(['encode-voice', pcm])
++      return { voice: pcm, durationMs: 20 }
++    },
+     async lookupSelf() {
+       // Recorded one turn later, so the trace shows whether login waited for it.
+       await nextTurn()
+@@ -190,6 +211,127 @@ test('group text names the group and the member, and the reply goes to the group
    }
  })
  
++test('a file send picks the carrier its name asks for, and reports what WeChat said', async () => {
++  const trace: unknown[] = []
++  let media: MediaSend['status'] = 'accepted'
++  // Read at send time, so one session can see both answers WeChat gives.
++  const { puppet, events } = scriptedPuppet(trace, () => ({ get media() { return media } }))
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    // Wechaty hands the puppet a FileBox; these are the two things it asks one for.
++    const file = (name: string, body: string) => ({ name, toBuffer: async () => Buffer.from(body) }) as unknown as FileBoxInterface
++    await puppet.messageSendFile(sender, file('1200.silk', 'note'))
++    await puppet.messageSendFile(sender, file('photo.jpg', 'picture'))
++    await puppet.messageSendFile(sender, file('report.pdf', 'file'))
++    await puppet.messageSendFile(room, file('note.silk', 'note'))
++    assert.deepEqual(trace.filter(step => Array.isArray(step)), [
++      ['sync', 6], ['sync', 1],
++      ['send-voice', sender, 1200, Buffer.from('note').toString('base64')],
++      ['send-image', sender, 'photo.jpg', Buffer.from('picture').toString('base64')],
++      ['send-file', sender, 'report.pdf', Buffer.from('file').toString('base64')],
++      // A name that states no length is a one-second note, and a group is a destination.
++      ['send-voice', room, 1000, Buffer.from('note').toString('base64')],
++    ])
++    // An outcome the puppet cannot vouch for is an error, never a silent success.
++    media = 'uncertain'
++    await assert.rejects(puppet.messageSendFile(sender, file('report.pdf', 'file')), /outcome is uncertain/)
++    assert.deepEqual(events.errors, [])
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('the built addon carries a voice, a file and an image send', async () => {
++  // The addon the image ships, asked for the four methods the puppet calls. Without a
++  // session each call is refused at the stage it names, so this proves the native
++  // surface exists and accepts exactly the arguments src/native.ts passes it.
++  const puppet = new class extends PuppetNeo {
++    openSession() { return this.createSession() }
++  }()
++  const session = puppet.openSession()
++  try {
++    await assert.rejects(session.sendVoice(sender, 1000, 'note'), /prepare a voice send/)
++    await assert.rejects(session.sendFile(sender, 'report.pdf', 'file'), /prepare a file send/)
++    await assert.rejects(session.sendImage(sender, 'photo.jpg', 'picture'), /prepare an image send/)
++    await assert.rejects(session.encodeVoice('audio'), /encode a voice note/)
++  } finally {
++    await session.close()
++  }
++})
++
 +test('a non-text message arrives with its own type and is never reported as text', async () => {
 +  const { puppet, events } = scriptedPuppet([], () => ({ messages: [picture, notice] }))
 +  const arrivals: payloads.EventMessage[] = []

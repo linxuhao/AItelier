@@ -267,7 +267,6 @@ def test_the_check_only_post_and_the_post_ask_the_very_same_predicates(world, mo
 
 
 # --- the one media-types table ---------------------------------------------------------------
-# --- the one media-types table ---------------------------------------------------------------
 
 def test_python_reads_the_same_media_types_table_as_the_host():
     table = json.loads((REPO / "integrations/dsh-director/media-types.json").read_text())

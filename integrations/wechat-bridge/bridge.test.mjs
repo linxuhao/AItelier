@@ -1098,7 +1098,10 @@ test('media: one fetch at a time - another request meanwhile is 503 busy', async
 });
 
 test('media: a fetch the puppet never answers, or whose stream stalls, ends at its deadline: 503, the lock released, nothing left', async () => {
-  const s = await mediaBridge({ fetchLimits: { firstByteMs: 100, totalMs: 2000, attempts: 5 } });
+  // Read at each request: short for the two that must time out, then long again, so a loaded
+  // machine never times out the fetches that must succeed.
+  const limits = { firstByteMs: 100, totalMs: 2000, attempts: 5 };
+  const s = await mediaBridge({ fetchLimits: limits });
   try {
     const bot = await s.login();
     const hung = mediaMessage({ kind: 'image', id: 'hung', hang: true, fails: 1 });
@@ -1117,6 +1120,7 @@ test('media: a fetch the puppet never answers, or whose stream stalls, ends at i
     assert.ok(Date.now() - t0 >= 1900, 'the first byte cleared the first-byte deadline; the total one ended it');
     await until(() => stalled.fetched.destroyed === 1);
     assert.ok(s.tmpEmpty());
+    Object.assign(limits, MEDIA_FETCH);
     const [status, bytes] = await fetchMedia(s, fineId);
     assert.deepEqual([status, bytes.toString()], [200, 'FINE'], 'the lock is free again');
     const [again, hungBytes] = await fetchMedia(s, hungId);

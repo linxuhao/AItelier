@@ -40,6 +40,11 @@ dependencies = [
     # (`-n 4 --dist loadfile`). Exact pin: a test instrument, upgraded
     # deliberately, never by a rebuild.
     "pytest-xdist==3.8.0",
+    # pytest-timeout bounds a hung row (`--timeout`). Installing it also switches
+    # on core/repository_executor_entry.py's `--timeout=120 --timeout-method=thread`
+    # for every repository-gate pytest run that asks for pytest_timeout, which is
+    # dormant while the image lacks the plugin.
+    "pytest-timeout==2.5.0",
     "fastapi>=0.136",
     "typer>=0.24",
     # Upper bound is load-bearing: litellm 1.106.x imports mcp.types.CacheableResult at

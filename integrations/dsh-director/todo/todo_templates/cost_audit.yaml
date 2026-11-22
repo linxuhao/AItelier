@@ -4,7 +4,8 @@ description: >-
   Read-only cost audit of the project's checks and process: measure, then propose. Give this
   description to the child as the plan's goal: the child sees only the goal, the item title and
   the predicates. The child changes nothing but the one JSON report it writes during the step,
-  and should not be the one who added the gates it audits. Run each measuring command once with
+  and commits it (the delivery item that follows wants a commit past the base); it should not
+  be the one who added the gates it audits. Run each measuring command once with
   timing (the commands are data, any language or runner; with none given, find the project's
   own checks, and a project with no tests times its build or export, if any, and reads from git
   history how often reviews or gates were repeated). Look for nested test runners that re-run
@@ -49,7 +50,7 @@ params:
 items:
   - id: audit
     title: >-
-      Read-only cost audit of ${look_at}: change nothing but ${report_path}. Time each command
+      Read-only cost audit of ${look_at}: change nothing but ${report_path}, and commit it. Time each command
       once: ${measure_commands} (empty: find the project's own checks; no tests: its build or
       export). Limits: ${limits}. Previous report: ${previous_report} (empty: this audit sets
       the baseline). Every finding that removes a test or gate names in still_guarded_by what

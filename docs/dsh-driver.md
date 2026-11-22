@@ -382,9 +382,9 @@ the child times the project's check commands once (given as data in
 `measure_commands`, any language or runner, or none), judges them against
 `limits` (default: a single test under 10 s, the full check under 10 min) and
 writes one JSON report (`report_path`, default `cost-audit.json`) with
-`measured_commands`, `baseline`, `costliest`, `findings` (each with category,
-where, cost, evidence, proposed change, what still guards it, risk) and
-`recommendations`. The child never sees the template's description, so the item
+`measured_commands`, `baseline`, `costliest`, `findings` and `recommendations`
+(only these five keys are checked; the description asks each finding for a category,
+where, cost, evidence, proposed change, what still guards it and risk). The child never sees the template's description, so the item
 title carries the rules that matter and the director passes the description as
 the plan's goal. It proposes; nothing waits on it. A host that names its own
 template directory replaces the default set, so it copies or links

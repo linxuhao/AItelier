@@ -60,7 +60,8 @@ const sleep = (ms, signal) => new Promise(resolve => {
 });
 
 /** Registers the channel and starts polling; returns `{ stop, polled }` (`polled`
- *  settles when the poll loop has ended). Timings are parameters for the tests. */
+ *  settles when the poll loop has ended). Timings, and `wait` (the pause between retries),
+ *  are parameters for the tests. */
 /** The bridge's /status as this channel's status. A bridge without `phase` (before the
  *  on-demand QR) is read as before: not logged in is 'scan needed'. */
 export function statusFromBridge(body) {
@@ -79,7 +80,7 @@ export function statusFromBridge(body) {
  *  this long, so the new QR reaches the dashboard in seconds, not at the next 30 s read. */
 export function startWechatChannel({ ownerChannels, logger = console, config = {}, fetch = globalThis.fetch,
   waitSeconds = 25, retryMs = 5000, maxRetryMs = 60_000, pollGraceMs = 10_000,
-  statusEveryMs = 30_000, fastEveryMs = 5000, fastForMs = 180_000 }) {
+  statusEveryMs = 30_000, fastEveryMs = 5000, fastForMs = 180_000, wait = sleep }) {
   const url = String(config.url ?? defaultUrl()).replace(/\/+$/, '');
   const token = readToken(config.tokenFile ?? defaultTokenFile());
   const stopping = new AbortController();
@@ -175,7 +176,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       }
       // Never the text in a log line: the message ref and the reason only.
       logger.warn(`wechat: inbound ${event.message_ref} not delivered (attempt ${attempt}): ${reason}; retrying`);
-      await sleep(pause, stopping.signal);
+      await wait(pause, stopping.signal);
       pause = Math.min(pause * 2, maxRetryMs);
     }
   }
@@ -201,7 +202,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
         if (stopping.signal.aborted) return;
         logger.warn('wechat: polling the bridge failed: ' + String(error?.message ?? error).slice(0, 200));
         await refreshStatus();
-        await sleep(retryMs, stopping.signal);
+        await wait(retryMs, stopping.signal);
       }
     }
   }

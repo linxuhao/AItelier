@@ -672,6 +672,67 @@ test('media: channel_sender_not_bound stops the fetching; inbound goes without a
   } finally { await channel.stop(); await bridge.close(); }
 });
 
+test('media: once storeMedia answers channel_sender_not_bound, inbound goes without attachments, even those already resolved', async () => {
+  const bridge = await fakeBridge();
+  const channels = mediaChannels({ bound: meta => meta.senderRef === 'wxid_owner', accept: () => false });
+  bridge.media.set('1.1', [[200, Buffer.alloc(4)]]);
+  // The stranger's first item is refused without storeMedia (too_large); the second meets the binding check.
+  bridge.events.push(mediaEvent(1, [{ kind: 'file', too_large: true }, { media_id: '1.1', kind: 'image' }], { sender_ref: 'wxid_stranger' }));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    await until(() => channels.received.length === 1);
+    assert.deepEqual(channels.stored.map(m => `${m.messageRef}.${m.index}`), ['m1.1']);
+    assert.equal('attachments' in channels.received[0], false, 'not even the too_large refusal gathered before');
+    assert.deepEqual(mediaFetches(bridge), []);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('media: a host without storeMedia gets every file as unsupported, nothing fetched and nothing held', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels();
+  bridge.media.set('1.0', [[200, Buffer.from('X')]]);
+  bridge.events.push(mediaEvent(1, [{ media_id: '1.0', kind: 'image' }]), event(2));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    await until(() => channels.received.length === 2);
+    assert.deepEqual(channels.received[0].attachments, [{ kind: 'image', refused: 'unsupported' }]);
+    assert.deepEqual(mediaFetches(bridge), []);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('media: while the bridge answers 503 the pause between attempts doubles, up to maxRetryMs', async () => {
+  const bridge = await fakeBridge();
+  const channels = mediaChannels();
+  bridge.media.set('1.0', [[503], [503], [503], [503], [503], [200, Buffer.from('OK')]]);
+  bridge.events.push(mediaEvent(1, [{ media_id: '1.0', kind: 'image' }]));
+  const pauses = [];
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1,
+    retryMs: 10, maxRetryMs: 50, wait: async ms => { pauses.push(ms); await new Promise(resolve => setTimeout(resolve, 1)); } });
+  try {
+    await until(() => channels.received.length === 1);
+    assert.deepEqual(pauses.slice(0, 5), [10, 20, 40, 50, 50]);
+    assert.deepEqual(channels.received[0].attachments, [{ kind: 'image', ref: 'm_0000000000000001' }]);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('media: a caption that fails after the file went out is logged; sendFile still answers the file\'s ref', async () => {
+  const bridge = await fakeBridge();
+  const channels = fakeChannels();
+  const file = join(dir, 'caption.png');
+  writeFileSync(file, Buffer.from('PNG'));
+  const warnings = [];
+  const channel = startWechatChannel({ ownerChannels: channels, logger: { warn: line => warnings.push(line) },
+    config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    bridge.sendFileAnswer = [200, { ref: 'f-7', sent_as: 'image' }];
+    bridge.sendAnswer = [502, { error: 'send_failed' }];
+    assert.deepEqual(await channels.registered.sendFile({ to: 'wxid_owner', kind: 'image', mime: 'image/png', name: 'caption.png',
+      path: file, caption: '看图' }), { ref: 'f-7' });
+    assert.deepEqual(bridge.sent, [{ to: 'wxid_owner', text: '看图' }], 'the caption was tried');
+    assert.ok(warnings.some(line => line.includes('caption after a file was not sent')));
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
 test('media: sendFile streams the host\'s file to POST /send-file (to the owner or into a group), a caption follows; mediaKinds', async () => {
   const bridge = await fakeBridge();
   const channels = fakeChannels();
@@ -711,12 +772,12 @@ test('media: sendFile streams the host\'s file to POST /send-file (to the owner 
 test('media end to end with the real bridge module: an owner\'s photo stored, a stranger\'s files never fetched, a refused voice bar sent as a file', async () => {
   const types = { Message: { Attachment: 1, Audio: 2, Image: 6, Text: 7 }, Contact: { Official: 2 }, ScanStatus: { Waiting: 2 } };
   const bot = new EventEmitter();
-  const sent = [];
+  const sent = [], refusedSilk = [];
   let fetches = 0;
   bot.start = async () => {};
   bot.stop = async () => {};
   bot.puppet = { messageSendFile: async (to, box) => {
-    if (box.name.endsWith('.silk')) throw new Error('voice refused');
+    if (box.name.endsWith('.silk')) { refusedSilk.push(box.name); throw new Error('voice refused'); }
     sent.push({ to, name: box.name, bytes: box.bytes });
     return 'out-' + sent.length;
   } };
@@ -727,8 +788,10 @@ test('media end to end with the real bridge module: an owner\'s photo stored, a 
   const channels = mediaChannels({ bound: meta => meta.senderRef === 'wxid_owner', accept: m => m.senderRef === 'wxid_owner' });
   const channel = startWechatChannel({ ownerChannels: channels, logger: quiet,
     config: { tokenFile, url: `http://${address.address}:${address.port}` }, waitSeconds: 1, statusEveryMs: 20 });
+  // A file's payload carries its appmsg XML (type 6), as the fork hands it over; without it the bridge lets no file in.
+  const fileXml = Buffer.from('<msg><appmsg><title>a.pdf</title><type>6</type><appattach><totallen>8</totallen></appattach></appmsg></msg>').toString('base64');
   const media = (id, from, type, bytes) => ({ id, self: () => false, type: () => type, text: () => '', date: () => new Date(),
-    payload: {}, talker: () => ({ id: from, type: () => 0 }),
+    payload: type === types.Message.Attachment ? { messageType: 49, content: fileXml } : {}, talker: () => ({ id: from, type: () => 0 }),
     toFileBox: async () => { fetches++; return { name: 'x', toStream: async () => Readable.from([bytes]) }; },
     toImage: () => ({ hd: async () => { fetches++; return { name: 'x.jpg', mediaType: 'image/jpeg', toStream: async () => Readable.from([bytes]) }; } }) });
   try {
@@ -744,10 +807,16 @@ test('media end to end with the real bridge module: an owner\'s photo stored, a 
     assert.deepEqual(channels.received[3].attachments, [{ kind: 'image', ref: 'm_0000000000000001' }]);
     assert.equal(channels.opened[0].bytes.toString(), 'PHOTO');
     assertClosedSet(channels.received);
+    // A WAV (the only voice the fork encodes): the voice bar is tried, refused, and the same bytes go as a file.
+    const audio = Buffer.alloc(44 + 320);
+    audio.write('RIFF', 0, 'latin1'); audio.writeUInt32LE(36 + 320, 4); audio.write('WAVE', 8, 'latin1'); audio.write('fmt ', 12, 'latin1');
+    audio.writeUInt32LE(16, 16); audio.writeUInt16LE(1, 20); audio.writeUInt16LE(1, 22); audio.writeUInt32LE(16000, 24);
+    audio.writeUInt32LE(32000, 28); audio.writeUInt16LE(2, 32); audio.writeUInt16LE(16, 34); audio.write('data', 36, 'latin1'); audio.writeUInt32LE(320, 40);
     const file = join(dir, 'voice-e2e.wav');
-    writeFileSync(file, Buffer.from('RIFF-ish audio'));
+    writeFileSync(file, audio);
     assert.deepEqual(await channels.registered.sendFile({ to: 'wxid_owner', kind: 'voice', mime: 'audio/wav', name: 'voice-e2e.wav', path: file }),
       { ref: 'out-1' });
-    assert.deepEqual(sent.map(x => [x.to, x.name, x.bytes.toString()]), [['wxid_owner', 'voice-e2e.wav', 'RIFF-ish audio']]);
+    assert.deepEqual(refusedSilk, ['voice-e2e.silk'], 'the voice bar was tried first');
+    assert.deepEqual(sent.map(x => [x.to, x.name, x.bytes.equals(audio)]), [['wxid_owner', 'voice-e2e.wav', true]]);
   } finally { await channel.stop(); await bridge.close(); }
 });

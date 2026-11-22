@@ -1,0 +1,434 @@
+From 32e2443607038a9472f6f017cf5b6154649f7b1d Mon Sep 17 00:00:00 2001
+From: AItelier wechat-bridge fork <noreply@aitelier.invalid>
+Date: Sun, 22 Nov 2026 12:03:01 +0000
+Subject: [PATCH] Carry every incoming message type out of the addon
+
+The addon decided which messages exist: incoming_text dropped anything whose type
+was not 1 before TypeScript could look at it, so images (3), voice (34), video
+(43), stickers (47), app messages and quoted replies (49/57) and system notices
+(10000) never left native code.
+
+The addon is a protocol client, not a policy. It now drops outgoing only and
+reports WeChat's own message type with the raw content/inline_data bytes (base64),
+so the consumer can see what arrived. Which arriving types may enter a
+conversation stays the consumer's decision: the bridge admits text only, and system
+notices and app messages stay out of conversations until a rule says otherwise.
+
+Text is unchanged: type 1 keeps the same JSON shape, the sender-in-content group
+split, and a group message without a valid sender is still skipped, never credited
+to the group.
+
+The Puppet maps the payload: text stays Text, image/voice/video/sticker map to
+their Wechaty types, and every type this puppet does not model - a system notice
+included - is Unknown, never Text, so WeChat's own announcement cannot read as a
+member speaking.
+---
+ native/src/lib.rs      | 173 ++++++++++++++++++++++++++++++++++++++++-
+ src/native.ts          |  27 ++++++-
+ src/puppet-neo.ts      |  38 ++++++++-
+ test/ding-dong.test.ts |  41 +++++++++-
+ 4 files changed, 269 insertions(+), 10 deletions(-)
+
+diff --git a/native/src/lib.rs b/native/src/lib.rs
+index ec6c930..06c97f6 100644
+--- a/native/src/lib.rs
++++ b/native/src/lib.rs
+@@ -55,6 +55,44 @@ struct TextMessage {
+     timestamp: u32,
+ }
+ 
++/// A message whose type is not text, carried out of the addon as it arrived.
++///
++/// The addon is a protocol client, not a policy: it reports WeChat's own type and
++/// the raw payload, and the consumer decides which arriving types may enter a
++/// conversation.
++#[derive(Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++struct TypedMessage {
++    id: String,
++    /// Who wrote the message. In a group the wire names the group: the member who
++    /// posted a non-text message is not in the payload.
++    talker: String,
++    /// The account that received a direct message.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    listener: Option<String>,
++    /// The group the message was posted in.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    room: Option<String>,
++    /// WeChat's message type: image 3, voice 34, video 43, sticker 47, app (a
++    /// quoted reply) 49 or 57, system notice 10000.
++    message_type: i32,
++    /// The raw `content` bytes, base64, exactly as the wire carried them.
++    content: String,
++    /// The raw `inline_data` bytes, base64, when the message carries any.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    inline_data: Option<String>,
++    timestamp: u32,
++}
++
++/// Any incoming message. Text keeps the shape and the handling it had; every other
++/// type arrives with its own type and payload instead of being dropped here.
++#[derive(Debug, PartialEq, Serialize)]
++#[serde(untagged)]
++enum IncomingMessage {
++    Text(TextMessage),
++    Typed(TypedMessage),
++}
++
+ #[derive(Default, Serialize)]
+ struct SelfProfile {
+     nickname: Option<String>,
+@@ -324,7 +362,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+         .own_username;
+     let cursor = session.received_cursor.clone();
+     let batch = connection(session)?.sync(&cursor, scene)?;
+-    let messages = text_messages(batch.commands, &own);
++    let messages = incoming_messages(batch.commands, &own);
+     session.received_cursor = batch.cursor;
+     Ok(json!({ "messages": messages, "continuation": batch.continuation }))
+ }
+@@ -451,15 +489,45 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+     }
+ }
+ 
+-fn text_messages(commands: Vec<wire::SyncCommand>, username: &str) -> Vec<TextMessage> {
++fn incoming_messages(commands: Vec<wire::SyncCommand>, username: &str) -> Vec<IncomingMessage> {
+     commands
+         .into_iter()
+         .filter(|command| command.id == 5)
+         .filter_map(|command| wire::decode_add_message(&command.payload, username).ok())
+-        .filter_map(incoming_text)
++        .filter_map(incoming_message)
+         .collect()
+ }
+ 
++/// An incoming message of any type. `outgoing` is the only thing dropped here:
++/// whether an arriving type may enter a conversation is the consumer's decision.
++fn incoming_message(message: wire::AddMessage) -> Option<IncomingMessage> {
++    if message.message_type == 1 {
++        return incoming_text(message).map(IncomingMessage::Text);
++    }
++    if message.outgoing {
++        return None;
++    }
++    let id = message.server_message_id?;
++    let (talker, listener, room) = if message.from.ends_with("@chatroom") {
++        let room = message.from;
++        let talker = message.sender_id.unwrap_or_else(|| room.clone());
++        (talker, None, Some(room))
++    } else {
++        (message.from, Some(message.to), None)
++    };
++    Some(IncomingMessage::Typed(TypedMessage {
++        id,
++        talker,
++        listener,
++        room,
++        message_type: message.message_type,
++        content: STANDARD.encode(&message.content),
++        inline_data: (!message.inline_data.is_empty())
++            .then(|| STANDARD.encode(&message.inline_data)),
++        timestamp: message.created_at,
++    }))
++}
++
+ /// Incoming text with a server message ID. A group message names its member
+ /// sender in the content; one without a valid sender is skipped, never credited
+ /// to the group.
+@@ -742,6 +810,103 @@ mod tests {
+         assert_eq!(incoming_text(image), None);
+     }
+ 
++    fn typed_message(from: &str, to: &str, message_type: i32) -> wire::AddMessage {
++        let mut message = add_message(from, to, "<msg/>");
++        message.message_type = message_type;
++        message
++    }
++
++    #[test]
++    fn an_image_arrives_with_its_own_type_and_payload() {
++        let mut image = typed_message("fixture-peer", "fixture-self", 3);
++        image.content = b"\x89PNG\r\n".to_vec();
++        image.inline_data = b"thumbnail".to_vec();
++        let message = incoming_message(image).expect("an image is delivered, not dropped");
++        assert_eq!(
++            message,
++            IncomingMessage::Typed(TypedMessage {
++                id: "fixture-message".into(),
++                talker: "fixture-peer".into(),
++                listener: Some("fixture-self".into()),
++                room: None,
++                message_type: 3,
++                content: STANDARD.encode(b"\x89PNG\r\n"),
++                inline_data: Some(STANDARD.encode(b"thumbnail")),
++                timestamp: 1700000000,
++            })
++        );
++        let json = serde_json::to_value(message).unwrap();
++        assert_eq!(json["messageType"], 3);
++        assert_eq!(json["content"], STANDARD.encode(b"\x89PNG\r\n"));
++        assert_eq!(json["inlineData"], STANDARD.encode(b"thumbnail"));
++        // Nothing but text may report itself as text.
++        assert!(json.get("text").is_none());
++    }
++
++    #[test]
++    fn every_non_text_type_reaches_the_consumer_with_the_type_wechat_sent() {
++        for (message_type, expected) in [
++            (3, "image"),
++            (34, "voice"),
++            (43, "video"),
++            (47, "sticker"),
++            (49, "app"),
++            (57, "quoted reply"),
++            (10000, "system notice"),
++            (2000, "a type this puppet does not know"),
++        ] {
++            let json = serde_json::to_value(
++                incoming_message(typed_message("fixture-peer", "fixture-self", message_type))
++                    .unwrap_or_else(|| panic!("{expected} is dropped")),
++            )
++            .unwrap();
++            assert_eq!(json["messageType"], message_type, "{expected}");
++            assert_eq!(json["talker"], "fixture-peer", "{expected}");
++            assert_eq!(json["listener"], "fixture-self", "{expected}");
++            assert_eq!(json["content"], STANDARD.encode(b"<msg/>"), "{expected}");
++            assert!(json.get("inlineData").is_none(), "{expected}");
++            assert!(json.get("text").is_none(), "{expected}");
++        }
++    }
++
++    #[test]
++    fn a_group_non_text_message_names_the_group_and_the_sender_when_the_wire_does() {
++        let json = serde_json::to_value(
++            incoming_message(typed_message("fixture-room@chatroom", "fixture-self", 47)).unwrap(),
++        )
++        .unwrap();
++        assert_eq!(json["messageType"], 47);
++        assert_eq!(json["room"], "fixture-room@chatroom");
++        assert_eq!(json["talker"], "fixture-room@chatroom");
++        assert!(json.get("listener").is_none());
++
++        let mut named = typed_message("fixture-room@chatroom", "fixture-self", 3);
++        named.sender_id = Some("fixture-member".into());
++        let json = serde_json::to_value(incoming_message(named).unwrap()).unwrap();
++        assert_eq!(json["talker"], "fixture-member");
++        assert_eq!(json["room"], "fixture-room@chatroom");
++    }
++
++    #[test]
++    fn outgoing_messages_are_dropped_whatever_their_type() {
++        assert_eq!(
++            incoming_message(add_message("fixture-self", "fixture-peer", "dong")),
++            None
++        );
++        for message_type in [3, 34, 43, 47, 49, 57, 10000] {
++            assert_eq!(
++                incoming_message(typed_message("fixture-self", "fixture-peer", message_type)),
++                None,
++                "direct {message_type}"
++            );
++            assert_eq!(
++                incoming_message(typed_message("fixture-self", "fixture-room@chatroom", message_type)),
++                None,
++                "group {message_type}"
++            );
++        }
++    }
++
+     #[test]
+     fn closing_without_a_session_resets_state() {
+         let mut session = Session {
+@@ -756,7 +921,7 @@ mod tests {
+ 
+     #[test]
+     fn unhandled_sync_commands_are_skipped() {
+-        let messages = text_messages(
++        let messages = incoming_messages(
+             vec![wire::SyncCommand {
+                 id: 9999,
+                 payload: vec![42],
+diff --git a/src/native.ts b/src/native.ts
+index eea2d34..6cdf763 100644
+--- a/src/native.ts
++++ b/src/native.ts
+@@ -22,6 +22,31 @@ export interface IncomingText {
+   timestamp: number
+ }
+ 
++/**
++ * A message the addon carried out of the sync stream. Text arrives exactly as
++ * before; WeChat's other types arrive with their own type and raw payload rather
++ * than being dropped in the addon.
++ */
++export interface IncomingMessage {
++  id: string
++  /** Who wrote the message. In a group: the member for text, the group otherwise. */
++  talker: string
++  /** The account that received a direct message. */
++  listener?: string
++  /** The group the message was posted in. */
++  room?: string
++  /** Present on text messages only. */
++  text?: string
++  /** WeChat's message type when it is not text: image 3, voice 34, video 43,
++   *  sticker 47, app (a quoted reply) 49 or 57, system notice 10000. */
++  messageType?: number
++  /** The raw content bytes, base64, of a message that is not text. */
++  content?: string
++  /** The raw inline bytes, base64, when the message carries them. */
++  inlineData?: string
++  timestamp: number
++}
++
+ export interface Session {
+   startLogin(): Promise<{ png: string }>
+   pollLogin(): Promise<
+@@ -30,7 +55,7 @@ export interface Session {
+   >
+   heartbeat(): Promise<{ sync: boolean, intervalMs: number }>
+   pollIncoming(): Promise<boolean>
+-  sync(scene: 1 | 6 | 7): Promise<{ messages: IncomingText[], continuation: boolean }>
++  sync(scene: 1 | 6 | 7): Promise<{ messages: IncomingMessage[], continuation: boolean }>
+   sendText(destination: string, text: string): Promise<{ status: 'accepted' | 'rejected' | 'uncertain' }>
+   lookupSelf(): Promise<SelfProfile>
+   logout(): Promise<{ accepted: boolean }>
+diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
+index 9da9e02..46ab9d1 100644
+--- a/src/puppet-neo.ts
++++ b/src/puppet-neo.ts
+@@ -2,10 +2,33 @@ import { setTimeout as delay } from 'node:timers/promises'
+ import { Puppet, types, type payloads, type PuppetOptions } from 'wechaty-puppet'
+ import jsQR from 'jsqr'
+ import { PNG } from 'pngjs'
+-import { openNativeSession, SESSION_ENDED, type SelfProfile, type Session } from './native.js'
++import { openNativeSession, SESSION_ENDED, type IncomingMessage, type SelfProfile, type Session } from './native.js'
+ 
+ const CACHE_LIMIT = 2048
+ 
++/**
++ * A message as the addon carried it: Wechaty's payload, plus WeChat's own type and
++ * the raw bytes behind it, so a consumer can see what arrived and not only its text.
++ */
++type CachedMessage = payloads.Message & Pick<IncomingMessage, 'messageType' | 'content' | 'inlineData'>
++
++/**
++ * Wechaty's type for a message Neo carried. Text is text; a WeChat type this puppet
++ * does not model is Unknown, never Text: a system notice that reads as text would
++ * turn WeChat's own announcement into a member speaking.
++ */
++function messageType({ messageType }: IncomingMessage): types.Message {
++  switch (messageType) {
++    case undefined:
++    case 1: return types.Message.Text
++    case 3: return types.Message.Image
++    case 34: return types.Message.Audio
++    case 43: return types.Message.Video
++    case 47: return types.Message.Emoticon
++    default: return types.Message.Unknown
++  }
++}
++
+ function putRecent<T>(cache: Map<string, T>, id: string, value: T) {
+   cache.delete(id)
+   cache.set(id, value)
+@@ -39,7 +62,7 @@ export class PuppetNeo extends Puppet {
+   private pendingSends = new Set<Promise<unknown>>()
+   private readonly contacts = new Map<string, payloads.Contact>()
+   private readonly rooms = new Map<string, true>()
+-  private readonly messages = new Map<string, payloads.Message>()
++  private readonly messages = new Map<string, CachedMessage>()
+ 
+   constructor(options: PuppetOptions = {}) {
+     super(options)
+@@ -236,7 +259,16 @@ export class PuppetNeo extends Puppet {
+       for (const item of page.messages) {
+         if (this.messages.has(item.id)) continue
+         this.rememberContact(item.talker)
+-        const text = { id: item.id, talkerId: item.talker, text: item.text, timestamp: item.timestamp, type: types.Message.Text }
++        const text = {
++          id: item.id,
++          talkerId: item.talker,
++          text: item.text,
++          timestamp: item.timestamp,
++          type: messageType(item),
++          ...(item.messageType === undefined ? {} : { messageType: item.messageType }),
++          ...(item.content === undefined ? {} : { content: item.content }),
++          ...(item.inlineData === undefined ? {} : { inlineData: item.inlineData }),
++        }
+         if (item.room) {
+           putRecent(this.rooms, item.room, true)
+           putRecent(this.messages, item.id, { ...text, roomId: item.room })
+diff --git a/test/ding-dong.test.ts b/test/ding-dong.test.ts
+index 72e7b75..c3a0983 100644
+--- a/test/ding-dong.test.ts
++++ b/test/ding-dong.test.ts
+@@ -4,7 +4,7 @@ import { test } from 'node:test'
+ import { types, type payloads } from 'wechaty-puppet'
+ import qrTerminal from 'qrcode-terminal'
+ import PuppetNeo from 'wechaty-puppet-neo'
+-import type { IncomingText, SelfProfile, Session } from '../src/native.js'
++import type { IncomingMessage, IncomingText, SelfProfile, Session } from '../src/native.js'
+ 
+ const username = 'fixture-self'
+ const sender = 'fixture-peer'
+@@ -12,6 +12,8 @@ const room = 'fixture-room@chatroom'
+ const member = 'fixture-member'
+ const direct: IncomingText = { id: 'fixture-message', talker: sender, listener: username, text: 'ding', timestamp: 1700000000 }
+ const inRoom: IncomingText = { id: 'fixture-room-message', talker: member, room, text: 'ding', timestamp: 1700000001 }
++const picture: IncomingMessage = { id: 'fixture-image', talker: sender, listener: username, messageType: 3, content: 'iVBORw0KGgo=', inlineData: 'dGh1bWI=', timestamp: 1700000002 }
++const notice: IncomingMessage = { id: 'fixture-notice', talker: room, room, messageType: 10000, content: 'eCBhZGRlZCB5IHRvIHRoZSBncm91cA==', timestamp: 1700000003 }
+ // The native addon's error for a session WeChat no longer accepts (SESSION_ENDED).
+ const SESSION_ENDED = 'Neo session ended by WeChat'
+ const profile: SelfProfile = { nickname: 'Fixture Name', alias: 'fixture-alias', avatar: null }
+@@ -22,7 +24,7 @@ interface Script {
+   /** Thrown by every heartbeat after the first, which then comes due quickly. */
+   laterHeartbeat?: Error
+   /** Delivered by the first NewSync after login. */
+-  messages?: IncomingText[]
++  messages?: IncomingMessage[]
+   /** Thrown by NewSync instead of delivering messages. */
+   laterSync?: Error
+ }
+@@ -190,6 +192,41 @@ test('group text names the group and the member, and the reply goes to the group
+   }
+ })
+ 
++test('a non-text message arrives with its own type and is never reported as text', async () => {
++  const { puppet, events } = scriptedPuppet([], () => ({ messages: [picture, notice] }))
++  const arrivals: payloads.EventMessage[] = []
++  const delivered = waitFor<void>(done => {
++    puppet.on('message', payload => {
++      arrivals.push(payload)
++      if (arrivals.length === 2) done()
++    })
++  }, 'both messages')
++  await puppet.start()
++  try {
++    await delivered
++    assert.deepEqual(arrivals.map(({ messageId }) => messageId), [picture.id, notice.id])
++
++    const image = await puppet.messageRawPayload(picture.id) as payloads.Message & IncomingMessage
++    assert.equal(image.type, types.Message.Image)
++    assert.equal(image.messageType, 3)
++    assert.equal(image.content, picture.content)
++    assert.equal(image.inlineData, picture.inlineData)
++    assert.equal(image.text, undefined)
++
++    // A system notice is carried with its own type; reading as text would turn
++    // WeChat's own announcement into a member speaking.
++    const system = await puppet.messageRawPayload(notice.id) as payloads.Message & IncomingMessage
++    assert.equal(system.type, types.Message.Unknown)
++    assert.notEqual(system.type, types.Message.Text)
++    assert.equal(system.messageType, 10000)
++    assert.equal(system.roomId, room)
++    assert.equal(system.text, undefined)
++    assert.deepEqual(events.errors, [])
++  } finally {
++    await puppet.stop()
++  }
++})
++
+ test('signing out from the phone during sync emits logout without an error', async () => {
+   const trace: unknown[] = []
+   const { puppet, events } = scriptedPuppet(trace, () => ({ laterSync: new Error(SESSION_ENDED) }))

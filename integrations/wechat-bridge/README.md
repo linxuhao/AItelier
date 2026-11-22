@@ -52,6 +52,29 @@ fits; `prebuilds/linux-x64` ships in the package) and `protobufjs` postinstall (
 version-scheme warning). The rest are `prepare` scripts, which npm does not run for
 registry installs.
 
+### The puppet is a fork
+
+The npm tarball's addon and its compiled JavaScript are replaced by a fork of
+wechaty-puppet-neo: `neo-fork/pin.json` names the upstream commit and the sha256 of every
+file the patch touches, `neo-fork/0001-incoming-message-types.patch` is the change, and
+the Dockerfile's `native` stage (Rust 1.93.1, the pin's `rust-toolchain.toml` channel)
+fetches that commit, verifies those blobs, applies the patch, runs `cargo build --release
+--locked` and rebuilds `dist/` with `tsc`, then runs the package's own tests. The build
+stage overlays exactly two paths from it - `node_modules/wechaty-puppet-neo/native/linux-x64/neo.node`
+and `node_modules/wechaty-puppet-neo/dist/` - before the load test above, so the image's
+own check runs the fork. The fork's source is not committed here; the upstream files the
+patch touches are vendored under `neo-fork/upstream/` (Apache-2.0, see its `NOTICE`) so
+`tests/unit/test_wechat_bridge_neo_fork.py` can check the pin, the patch and the
+Dockerfile offline.
+
+Why: 0.1.1's native addon dropped every incoming message whose type was not text (image
+3, voice 34, video 43, sticker 47, app messages and quoted replies 49/57, system notices
+10000) before any JavaScript could see it. The fork's native layer is faithful - it drops
+`outgoing` only and reports WeChat's own type with the raw `content`/`inline_data` bytes -
+and which arriving types may enter a conversation is the consumer's decision: this bridge
+still serves text only, and system notices and app messages stay out of conversations
+until a rule says otherwise.
+
 What the build checks, and what it found (2026-11-18, log in
 `~/.AItelier/artifacts/aitelier/dsh-director-plugin-20261114/s19-wechat-image-build.txt`):
 

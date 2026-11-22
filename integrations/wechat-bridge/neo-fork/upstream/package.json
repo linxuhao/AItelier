@@ -1,0 +1,52 @@
+{
+  "name": "wechaty-puppet-neo",
+  "version": "0.1.1",
+  "description": "A standalone WeChat protocol Puppet for Wechaty",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "native/*/neo.node",
+    "native/*/THIRD-PARTY.txt",
+    "examples/ding-dong-bot.ts",
+    "docs/v1-spec.md"
+  ],
+  "engines": {
+    "node": ">=26"
+  },
+  "license": "Apache-2.0",
+  "repository": "https://github.com/wechaty/puppet-neo",
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:native": "node scripts/build-native.mjs",
+    "typecheck": "tsc --project tsconfig.check.json",
+    "test": "npm run build && npm run typecheck && node --test test/*.test.ts",
+    "ding-dong": "node examples/ding-dong-bot.ts",
+    "test:package": "node scripts/test-package.mjs"
+  },
+  "peerDependencies": {
+    "wechaty-puppet": "1.20.2"
+  },
+  "dependencies": {
+    "jsqr": "1.4.0",
+    "pngjs": "7.0.0",
+    "qrcode-terminal": "0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "@types/pngjs": "6.0.5",
+    "@types/qrcode-terminal": "0.12.2",
+    "typescript": "7.0.2"
+  }
+}

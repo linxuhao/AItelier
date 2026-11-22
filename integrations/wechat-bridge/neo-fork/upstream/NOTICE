@@ -1,0 +1,15 @@
+The files under upstream/ are unmodified copies of wechaty-puppet-neo, vendored so the
+fork in this directory can be checked offline (no network, no cargo, no docker) by
+tests/unit/test_wechat_bridge_neo_fork.py.
+
+Upstream:  https://github.com/wechaty/puppet-neo
+Commit:    ddfa5ecd53ba1303d7e424acb47f86989715af89   (npm wechaty-puppet-neo 0.1.1)
+License:   Apache-2.0 — see LICENSE in this directory.
+
+Vendored:  every file 0001-incoming-message-types.patch touches, plus LICENSE,
+package.json and rust-toolchain.toml (the pinned version and the toolchain the bridge
+image must build with). The rest of the upstream repository is not vendored; the
+Dockerfile fetches the commit itself.
+
+pin.json beside this directory carries the sha256 and size of each of those files at
+that commit, and the sha256 of the patch.

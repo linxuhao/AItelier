@@ -118,6 +118,7 @@ export const SHIPPED = [
   join('todo', 'dsh_todo', 'security_jail.py'),
   join('todo', 'dsh_todo', 'templates.py'),
   join('todo', 'todo_templates', 'change_files.yaml'),
+  join('todo', 'todo_templates', 'cost_audit.yaml'),
   join('tools', 'measure-vectors.mjs'),
   join('tools', 'normalize-recording.mjs'),
   join('tools', 'vocabulary.mjs'),

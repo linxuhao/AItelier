@@ -317,7 +317,7 @@ function setupWorld({ fold = () => 0, audience = async () => ({ recorded: true }
   const host = { audience: async (a, s) => { calls.audience.push(a); return audience(a, s); },
     ...(ownerSpokeSince ? { ownerSpokeSince } : {}) };
   const pendingFile = join(stateDir, 'group-setup-pending.json');
-  const setup = createGroupSetup({ turns: g, groups: host, pendingFile, retryMs: 30, fold: (...a) => fold(...a),
+  const setup = createGroupSetup({ turns: g, groups: host, pendingFile, retryMs: 30, recordRetryMs: 1, fold: (...a) => fold(...a),
     createUserMessage: m => ({ ...m, id: 'redelivered-' + ++ids, role: 'user' }), steer: list => calls.steered.push(...list),
     setHostError: async e => { calls.errors.push(e); }, clearHostError: async () => { calls.cleared += 1; } });
   const payload = (turn, step = 1) => ({ step, turn, agent: { inbox: fakeInbox(), session: { snapshotEvents: () => [] } } });
@@ -348,6 +348,22 @@ test('setup: a failing fold rejects the step, keeps its input, delivers it again
   assert.deepEqual((await w.setup.step(w.payload(3), { kind: 'enter', messages: [owner] })).messages, [owner]);
   assert.equal(w.calls.cleared, 1);
   assert.deepEqual(texts(w.calls.steered), ['KEPT_QUESTION', 'KEPT_QUESTION']);
+});
+
+test('setup (director 602 defect 1): a failed audience record is tried again at once - a lost request does not cost the turn', async () => {
+  let failures = 2;
+  const w = setupWorld({ audience: async () => { if (failures-- > 0) throw new Error('HTTP 503'); return { recorded: true }; } });
+  const q = group('Q', 'r1', 'gq1');
+  const decision = await w.setup.step(w.payload(1), { kind: 'enter', messages: [q] });
+  assert.equal(decision.kind, 'enter');
+  assert.deepEqual(decision.messages, [q]);
+  assert.equal(w.calls.audience.length, 3, 'two failures, then recorded');
+  assert.deepEqual(w.calls.audience.map(a => a.questionIds), [['gq1'], ['gq1'], ['gq1']], 'the same record each time');
+  assert.ok(!existsSync(w.pendingFile) && w.calls.errors.length === 0);
+  // Three in a row: the step is rejected as before (kept, delivered again later).
+  const down = setupWorld({ audience: async () => { throw new Error('HTTP 503'); } });
+  assert.deepEqual(await down.setup.step(down.payload(1), { kind: 'enter', messages: [group('Q')] }), { kind: 'reject' });
+  assert.equal(down.calls.audience.length, 3);
 });
 
 test('setup: a failed audience write is handled like a failed fold; a failed pause check never rejects the owner\'s turn', async () => {

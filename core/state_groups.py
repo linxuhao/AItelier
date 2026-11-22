@@ -850,7 +850,11 @@ class StateGroups:
         a steward message the host mirrors like any other (`owner_notice`), at most
         withheld_owner_lines_per_hour per group (r44w). Formatted as one WeChat message: 「first 20 characters of the
         question」 on the first line, at most reply_chars in all, cut with '…'. Answered
-        once per request_key: the replay returns the first answer."""
+        once per request_key: the replay returns the first answer.
+
+        A question this turn never stamped (the host's stamping request was lost, director 602
+        defect 1) is judged once more by the audience record of THIS turn (`_stamp_late`), within
+        bounds, before it is refused."""
         _require_utf8("body", body, "invalid_body")
         if not isinstance(body, str) or not body.strip():
             raise StateGraphError("empty_body")
@@ -866,6 +870,8 @@ class StateGroups:
                                     "AND accepted=1", (question_id,)).fetchone()
             if question is None:
                 raise StateNotFound("unknown_question")
+            if question["turn"] is None and self._stamp_late(conn, str(turn), [question_id, *others]):
+                question = conn.execute("SELECT * FROM state_group_messages WHERE message_id=?", (question_id,)).fetchone()
             if question["turn"] is None or question["turn"] != str(turn) or question["answered_by"] is not None:
                 raise StateConflict("not_this_turns_question: that question is not an unanswered question of this turn")
             channel, group = question["channel"], question["group_ref"]
@@ -890,6 +896,30 @@ class StateGroups:
         if reason:
             self._log("reply withheld " + reason, channel, group, None, len(body.encode("utf-8")))
         return out
+
+    def _stamp_late(self, conn, turn, ids):
+        """The bounded fallback for a question the host's stamping request never reached (director
+        602 defect 1): stamps with `turn` those of `ids` still unstamped and unanswered that the
+        audience record of THIS turn covers - a group audience naming the question's own group
+        (bound now), the question's sender among the turn's recorded senders, relayed before the
+        turn was recorded and at most fresh_minutes before it. Never a question of another group
+        or another turn (review P3 stands); the number stamped."""
+        row = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1 AND turn=? AND audience='group'",
+                           (turn,)).fetchone()
+        senders = [r for r in json.loads(row["sender_refs_json"]) if isinstance(r, str)] if row is not None else []
+        ids = [i for i in ids if isinstance(i, str) and i]
+        if row is None or not senders or not ids or self._live_group(conn, row["channel"], row["group_ref"]) is None:
+            return 0
+        recorded = datetime.fromisoformat(row["at"])
+        stamped = conn.execute(
+            f"UPDATE state_group_messages SET turn=? WHERE message_id IN ({','.join('?' * len(ids))}) AND channel=? AND "
+            f"group_ref=? AND direction='in' AND accepted=1 AND answered_by IS NULL AND turn IS NULL AND sender_ref IN "
+            f"({','.join('?' * len(senders))}) AND at<=? AND at>=?",
+            (turn, *ids, row["channel"], row["group_ref"], *senders, recorded.isoformat(),
+             (recorded - timedelta(minutes=GROUP_LIMITS["fresh_minutes"])).isoformat())).rowcount
+        if stamped:
+            self._log(f"reply question stamped late ({stamped})", row["channel"], row["group_ref"], None)
+        return stamped
 
     def _withheld_owner_notice(self, conn, channel, group, message_id, reason, moment):
         """The owner's half of a withheld group reply (r44w, 7.7.7): one steward message in

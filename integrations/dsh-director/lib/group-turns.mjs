@@ -358,9 +358,12 @@ const short = error => String(error?.message ?? error).slice(0, 300);
  *  record, writing group-pause.json) rejects the step; its input is
  *  kept in `pendingFile` and delivered again after `retryMs`; a second failure in a row is
  *  reported as the host error group_turn_setup_failed (cleared, and what was kept delivered,
- *  by the next first step that succeeds). */
+ *  by the next first step that succeeds). The audience record itself is tried `recordAttempts`
+ *  times, `recordRetryMs` apart, before it counts as failed (director 602 defect 1: one lost
+ *  request must not cost a group its answer; recording a turn again is idempotent). */
 export function createGroupSetup({ turns, groups, createUserMessage, pendingFile, canSteer = () => true, steer,
-  setHostError = async () => {}, clearHostError = async () => {}, log = () => {}, retryMs = 30000, fold = foldGroupTurns }) {
+  setHostError = async () => {}, clearHostError = async () => {}, log = () => {}, retryMs = 30000, fold = foldGroupTurns,
+  recordAttempts = 3, recordRetryMs = 500 }) {
   let failures = 0, reported = false;
   const pending = () => {
     try { return pendingFile ? JSON.parse(readFileSync(pendingFile, 'utf8')) : []; } catch { return []; }
@@ -376,11 +379,22 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
   };
   // The host records the turn's audience, its askers and (step 23.1, 7.7.7) the questions it took,
   // which the backend stamps with the turn: a reply answers only a question of its own turn.
-  const record = (payload, audience, keep) => groups?.audience ? groups.audience({ turn: String(payload.turn), audience: audience.kind,
+  const recordOnce = (payload, audience, keep) => groups.audience({ turn: String(payload.turn), audience: audience.kind,
     ...(audience.kind === 'group' ? { group: { channel: audience.channel, group_ref: audience.group_ref } } : {}),
     senderRefs: [...new Set(keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.sender_refs ?? [] : []))],
     ...(audience.kind === 'group' ? { questionIds: keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.question_ids ?? [] : []) } : {}) },
-  payload.signal) : undefined;
+  payload.signal);
+  const record = async (payload, audience, keep) => {
+    if (!groups?.audience) return undefined;
+    for (let attempt = 1; ; attempt += 1) {
+      try { return await recordOnce(payload, audience, keep); }
+      catch (error) {
+        if (attempt >= recordAttempts || payload.signal?.aborted) throw error;
+        log(`group audience not recorded (attempt ${attempt} of ${recordAttempts}): ` + short(error));
+        await new Promise(resolve => setTimeout(resolve, recordRetryMs));
+      }
+    }
+  };
   async function step(payload, decision) {
     if (payload.step !== 1 && turns.current?.turn !== turnKey(payload.turn)) turns.resume(payload.agent.session.snapshotEvents(), payload.turn);
     const { keep, back } = turns.split(decision.messages, payload.step, payload.turn);

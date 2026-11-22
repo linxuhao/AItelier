@@ -299,6 +299,43 @@ def test_with_two_groups_a_reply_goes_only_to_its_questions_group_in_its_own_tur
     assert reply(world, a["message_id"], "A 的答案", turn="ta2", stamp=False)["group_ref"] == ROOM
 
 
+def test_director_602_1_a_question_the_turn_never_stamped_is_judged_by_that_turns_audience_record(world, monkeypatch):
+    """Director 602 defect 1: one lost stamping request no longer costs the group its answer. A
+    question still unstamped is stamped at reply time when the audience record of THIS turn covers
+    it - its own group, its sender among the turn's senders, relayed before the turn was recorded
+    and at most fresh_minutes before it; anything else is still not_this_turns_question."""
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    start = state_channels._now()
+    at = lambda minutes: monkeypatch.setattr(state_channels, "_now", lambda: start + timedelta(minutes=minutes))  # noqa: E731
+    at(-11)
+    stale = ask(world, "a0")
+    at(0)
+    a, other, b = ask(world, "a1"), ask(world, "a2", sender=MEMBER2), ask(world, "b1", room=ROOM2)
+    at(2)
+    late = ask(world, "a3")
+    audience(world, room=ROOM, turn="ta", senders=(MEMBER,))  # the stamping of its questions never arrived
+    at(3)
+    newer = ask(world, "a4")
+    # Not covered: another turn, another group, a sender the turn did not record, a question relayed
+    # after the turn was recorded or more than fresh_minutes before it.
+    refused(lambda: reply(world, a["message_id"], "答", key="k-other-turn", turn="tz", stamp=False),
+            "not_this_turns_question")
+    for question, key in ((b, "k-b"), (other, "k-m2"), (newer, "k-new"), (stale, "k-old")):
+        refused(lambda: reply(world, question["message_id"], "答", key=key, turn="ta", stamp=False),
+                "not_this_turns_question")
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='out' AND kind='reply'") == [(0,)]
+    # Covered: answered in its own group, with the turn's other covered question; the stale one is not.
+    sent = execute(world.steward, "post_group_reply", {"request_key": "k-a", "question_id": a["message_id"],
+                                                       "body": "A 的答案", "turn": "ta",
+                                                       "also_answers": [late["message_id"], stale["message_id"]]},
+                   allow_write=True)
+    assert (sent["channel"], sent["group_ref"]) == ("wechat", ROOM) and sent["withheld"] is False
+    answered = dict(rows(world, "SELECT channel_message_ref, answered_by IS NOT NULL FROM state_group_messages "
+                                "WHERE direction='in'"))
+    assert answered == {"a0": 0, "a1": 1, "a2": 0, "a3": 1, "a4": 0, "b1": 0}
+
+
 def test_with_two_groups_family_memory_recent_and_names_stay_in_their_group(world):
     bound_group(world)
     bound_group(world, room=ROOM2, key="bg-2", label="老家群")

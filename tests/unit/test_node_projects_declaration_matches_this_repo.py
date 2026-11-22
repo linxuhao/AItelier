@@ -35,9 +35,9 @@ import aitelier.tools.run_tests.impl as impl
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Discovered directories that are deliberately NOT declared, each with the
-# measurement that decided it. Both were measured in the gate's own shape; both
-# fail there, so declaring either would turn a documented absence into a red
-# gate -- which measures nothing and hides which suite is broken.
+# measurement that decided it. Each was measured in the gate's own shape and
+# fails there, so declaring one turns a documented absence into a red gate --
+# which measures nothing and hides which suite is broken.
 EXCEPTIONS = {
     "integrations/dsh-director": {
         "reason": (

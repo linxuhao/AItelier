@@ -375,8 +375,9 @@ def test_fetch_refuses_a_url_not_seen_in_this_turn_another_origin_or_connection_
 
 def test_fetch_refuses_a_malformed_url_or_redirect_location_as_a_bad_url_not_a_500(world, server, upstream):
     """Review F1: a url a result named that urlsplit cannot take (port out of range, an unclosed
-    [ ) - asked for, or met as a redirect's Location - is a JSON refusal, never a 500."""
-    bad = ["http://mcp_server:99999/files/cat.png", "http://[::1/files/cat.png"]
+    [ ) - asked for, or met as a redirect's Location - is a JSON refusal, never a 500. So is one
+    urlsplit takes but httpx refuses to send (a DEL: no \\s, kept by both url ledgers)."""
+    bad = ["http://mcp_server:99999/files/cat.png", "http://[::1/files/cat.png", "http://mcp_server:9003/files/cat\x7f.png"]
     media_ready(world, server, upstream, *bad, "http://mcp_server:9003/files/badport", "http://mcp_server:9003/files/badhost")
     for url in bad:
         got = fetch(server, world, url)

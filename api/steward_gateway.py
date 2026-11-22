@@ -887,7 +887,13 @@ def recorded_turn(conn) -> str | None:
 
 def _origin(url: str):
     """(scheme, host, port) of an http(s) url, or None; a malformed url (a port out of range, an
-    unclosed [ ) raises ValueError - the caller refuses it as a bad url, never a 500."""
+    unclosed [ ) raises ValueError - the caller refuses it as a bad url, never a 500. So does one
+    urlsplit takes but httpx would not send (a control character such as DEL, a part too long):
+    it is judged here, before the client ever builds a request from it."""
+    try:
+        httpx.URL(url)
+    except httpx.InvalidURL as exc:
+        raise ValueError(str(exc)) from None
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return None

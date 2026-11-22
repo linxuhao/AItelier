@@ -1,7 +1,9 @@
 /** dsh-channel-wechat: the owner's WeChat as a channel of the `ownerChannels` service
  *  (dsh-director). The WeChat login itself lives in the wechat-bridge process
  *  (integrations/wechat-bridge), which survives restarts of this one; this plugin
- *  only long-polls its /events into ownerChannels.inbound, sends through its /send,
+ *  only long-polls its /events into ownerChannels.inbound (step 24.2: a message's files
+ *  first through ownerChannels.storeMedia, fetched from the bridge's GET /media/:media_id),
+ *  sends through its /send (files through POST /send-file),
  *  reports its /status (while a scan is needed: detail 'scan needed' and the login
  *  QR as the bridge drew it, `qrSvg`, which the host shows the owner on the dashboard;
  *  the QR is a login token and is never logged, nor put into the detail) and asks the
@@ -13,9 +15,11 @@
  *  bridge's container on) and `tokenFile` (default
  *  ~/.aitelier-secrets/wechat-bridge-token). No token → the channel is registered as
  *  disconnected ("not configured") and nothing is polled. */
-import { readFileSync } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 
 export const name = 'dsh-channel-wechat';
 export const inject = ['ownerChannels'];
@@ -31,6 +35,12 @@ export const CHANNEL = 'wechat';
 // carries is still running (`approval_pending`). The message is kept and asked again -
 // the cursor does not move past it - never dropped.
 const RETRY_REASONS = new Set(['unavailable', 'rate_limited', 'approval_pending']);
+/** Step 24.2 (design-steward 7.8.12): the kinds the bridge sends (POST /send-file), the most
+ *  bytes it takes, and the refusals an attachment may carry into inbound (the host's closed set). */
+export const MEDIA_KINDS = Object.freeze(['image', 'voice', 'file']);
+export const SEND_FILE_LIMIT = 25 * 1024 * 1024;
+const ATTACHMENT_REFUSALS = new Set(['too_large', 'type', 'unsupported', 'gone']);
+const refusal = code => Object.assign(new Error(code), { refused: code });
 
 const defaultTokenFile = () => join(homedir(), '.aitelier-secrets', 'wechat-bridge-token');
 // 18741, not the bridge's in-container 18731: on the owner's host 127.0.0.1:18731 is
@@ -83,6 +93,48 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     return payload;
   };
 
+  /** storeMedia's `open` for one bridge media_id: GET /media/:media_id, streamed. 413 throws
+   *  {refused: too_large}, 410 and 404 (its message left the bridge's ring) {refused: gone};
+   *  anything else (503 busy, a network error) is thrown plainly - the host answers
+   *  `unavailable` and the message is held. */
+  const openMedia = mediaId => async ({ signal } = {}) => {
+    const response = await fetch(`${url}/media/${encodeURIComponent(mediaId)}`, { headers: { authorization: `Bearer ${token}` },
+      signal: signal ? AbortSignal.any([stopping.signal, signal]) : stopping.signal });
+    if (response.ok && response.body) return response.body;
+    await response.body?.cancel().catch(() => {});
+    if (response.status === 413) throw refusal('too_large');
+    if (response.status === 410 || response.status === 404) throw refusal('gone');
+    throw new Error(`bridge answered ${response.status} for a media fetch`);
+  };
+
+  /** Step 24.2: the inbound attachments of a 1:1 event, into `resolved` (kept on the held
+   *  message across retries, so a stored file is never asked for twice). A description the
+   *  bridge marked too_large or gone, or that has no media_id, is refused without storeMedia;
+   *  the rest are stored one by one. Returns 'unbound' when storeMedia answers
+   *  channel_sender_not_bound (the rest are not fetched); throws when an answer is transient. */
+  async function storeAttachments(event, items, resolved) {
+    for (let index = resolved.length; index < items.length; index++) {
+      const item = items[index];
+      if (item.gone) { resolved.push({ kind: item.kind, refused: 'gone' }); continue; }
+      if (item.too_large) { resolved.push({ kind: item.kind, refused: 'too_large' }); continue; }
+      // A host without storeMedia (before 24.2) cannot take a file: unsupported, never held.
+      if (typeof item.media_id !== 'string' || !item.media_id || typeof ownerChannels.storeMedia !== 'function') {
+        resolved.push({ kind: item.kind, refused: 'unsupported' });
+        continue;
+      }
+      const meta = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, index, kind: item.kind,
+        ...(typeof item.mime === 'string' && item.mime ? { mime: item.mime } : {}),
+        ...(typeof item.name === 'string' && item.name ? { name: item.name } : {}) };
+      const answer = await ownerChannels.storeMedia(meta, openMedia(item.media_id));
+      if (typeof answer?.ref === 'string' && answer.ref) resolved.push({ kind: item.kind, ref: answer.ref });
+      else if (answer?.refused === 'channel_sender_not_bound') return 'unbound';
+      else if (ATTACHMENT_REFUSALS.has(answer?.refused)) resolved.push({ kind: item.kind, refused: answer.refused });
+      else if (answer?.refused === 'invalid_media') resolved.push({ kind: item.kind, refused: 'unsupported' });
+      else throw new Error(`media ${index} not stored: ${String(answer?.refused ?? 'no answer').slice(0, 40)}`);
+    }
+    return undefined;
+  }
+
   async function refreshStatus() {
     try {
       status = statusFromBridge(await call('/status'));
@@ -98,17 +150,24 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
    *  pause, however long that takes, so the cursor stays on it and nothing after it
    *  overtakes it. */
   async function deliver(event) {
+    // Step 24.2: a 1:1 message's files are stored first (storeMedia), and inbound is called once
+    // every one has a ref or a refusal; a stranger's (channel_sender_not_bound) go without any.
+    const items = event.type === 'message' && Array.isArray(event.attachments)
+      ? event.attachments.filter(item => item && MEDIA_KINDS.includes(item.kind)) : [];
+    const resolved = [];
+    let unbound = false;
     // Step 23: a group's @-message or group code carries its room as the conversation; the
     // host answers it finally (accepted or refused), so it never holds the owner's 1:1 messages.
     const room = event.type === 'group_message' || event.type === 'group_bind'
       ? { conversationRef: event.room_ref, ...(event.type === 'group_bind' ? { groupBind: { prefix: event.prefix, code: event.code } } : {}) } : {};
     const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref,
-      text: event.type === 'group_bind' ? event.code : event.text, at: event.at, ...room };
+      text: event.type === 'group_bind' ? event.code : event.text ?? '', at: event.at, ...room };
     let pause = retryMs;
     for (let attempt = 1; !stopping.signal.aborted; attempt++) {
       let reason;
       try {
-        const result = await ownerChannels.inbound(message);
+        if (!unbound && resolved.length < items.length) unbound = await storeAttachments(event, items, resolved) === 'unbound';
+        const result = await ownerChannels.inbound(!unbound && resolved.length ? { ...message, attachments: resolved } : message);
         if (result?.accepted || !RETRY_REASONS.has(result?.reason)) return;
         reason = result.reason;
       } catch (error) {
@@ -163,6 +222,32 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       const { ref } = await call('/send', { method: 'POST', body: { room, text } });
       return ref ? { ref } : {};
     },
+    /** Step 24.2: one file from the host's library to the bound owner (`to`) or into a bound
+     *  group (`groupRef`), streamed from `path` to the bridge's POST /send-file; a caption
+     *  follows as a text. A voice goes as a voice bar, or as a file when WeChat refuses that. */
+    async sendFile({ to, groupRef, kind, mime, name, path, caption } = {}) {
+      if (!token) throw new Error('wechat channel not configured');
+      const target = typeof groupRef === 'string' && groupRef ? { room: groupRef } : typeof to === 'string' && to ? { to } : undefined;
+      if (!target) throw Object.assign(new Error('wechat: no recipient named'), { code: 'recipient_unknown' });
+      if (!MEDIA_KINDS.includes(kind)) throw Object.assign(new Error('wechat: cannot send this kind'), { code: 'channel_no_media' });
+      const { size } = await stat(path);
+      if (size > SEND_FILE_LIMIT) throw Object.assign(new Error('wechat: file over 25 MiB'), { code: 'too_large' });
+      const query = new URLSearchParams({ ...target, kind, mime: String(mime ?? ''), name: String(name ?? '') });
+      const response = await fetch(`${url}/send-file?${query}`, { method: 'POST', signal: stopping.signal, duplex: 'half',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' },
+        body: Readable.toWeb(createReadStream(path)) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw Object.assign(new Error(`bridge refused: ${payload.error ?? response.status}`),
+        { code: payload.error, status: response.status, payload });
+      if (payload.sent_as && payload.sent_as !== kind) logger.warn(`wechat: a ${kind} went out as a ${payload.sent_as}`);
+      if (typeof caption === 'string' && caption.trim()) {
+        // The file is out: a caption that fails is logged, not reported as a failed send.
+        try { await call('/send', { method: 'POST', body: { ...target, text: caption } }); }
+        catch (error) { logger.warn('wechat: the caption after a file was not sent: ' + String(error?.message ?? error).slice(0, 200)); }
+      }
+      return typeof payload.ref === 'string' && payload.ref ? { ref: payload.ref } : {};
+    },
+    mediaKinds: [...MEDIA_KINDS],
     /** Step 23: the bridge's whitelist, set whole: the bound account and each bound room. */
     async setRooms({ ownerRef, rooms }) {
       if (!token) return;

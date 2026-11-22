@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { WechatyBuilder, types } from 'wechaty';
+import { FileBox } from 'file-box';
 import { PuppetNeo } from 'wechaty-puppet-neo';
 import { bindHost, createBridge, DEFAULT_PORT } from './bridge.mjs';
 import { qrSvg } from './qr-svg.mjs';
@@ -36,7 +37,10 @@ catch (error) { log(error.message); process.exit(78); }
 // (the container's root filesystem is read-only; the login is in memory anyway).
 const makeBot = () => WechatyBuilder.build({ puppet: new PuppetNeo() });
 const skipLogin = process.env.WECHAT_BRIDGE_SKIP_LOGIN === '1';
-const bridge = createBridge({ makeBot, types, token, log, renderQr: qrSvg, loginEnabled: !skipLogin });
+// Step 24.2: POST /send-file hands the fork a FileBox whose name says what it goes out as
+// (bridge.mjs sendNames).
+const makeFileBox = (bytes, name) => FileBox.fromBuffer(bytes, name);
+const bridge = createBridge({ makeBot, types, token, log, renderQr: qrSvg, loginEnabled: !skipLogin, makeFileBox });
 
 let stopping = false;
 async function stop(reason, code) {

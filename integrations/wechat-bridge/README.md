@@ -72,7 +72,8 @@ Why: 0.1.1's native addon dropped every incoming message whose type was not text
 10000) before any JavaScript could see it. The fork's native layer is faithful - it drops
 `outgoing` only and reports WeChat's own type with the raw `content`/`inline_data` bytes -
 and which arriving types may enter a conversation is the consumer's decision: this bridge
-still serves text only, and system notices and app messages stay out of conversations
+serves text and, since step 24.2, 1:1 images (3), voices (34) and files (49 with appmsg type
+6); quoted replies (49/57), system notices and other app messages stay out of conversations
 until a rule says otherwise.
 
 What the build checks, and what it found (2026-11-18, log in
@@ -108,7 +109,8 @@ phone`, `connected`, or why not).
 
 `run.sh` starts the container (nothing runs it for you):
 
-- non-root (uid 1000), `--read-only` with a 16 MB tmpfs on `/tmp`, `--cap-drop ALL`,
+- non-root (uid 1000), `--read-only` with a 32 MiB tmpfs on `/tmp` (one fetched media
+  file at a time, step 24.2), `--cap-drop ALL`,
   `--security-opt no-new-privileges`, `--memory 512m --cpus 1 --pids-limit 256`;
 - publishes only `127.0.0.1:18741:18731` (host port `WECHAT_BRIDGE_PORT`, default
   18741, the same variable and default the channel plugin uses); inside, the bridge
@@ -198,6 +200,27 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   recipient_unknown` (puppet-neo can only write to a peer that has written to this
   login since it started, and only the last 2048 of them), `400 bad_request`, `413
   body_too_large` (over 64 KiB), `502 send_failed`.
+
+Step 24.2 media (design-steward 7.8.12 "微信"; the fork's interface as the platform
+director gave it: `messageFile`/`messageImage`/`messageVoice` → FileBox, a voice as WAV;
+`messageSendFile(conversationId, fileBox)` with the kind taken from the FileBox name):
+
+- A 1:1 image, voice or file is an event with `text: ""` and `attachments: [{media_id,
+  kind, mime?, name?, size?}]` - a description only, nothing is fetched on arrival. Over the
+  size WeChat reports (image 20 MiB, file 25 MiB, the voice's SILK 2 MiB): `too_large:
+  true` and no `media_id`. In the stranger buffer (`owner_ref` set, another sender):
+  `gone: true` and no `media_id`. Group messages stay text only.
+- `GET /media/<media_id>` → the bytes (a voice as `audio/wav`), fetched from WeChat now
+  and held in `/tmp` only while answering. `404 not_found` (its event left the ring, or
+  never was), `410 gone` (another login's message, or the puppet refused it), `503 busy`
+  (another fetch is running), `413 too_large` (more bytes than the bound; a voice over 2
+  min 5 s of WAV by its header's rate).
+- `POST /send-file?to=<wxid>|room=<room>&kind=image|voice|file&mime=&name=` with the
+  file's bytes as the body (at most 25 MiB, `413 body_too_large`) → `{ref, sent_as}`. An
+  image goes under an image extension, a file under its own name (`.bin` added when that
+  name would read as an image or a voice); a voice first as `<stem>.silk` (a voice bar),
+  and when that is refused or fails, the same bytes again under its own name as a file
+  (`sent_as: "file"`). Group sends share the group queue and its backstop.
 
 Message texts are never logged.
 

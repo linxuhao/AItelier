@@ -443,6 +443,9 @@ def test_fetch_refuses_a_malformed_url_or_redirect_location_as_a_bad_url_not_a_5
     assert (got.status_code, got.json()["detail"]) == (502, "redirect_bad_url"), (got.status_code, got.text)
     # An unclosed [ in the Location: httpx itself refuses the response (it parses the Location even
     # without following it) - an upstream error, still a JSON refusal.
+    # Boundary, by decision (platform director): a Location httpx itself cannot parse (an unclosed
+    # [ or a control character) is answered 502 upstream_unavailable, not redirect_bad_url - no hook
+    # relabels httpx's pre-redirect errors. redirect_bad_url is only a Location httpx handed over.
     got = fetch(server, world, "http://mcp_server:9003/files/badhost")
     assert (got.status_code, got.json()["detail"]) == (502, "upstream_unavailable"), (got.status_code, got.text)
 

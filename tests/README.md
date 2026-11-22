@@ -10,7 +10,7 @@ production container.
 
 | Marker | Default run | What it marks |
 |---|---|---|
-| `slow` | deselected | Rows that take minutes of wall time: the node/vitest suites run from pytest (`tests/integration/test_driver_node_suite_runs.py`, the director row of `test_director_and_channel_node_suites_run.py`, `test_web_suite_runs.py`), the nested-pytest write-opening mutation rows in `tests/unit/test_write_opening_coverage.py`, the skillflow absence-gate modules (`tests/skillflow/test_coding_impl_gate_absence.py`, `test_coding_impl_absence_needs_nothing_else_red.py`) and the prose guard's round-9/10 self-proof poles (`test_truncation_is_not_a_formatting_mistake.py`, `test_prose_corruption_catalog.py`). |
+| `slow` | deselected | Rows that take minutes of wall time: the node/vitest suites run from pytest (`tests/integration/test_driver_node_suite_runs.py`, the director row of `test_director_and_channel_node_suites_run.py`, `test_web_suite_runs.py`), the skillflow absence-gate modules (`tests/skillflow/test_coding_impl_gate_absence.py`, `test_coding_impl_absence_needs_nothing_else_red.py`) and the prose guard's round-9/10 self-proof poles (`test_truncation_is_not_a_formatting_mistake.py`, `test_prose_corruption_catalog.py`). |
 | `meta` | selected | Guards over test sources or hand-kept lists rather than product behaviour: `test_no_verbatim_previous_line_dup.py`, `test_state_wait_bounds.py`, `test_driver_suite_lists_its_files.py`, the prose-constant accounting row, the private-ack-table union row and the steward write whitelist row. |
 | `gate` | selected | Registered for integration gates that need a real clock or real subprocesses. No row carries it yet. |
 | `serial` | selected | Rows that break under pytest-xdist; see "Parallel runs" below. |
@@ -40,7 +40,7 @@ The slow tier is not part of the default run, so whoever relies on the default
 run as a gate must run `-m slow` as a second job. The platform's repository gate
 (`aitelier/tools/run_tests/impl.py`) runs plain `pytest` and has no such job
 yet: until one exists, a gate run of this repository does not run the driver,
-director and web JS suites, the write-opening mutation rows, the skillflow
+director and web JS suites, the skillflow
 absence gate or the prose self-proof poles.
 
 The node suites need `integrations/dsh-driver/node_modules` to resolve. In the
@@ -115,6 +115,8 @@ the total is wall time, so `measure` ignores LIST there and warns. A
 The committed file holds the default tier (plain `pytest`, without `slow`)
 after the State template change, measured 2026-11-22 under `-n 4`; files with no
 default-tier row are absent and charged the median.
+`tests/unit/test_write_opening_coverage.py` was re-measured alone (serial, 2 CPUs)
+after its mutation rows moved in-process and into the default tier.
 
 ## State database templates
 

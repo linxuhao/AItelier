@@ -203,6 +203,27 @@ test('run_confirmed (step 23.1, 7.8.9 step 5): the read names the open turn; an 
   assert.deepEqual(f.tools.get('run_confirmed').projectContent({ token: 'tok-1' }), [{ type: 'text', text: 'sent' }]);
 });
 
+test('run_confirmed (step 23.1, PRIV-2): a failed forward of a group\'s record still names the group and confirmer; the gateway\'s own line is not repeated', async () => {
+  const f = fixture();
+  Object.assign(f.record, { group: '家庭群', confirmed_by: '妈妈' });
+  const line = '[This action was asked for and confirmed in the family group 「家庭群」 by 妈妈; it ran in your owner\'s turn.]';
+  const failing = { isError: true, error: { message: 'upstream_error: the connection did not answer this call', info: { code: 'upstream_error' } },
+    content: [{ type: 'text', text: 'boom' }] };
+  const tools = new Map();
+  class HarnessError extends Error { constructor(message, code) { super(message); this.code = code; } }
+  let answer = failing;
+  registerConfirmTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx: { tools: { execute: async () => answer } },
+    defineTool: t => t, jsonOutput: {}, HarnessError, catalog: f.catalog, currentTurn: () => '5',
+    confirm: { get: async code => ({ code, ...f.record }) } });
+  const exec = { agent: { session: { id: 'root' } }, token: 't1', callId: 'c', rootCallId: 'r' };
+  await assert.rejects(tools.get('run_confirmed').execute({ code: 'K7Q2A' }, exec), error => error.message.startsWith(line) && error.code === 'upstream_error');
+  assert.equal(tools.get('run_confirmed').projectContent(exec)[0].text, line);
+  // The backend's gateway already put the same line first: it is shown once.
+  answer = { value: { sent: true }, content: [{ type: 'text', text: line }, { type: 'text', text: 'sent' }] };
+  await tools.get('run_confirmed').execute({ code: 'K7Q2A' }, { ...exec, token: 't2' });
+  assert.deepEqual(tools.get('run_confirmed').projectContent({ token: 't2' }).map(b => b.text), [line, 'sent']);
+});
+
 test('run_confirmed (step 23.1): the backend\'s not_this_conversation reaches the model as it is and nothing runs', async () => {
   const f = fixture();
   f.record.status = undefined;

@@ -40,7 +40,9 @@ outward tool consumes one confirmation its requester gave for exactly these argu
 (core.state_steward_confirmations, 24.1b) - and, in the same write transaction, a
 pending ledger row is reserved (so two concurrent calls never both pass the last unit
 of a cap) and the confirmation consumed; then forwarded, and the row completed. An
-outward call is forwarded once and never retried.
+outward call is forwarded once and never retried. When an owner turn's call consumed a
+record a family group confirmed (director 581 lets it), the answer carries, first, a line
+naming that group and who confirmed it - on a result, a tool error and a JSON-RPC error alike.
 
 An oauth connection's upstream client carries `OAuthBearer` (core.steward_oauth): the
 token is refreshed under a minute before expiry, and once after an upstream 401, without
@@ -761,22 +763,22 @@ class Gateway:
             with _store(self.app).transaction(write=True) as conn:
                 row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
                 if row is None:
-                    return "tool_not_allowed", None, None, None, None
+                    return "tool_not_allowed", None, None, None, None, None
                 if not sc.connection_usable(row):
-                    return "connection_unavailable", None, None, None, None
+                    return "connection_unavailable", None, None, None, None, None
                 entry = next((e for e in sc.effective(conn) if e["conn_id"] == conn_id and e["gw_name"] == gw), None)
                 if entry is None:
-                    return "tool_not_allowed", None, None, None, None
+                    return "tool_not_allowed", None, None, None, None, None
                 if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
-                    return "not_visible_in_this_turn", None, None, None, None
+                    return "not_visible_in_this_turn", None, None, None, None, None
                 if sc.blocked_present(arguments, entry["blocked_args"]) or (
                         row["visibility"] == "public"
                         and sc.url_argument_present(arguments, sc.unblocked_url_paths(entry))):
-                    return "argument_blocked", None, None, None, None
+                    return "argument_blocked", None, None, None, None, None
                 call_id = sc.reserve_call(conn, conn_id, entry["raw_name"], entry["daily_cap"])
                 if call_id is None:
-                    return "daily_cap_reached", None, None, None, None
-                code = None
+                    return "daily_cap_reached", None, None, None, None, None
+                code = note = None
                 if entry["outward"]:
                     try:
                         code = sconf.consume(conn, row, entry["raw_name"], arguments)
@@ -784,15 +786,16 @@ class Gateway:
                         raise _Refused("invalid_arguments")
                     if code is None:
                         raise _Refused("confirmation_required")
-                return None, dict(row), entry, call_id, code
+                    note = sconf.owner_turn_note(conn, code)
+                return None, dict(row), entry, call_id, code, note
 
         def judged():
             try:
                 return judge()
             except _Refused as refused:  # the transaction rolled back: no row, nothing consumed
-                return refused.code, None, None, None, None
+                return refused.code, None, None, None, None, None
 
-        refusal, row, entry, call_id, confirmation = await asyncio.to_thread(judged)
+        refusal, row, entry, call_id, confirmation, note = await asyncio.to_thread(judged)
         texts = {"tool_not_allowed": "this tool is not allowed for you",
                  "connection_unavailable": "this connection is not available now",
                  "not_visible_in_this_turn": "this connection is not available in this conversation",
@@ -823,8 +826,13 @@ class Gateway:
             code = getattr(getattr(exc, "error", None), "code", None)
             rpc_error = f"upstream_error:{code}" if code is not None else "upstream_error"
         if rpc_error:
-            answer = _error(mid, rpc_error, "the connection did not answer this call")
-        elif not is_error:
+            answer = _error(mid, rpc_error, "the connection did not answer this call" + (f" {note}" if note else ""))
+        elif note:
+            # An owner turn that took a family group's confirmation is told whose it was,
+            # first in what it reads, whatever the outcome (director 581).
+            content = result.get("content") if isinstance(result.get("content"), list) else []
+            answer["result"] = {**result, "content": [{"type": "text", "text": note}, *content]}
+        if not rpc_error and not is_error:
             turn = await asyncio.to_thread(_read, self.app, recorded_turn)
             self.remember_urls(conn_id, result, turn)
         response_bytes = len(json.dumps(answer, ensure_ascii=False).encode("utf-8", "replace"))

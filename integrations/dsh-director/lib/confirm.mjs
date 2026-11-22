@@ -84,9 +84,13 @@ export function registerConfirmTools(scope, { ctx, defineTool, jsonOutput, Harne
       // outside content) as a direct call; the gateway consumes the confirmation.
       const result = await ctx.tools.execute({ name: record.name, arguments: record.arguments, agent: exec.agent,
         callId: exec.callId + ':run_confirmed', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
-      outcomes.set(exec.token, note && !result.isError ? { ...result, content: [note, ...(result.content ?? [])] } : result);
+      // Whatever the outcome: a failed forward still used the group's confirmation (PRIV-2). The
+      // backend's gateway puts the same line in what it forwards; it is not repeated.
+      const named = note && (result.content ?? []).some(block => block?.text === note.text);
+      outcomes.set(exec.token, note && !named ? { ...result, content: [note, ...(result.content ?? [])] } : result);
       if (result.isError) {
-        const error = new HarnessError(result.error.message, result.error.info?.code ?? 'TOOL_ERROR');
+        const message = note && !String(result.error.message ?? '').includes(note.text) ? `${note.text} ${result.error.message}` : result.error.message;
+        const error = new HarnessError(message, result.error.info?.code ?? 'TOOL_ERROR');
         error.name = result.error.info?.name ?? 'ToolError';
         throw error;
       }

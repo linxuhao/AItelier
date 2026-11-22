@@ -282,6 +282,33 @@ def consume(conn, connection, raw_name: str, arguments) -> str | None:
     return row["code"] if taken else None
 
 
+def _group_origin(conn, row) -> tuple:
+    """A group record's group label and the label of the member who confirmed it."""
+    from core.state_groups import StateGroups
+    named = conn.execute("SELECT label FROM state_owner_groups WHERE channel=? AND group_ref=?",
+                         (row["channel"], row["conversation_ref"])).fetchone()
+    label = named[0] if named else row["conversation_ref"]
+    return label, StateGroups._label_of(conn, row["channel"], row["conversation_ref"], row["sender_ref"],
+                                        row["requester_kind"])
+
+
+def owner_turn_note(conn, code: str) -> str | None:
+    """In the gateway's transaction, after `consume`: when an OWNER turn took a record a family
+    group confirmed (director 581 lets it), the line the forwarded result carries naming the
+    group and who confirmed it - the same text run_confirmed shows, so a direct call with the
+    same arguments is never a silent use of a group's confirmation. Else None."""
+    row = conn.execute("SELECT * FROM state_steward_confirmations WHERE code=?", (code,)).fetchone()
+    try:
+        audience = conn.execute("SELECT audience FROM state_steward_turn_audience WHERE id=1").fetchone()
+    except sqlite3.OperationalError:
+        audience = None
+    if row is None or row["audience"] != "group" or audience is None or audience["audience"] != "owner":
+        return None
+    label, confirmer = _group_origin(conn, row)
+    return (f"[This action was asked for and confirmed in the family group 「{label}」 by "
+            f"{confirmer or 'a member of that group'}; it ran in your owner's turn.]")
+
+
 def finish(conn, code: str, ok: bool, summary: str | None) -> None:
     """The forward's outcome on the record: done / failed and an error code, never a result body."""
     conn.execute("UPDATE state_steward_confirmations SET status=?, result=? WHERE code=? AND status='consumed'",
@@ -460,12 +487,7 @@ class StateStewardConfirmations:
                 raise StateGraphError("not_this_conversation: a confirmation runs only in the conversation it was "
                                       "asked for")
             if audience["audience"] == "owner" and row["audience"] == "group":
-                from core.state_groups import StateGroups
-                named = conn.execute("SELECT label FROM state_owner_groups WHERE channel=? AND group_ref=?",
-                                     (row["channel"], row["conversation_ref"])).fetchone()
-                group_label = named[0] if named else row["conversation_ref"]
-                confirmer = StateGroups._label_of(conn, row["channel"], row["conversation_ref"], row["sender_ref"],
-                                                  row["requester_kind"])
+                group_label, confirmer = _group_origin(conn, row)
         status = row["status"]
         if status == "pending" and _utcnow() - _parse(row["created_at"]) > TTL:
             status = "expired"

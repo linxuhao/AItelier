@@ -480,3 +480,55 @@ def test_two_groups_a_code_confirmed_in_one_group_runs_only_in_that_groups_turn(
     assert mine["status"] == "confirmed" and "group" not in mine
     assert "result" in call("calfam__create_event", event)
     assert upstream.methods.count("tools/call") == before + 1
+
+
+def test_an_owner_turns_direct_call_that_takes_a_groups_confirmation_is_told_whose_it_was(world, server, upstream,
+                                                                                        monkeypatch):
+    """Review PRIV-1 (director 581): an owner turn may run what a family group confirmed, but
+    never silently - a direct call with the same arguments (not run_confirmed) that consumes a
+    group's record gets, first in its result, the group and who confirmed it; on a tool error
+    and on an upstream JSON-RPC error too. The owner's own record adds nothing."""
+    calendar_ready(world, monkeypatch)
+    event = {"title": "周六聚餐", "start": "2026-11-28T18:00:00+08:00"}
+    line = "[This action was asked for and confirmed in the family group 「家庭群」 by 成员甲; it ran in your owner's turn.]"
+
+    def call(name, arguments):
+        return body_of(rpc(server, world, "tools/call", {"name": name, "arguments": arguments}))[0]
+
+    def group_confirmed(ref):
+        question = gask(world, f"q-{ref}", "周六聚餐加到家庭日历")["message_id"]
+        group_turn(world, turn=f"g-{ref}")
+        asked = request(world, question, event, name="mcp__sw__calfam__create_event")["code"]
+        assert gask(world, f"c-{ref}", f"确认 {asked}")["confirmation"]["outcome"] == "confirmed"
+        execute(world.steward, "set_steward_turn_audience", {"turn": f"o-{ref}", "audience": "owner"},
+                allow_write=True)
+        return asked
+
+    asked = group_confirmed("1")
+    before = upstream.methods.count("tools/call")
+    answer = call("calfam__create_event", event)
+    assert upstream.methods.count("tools/call") == before + 1
+    assert answer["result"]["content"][0] == {"type": "text", "text": line}
+    assert "echo" in answer["result"]["content"][1]["text"], "the call's own content follows"
+    assert status_of(world, asked) == "done"
+    # A tool error: the line still comes first.
+    asked = group_confirmed("2")
+    upstream.call_answer = {"result": {"content": [{"type": "text", "text": "calendar full"}], "isError": True}}
+    answer = call("calfam__create_event", event)
+    assert answer["result"]["isError"] is True
+    assert [c["text"] for c in answer["result"]["content"]] == [line, "calendar full"]
+    assert status_of(world, asked) == "failed"
+    # An upstream JSON-RPC error: the line is in the error message.
+    asked = group_confirmed("3")
+    upstream.call_answer = {"error": {"code": -32010, "message": "nope"}}
+    answer = call("calfam__create_event", event)
+    assert answer["error"]["data"]["code"].startswith("upstream_error") and line in answer["error"]["message"]
+    assert status_of(world, asked) == "failed"
+    # The owner's own confirmation: no line.
+    upstream.call_answer = None
+    code = execute(world.steward, "create_steward_confirmation", {
+        "name": "mcp__sw__calfam__create_event", "arguments": event,
+        "requester_message_id": dashboard(world, "周六聚餐加到家庭日历", "o-9")["message_id"]}, allow_write=True)["code"]
+    assert dashboard(world, f"确认 {code}", "o-10")["confirmation"]["outcome"] == "confirmed"
+    answer = call("calfam__create_event", event)
+    assert "family group" not in json.dumps(answer, ensure_ascii=False)

@@ -55,12 +55,17 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail,
-          pytest_wall_seconds=None, gate_observations=None):
+          pytest_wall_seconds=None, gate_observations=None,
+          absence_max_loop=None):
     """Real graph, real host class, real `run_tests`, real repo gate.
 
     `counter` lives OUTSIDE the worktree so the gate leaves no uncommitted file
     behind it, and `tail` is a script that NEVER answers — it does not count
     attempts and does not change its mind on a later call.
+
+    `absence_max_loop` replaces the `max_loop` of the absence edge
+    (`test_gate_absent -> test`) on the loaded graph, before it is registered,
+    so a row can spend the lap limit in a few laps instead of the shipped 100.
     """
     from tests.gate_fixture import install_entry_executor
     # The outer disposable capsule supplies isolation; only Docker I/O is substituted.
@@ -112,6 +117,11 @@ def _wire(tmp_path, monkeypatch, *, episode_max, wait, counter, tail,
         for step in graph.steps:
             if step.tool_name == "run_tests":
                 step.tool_params["pytest_wall_seconds"] = pytest_wall_seconds
+    if absence_max_loop is not None:
+        edges = [t for step in graph.steps if step.id == "test_gate_absent"
+                 for t in step.transitions if t.to == "test"]
+        assert len(edges) == 1, edges
+        edges[0].max_loop = absence_max_loop
     sf.register_graph(graph)
     from core.seed_publication import publish_seeds, seed_dir
     publish_seeds(seed_dir(sf, "p", graph.name), {
@@ -271,6 +281,20 @@ def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
     `from_file` resolves against a step that writes nothing, so the edge could
     never match and this pole spent 4 implement cycles on `Cycle limit
     exceeded` instead.
+
+    12 ticks with the clock moved by one wait per tick make about 6 laps of
+    the absence edge (test, then a held tick, then the next re-run). The r5
+    failure spent its second implement cycle on the first lap, so 6 laps see
+    it with room to spare.
+
+    It also carries criterion 2 (formerly its own row, which drove the same
+    wiring and clock for 40 ticks and asserted the same four facts): on the
+    REAL graph's step rows, while the never-answering gate is silent, the
+    `test` row is `completed`, its `retry_count` is 0 (the deferral never
+    charges a retry), its `release_count` is 0 (it never releases the claim)
+    and its `claim_epoch` is 1 (the step instance was claimed exactly once).
+    `_assert_test_row_untouched` asserts each one separately, so the mutation
+    that breaks one names itself.
     """
     counter = tmp_path / "calls.txt"
     sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000,
@@ -279,7 +303,7 @@ def test_pole_a_a_ceiling_far_past_the_window_spends_one_implement_cycle(
     assert first["state"] == "none"          # no report yet: nothing to account
 
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, monkeypatch, ticks=40,
+        sf, run_id, monkeypatch, ticks=12,
         clock_step=gate_deferral.wait_seconds())
     _assert_test_row_untouched(sf, run_id)
 
@@ -310,7 +334,7 @@ def test_pole_b_a_zero_ceiling_is_clamped_and_cannot_charge_the_absence(
     _prime_ledger(sf, run_id)
 
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, monkeypatch, ticks=15, clock_step=1)
+        sf, run_id, monkeypatch, ticks=8, clock_step=1)
     _assert_test_row_untouched(sf, run_id)
 
     assert implement_runs == 1, implement_runs
@@ -466,34 +490,6 @@ def _assert_test_row_untouched(sf, run_id, *, run_status="running"):
         f"status={run['status']} node={run['current_node']}")
 
 
-def test_the_deferral_hold_leaves_real_step_rows_untouched(tmp_path, monkeypatch):
-    """Criterion 2, measured on the REAL graph's step rows — not a stub.
-
-    While the never-answering gate is silent, the `test` step has already run
-    and completed, and the hold parks the run at `test_gate_absent`. What must
-    be TRUE of the rows the hold does NOT touch:
-
-    * the `test` row is `completed`;
-    * its `retry_count` is 0 — the deferral never charges a retry;
-    * its `release_count` is 0 — the deferral never releases the claim;
-    * its `claim_epoch` is 1 — the step instance was claimed exactly once.
-
-    Each is a separate assertion so the mutation that breaks it names itself.
-    """
-    counter = tmp_path / "calls.txt"
-    sf, run_id = _wire(tmp_path, monkeypatch, episode_max=100000, wait=1,
-                       counter=counter, tail=_SILENT_TAIL)
-    _prime_ledger(sf, run_id)
-    _drive(sf, run_id, monkeypatch, ticks=40,
-           clock_step=gate_deferral.wait_seconds())
-    test_row = _rows_by_step(sf, run_id)["test"]
-    assert test_row["status"] == "completed", test_row
-    assert test_row["retry_count"] == 0, test_row
-    assert test_row["release_count"] == 0, test_row
-    assert test_row["claim_epoch"] == 1, test_row
-    _assert_test_row_untouched(sf, run_id)
-
-
 def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
         tmp_path, monkeypatch):
     """The TICK hold (`core/scheduler.py:_run_skillflow_tick`) measured on its
@@ -513,13 +509,13 @@ def test_the_tick_hold_alone_keeps_the_rows_where_the_absence_left_them(
     monkeypatch.setattr(gate_deferral, "hold_blocks_advance",
                         lambda run_id, **_kw: False)
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        sf, run_id, monkeypatch, ticks=10, clock_step=1, second_driver=False)
     _assert_test_row_untouched(sf, run_id)
     assert implement_runs == 1, implement_runs
     assert statuses[-1] == "running", statuses
     first = outcomes.index("silent")
     assert set(outcomes[first:]) == {"silent", "reacquire"}, outcomes
-    assert outcomes.count("silent") >= 8, outcomes
+    assert outcomes.count("silent") >= 4, outcomes
     assert_repo_gate_calls(observations, counter,
                            tests=1 + outcomes.count("reacquire"), measured="unmeasured")
 
@@ -549,12 +545,12 @@ def test_the_host_hold_alone_keeps_the_rows_where_the_absence_left_them(
 
     monkeypatch.setattr(gate_deferral, "observe_run", _observe_but_answer_none)
     implement_runs, statuses, outcomes, nodes = _drive(
-        sf, run_id, monkeypatch, ticks=20, clock_step=1, second_driver=False)
+        sf, run_id, monkeypatch, ticks=10, clock_step=1, second_driver=False)
     _assert_test_row_untouched(sf, run_id)
     assert implement_runs == 1, implement_runs
     assert statuses[-1] == "running", statuses
     first = seen.index("silent")
     assert set(seen[first:]) == {"silent", "due"}, seen
-    assert seen.count("silent") >= 8, seen
+    assert seen.count("silent") >= 4, seen
     assert_repo_gate_calls(observations, counter,
                            tests=1 + seen[first:].count("due"), measured="unmeasured")

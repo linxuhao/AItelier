@@ -866,6 +866,7 @@ export function mediaOps({ request, library, gatewayFetch }) {
     resolve: async ref => library.lookup(ref),
     read: ref => library.read(ref),
     setProtected: fn => library.setProtected(fn),
+    withdraw: ref => library.withdraw(ref),
     async fetch({ connId, url, audience }, signal) {
       let response;
       try { response = await gatewayFetch(connId, url, signal); }

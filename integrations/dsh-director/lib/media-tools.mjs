@@ -22,6 +22,8 @@
  *    can refuse the send is judged before a url is fetched (review F2): the destination, the
  *    channel's kinds, and for a group the backend's budget and caption check as a dry run
  *    (postGroup checkOnly); postGroup without checkOnly stays the authoritative record at send.
+ *    What only the fetched bytes decide (a url whose name gave no kind) or the authoritative
+ *    record refuses after the fetch takes back the file this call stored (media.withdraw).
  */
 import { covers, audienceLabel, REF_PATTERN, MEDIA_TYPES, MEDIA_LIMITS } from './media.mjs';
 
@@ -171,28 +173,37 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         const check = await media.postGroup({ turn: turns.open()?.turn, ...(kind ? { kind } : {}), caption: args.caption, checkOnly: true }, exec.signal);
         if (!check?.may_post) return { refused: check?.refused ?? 'not_posted', ...(check?.reason ? { reason: check.reason } : {}) };
       }
+      // A file this call fetched and stored, taken back if the send is refused after all (review
+      // MF3): a library row that existed before (a duplicate answer) is never this call's.
+      let created;
+      const unsent = async refusal => {
+        if (created) { try { await media.withdraw?.(created); } catch { /* kept: cleanup removes it in 30 days */ } }
+        return refusal;
+      };
       if (hasUrl) {
         const fetched = await media.fetch({ connId, url: args.url, audience: label }, exec.signal);
         if (!fetched?.ref) return { refused: fetched?.refused ?? 'fetch_failed', ...(fetched?.reason ? { reason: fetched.reason } : {}) };
+        if (fetched.duplicate !== true) created = fetched.ref;
         row = await media.resolve(fetched.ref);
-        if (!row) return { refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' };
+        if (!row) return unsent({ refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' });
       }
       const file = { kind: row.kind, mime: row.mime, name: `${row.kind}-${row.ref.slice(2, 10)}.${row.ext}`, path: row.path,
         ...(args.caption ? { caption: args.caption } : {}) };
       if (turn.kind === 'owner') {
         // A url whose name said nothing: its real kind is known only now - its bytes are fetched
-        // and stored by now (kept as any generated file), but a kind the channel cannot send is not sent.
-        if (!channels.canSendFile(target.channel, row.kind)) return { refused: 'channel_no_media' };
+        // and stored by now, so a kind the channel cannot send is not sent and the file is taken back.
+        if (!channels.canSendFile(target.channel, row.kind)) return unsent({ refused: 'channel_no_media' });
         const sent = await channels.sendFile(target.channel, { ...file, to: target.to, ...(target.replyToRef ? { replyToRef: target.replyToRef } : {}) });
         return sent.sent ? { sent: true, ref: row.ref, kind: row.kind, channel: target.channel } : sent;
       }
       // A group's file: the backend counts it among the group's sends and checks the caption -
       // only once the group's channel can send this kind at all (a url's real kind: when its name
-      // said nothing, its bytes are fetched and stored by now, kept as any generated file, not sent).
-      if (!channels.canSendFile(turn.channel, row.kind)) return { refused: 'channel_no_media' };
+      // said nothing, its bytes are fetched and stored by now; refused, the file is taken back).
+      if (!channels.canSendFile(turn.channel, row.kind)) return unsent({ refused: 'channel_no_media' });
       const open = turns.open();
       const posted = await media.postGroup({ turn: open?.turn, kind: row.kind, caption: args.caption }, exec.signal);
-      if (!posted || posted.refused || !posted.group_ref) return { refused: posted?.refused ?? 'not_posted', ...(posted?.reason ? { reason: posted.reason } : {}) };
+      if (!posted || posted.refused || !posted.group_ref)
+        return unsent({ refused: posted?.refused ?? 'not_posted', ...(posted?.reason ? { reason: posted.reason } : {}) });
       const { caption: _asked, ...bare } = file;
       const sent = await channels.sendFile(posted.channel, { ...bare, groupRef: posted.group_ref,
         ...(posted.caption ? { caption: posted.caption } : {}) });

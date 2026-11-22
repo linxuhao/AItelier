@@ -26,6 +26,10 @@ const wav = () => Buffer.concat([Buffer.from('RIFF\x24\x00\x00\x00WAVEfmt ', 'la
 const zip = () => Buffer.concat([Buffer.from('504b030414000600', 'hex'), Buffer.alloc(100)]);
 const exe = () => Buffer.concat([Buffer.from('MZ'), Buffer.alloc(100)]);
 const root = () => mkdtempSync(join(tmpdir(), 'media-'));
+// Every stored file of a world's library (its month directories; the index left out).
+const files = t => existsSync(t.library.home) ? readdirSync(t.library.home, { recursive: true })
+  .filter(name => name.includes('/') && statSync(join(t.library.home, name)).isFile()).sort() : [];
+
 /** A source that hands out `total` bytes in `chunk`-sized pieces, counting what was pulled. */
 function counted(head, total, chunk = MiB) {
   const state = { pulled: 0 };
@@ -332,7 +336,7 @@ function channelWorld({ bound = 'wxid_owner', senderBound, owedFile, now, mediaK
   const dir = root();
   const library = createMediaLibrary({ root: join(dir, 'media'), ...(now ? { now } : {}) });
   const media = { ingest: (m, o) => library.ingest(m, o), resolve: async ref => library.lookup(ref), read: ref => library.read(ref),
-    setProtected: fn => library.setProtected(fn) };
+    setProtected: fn => library.setProtected(fn), withdraw: ref => library.withdraw(ref) };
   const calls = { relay: [], senderBound: [], sent: [], files: [] };
   const sources = new Map();
   const host = {
@@ -629,14 +633,49 @@ test('send_media(url) in an owner turn: a channel that cannot send the file is r
     assert.equal(t.calls.files.length, 0);
   }
   // A url whose name says nothing, on a file-only channel: its kind is known once fetched -
-  // fetched and stored, then refused without sending.
+  // fetched and stored, then refused without sending, and the file taken back (review MF3).
   const t = toolWorld({ mediaKinds: ['file'] });
   await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
   t.ledger.record(DRAW, { value: { unnamed } });
   assert.deepEqual(await t.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
   assert.equal(t.fetched.length, 1);
   assert.equal(t.calls.files.length, 0, 'not sent');
+  assert.deepEqual(t.library.rows, [], 'the row this call stored is withdrawn');
+  assert.deepEqual(files(t), [], 'and its file');
   assert.deepEqual(await t.handle.ownerMediaTarget('msg-1', 'image'), { refused: 'channel_no_media' }, 'the kind branch is live');
+});
+
+test('send_media(url) refused after its fetch takes back only what that call stored: a row stored before (same bytes) and its file stay', async () => {
+  // Review MF3: the owner's url without a kind in its name on a file-only channel, and a
+  // group's post refused at send time (its dry run allowed it) - each leaves the library as it was.
+  const unnamed = 'http://mcp_server:9003/files/7f3a?sig=1';
+  const mine = toolWorld({ mediaKinds: ['file'] });
+  await mine.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
+  const before = await mine.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => png(64, 64));
+  const rows = mine.library.rows, stored = files(mine);
+  mine.ledger.record(DRAW, { value: { unnamed } });
+  assert.deepEqual(await mine.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
+  assert.equal(mine.fetched.length, 1);
+  assert.deepEqual(mine.library.rows, rows, 'the earlier row (same sha256) is untouched');
+  assert.deepEqual(files(mine), stored, 'and so is the file it shares');
+  assert.deepEqual(readFileSync(mine.library.lookup(before.ref).path), png(64, 64));
+  const group = { kind: 'group', channel: 'wechat', group_ref: 'r1' };
+  for (const shape of [{ mediaKinds: ['file'], url: unnamed, refused: 'channel_no_media' },
+    { url: 'http://mcp_server:9003/files/cat.png?sig=1', refused: 'group_send_budget' }]) {
+    const t = toolWorld({ audience: group, ...(shape.mediaKinds ? { mediaKinds: shape.mediaKinds } : {}) });
+    const real = t.media.postGroup;
+    t.media.postGroup = async (request, signal) => request.checkOnly ? real(request, signal) : { refused: 'group_send_budget' };
+    t.ledger.record(DRAW, { value: { url: shape.url } });
+    assert.deepEqual(await t.run('send_media', { url: shape.url }), { refused: shape.refused }, shape.url);
+    assert.equal(t.fetched.length, 1, 'fetched once (only its bytes could decide)');
+    assert.deepEqual(t.library.rows, [], `nothing left stored: ${shape.refused}`);
+    assert.deepEqual(files(t), []);
+    assert.equal(t.calls.files.length, 0);
+  }
+  // The library's withdraw leaves an inbound row alone.
+  const kept = await mine.library.ingest({ ...owner, messageRef: 'in-1', index: 0 }, async () => png(5, 5));
+  assert.deepEqual(mine.library.withdraw(kept.ref), { removed: 0 });
+  assert.ok(mine.library.lookup(kept.ref));
 });
 
 test('send_media: a dashboard turn is dashboard_no_media; no requester is no_requester; exactly one of ref and url', async () => {

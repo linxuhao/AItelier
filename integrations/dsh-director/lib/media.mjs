@@ -457,6 +457,14 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     /** The bytes of a ref (undefined when the ref is unknown or its file is gone). */
     async read(ref) { const row = lookup(ref); return row ? { row, bytes: await readFile(row.path) } : undefined; },
     setProtected(fn) { if (typeof fn === 'function') protectFn = fn; },
+    /** Take back a file this host fetched for send_media and did not send (review MF3): the
+     *  `generated` row `ref`, and its file once no other row points at it (a file stored before,
+     *  shared by sha256, stays). A protected ref, an inbound row or an unknown ref is left alone. */
+    withdraw(ref) {
+      const row = rows.find(r => r.ref === ref);
+      if (!row || row.source !== 'generated' || protectedRefs().has(ref)) return { removed: 0 };
+      return { removed: dropRows(new Set([ref])) };
+    },
     /** Every file and row of this writer (the dashboard's 清空媒体). */
     clear() { const n = rows.length; rows = []; refusals = []; rmSync(home, { recursive: true, force: true }); return { removed: n }; },
     start(intervalMs = DAY_MS) {

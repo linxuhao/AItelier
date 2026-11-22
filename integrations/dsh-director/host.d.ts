@@ -356,7 +356,10 @@ export interface DirectorHost {
    *    group_send_budget, caption exit-checked - {posted, channel, group_ref, caption?} or {refused}.
    *    With checkOnly, the same judgement as a dry run before anything is fetched (kind may be
    *    omitted): {may_post: true} or {refused}, no budget used and no row written.
-   *  - setProtected (optional): refs the library must not clean (a relay not committed yet). */
+   *  - setProtected (optional): refs the library must not clean (a relay not committed yet).
+   *  - withdraw (optional): take back the `generated` row a fetch for send_media just stored when
+   *    the send is then refused (a kind the channel cannot send, the group's post refused) - the
+   *    row, and its file once no other row points at it; anything else is left alone. */
   media?: {
     ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
       open: (options: { signal: AbortSignal }) => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>,
@@ -370,6 +373,7 @@ export interface DirectorHost {
       Promise<{ posted: true; message_id: string; channel: string; group_ref: string; caption?: string } | { may_post: true }
         | { refused: string; reason?: string }>;
     setProtected?(refs: () => Iterable<string>): void;
+    withdraw?(ref: string): { removed: number } | Promise<{ removed: number }>;
   };
   channels?: {
     /** Step 24.2: `attachments` - the files' metadata the plugin checked (each a kind and exactly

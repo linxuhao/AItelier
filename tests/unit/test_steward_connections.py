@@ -41,6 +41,7 @@ from core.state_commands import STEWARD_WRITE_ACTIONS, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError, StateNotFound
 from core.state_service import StateService
+from tests.support import state_template
 
 HOME = "aitelier-home"
 OWNER = "owner:o@example.com"
@@ -129,14 +130,14 @@ class FakeUpstream:
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setattr(sc, "RESOLVER", resolver)
     monkeypatch.setenv("AITELIER_STEWARD_SECRETS_DIR", str(tmp_path / "secrets"))
     monkeypatch.setenv("AITELIER_STEWARD_HOST_ADDRESSES", "192.168.1.119,100.106.5.46,172.24.0.1")
     monkeypatch.delenv(gw.PORT_ENV, raising=False)
     monkeypatch.setattr(sc, "TOOLS_CHANGED_HOOKS", [])
     monkeypatch.setattr(sc, "PROBER", None)
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, PEPPER)
     registry.seed("steward-connections-owner-cli")
     seeder = StateService(db, actor="fixture", project_read_trusted=True)

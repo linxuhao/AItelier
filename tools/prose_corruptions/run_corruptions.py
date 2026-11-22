@@ -285,8 +285,13 @@ def run_all(rev=None, log=None, targets=(), raw_dir=None, only=(),
                 _apply(entry, worktree, catalog)
             changed = _git(["status", "--porcelain"], worktree)
             run_targets = list(targets) if targets else ["tests/"]
+            # pytest.ini deselects `slow` rows by default; name the selection
+            # explicitly so the nested run measures what it measured before
+            # that tier existed, on any --rev.
             command = [sys.executable, "-m", "pytest", "-q",
-                       "-p", "no:cacheprovider", *run_targets]
+                       "-p", "no:cacheprovider",
+                       "-m", "not network and not docker and not baked_toolchain",
+                       *run_targets]
             started = datetime.now(timezone.utc).isoformat()
             code, output = _bare_run(command, worktree)
             tree_sha = _git(["rev-parse", "HEAD"], worktree).stdout.strip()

@@ -17,7 +17,7 @@
 import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
-import { autoReplyBody, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
+import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
   mediaRootFrom } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
@@ -722,7 +722,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           execute: (_args, exec) => listSchedules(toolRequest, exec.signal).then(schedules => ({ schedules })),
         }));
         scope.tools.register(defineTool({ name: 'schedule_set',
-          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner. target "family_group" (only when your owner asks for a reminder to a family group): the instruction is then the exact words posted into that group when due, at most 500 characters, not an instruction to you - you are not woken; group is the bound group\'s name (your snapshot lists them), required when more than one group is bound. A reminder is your owner\'s own unless they name a group (or say "to the group" while only one is bound). Refused no_group_bound when no group is bound, group_required when several are and none is named, withheld when the words name something the group may not see.',
+          description: 'Create a reminder (no schedule_id), or change one (schedule_id with the expected_version schedule_list showed). When it is due you are woken with its instruction. schedule: a 5-field cron expression (at least 15 minutes apart) or a single future time; tz defaults to your owner\'s timezone. A reminder gives you no new permission: you still only answer, pass on, propose and tell your owner. target "family_group" (only when your owner asks for a reminder to a family group): the instruction is then the exact words posted into that group when due, at most 500 characters, not an instruction to you - you are not woken; group is the bound group\'s name, required when more than one group is bound (a group_required refusal names every bound group). A reminder is your owner\'s own unless they name a group (or say "to the group" while only one is bound). Refused no_group_bound when no group is bound, group_required when several are and none is named, withheld when the words name something the group may not see.',
           parameters: { schedule_id: { type: 'string' }, expected_version: { type: 'integer' }, title: { type: 'string' }, instruction: { type: 'string' },
             schedule: scheduleShape, tz: { type: 'string' }, enabled: { type: 'boolean' },
             target: { type: 'string', enum: ['owner', 'family_group'] }, group: { type: 'string' },
@@ -815,13 +815,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           ...(r.target === 'family_group' ? { target: r.target, target_group: r.target_group_label ?? null } : {}),
           ...(r.created_via === 'group' ? { created_via: 'group' } : {}) })))
         .catch(error => ({ error: String(error?.message ?? error).slice(0, 300) }));
-      const groups = await request('/api/state/query/list_owner_groups', {}).then(r => ((r?.result ?? r)?.groups ?? [])
-        .map(g => g.label).filter(Boolean)).catch(() => undefined);
+      // Director 602 defect 4: a failed read of the group names is said (boundGroupsSection), never dropped.
+      const groups = await boundGroupsSection(request);
       // Design-steward 7.3 layer 2: what is open, from data, not from the model's memory.
       const threads = await openThreads({ request, project, me: env.AITELIER_DRIVER_ID, stateDir: env.AITELIER_DSH_STATE_DIR });
       return runtime.render() + '\n\nOpen threads:\n' + JSON.stringify(threads) + '\n\nYour open proposals:\n' + JSON.stringify(proposals)
         + '\n\nYour reminders (on):\n' + JSON.stringify(schedules)
-        + (groups?.length ? '\n\nYour owner\'s bound family groups (by name):\n' + JSON.stringify(groups) : '');
+        + groups;
     },
     progress: body => request(`/api/dsh-drivers/${encodeURIComponent(project)}/activity`, body),
     /** One get_attempt per plan attempt (see settledAttempts). */

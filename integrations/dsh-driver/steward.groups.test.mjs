@@ -4,7 +4,8 @@
  *  operations map onto the step 23 commands. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stewardOps, groupOps, publicProjectSummary, listWhoShown } from './steward-host.mjs';
+import { stewardOps, groupOps, publicProjectSummary, listWhoShown, boundGroupsSection } from './steward-host.mjs';
+import { readFileSync } from 'node:fs';
 
 function recorder(answers = {}) {
   const calls = [];
@@ -191,4 +192,17 @@ test('step 23.1 (7.8.9 step 5): run_confirmed\'s read names the turn it runs in'
   await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A', undefined, {});
   await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A');
   assert.deepEqual(calls.slice(1).map(c => c.body), [{ code: 'K7Q2A' }, { code: 'K7Q2A' }]);
+});
+
+test('director 602 defect 4: the snapshot says 群名暂不可用 when the group names cannot be read; schedule_set does not lean on it', async () => {
+  const names = await boundGroupsSection(recorder({ '/api/state/query/list_owner_groups': { result: { groups: [{ label: '家庭群' }, { label: '老家群' }] } } }).request);
+  assert.equal(names, '\n\nYour owner\'s bound family groups (by name):\n["家庭群","老家群"]');
+  assert.equal(await boundGroupsSection(recorder({ '/api/state/query/list_owner_groups': { result: { groups: [] } } }).request), '');
+  const failed = await boundGroupsSection(recorder({ '/api/state/query/list_owner_groups': new Error('AItelier: HTTP 503') }).request);
+  assert.match(failed, /bound family groups \(by name\): 群名暂不可用/);
+  // The snapshot is built from it, and schedule_set's description sends the model to the refusal, not the snapshot.
+  const runtime = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
+  assert.ok(runtime.includes('await boundGroupsSection(request)'));
+  const description = runtime.match(/name: 'schedule_set',\s*description: '((?:[^'\\]|\\.)*)'/)?.[1] ?? '';
+  assert.ok(description.includes('a group_required refusal names every bound group') && !description.includes('snapshot'), description);
 });

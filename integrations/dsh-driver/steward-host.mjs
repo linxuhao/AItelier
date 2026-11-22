@@ -203,6 +203,17 @@ async function ownerMessageById({ request, project, id, signal }) {
 /** A State refusal as a tool answer: the error text, bounded. */
 const refusedBy = error => ({ refused: 'state_refused', reason: String(error?.message ?? error).slice(0, 500) });
 
+/** The snapshot's line naming the owner's bound family groups (step 23.1, review P1): names only.
+ *  A read that fails is said - 群名暂不可用 - never dropped as if no group were bound (director
+ *  602 defect 4); schedule_set does not rely on this line (group_required names every bound group). */
+export async function boundGroupsSection(request, signal) {
+  const names = await request('/api/state/query/list_owner_groups', {}, signal).then(r => ((r?.result ?? r)?.groups ?? [])
+    .map(g => g.label).filter(Boolean)).catch(() => null);
+  if (names === null) return '\n\nYour owner\'s bound family groups (by name): 群名暂不可用 (could not be read just now; a reminder '
+    + 'to a group still works - a group_required refusal names the bound groups)';
+  return names.length ? '\n\nYour owner\'s bound family groups (by name):\n' + JSON.stringify(names) : '';
+}
+
 /** The steward's open proposals, for its snapshot. A connection_change keeps only op,
  *  conn_id and widens: its stored payload carries the card's snapshot (each tool's whole
  *  definition, written by the upstream server) and tool names, the server's own text,

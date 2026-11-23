@@ -4,14 +4,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, chmodSync, statSync, symlinkSync, existsSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS, MEDIA_LIMITS, MEDIA_FETCH, MEDIA_SEND, mediaOf,
-  sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError } from './bridge.mjs';
+  sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError, RESUME_LIMITS, accountRecord, ACCOUNT_FILE } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
 const types = { Message: { Unknown: 0, Attachment: 1, Audio: 2, Emoticon: 5, Image: 6, Text: 7, Video: 15 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
@@ -92,7 +92,8 @@ const noBot = () => { throw new Error('no bot expected'); };
  *  `bot()` the newest. `login()` requests a QR and logs in with it on the new bot. */
 async function started(options = {}) {
   const bots = [];
-  const makeBot = () => { const made = fakeBot(options); if (options.prepare) options.prepare(made); bots.push(made); return made; };
+  // `options` is what the bridge built the bot with (step 19.1: {resume: true} for a resume).
+  const makeBot = opts => { const made = fakeBot(options); made.options = opts; if (options.prepare) options.prepare(made, opts); bots.push(made); return made; };
   const bridge = createBridge({ makeBot, types, token: TOKEN, ...options });
   const address = await bridge.listen(0);
   const base = `http://${address.address}:${address.port}`;
@@ -1562,4 +1563,483 @@ test('send-file: into a bound room through the group queue and its backstop', as
 test('run.sh gives /tmp a 32 MiB tmpfs (one fetched media file at a time)', () => {
   const script = readFileSync(fileURLToPath(new URL('./run.sh', import.meta.url)), 'utf8');
   assert.match(script, /--tmpfs \/tmp:rw,noexec,nosuid,size=32m /);
+});
+
+// --- step 19.1: the saved login (design-steward 7.2.1) -----------------------------------------
+/** The fork's saved login as main.mjs hands it in, faked: `present` and the write counts are
+ *  what savedLoginStatus() answers (`off` set: its configuration error, present false);
+ *  `account` is the recorded QR-login account (null: none). `forgotten` counts forget() calls. */
+function fakeSaved({ present = true, off, account = 'wxid_bot', writes = 0, writeFailures = 0 } = {}) {
+  const saved = { present, off, account, writes, writeFailures, forgotten: 0, recorded: [], recordError: undefined,
+    forgetError: undefined, statusCalls: 0 };
+  saved.api = {
+    status: () => {
+      saved.statusCalls++;
+      return saved.off ? { present: false, off: saved.off, writes: 0, write_failures: 0 }
+        : { present: saved.present, writes: saved.writes, write_failures: saved.writeFailures };
+    },
+    forget: async () => { saved.forgotten++; if (saved.forgetError) throw saved.forgetError; saved.present = false; },
+    readAccount: () => saved.account ?? undefined,
+    recordAccount: id => { if (saved.recordError) throw saved.recordError; saved.recorded.push(id); saved.account = id; },
+  };
+  return saved;
+}
+// A test that hangs fails at this bound instead of holding up the suite.
+const LIMIT = { timeout: 15_000 };
+const FAST = Object.freeze({ waitMs: 200, retryMs: Object.freeze([30, 60, 90]), holdGroupMs: 150, countLogMs: 40 });
+const resumed = async (options = {}) => {
+  const saved = options.saved ?? fakeSaved();
+  const s = await started({ savedLogin: saved.api, resumeLimits: FAST, ...options });
+  return { ...s, saved };
+};
+const events = async s => (await s.json('/events?after=0'))[1].events;
+const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('saved login: the limits are code constants, the resume bound strictly above the fork\'s ~70 s worst case', LIMIT, () => {
+  assert.deepEqual({ ...RESUME_LIMITS, retryMs: [...RESUME_LIMITS.retryMs] },
+    { waitMs: 150_000, retryMs: [30_000, 120_000, 600_000], holdGroupMs: 120_000, countLogMs: HOUR });
+  assert.ok(Object.isFrozen(RESUME_LIMITS) && Object.isFrozen(RESUME_LIMITS.retryMs));
+  assert.ok(RESUME_LIMITS.waitMs > 70_000);
+});
+
+test('saved login: none to resume starts idle (boot) and builds no bot; one to resume goes resuming -> logged_in with no QR', LIMIT, async () => {
+  const none = await resumed({ saved: fakeSaved({ present: false }) });
+  try {
+    const [, body] = await none.json('/status');
+    assert.deepEqual([body.phase, body.idle_reason, body.resumable], ['idle', 'boot', false]);
+    await sleepMs(50);
+    assert.deepEqual(none.bots, [], 'nothing to resume: WeChat is asked for nothing');
+  } finally { await none.bridge.close(); }
+
+  const logs = [];
+  const s = await resumed({ log: line => logs.push(line) });
+  try {
+    let [, body] = await s.json('/status');
+    assert.deepEqual([body.phase, body.logged_in, body.resumable, typeof body.since], ['resuming', false, true, 'string']);
+    assert.equal(s.bots.length, 1);
+    assert.deepEqual(s.bot().options, { resume: true });
+    await s.bridge.settled();
+    assert.deepEqual(s.bot().calls, ['start']);
+    s.bot().emit('login', { id: 'wxid_bot' });
+    [, body] = await s.json('/status');
+    assert.deepEqual([body.phase, body.logged_in, body.user_id, body.qr, body.qr_svg, body.resumable],
+      ['logged_in', true, 'wxid_bot', undefined, undefined, true]);
+    assert.ok(logs.includes('logged in (the saved login resumed)'));
+    assert.deepEqual(s.saved.recorded, [], 'a resumed login does not rewrite the record');
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: refused, unreadable, throttled and none each leave their idle reason, with no retry and no QR', LIMIT, async () => {
+  const cases = [
+    ['RESUME_REJECTED', 'resume_rejected', false],
+    ['RESUME_UNREADABLE', 'resume_unreadable', true],
+    ['RESUME_THROTTLED', 'resume_throttled', true],
+    ['RESUME_NONE', 'boot', false],
+  ];
+  for (const [prefix, reason, present] of cases) {
+    const s = await resumed();
+    try {
+      await s.bridge.settled();
+      // The fork deleted a refused file (and found none for RESUME_NONE) before it answered.
+      s.saved.present = present;
+      s.bot().emit('error', new Error(`${prefix}: the saved login was not resumed`));
+      s.bot().emit('logout', { id: 'wxid_bot' });
+      await s.bridge.settled();
+      const [, body] = await s.json('/status');
+      assert.deepEqual([body.phase, body.idle_reason, body.resumable], ['idle', reason, present], prefix);
+      assert.deepEqual(s.bot().calls, ['start', 'stop'], prefix);
+      await sleepMs(250);
+      assert.equal(s.bots.length, 1, `${prefix}: never tried again, never a QR by itself`);
+    } finally { await s.bridge.close(); }
+  }
+});
+
+test('saved login: a passing failure (network, busy, a start that throws, no answer in time) is idle resume_failed and is tried again', LIMIT, async () => {
+  const cases = [
+    ['network', bot => bot.emit('error', new Error('Neo could not resume the saved login: timed out'))],
+    ['busy', bot => bot.emit('error', new Error('RESUME_BUSY: another resume is running'))],
+    ['start', undefined],
+    ['silence', () => {}],
+  ];
+  for (const [name, happen] of cases) {
+    const s = await resumed({ prepare: (bot, opts) => { if (name === 'start' && opts?.resume && !bot.done) bot.startError = new Error('no session'); } });
+    try {
+      await s.bridge.settled();
+      happen?.(s.bots[0]);
+      await until(() => s.bridge.state.idle_reason === 'resume_failed' || s.bots.length > 1, 1000);
+      if (s.bots.length === 1) assert.deepEqual([s.bridge.state.phase, s.bridge.state.idle_reason], ['idle', 'resume_failed'], name);
+      await until(() => s.bots.length === 2, 1000);
+      assert.deepEqual(s.bots[1].options, { resume: true }, name);
+      assert.ok(s.bots[0].calls.includes('stop'), `${name}: the first bot was stopped`);
+    } finally { await s.bridge.close(); }
+  }
+});
+
+test('saved login: retries at retryMs (3), each on a new bot after the last one stopped, then idle resume_failed for good', LIMIT, async () => {
+  const order = [];
+  const s = await resumed({ prepare: (bot, opts) => {
+    const index = order.filter(line => line.endsWith(':built')).length;
+    order.push(`${index}:built`);
+    bot.startError = new Error('Neo could not resume the saved login: network');
+    // The first bot stops slowly: the first retry (after 30 ms) must wait for it.
+    const stop = bot.stop;
+    bot.stop = async () => { if (index === 0) await sleepMs(150); await stop(); order.push(`${index}:stopped`); };
+    assert.deepEqual(opts, { resume: true });
+  } });
+  try {
+    await until(() => s.bots.length === 4 && s.bridge.state.idle_reason === 'resume_failed' && !s.bridge.state.logged_in, 2000);
+    await s.bridge.settled();
+    await sleepMs(300);
+    assert.equal(s.bots.length, 4, 'one resume and three retries, no more');
+    assert.deepEqual([s.bridge.state.phase, s.bridge.state.idle_reason], ['idle', 'resume_failed']);
+    assert.ok(order.indexOf('0:stopped') < order.indexOf('1:built'), order.join(' '));
+    for (const bot of s.bots) assert.deepEqual(bot.calls, ['start', 'stop']);
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: POST /login is refused 409 resuming while resuming, taken in a resume_* idle, and it voids a pending retry', LIMIT, async () => {
+  const s = await resumed({ resumeLimits: { ...FAST, retryMs: [150, 150, 150] }, loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 } });
+  try {
+    assert.deepEqual(await s.json('/login', { method: 'POST' }), [409, { refused: 'resuming' }]);
+    assert.equal(s.bots.length, 1);
+    await s.bridge.settled();
+    s.bot().emit('error', new Error('Neo could not resume the saved login: offline'));
+    assert.equal(s.bridge.state.idle_reason, 'resume_failed');
+    assert.equal((await s.request())[0], 202);
+    assert.equal(s.bots.length, 2);
+    assert.equal(s.bots[1].options, undefined, 'a QR login is built as before');
+    await sleepMs(300);
+    assert.equal(s.bots.length, 2, 'the pending retry did nothing');
+    assert.equal(s.bridge.state.phase, 'starting');
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: an ended resume\'s bot changes nothing later - its login, error or logout', LIMIT, async () => {
+  const s = await resumed();
+  try {
+    await s.bridge.settled();
+    const first = s.bots[0];
+    await until(() => s.bridge.state.idle_reason === 'resume_failed', 1000);
+    await until(() => s.bots.length === 2 && s.bridge.state.phase === 'resuming', 1000);
+    first.emit('login', { id: 'wxid_bot' });
+    first.emit('error', new Error('RESUME_REJECTED'));
+    first.emit('logout', { id: 'wxid_bot' });
+    assert.equal(s.bridge.state.phase, 'resuming');
+    s.bots[1].emit('login', { id: 'wxid_bot' });
+    assert.equal(s.bridge.state.phase, 'logged_in');
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: a resume that comes back as another account is deleted, its bot stopped, nothing sent; idle resume_account_mismatch', LIMIT, async () => {
+  const logs = [];
+  let releaseStop;
+  const s = await resumed({ log: line => logs.push(line), prepare: bot => {
+    const stop = bot.stop;
+    bot.stop = async () => { await new Promise(resolve => { releaseStop = resolve; }); await stop(); };
+  } });
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('login', { id: 'wxid_other' });
+    bot.emit('message', message({ text: 'not for anyone' }));
+    // Until the bot has stopped and the file is gone, no QR login may start.
+    let [, body] = await s.json('/status');
+    assert.deepEqual([body.phase, body.logged_in, body.user_id], ['resuming', false, undefined]);
+    assert.deepEqual(await s.json('/login', { method: 'POST' }), [409, { refused: 'resuming' }]);
+    assert.deepEqual(await s.json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'x' } }), [409, { error: 'not_logged_in' }]);
+    assert.equal(s.saved.forgotten, 0, 'deleted only once the bot has stopped');
+    releaseStop();
+    await s.bridge.settled();
+    [, body] = await s.json('/status');
+    assert.deepEqual([body.phase, body.idle_reason, body.logged_in, body.resumable], ['idle', 'resume_account_mismatch', false, false]);
+    assert.equal(s.saved.forgotten, 1);
+    assert.deepEqual(bot.said, []);
+    assert.deepEqual(await events(s), []);
+    await s.json('/rooms', { method: 'PUT', body: { owner_ref: 'wxid_owner', rooms: [] } });
+    assert.deepEqual(await events(s), [], 'what it held is dropped, not released');
+    assert.ok(!logs.some(line => line.includes('wxid_other')), 'the account is never logged');
+    await sleepMs(250);
+    assert.equal(s.bots.length, 1, 'no retry');
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: a deletion that fails still never calls it resumable in this process; a start with no account recorded deletes it unresumed', LIMIT, async () => {
+  const failing = fakeSaved();
+  failing.forgetError = new Error('EROFS');
+  const logs = [];
+  const s = await resumed({ saved: failing, log: line => logs.push(line) });
+  try {
+    await s.bridge.settled();
+    s.bot().emit('login', { id: 'wxid_other' });
+    await s.bridge.settled();
+    const [, body] = await s.json('/status');
+    assert.deepEqual([body.idle_reason, body.resumable], ['resume_account_mismatch', false]);
+    assert.ok(failing.present, 'the file is still there');
+    assert.ok(logs.includes('deleting the saved login failed: EROFS'));
+  } finally { await s.bridge.close(); }
+
+  const unrecorded = await resumed({ saved: fakeSaved({ account: null }) });
+  try {
+    await unrecorded.bridge.settled();
+    const [, body] = await unrecorded.json('/status');
+    assert.deepEqual([body.phase, body.idle_reason, body.resumable], ['idle', 'resume_account_mismatch', false]);
+    assert.equal(unrecorded.saved.forgotten, 1);
+    assert.deepEqual(unrecorded.bots, [], 'WeChat is never asked');
+  } finally { await unrecorded.bridge.close(); }
+});
+
+test('saved login: a QR login records its account; a record that cannot be written leaves it logged in and not resumable', LIMIT, async () => {
+  const s = await resumed({ saved: fakeSaved({ present: false, account: null }) });
+  try {
+    await s.login();
+    assert.deepEqual(s.saved.recorded, ['wxid_bot']);
+    s.saved.present = true;
+    assert.equal((await s.json('/status'))[1].resumable, true);
+  } finally { await s.bridge.close(); }
+
+  const logs = [];
+  const failing = fakeSaved({ present: false, account: 'wxid_old' });
+  failing.recordError = new Error('ENOSPC');
+  const f = await resumed({ saved: failing, log: line => logs.push(line) });
+  try {
+    await f.login();
+    failing.present = true;
+    const [, body] = await f.json('/status');
+    assert.deepEqual([body.phase, body.resumable], ['logged_in', false]);
+    assert.ok(logs.some(line => line.startsWith('the account logged in with could not be recorded') && line.endsWith('ENOSPC')));
+  } finally { await f.bridge.close(); }
+});
+
+test('saved login: write failures are counted apart and never read as off; off logs its reason only', LIMIT, async () => {
+  const logs = [];
+  const saved = fakeSaved({ writes: 4, writeFailures: 2 });
+  const s = await resumed({ saved, log: line => logs.push(line) });
+  try {
+    await s.bridge.settled();
+    s.bot().emit('login', { id: 'wxid_bot' });
+    assert.equal((await s.json('/status'))[1].resumable, true);
+    await until(() => logs.includes('saved login: 4 writes, 2 write failures'), 1000);
+    await sleepMs(150);
+    assert.equal(logs.filter(line => line.startsWith('saved login: ')).length, 1, 'unchanged counts are not logged again');
+    saved.writes = 5;
+    await until(() => logs.includes('saved login: 5 writes, 2 write failures'), 1000);
+    assert.ok(!logs.some(line => line.includes('off')), logs.join('\n'));
+  } finally { await s.bridge.close(); }
+
+  for (const off of ['key', 'dir', 'not_configured']) {
+    const offLogs = [];
+    const o = await resumed({ saved: fakeSaved({ off }), log: line => offLogs.push(line) });
+    try {
+      assert.ok(offLogs.includes(`saved login off (${off})`), off);
+      assert.equal((await o.json('/status'))[1].resumable, false);
+      await sleepMs(100);
+      assert.ok(!offLogs.some(line => line.startsWith('saved login: ')), `${off}: no write counts`);
+      assert.deepEqual(o.bots, []);
+    } finally { await o.bridge.close(); }
+  }
+});
+
+test('saved login off (WECHAT_BRIDGE_SAVE_LOGIN=0) and no saved-login calls at all are the bridge as it was before 19.1', LIMIT, async () => {
+  // One script of today's behaviour: a QR login, a 1:1 message before any PUT /rooms (relayed
+  // at once: no hold), the account never recorded, a logout that resumes nothing.
+  const trace = async savedLogin => {
+    const saved = savedLogin;
+    const s = await started({ savedLogin: saved?.api, resumeLimits: FAST });
+    try {
+      const out = [];
+      const status = async () => { const [, b] = await s.json('/status'); delete b.since; out.push(b); };
+      await status();
+      const bot = await s.login();
+      out.push(s.bots.map(b => b.options));
+      bot.emit('message', message({ id: 'a1', text: 'before any PUT' }));
+      bot.emit('message', roomMessage({ id: 'g1', text: '@管家 hi' }));
+      out.push((await events(s)).map(e => [e.type, e.message_ref]));
+      await status();
+      bot.emit('logout', { id: 'wxid_bot' });
+      await s.bridge.settled();
+      await sleepMs(100);
+      await status();
+      out.push(s.bots.length, saved?.recorded ?? [], saved?.forgotten ?? 0);
+      return out;
+    } finally { await s.bridge.close(); }
+  };
+  const today = await trace(undefined);
+  assert.deepEqual(today[0], { phase: 'idle', idle_reason: 'boot', logged_in: false, resumable: false });
+  assert.deepEqual(today[2], [['message', 'a1']]);
+  const off = await trace(fakeSaved({ off: 'not_configured' }));
+  assert.deepEqual(off, today);
+  // With login disabled (the image's start check) a saved login is never resumed either.
+  const skip = await resumed({ loginEnabled: false });
+  try {
+    assert.deepEqual(skip.bots, []);
+    assert.equal(skip.bridge.state.phase, 'idle');
+  } finally { await skip.bridge.close(); }
+});
+
+test('saved login: a login that ends here with its saved login still on disk is resumed; one WeChat ended (file gone) is not', LIMIT, async () => {
+  const s = await resumed();
+  try {
+    await s.bridge.settled();
+    s.bot().emit('login', { id: 'wxid_bot' });
+    s.bot().emit('logout', { id: 'wxid_bot' });
+    assert.equal(s.bridge.state.idle_reason, 'logged_out');
+    await until(() => s.bots.length === 2 && s.bridge.state.phase === 'resuming', 1000);
+    assert.deepEqual(s.bots[1].options, { resume: true });
+    assert.deepEqual(s.bots[0].calls, ['start', 'stop']);
+    s.bots[1].emit('login', { id: 'wxid_bot' });
+    // WeChat ends it: the fork deletes the saved login before the puppet reports the logout.
+    s.saved.present = false;
+    s.bots[1].emit('logout', { id: 'wxid_bot' });
+    await s.bridge.settled();
+    await sleepMs(100);
+    assert.deepEqual([s.bots.length, s.bridge.state.phase, s.bridge.state.idle_reason], [2, 'idle', 'logged_out']);
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: until the first PUT /rooms what arrives is held, then released through the usual rules', LIMIT, async () => {
+  const s = await resumed({ resumeLimits: { ...FAST, holdGroupMs: 60_000 } });
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('login', { id: 'wxid_bot' });
+    bot.emit('message', message({ id: 'o1', text: 'owner first' }));
+    bot.emit('message', message({ id: 'x1', from: 'wxid_stranger', text: 'stranger' }));
+    bot.emit('message', roomMessage({ id: 'g1', text: '@管家 bound room' }));
+    bot.emit('message', roomMessage({ id: 'u1', roomId: 'other@chatroom', text: 'unbound room' }));
+    assert.deepEqual(await events(s), [], 'nothing before the host has named the account and rooms');
+    await withRooms(s);
+    const out = await events(s);
+    assert.deepEqual(out.map(e => [e.type, e.message_ref]), [['message', 'o1'], ['message', 'x1'], ['group_message', 'g1']]);
+    bot.emit('message', message({ id: 'o2', text: 'after the PUT' }));
+    assert.equal((await events(s)).at(-1).message_ref, 'o2', 'no hold after the first PUT');
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: past holdGroupMs group messages pass the rules (no room bound: dropped), 1:1 ones stay held to the first PUT', LIMIT, async () => {
+  const s = await resumed({ ringSize: 500, strangerRingSize: 1 });
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('login', { id: 'wxid_bot' });
+    bot.emit('message', roomMessage({ id: 'g1', text: '@管家 early' }));
+    bot.emit('message', message({ id: 'x1', from: 'wxid_stranger', text: 'stranger early' }));
+    await sleepMs(250);
+    bot.emit('message', roomMessage({ id: 'g2', text: '@管家 late' }));
+    bot.emit('message', message({ id: 'o1', text: 'owner' }));
+    assert.deepEqual(await events(s), [], 'groups dropped, 1:1 still held');
+    await withRooms(s);
+    const out = await events(s);
+    assert.deepEqual(out.map(e => e.message_ref), ['x1', 'o1'], 'the group messages are gone, not stored');
+    // The stranger's message was held until owner_ref was known: it is in the stranger ring
+    // (size 1 here), so the next stranger pushes it out and the owner's stays.
+    bot.emit('message', message({ id: 'x2', from: 'wxid_stranger', text: 'stranger again' }));
+    assert.deepEqual((await events(s)).map(e => e.message_ref), ['o1', 'x2']);
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: what a login held is dropped when that login ends; each kind is held at most its ring\'s size', LIMIT, async () => {
+  const s = await resumed({ ringSize: 2, groupRingSize: 1, resumeLimits: { ...FAST, holdGroupMs: 60_000 } });
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('login', { id: 'wxid_bot' });
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'p1' }));
+    s.saved.present = false;
+    bot.emit('logout', { id: 'wxid_bot' });
+    await withRooms(s);
+    assert.deepEqual(await events(s), []);
+    assert.equal(s.bridge.live, 0, 'no media id for a message of an ended login');
+  } finally { await s.bridge.close(); }
+
+  const c = await resumed({ ringSize: 2, groupRingSize: 1, resumeLimits: { ...FAST, holdGroupMs: 60_000 } });
+  try {
+    await c.bridge.settled();
+    const bot = c.bot();
+    bot.emit('login', { id: 'wxid_bot' });
+    // The hold's own bound, not the rings': two 1:1 messages and one group message at most, so
+    // the owner's o1 and the bound room's g1 are dropped as later ones (that the rings would
+    // not have pushed them out for) arrive.
+    bot.emit('message', message({ id: 'o1' }));
+    bot.emit('message', message({ id: 'x1', from: 'wxid_stranger' }));
+    bot.emit('message', message({ id: 'x2', from: 'wxid_stranger' }));
+    bot.emit('message', roomMessage({ id: 'g1', text: '@管家 hi' }));
+    bot.emit('message', roomMessage({ id: 'u1', roomId: 'other@chatroom', text: 'unbound' }));
+    await withRooms(c);
+    assert.deepEqual((await events(c)).map(e => e.message_ref), ['x1', 'x2']);
+  } finally { await c.bridge.close(); }
+});
+
+test('saved login: the account record is written atomically (0600, no temporary left) and read back; anything odd reads as none', LIMIT, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wechat-bridge-account-'));
+  const record = accountRecord(dir);
+  assert.equal(record.readAccount(), undefined);
+  record.recordAccount('wxid_bot');
+  assert.equal(record.readAccount(), 'wxid_bot');
+  assert.equal(statSync(join(dir, ACCOUNT_FILE)).mode & 0o777, 0o600);
+  assert.deepEqual(readdirSync(dir), [ACCOUNT_FILE]);
+  record.recordAccount('wxid_new');
+  assert.equal(record.readAccount(), 'wxid_new');
+  writeFileSync(join(dir, ACCOUNT_FILE), 'not json');
+  assert.equal(record.readAccount(), undefined);
+  writeFileSync(join(dir, ACCOUNT_FILE), JSON.stringify({ v: 2, user_id: 'wxid_bot' }));
+  assert.equal(record.readAccount(), undefined);
+  const other = mkdtempSync(join(tmpdir(), 'wechat-bridge-account-'));
+  writeFileSync(join(other, 'target'), JSON.stringify({ v: 1, user_id: 'wxid_bot' }));
+  const linked = mkdtempSync(join(tmpdir(), 'wechat-bridge-account-'));
+  symlinkSync(join(other, 'target'), join(linked, ACCOUNT_FILE));
+  assert.equal(accountRecord(linked).readAccount(), undefined, 'a link is never followed');
+  assert.equal(accountRecord(undefined).readAccount(), undefined);
+  assert.throws(() => accountRecord(undefined).recordAccount('wxid_bot'));
+  assert.throws(() => accountRecord(join(dir, 'missing')).recordAccount('wxid_bot'));
+});
+
+test('run.sh: the saved login\'s key (0600, read-only file mount) and state (0700, read-write directory mount), outside ~/.aitelier-secrets', LIMIT, () => {
+  const home = mkdtempSync(join(tmpdir(), 'wechat-bridge-save-'));
+  mkdirSync(join(home, '.aitelier-secrets'));
+  writeFileSync(join(home, '.aitelier-secrets', 'wechat-bridge-token'), 'throwaway\n');
+  mkdirSync(join(home, 'bin'));
+  writeFileSync(join(home, 'bin', 'docker'), '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+  chmodSync(join(home, 'bin', 'docker'), 0o755);
+  const script = fileURLToPath(new URL('./run.sh', import.meta.url));
+  const run = extra => execFileSync('sh', [script], { encoding: 'utf8',
+    env: { PATH: `${join(home, 'bin')}:/usr/bin:/bin`, HOME: home, ...extra } }).split('\n');
+  const after = (args, flag) => args.filter((arg, i) => args[i - 1] === flag);
+  const state = join(home, '.local/share/aitelier/wechat-bridge-state');
+  const key = join(home, '.local/share/aitelier/wechat-bridge-key');
+  // A state directory left open by hand is closed again.
+  mkdirSync(state, { recursive: true });
+  chmodSync(state, 0o755);
+  const args = run({});
+  assert.deepEqual(after(args, '--volume'), [`${home}/.aitelier-secrets/wechat-bridge-token:/home/bridge/.aitelier-secrets/wechat-bridge-token:ro`,
+    `${key}/key:/home/bridge/saved-login-key:ro`, `${state}/data:/home/bridge/state:rw`]);
+  assert.deepEqual(after(args, '--env'), ['PUPPET_NEO_STATE_DIR=/home/bridge/state', 'PUPPET_NEO_STATE_KEY_FILE=/home/bridge/saved-login-key']);
+  assert.equal(args.at(-2), 'aitelier-wechat-bridge:local', 'the mounts come before the image');
+  const keyBytes = readFileSync(join(key, 'key'));
+  assert.equal(keyBytes.length, 32);
+  assert.equal(statSync(join(key, 'key')).mode & 0o777, 0o600);
+  for (const dir of [state, join(state, 'data'), key]) assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
+  assert.ok(!readdirSync(key).some(name => name !== 'key'), 'no temporary key left');
+  for (const path of after(args, '--volume').slice(1)) assert.ok(!path.includes('.aitelier-secrets'), path);
+  // A second start keeps the key: it is made once.
+  run({});
+  assert.deepEqual(readFileSync(join(key, 'key')), keyBytes);
+  // The off switch: neither mount nor variable, and the saved login and record deleted (never
+  // read); the resume times and the key stay.
+  const data = join(state, 'data');
+  for (const name of ['account.v1', 'account.user', 'account.v1.tmp-0011223344556677', 'account.user.tmp-aa', 'resumes'])
+    writeFileSync(join(data, name), 'x');
+  const off = run({ WECHAT_BRIDGE_SAVE_LOGIN: '0' });
+  assert.deepEqual(after(off, '--volume'), [`${home}/.aitelier-secrets/wechat-bridge-token:/home/bridge/.aitelier-secrets/wechat-bridge-token:ro`]);
+  assert.deepEqual(after(off, '--env'), []);
+  assert.ok(!off.some(arg => arg.includes('PUPPET_NEO')));
+  assert.deepEqual(readdirSync(data), ['resumes']);
+  assert.ok(existsSync(join(key, 'key')));
+  // Off with nothing on disk at all still starts.
+  const empty = mkdtempSync(join(tmpdir(), 'wechat-bridge-empty-'));
+  mkdirSync(join(empty, '.aitelier-secrets'));
+  writeFileSync(join(empty, '.aitelier-secrets', 'wechat-bridge-token'), 'throwaway\n');
+  assert.ok(run({ WECHAT_BRIDGE_SAVE_LOGIN: '0', HOME: empty }).includes('aitelier-wechat-bridge:local'));
+  assert.ok(!existsSync(join(empty, '.local')), 'off creates nothing');
+  assert.throws(() => execFileSync('sh', [script], { encoding: 'utf8', stdio: 'pipe',
+    env: { PATH: `${join(home, 'bin')}:/usr/bin:/bin`, HOME: home, WECHAT_BRIDGE_SAVE_LOGIN: 'off' } }), error => error.status === 78);
 });

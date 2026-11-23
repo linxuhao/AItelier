@@ -14,7 +14,7 @@ from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
 from core import ai_router
 from core.datadir import aitelier_home
-from core.dsh_driver import DshDrivers, completion_route
+from core.dsh_driver import DshDrivers, completion_route, route_input, route_modalities
 from core.state_commands import ProjectPrivate, execute
 from core.state_graph import CLOSED_STATUSES, StateGraphError, StateNotFound, StateWriteBusy
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
@@ -241,6 +241,14 @@ def model_sessions(project_id: str, request: Request, runtime=Depends(manager)):
     return {"project_id": project_id, "sessions": runtime.session_models(project_id)}
 
 
+@router.get("/{project_id}/route-input", dependencies=[Depends(authz.require_reader)])
+def route_input_read(project_id: str, request: Request, runtime=Depends(manager)):
+    """Step 24.2b (design-steward 7.8.12a "路线能力"): what this driver's root
+    session and its child sessions may each be sent, `{root, child}`, by the
+    route `/completion` uses for them. Driver-scoped like `model-sessions`."""
+    return route_input(owned(project_id, request, runtime))
+
+
 @router.post("/{project_id}/activity", dependencies=[Depends(authz.require_writer)])
 async def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
     row = await owned_off_loop(project_id, request, runtime)
@@ -304,6 +312,13 @@ class Completion(BaseModel):
     tools: list[dict] | None = None
     max_tokens: int = Field(default=32768, ge=1, le=262144)
     reasoning_effort: str = Field(default="high", pattern="^(off|low|high|max)$")
+
+
+def _carries_image(messages):
+    """True when any message has an OpenAI `image_url` content part."""
+    return any(isinstance(part, dict) and part.get("type") == "image_url"
+               for m in messages if isinstance(m, dict) and isinstance(m.get("content"), list)
+               for part in m["content"])
 
 
 class ProjectWork(BaseModel):
@@ -376,6 +391,11 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     # every turn, not just the binding one, so the record always states the
     # route the call was made under.
     route = completion_route(row, body.session_id)
+    # Step 24.2b backstop (7.8.12a): an image on a route that does not take
+    # images is refused here, before any gateway exists, so nothing reaches a
+    # provider. The adapter normally rewrites such images to a text line first.
+    if _carries_image(body.messages) and "image" not in route_modalities(route):
+        raise HTTPException(422, "route_no_image")
     if body.session_id not in sessions:
         # Native children (including resumed old children) have their own session.
         # Bind once per child: rotate across workers, keep tool turns sticky.

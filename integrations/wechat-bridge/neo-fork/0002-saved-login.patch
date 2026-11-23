@@ -1,8 +1,187 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index 768d869..4374d69 100644
+index 768d869..1bd7900 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
-@@ -1572,3 +1572,618 @@ mod tests {
+@@ -15,8 +15,9 @@ use wechat_protocol::{
+         UploadedMedia,
+     },
+     media_send::{MediaSendResult, SendStatus},
+-    silk, wire, AccountInterrupted, AccountPushConnection, DeviceProfile, LoginAttempt,
+-    LoginStatus, NativeClient, NativeOptions, Service, ServiceRejected, TextSendOptions,
++    silk, wire, AccountInterrupted, AccountPushConnection, AccountState, DeviceProfile,
++    LoginAttempt, LoginStatus, NativeClient, NativeOptions, Service, ServiceRejected,
++    TextSendOptions,
+ };
+ 
+ const DEVICE_NAME: &str = "Puppet Neo";
+@@ -110,6 +111,8 @@ struct SelfProfile {
+ enum Operation {
+     StartLogin,
+     PollLogin,
++    /// Try the login saved on disk instead of asking for another QR scan.
++    ResumeLogin,
+     Heartbeat,
+     PollIncoming,
+     Sync { scene: u32 },
+@@ -182,6 +185,20 @@ impl NeoSession {
+         self.task(Operation::PollLogin)
+     }
+ 
++    /// Try the login saved on disk. The answer is one of `none`, `unreadable`,
++    /// `throttled`, `busy` or `resumed`, and only `resumed` names the account.
++    #[napi]
++    pub fn resume_login(&self) -> AsyncTask<NeoTask> {
++        self.task(Operation::ResumeLogin)
++    }
++
++    /// Whether a stored login is there (an lstat, never a decrypt), why the
++    /// store is off when it is, and this process's stored-login write counters.
++    #[napi]
++    pub fn saved_login_status(&self) -> String {
++        stored_login::status().to_string()
++    }
++
+     #[napi]
+     pub fn heartbeat(&self) -> AsyncTask<NeoTask> {
+         self.task(Operation::Heartbeat)
+@@ -351,6 +368,7 @@ impl Task for NeoTask {
+         let stage = match &operation {
+             Operation::StartLogin => "start QR login",
+             Operation::PollLogin => "check or complete QR login",
++            Operation::ResumeLogin => "resume the saved login",
+             Operation::Heartbeat => "check session heartbeat",
+             Operation::PollIncoming => "wait for incoming message notifications",
+             Operation::Sync { .. } => "read a sync page",
+@@ -377,8 +395,17 @@ impl Task for NeoTask {
+             &operation,
+             Operation::DownloadMedia { .. } | Operation::DownloadVoice { .. }
+         );
+-        run(&mut session, operation)
+-            .map_err(|error| napi::Error::from_reason(failure_message(stage, explain, &error)))
++        let outcome = run(&mut session, operation);
++        // WeChat refused these credentials, so the stored login - the same login -
++        // is not good either. A read that failed, a throttle and a transport error
++        // never arrive as this rejection, and each of those keeps the file: a
++        // stored login is deleted only when WeChat says it is no longer good.
++        if let Err(error) = &outcome {
++            if is_session_rejected(error) {
++                stored_login::forget();
++            }
++        }
++        outcome.map_err(|error| napi::Error::from_reason(failure_message(stage, explain, &error)))
+     }
+ 
+     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+@@ -472,12 +499,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+             if status == LoginStatus::Approved {
+                 let mut attempt = session.attempt.take().expect("issued challenge");
+                 let state = client.complete_login(&mut attempt)?;
++                // WeChat accepted this login, so a later start may resume it
++                // instead of asking for another scan. A store that is off, or a
++                // write that fails, is a counter; the login has already happened.
++                stored_login::record(&state);
+                 let result = json!({ "status": "completed", "username": state.own_username });
+                 session.account = Some(NativeClient::from_account(state, options())?);
+                 return Ok(result);
+             }
+             Ok(json!({ "status": status }))
+         }
++        Operation::ResumeLogin => resume_login(session),
+         Operation::Heartbeat => {
+             let beat = read_session(session, heartbeat)?;
+             Ok(
+@@ -776,6 +808,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+             let account = session.account.take().context("No active session")?;
+             // Reserving the logout stops new account requests before submission.
+             let reply = account.prepare_logout()?.submit_blocking()?;
++            if reply.accepted {
++                // The account logged out, so the login saved for it is gone with
++                // it. A logout WeChat refused leaves the credentials live, so the
++                // stored login stays.
++                stored_login::forget();
++            }
+             Ok(json!({ "accepted": reply.accepted }))
+         }
+         Operation::Close => {
+@@ -915,6 +953,77 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
+     Ok(json!(profile))
+ }
+ 
++/// The account a stored login opened: the client this session goes on to use,
++/// and the name WeChat knew it by.
++struct AcceptedAccount {
++    client: NativeClient,
++    username: String,
++}
++
++/// The status token one resume attempt answers. One of the closed set the bridge
++/// branches on; `resumed` is the only answer that also names an account.
++fn resume_status<T>(answered: &stored_login::Answer<T>) -> &'static str {
++    match answered {
++        stored_login::Answer::None => "none",
++        stored_login::Answer::Unreadable => "unreadable",
++        stored_login::Answer::Throttled => "throttled",
++        stored_login::Answer::Busy => "busy",
++        stored_login::Answer::Resumed { .. } => "resumed",
++    }
++}
++
++/// Try the stored login instead of the QR path.
++fn resume_login(session: &mut Session) -> Result<Value> {
++    ensure!(session.account.is_none(), "A session is already active");
++    let store = match stored_login::Store::from_env() {
++        Ok(store) => store,
++        // Saved logins are off. The answer is still one of the closed set, and it
++        // says why, so a start can tell a build without a store from a login that
++        // is simply not there.
++        Err(off) => return Ok(json!({ "status": "none", "off": off.as_str() })),
++    };
++    let answer =
++        stored_login::resume(&store, now_seconds()?.into(), |state| open_stored_login(state))?;
++    let status = resume_status(&answer);
++    let stored_login::Answer::Resumed { accepted, .. } = answer else {
++        return Ok(json!({ "status": status }));
++    };
++    session.account = Some(accepted.client);
++    Ok(json!({ "status": status, "username": accepted.username }))
++}
++
++/// Turn the bytes a stored login holds into a live account, and say how that
++/// went. Bytes this build cannot use are `Unreadable`, which keeps the file: a
++/// document from another version is evidence, not garbage. Credentials WeChat
++/// refuses are `Rejected`, which drops it, because the login in it is not good
++/// any more.
++fn open_stored_login(bytes: &[u8]) -> Result<stored_login::Opened<AcceptedAccount>> {
++    let Ok(state) = serde_json::from_slice::<AccountState>(bytes) else {
++        return Ok(stored_login::Opened::Unreadable);
++    };
++    // Constructing a client touches no network and no store, so a document that
++    // fails here is unreadable rather than a failed resume.
++    let Ok(client) = NativeClient::from_account(state, options()) else {
++        return Ok(stored_login::Opened::Unreadable);
++    };
++    // The one request that decides it: WeChat either renews these credentials or
++    // refuses them, and a refusal is the only answer that may delete the file.
++    match client.renew_session_blocking(DEVICE_NAME) {
++        Ok(()) => {}
++        Err(error) if is_session_rejected(&error) => return Ok(stored_login::Opened::Rejected),
++        Err(error) => return Err(error),
++    }
++    // A renewal rotates the credentials, so the account state this attempt
++    // accepted is what the next process has to find on disk.
++    let refreshed = client.export_account_state()?;
++    let username = refreshed.own_username.clone();
++    stored_login::record(&refreshed);
++    Ok(stored_login::Opened::Accepted(AcceptedAccount {
++        client,
++        username,
++    }))
++}
++
+ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+     match send() {
+         Ok(result)
+@@ -1572,3 +1681,1057 @@ mod tests {
          );
      }
  }
@@ -17,7 +196,7 @@ index 768d869..4374d69 100644
 +// and a read that fails never deletes the file it could not read.
 +// ---------------------------------------------------------------------------
 +mod stored_login {
-+    #![allow(dead_code)] // the login path consumes these in step 19.1's next stage.
++    #![allow(dead_code)] // not every answer this store can give has a caller yet.
 +
 +    use anyhow::{anyhow, Result};
 +    use base64::{engine::general_purpose::STANDARD, Engine};
@@ -28,6 +207,7 @@ index 768d869..4374d69 100644
 +        io::{ErrorKind, Write},
 +        os::unix::fs::{OpenOptionsExt, PermissionsExt},
 +        path::{Path, PathBuf},
++        sync::atomic::{AtomicU64, Ordering},
 +        time::{SystemTime, UNIX_EPOCH},
 +    };
 +
@@ -51,6 +231,15 @@ index 768d869..4374d69 100644
 +    pub const RESUMES_PER_DAY: usize = 20;
 +    const HOUR: u64 = 3_600;
 +    const DAY: u64 = 86_400;
++    /// The writer lock one resume at a time holds. It carries the holder's pid so
++    /// a file a killed process left behind can be told from a live holder.
++    const LOCK_FILE: &str = "resume.lock";
++
++    /// This process's stored-login writes and failed writes. They are not
++    /// persisted: a fresh process starts at zero, so the row describes the
++    /// bridge that is running now, not what ever happened.
++    static WRITES: AtomicU64 = AtomicU64::new(0);
++    static WRITE_FAILURES: AtomicU64 = AtomicU64::new(0);
 +
 +    /// Why persistence is off — the closed set a status row may show.
 +    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +338,10 @@ index 768d869..4374d69 100644
 +            self.dir.join(RESUMES_FILE)
 +        }
 +
++        pub fn lock_path(&self) -> PathBuf {
++            self.dir.join(LOCK_FILE)
++        }
++
 +        /// Is there a stored login? lstat only — the answer a status row needs
 +        /// and must not pay a decrypt for. A file that exists but will not open
 +        /// still answers true here; `read` is what tells the two apart.
@@ -206,6 +399,209 @@ index 768d869..4374d69 100644
 +                return Allowance::Throttled;
 +            }
 +            Allowance::Allowed
++        }
++    }
++
++    impl Store {
++        /// Seal `plaintext`, count the attempt, and put it in place atomically.
++        /// A write that fails is counted too: a store that cannot be written is
++        /// the thing the counters exist to show.
++        pub fn save(&self, plaintext: &[u8]) -> Result<()> {
++            let written = self.write(plaintext);
++            match &written {
++                Ok(()) => WRITES.fetch_add(1, Ordering::Relaxed),
++                Err(_) => WRITE_FAILURES.fetch_add(1, Ordering::Relaxed),
++            };
++            written
++        }
++    }
++
++    /// What turning a stored login into a live account answered.
++    pub enum Opened<T> {
++        /// WeChat accepted the credentials the stored bytes carry.
++        Accepted(T),
++        /// The bytes are not a login this build can use; the file is kept.
++        Unreadable,
++        /// WeChat refused these credentials; the file is deleted.
++        Rejected,
++    }
++
++    /// One resume attempt's answer: the closed set a caller branches on.
++    #[derive(Debug, PartialEq)]
++    pub enum Answer<T> {
++        /// No stored login, or the store is off.
++        None,
++        /// A stored login is there and did not open. The file is kept.
++        Unreadable,
++        /// The counters refused this attempt. No envelope was read.
++        Throttled,
++        /// Another resume holds the writer lock. Nothing was read or counted.
++        Busy,
++        /// WeChat accepted the stored login. `state` is the plaintext the store
++        /// returned, which is the account state `open` accepted.
++        Resumed { state: Vec<u8>, accepted: T },
++    }
++
++    /// The resume writer lock, held for one attempt and dropped on every exit
++    /// path, a panic included.
++    struct Lock {
++        path: PathBuf,
++    }
++
++    impl Lock {
++        /// Take the lock, or answer `None` when another resume holds it. The lock
++        /// file is created with `create_new`, so two attempts cannot both win it;
++        /// a holder whose pid is gone is what a killed process leaves behind and
++        /// may be removed. The create is retried once after removing a stale file,
++        /// and a second refusal means somebody else won that race - the same
++        /// `busy`.
++        fn take(store: &Store) -> Result<Option<Lock>> {
++            let path = store.lock_path();
++            for attempt in 0..2 {
++                match OpenOptions::new()
++                    .write(true)
++                    .create_new(true)
++                    .mode(0o600)
++                    .open(&path)
++                {
++                    Ok(mut file) => {
++                        let written = (|| -> Result<()> {
++                            file.write_all(format!("{}\n", std::process::id()).as_bytes())?;
++                            file.sync_all()?;
++                            Ok(())
++                        })();
++                        if let Err(err) = written {
++                            let _ = std::fs::remove_file(&path);
++                            return Err(err);
++                        }
++                        return Ok(Some(Lock { path }));
++                    }
++                    Err(err) if err.kind() == ErrorKind::AlreadyExists => {
++                        if attempt == 1 || holder_running(&path) {
++                            return Ok(None);
++                        }
++                        let _ = std::fs::remove_file(&path);
++                    }
++                    Err(err) => return Err(err.into()),
++                }
++            }
++            Ok(None)
++        }
++    }
++
++    impl Drop for Lock {
++        fn drop(&mut self) {
++            let _ = std::fs::remove_file(&self.path);
++        }
++    }
++
++    /// Is the process that wrote this lock still running? A file with no pid in it
++    /// is the same as a pid that answers nothing: no holder lives there.
++    fn holder_running(path: &Path) -> bool {
++        let Ok(body) = std::fs::read_to_string(path) else {
++            return false;
++        };
++        let Ok(pid) = body.trim().parse::<u32>() else {
++            return false;
++        };
++        running(pid)
++    }
++
++    /// Whether a pid names a live process. Linux gives every process a directory
++    /// under `/proc`; where that is not mounted the answer is unknown, and an
++    /// unknown holder counts as running, because taking the lock from a live
++    /// resume is worse than answering `busy`.
++    fn running(pid: u32) -> bool {
++        if pid == std::process::id() {
++            return true;
++        }
++        match std::fs::metadata("/proc") {
++            Ok(meta) if meta.is_dir() => Path::new(&format!("/proc/{pid}")).exists(),
++            _ => true,
++        }
++    }
++
++    /// Try the stored login. In this order: take the writer lock, count the
++    /// attempt, read the store, and only then contact WeChat - `open` is the
++    /// caller's one request. `busy` is the one answer that neither reads the
++    /// envelope nor spends a throttle slot, so a second start racing the first
++    /// costs nothing.
++    pub fn resume<T>(
++        store: &Store,
++        now: u64,
++        open: impl FnOnce(&[u8]) -> Result<Opened<T>>,
++    ) -> Result<Answer<T>> {
++        let Some(_lock) = Lock::take(store)? else {
++            return Ok(Answer::Busy);
++        };
++        if store.allow_resume(now) == Allowance::Throttled {
++            return Ok(Answer::Throttled);
++        }
++        let state = match store.read() {
++            Ok(state) => state,
++            Err(Miss::Absent) => return Ok(Answer::None),
++            Err(Miss::Unreadable) => return Ok(Answer::Unreadable),
++        };
++        match open(&state)? {
++            Opened::Accepted(accepted) => Ok(Answer::Resumed { state, accepted }),
++            Opened::Unreadable => Ok(Answer::Unreadable),
++            Opened::Rejected => {
++                // WeChat said this login is no longer good, so the file is not
++                // evidence of anything: keeping it would make every start pay the
++                // same rejected round trip.
++                store.delete()?;
++                Ok(Answer::None)
++            }
++        }
++    }
++
++    /// The row `savedLoginStatus` answers: whether a stored login is there (an
++    /// lstat, never a decrypt), why the store is off when it is, and this
++    /// process's write counters.
++    pub fn status() -> Value {
++        status_of(Store::from_env())
++    }
++
++    pub fn status_of(store: std::result::Result<Store, Off>) -> Value {
++        let (present, off) = match &store {
++            Ok(store) => (store.present(), None),
++            Err(off) => (false, Some(off.as_str())),
++        };
++        let mut row = json!({
++            "present": present,
++            "writes": WRITES.load(Ordering::Relaxed),
++            "write_failures": WRITE_FAILURES.load(Ordering::Relaxed),
++        });
++        // An `off` reason is present only when the store is: a configured store
++        // has nothing to explain.
++        if let (Some(off), Some(fields)) = (off, row.as_object_mut()) {
++            fields.insert("off".to_string(), json!(off));
++        }
++        row
++    }
++
++    /// Write an accepted account through the store, if the store is on. The login
++    /// it follows already succeeded, so a store that is off or a write that fails
++    /// is a counter, never a failed login.
++    pub fn record(account: &impl serde::Serialize) {
++        let Ok(store) = Store::from_env() else {
++            return;
++        };
++        match serde_json::to_vec(account) {
++            Ok(bytes) => {
++                let _ = store.save(&bytes);
++            }
++            Err(_) => {
++                WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
++            }
++        }
++    }
++
++    /// Drop the stored login: WeChat says these credentials are no longer good,
++    /// or the account logged out. A store that is off has nothing to drop.
++    pub fn forget() {
++        if let Ok(store) = Store::from_env() {
++            let _ = store.delete();
 +        }
 +    }
 +
@@ -619,5 +1015,227 @@ index 768d869..4374d69 100644
 +                "a counter file it could not read is not rewritten"
 +            );
 +        }
++
++        /// Cargo runs this module's tests on parallel threads of one process and
++        /// the write counters are process-wide, so a test that asserts on them
++        /// takes this first: the delta it reads is then its own write.
++        static COUNTERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
++
++        fn counting() -> std::sync::MutexGuard<'static, ()> {
++            COUNTERS
++                .lock()
++                .unwrap_or_else(|poisoned| poisoned.into_inner())
++        }
++
++        fn seconds() -> u64 {
++            SystemTime::now()
++                .duration_since(UNIX_EPOCH)
++                .map(|elapsed| elapsed.as_secs())
++                .unwrap_or(0)
++        }
++
++        #[test]
++        fn a_held_lock_answers_busy_without_spending_a_throttle_slot() {
++            let _counting = counting();
++            let scratch = Scratch::new("busy");
++            let store = scratch.store();
++            // One attempt already spent, so there is a counter file to compare.
++            assert_eq!(store.allow_resume(seconds()), Allowance::Allowed);
++            let spent = std::fs::read(store.resumes_path()).expect("the counter file");
++            let held = Lock::take(&store)
++                .expect("the writer lock opens")
++                .expect("nobody else holds it");
++
++            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                .expect("a busy answer is not an error");
++            assert_eq!(answer, Answer::Busy);
++            assert_eq!(
++                std::fs::read(store.resumes_path()).expect("the counter file"),
++                spent,
++                "a busy attempt spent a throttle slot"
++            );
++
++            // The next attempt after the lock is released is allowed to look, and
++            // finds nothing stored - which is a `none`, not a refusal.
++            drop(held);
++            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                .expect("a resumed answer is not an error");
++            assert_eq!(
++                answer,
++                Answer::None,
++                "the attempt after the lock was released was refused"
++            );
++            assert_eq!(
++                store.allow_resume(seconds()),
++                Allowance::Allowed,
++                "the next attempt after the busy one is not allowed"
++            );
++        }
++
++        #[test]
++        fn a_lock_whose_holder_is_gone_is_stale_and_may_be_taken() {
++            let _counting = counting();
++            let scratch = Scratch::new("stale");
++            let store = scratch.store();
++            // A pid no process has: what a holder that was killed leaves behind.
++            let gone = u32::MAX - 1;
++            std::fs::write(store.lock_path(), format!("{gone}\n")).expect("a stale lock file");
++            assert!(!running(gone), "the test pid names a running process");
++
++            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                .expect("a stale lock is not an error");
++            assert_eq!(answer, Answer::None, "a stale lock answered busy");
++            assert!(
++                !store.lock_path().exists(),
++                "the guard that took the stale lock left a file behind"
++            );
++        }
++
++        #[test]
++        fn a_stored_login_that_opens_is_resumed_with_the_bytes_that_were_written() {
++            let _counting = counting();
++            let scratch = Scratch::new("resumed");
++            let store = scratch.store();
++            let written = br#"{"schema":1,"own_username":"fixture-self"}"#.to_vec();
++            store.save(&written).expect("store the login");
++
++            let answer = resume(&store, seconds(), |state| Ok(Opened::Accepted(state.len())))
++                .expect("a resumed answer is not an error");
++            assert_eq!(
++                answer,
++                Answer::Resumed {
++                    state: written.clone(),
++                    accepted: written.len(),
++                },
++                "the answer does not carry the account state that was written"
++            );
++        }
++
++        #[test]
++        fn a_rejected_login_is_deleted_and_unreadable_bytes_are_kept() {
++            let _counting = counting();
++            let scratch = Scratch::new("rejected");
++            let store = scratch.store();
++            store
++                .save(b"credentials WeChat no longer accepts")
++                .expect("store the login");
++            let answer = resume(&store, seconds(), |_| Ok(Opened::<()>::Rejected))
++                .expect("a rejection is not an error");
++            assert_eq!(answer, Answer::None);
++            assert!(
++                !store.present(),
++                "WeChat rejected this login and its file is still there"
++            );
++
++            // A file that is there and does not open is kept: it is evidence, and
++            // deleting it would make a corrupt store look like no login at all.
++            let corrupt = Scratch::new("corrupt-envelope");
++            let store = corrupt.store();
++            std::fs::write(store.state_path(), b"not an envelope").expect("a corrupt login");
++            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                .expect("an unreadable answer is not an error");
++            assert_eq!(answer, Answer::Unreadable);
++            assert!(store.present(), "an unreadable store lost the file it had");
++
++            // And bytes that open into a document this build cannot use are kept
++            // for the same reason.
++            let alien = Scratch::new("alien-schema");
++            let store = alien.store();
++            store
++                .save(b"a document from another schema")
++                .expect("store the document");
++            let answer = resume(&store, seconds(), |_| Ok(Opened::<()>::Unreadable))
++                .expect("an unreadable answer is not an error");
++            assert_eq!(answer, Answer::Unreadable);
++            assert!(
++                store.present(),
++                "a login this build cannot read was deleted"
++            );
++        }
++
++        #[test]
++        fn saved_login_status_answers_present_and_counts_the_writes_it_saw() {
++            let _counting = counting();
++            let scratch = Scratch::new("status");
++            let store = scratch.store();
++
++            let before = status_of(scratch.configured());
++            assert_eq!(before["present"], json!(false));
++            assert!(
++                before.get("off").is_none(),
++                "a configured store carries an off reason"
++            );
++            let writes = before["writes"].as_u64().expect("a write count");
++            let failures = before["write_failures"].as_u64().expect("a failure count");
++
++            // A write that worked is counted, and the file it wrote is present
++            // without being opened.
++            store.save(b"an accepted login").expect("store the login");
++            let after = status_of(scratch.configured());
++            assert_eq!(
++                after["present"],
++                json!(true),
++                "a stored login is not reported present"
++            );
++            assert_eq!(after["writes"], json!(writes + 1), "the write was not counted");
++            assert_eq!(after["write_failures"], json!(failures));
++
++            // With neither path configured - what `from_env` reads when neither
++            // variable is set - the row says there is nothing and why.
++            let off = status_of(Store::from_parts(None, None));
++            assert_eq!(off["present"], json!(false));
++            assert_eq!(off["off"], json!("not_configured"));
++            assert_eq!(
++                off.as_object()
++                    .expect("a status row is an object")
++                    .keys()
++                    .map(String::as_str)
++                    .collect::<std::collections::BTreeSet<_>>(),
++                ["off", "present", "write_failures", "writes"]
++                    .into_iter()
++                    .collect::<std::collections::BTreeSet<_>>(),
++                "a status row carries more than the four documented fields"
++            );
++
++            // A write that failed is counted as a failed write, not as a write, and
++            // the store's own state explains itself: the directory is gone.
++            std::fs::remove_dir_all(&scratch.dir).expect("remove the state directory");
++            assert!(
++                store.save(b"an accepted login").is_err(),
++                "a removed state directory still accepts a write"
++            );
++            let failed = status_of(scratch.configured());
++            assert_eq!(failed["off"], json!("dir"));
++            assert_eq!(failed["writes"], json!(writes + 1));
++            assert_eq!(failed["write_failures"], json!(failures + 1));
++        }
++    }
++}
++
++#[cfg(test)]
++mod resume_answer_tests {
++    use super::{resume_status, stored_login};
++
++    /// The bridge branches on these tokens, so each answer names exactly one of
++    /// them and nothing else: `none`, `unreadable`, `throttled`, `busy`, `resumed`.
++    #[test]
++    fn every_resume_answer_is_one_of_the_closed_set() {
++        assert_eq!(resume_status(&stored_login::Answer::<()>::None), "none");
++        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Unreadable),
++            "unreadable"
++        );
++        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Throttled),
++            "throttled"
++        );
++        assert_eq!(resume_status(&stored_login::Answer::<()>::Busy), "busy");
++        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Resumed {
++                state: Vec::new(),
++                accepted: (),
++            }),
++            "resumed"
++        );
 +    }
 +}

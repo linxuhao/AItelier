@@ -25,8 +25,9 @@ The same id, unchanged, was then asked for as `quality=Standard filetype=2` at 0
 and served the picture; the served line follows at 09:59:20.31Z, 5.97 s after that request
 left. So the standard profile is an image's first attempt (patch line 441) and the full-size
 profile follows only a refusal (442). `cdnmidimgurl` is the payload's second candidate and is
-tried only when it is present and different from the primary, as the last resort (443-445);
-the measured message carried no second id, so that arm has not run. This tree pins the order
+tried only when it is present and different from the primary, as the last resort (443-445); the
+two attempts that ran both carried the payload's own id, so that arm was never reached, and
+whether this payload carried a second id at all is not measured. This tree pins the order
 the measurement showed; which of the two ids the CDN serves is not measurable here (see the
 last section). No third candidate, no thumbnail profile.
 
@@ -96,10 +97,14 @@ message/file bytes, or a full URL.
 
 ## What this environment cannot measure
 
-The numbers above were measured on a probe image through a live bridge, not on this
-artifact: nothing in this tree compiled the patch or fetched a real picture, so what they
-show is the order the CDN answered in that one session. The boundary left open is the
-thumbnail profile: an id that refuses both `Standard` and `Original` has never been tried
-against `Thumbnail`, so that candidate is absent rather than guessed at. Confirming either
-needs a rebuilt native module, a fresh login (QR scan) and another live image, and the next
-live attempt after the rebuild decides.
+The numbers above were measured on a probe image through a live bridge, not on this artifact.
+These bytes have been compiled: the bridge image's native stage applies this patch to the pinned
+commit, builds the crate, runs its tests, and the addon it produces carries `primary-standard`
+and `primary-original` and no `primary-thumbnail`. What has not happened is a picture fetched
+through the rebuilt image, so what the numbers show is the order the CDN answered in that one
+session.
+
+The boundary left open is the thumbnail profile: an id that refuses both `Standard` and
+`Original` has never been tried against `Thumbnail`, so that candidate is absent rather than
+guessed at. Confirming it, or the fallback id's arm, needs a rebuilt native module, a fresh login
+(QR scan) and another live image, and the next live attempt after the rebuild decides.

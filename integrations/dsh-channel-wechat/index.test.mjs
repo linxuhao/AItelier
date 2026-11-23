@@ -511,7 +511,7 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
       talker: () => ({ id: 'wxid_m1', type: () => 0 }) }));
     await until(() => channels.received.length === 2);
     assert.deepEqual({ ...channels.received[1], at: undefined },
-      { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'w2', text: '周六干嘛', at: undefined, conversationRef: 'r1@chatroom' });
+      { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'w2', text: '周六干嘛', at: undefined, conversationRef: 'r1@chatroom', asked: true });
     assert.deepEqual(await channels.registered.sendGroup('r1@chatroom', '去外婆家'), { ref: 'room-out-1' });
     assert.deepEqual(said.at(-1), { room: 'r1@chatroom', text: '去外婆家' });
   } finally { await channel.stop(); await bridge.close(); }
@@ -697,6 +697,61 @@ test('media: a host without storeMedia gets every file as unsupported, nothing f
     await until(() => channels.received.length === 2);
     assert.deepEqual(channels.received[0].attachments, [{ kind: 'image', refused: 'unsupported' }]);
     assert.deepEqual(mediaFetches(bridge), []);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+// ---- the owner's ruling of 2026-11-22: a group's medium is kept without a mention ----------
+// (design/steward-group-media.md; the bridge half landed at 73089294f7)
+
+test('media: a group event\'s file is stored through storeMedia with its room before inbound, and inbound carries only the m_ ref', async () => {
+  const bridge = await fakeBridge();
+  const channels = mediaChannels();
+  bridge.media.set('5.0', [[200, Buffer.from('JPEG-BYTES')]]);
+  const at = new Date().toISOString();
+  bridge.events.push({ seq: 5, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m1', message_ref: 'g5',
+    text: '', asked: false, at, attachments: [{ media_id: '5.0', kind: 'image', size: 10 }] });
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    await until(() => channels.received.length === 1);
+    assert.deepEqual(channels.log, ['store g5.0', 'inbound g5'], 'the file is stored before the message is handed on');
+    assert.deepEqual(channels.stored, [{ channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'g5', index: 0, kind: 'image',
+      conversationRef: 'r1@chatroom' }], 'the room goes with it, so the library can scope the row to it');
+    assert.deepEqual(channels.opened.map(o => o.bytes.toString()), ['JPEG-BYTES'], 'fetched from GET /media once');
+    // Un-mentioned: the host records it and opens no turn (the director decides that); the
+    // channel passes the caption as the bridge gave it - empty - and the ref, never the id.
+    assert.deepEqual(channels.received[0], { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'g5', text: '', at,
+      conversationRef: 'r1@chatroom', asked: false, attachments: [{ kind: 'image', ref: 'm_0000000000000001' }] });
+    assert.ok(!JSON.stringify(channels.received).includes('5.0'), 'never the bridge\'s own media_id');
+    assertClosedSet(channels.received);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('media: a group event\'s files the host will not take (its room unserved, one over its bound) are never fetched and arrive as refusals', async () => {
+  const bridge = await fakeBridge();
+  const channels = mediaChannels();
+  const store = channels.storeMedia;
+  // What the host answers for a room it does not serve (`unsupported`, before any byte).
+  const asked = [];
+  channels.storeMedia = async (meta, open) => {
+    asked.push(meta);
+    return meta.conversationRef === 'r9@chatroom' ? { refused: 'unsupported' } : store(meta, open);
+  };
+  bridge.media.set('7.0', [[200, Buffer.from('NOPE')]]);
+  const at = new Date().toISOString();
+  bridge.events.push({ seq: 7, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m2', message_ref: 'g7',
+    text: '', asked: false, at, attachments: [{ kind: 'image', size: 30 * 1048576, too_large: true }] },
+  { seq: 8, type: 'group_message', room_ref: 'r9@chatroom', sender_ref: 'wxid_m3', message_ref: 'g8',
+    text: '', asked: true, at, attachments: [{ media_id: '7.0', kind: 'file', name: 'a.pdf', size: 4 }] });
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    await until(() => channels.received.length === 2);
+    assert.deepEqual(channels.received.map(m => m.attachments),
+      [[{ kind: 'image', refused: 'too_large' }], [{ kind: 'file', refused: 'unsupported' }]]);
+    assert.deepEqual(channels.stored, [], 'the over-bound description never reached storeMedia');
+    assert.deepEqual(asked.map(m => [m.messageRef, m.index, m.conversationRef]), [['g8', 0, 'r9@chatroom']],
+      'the served-room check was asked with the room, and it answered before the fetch');
+    assert.deepEqual(mediaFetches(bridge), [], 'not one byte of an unserved room\'s file was fetched');
+    assertClosedSet(channels.received);
   } finally { await channel.stop(); await bridge.close(); }
 });
 

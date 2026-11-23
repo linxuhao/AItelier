@@ -16,96 +16,175 @@ The two questions the ruling separates are not the same gate:
 
 ## What the shipped code already settles
 
-Measured on main `25f9ea72e15a`, and deliberately not re-decided here:
+Measured on `f7a325a1fb` (the merge of the bridge half), and deliberately not re-decided
+here:
 
-* **Audience, retention and refs are already the library's** (`integrations/dsh-director/lib/media.mjs`):
-  a row's audience is `owner`, `group:<channel>:<group_ref>` or `project:<id>`, and
-  `covers(turnAudience, row)` is the one rule `media_call` and `send_media` apply - an owner
-  turn covers every ref, a group turn only its own group's. Rows are kept 30 days and at
-  most `limits.total_bytes` in all, oldest first, deduplicated by sha256; refs are `m_` +
-  16 hex characters. `lib/media.mjs:12-45`.
-* **The consumer side of a group attachment already exists** (`integrations/dsh-director/lib/channels.mjs`):
-  `withAttachments` accepts a group message's ref only when the row's audience is exactly
-  `group:<channel>:<conversationRef>`, so an owner's file can never become a group
-  message's attachment (`lib/channels.mjs:751-760`).
+* **Audience, retention and refs are already the library's**
+  (`integrations/dsh-director/lib/media.mjs`): a row's audience is `owner`,
+  `group:<channel>:<group_ref>` or `project:<id>`, and `covers(turnAudience, row)`
+  (`:115-119`) is the one rule `media_call` and `send_media` apply - an owner turn covers
+  every ref, a group turn only its own group's. Rows are kept 30 days and at most
+  `limits.total_bytes` in all, oldest first, deduplicated by sha256; refs are `m_` + 16 hex
+  characters (`integrations/dsh-director/lib/media.mjs:12-45`).
+* **The consumer side of a group attachment already exists**
+  (`integrations/dsh-director/lib/channels.mjs`): `withAttachments` (`:758-785`) accepts a
+  group message's ref only when the row's audience is exactly
+  `group:<channel>:<conversationRef>`, so an owner's file can never become a group message's
+  attachment.
 * **The group record already has a place for attachments**: `state_group_messages.attachments_json`
-  (`core/state_groups.py:257`, written at `:748`) holds kind, mime, size, duration and the
-  ref - never a byte and never a name.
-* **The 1:1 path already does the whole shape**: the bridge *describes* a medium on
-  arrival and fetches only on demand (`integrations/wechat-bridge/bridge.mjs:519-532`,
-  `live.set(mediaId, ...)`), the channel plugin stores it through `storeMedia` before
-  handing the message in (`integrations/dsh-channel-wechat/index.mjs:111-136`), and the
-  host writes the placeholder lines itself (`lib/channels.mjs:711-745`).
+  (`core/state_groups.py:257`, written at `:746-751`) holds kind, mime, size, duration and
+  the ref - never a byte and never a name. Measured, not assumed: `relay_group_message`
+  writes it for the inbound row itself (`keep("question", accepted=1, …, text=body)` at
+  `:805`), not only for an answered question, and the body it needs is the placeholder line
+  `integrations/dsh-director/lib/channels.mjs` composes (`[图片]` …), so the record path
+  needs no backend change.
+* **The 1:1 path already does the whole shape**: the bridge *describes* a medium on arrival
+  and fetches only on demand (`integrations/wechat-bridge/bridge.mjs:539-556`,
+  `live.set(mediaId, ...)` at `:553`), the channel plugin stores it through `storeMedia`
+  before handing the message in (`integrations/dsh-channel-wechat/index.mjs:111-141`),
+  and the host writes the placeholder lines itself
+  (`integrations/dsh-director/lib/channels.mjs:758-785`).
 
-## What is missing, and the three seams this delta fixes
+## The five seams, and what is implemented now
 
-1. **The bridge drops group media before anything can describe it.**
-   `relayGroup` returns false for every message whose type is not text
-   (`bridge.mjs:488`) and, for a text message in a bound room, unless the text calls the
-   steward (`bridge.mjs:492-497`). A bound room's non-text message therefore never becomes
-   an event. Decision: a bound room's non-text message is described exactly as a 1:1 one is
-   (`mediaOf`, the same `MEDIA_LIMITS`), kept in the bridge's `live` map under its own
-   `media_id`, and pushed as one `group_message` event carrying the attachment and the
-   text the room's prefix called out - empty when the message does not call the steward.
-   The event says which of the two it was (`asked`), because the two have different
-   consequences downstream.
-2. **The channel plugin stores attachments only for 1:1 events.**
-   `deliver` builds `items` from `event.attachments` only when
-   `event.type === 'message'` (`index.mjs:156`). Decision: a `group_message` event's
-   attachments take the same path, with the room handed in as `conversationRef`.
-3. **`storeMedia` refuses group media outright.**
-   `lib/channels.mjs:711-716` answers `unsupported` for any meta carrying a
-   `conversationRef` and ingests with `audience: 'owner'`. Decision: a `conversationRef`
-   is accepted when it names a group this host serves (the same read the wake already
-   does), and the row is ingested with `audience: 'group:<channel>:<group_ref>'`; the
-   1:1 binding check (`host.senderBound`) stays the 1:1 rule and does not decide a group's.
-4. **A later turn cannot see what it must resolve.**
-   The group wake's `recent` is built from answered question/reply pairs only
-   (`core/state_groups.py:1220-1240`), so an un-answered medium is invisible even after it
-   is stored. Decision: the group turn's `recent` additionally carries the group's last
-   kept inbound messages that have attachments and no answer, each with its attachment
-   line, inside the same `GROUP_LIMITS.recentChars` budget. Un-answered *text* stays out -
-   it was never visible either; only media gains a line, so "the picture just now" has a
-   ref to resolve.
-5. **An un-mentioned medium must not answer.** The wake is steered by
-   `channels.setGroupWake` (`index.mjs:402-419`); a message whose `asked` is false is
-   recorded and never wakes, never answers, never notices.
+1. **The bridge: implemented** (`integrations/wechat-bridge/bridge.mjs:484-526`, merged at
+   `73089294f7`). It used to return false for every group message whose type is not text,
+   and for a bound room's text unless it called the steward; a bound room's image, voice or
+   file therefore never became an event. Now a bound room's non-text message that is one of
+   the three kinds is described exactly as a 1:1 one is (`mediaOf`, the bridge's own
+   `mediaLimits`), registered in `live` under its own `media_id`, and pushed as ONE
+   `group_message` event: `text` is the room's prefix-stripped caption (`""` when the
+   message does not call the steward), `asked` is true exactly when it does (text group
+   messages carry `asked: true` too), and an over-bound medium keeps the 1:1 shape
+   (`[{kind, size, too_large: true}]`, no `media_id`). An unbound room still passes only the
+   exact "@prefix group-code". The group ring stays separate from the 1:1 ring.
+2. **The channel plugin: implemented** (`integrations/dsh-channel-wechat/index.mjs:157-193`).
+   `deliver` builds `items` from a `group_message`'s attachments as well as a `message`'s,
+   and `storeAttachments` (`:111-141`) hands the room along as `conversationRef`; `asked`
+   is passed on for a `group_message` and never invented when the bridge omits it.
+3. **`storeMedia`: implemented** (`integrations/dsh-director/lib/channels.mjs:701-750`). A
+   `conversationRef` no longer answers `unsupported` outright. The binding check becomes
+   the message's own: a 1:1 sender must be the channel's current binding
+   (`host.senderBound`), a group must be one this host serves - `servesGroup`
+   (`:840-845`) reads `host.groups.list()`, the same read the wake and the bridge's
+   whitelist use, and it is asked BEFORE `open`, so not one byte is fetched for a room
+   nobody vouched for. The row is ingested with `audience: 'group:<channel>:<conversationRef>'`.
+   A room the host does not list is refused `unsupported` (the closed set has no other
+   word for it) with nothing fetched; a host it cannot reach is `unavailable`, so the
+   channel holds the message; a host without a media library or without groups stores
+   nothing, as before.
+4. **A later turn sees what it must read: implemented.** The medium an un-mentioned group
+   message carries is relayed (item 5) as an un-answered inbound row whose
+   `attachments_json` holds its kind, ref and - when the library knew them - mime, size and
+   durationMs. The group wake's reader `list_group_recent`
+   (`core/state_groups.py:1219-1254`) now returns, for its own channel and `group_ref` alone,
+   that group's un-answered inbound rows carrying `attachments_json`, each as an entry of its
+   own (`at`, `sender`, `q`, `attachments`) in the place its time gives it among the answered
+   pairs; both parts keep their own last `limit` rows. The wake renders those attachments
+   with the very `attachmentLine` the current message's own use, through
+   `withAttachmentLines` (`integrations/dsh-director/lib/media.mjs:140-148`) applied at
+   `integrations/dsh-director/index.mjs:414`. Measured by
+   `tests/unit/test_steward_groups.py::test_a_later_mention_turn_sees_an_unmentioned_medium_in_its_group_alone`
+   (group A's `recent` names the ref, group B's is empty) and by
+   `integrations/dsh-director/test/media.test.mjs`'s test `a group wake's recent: a kept
+   medium names its ref, a pair without attachments is untouched`.
+5. **An un-mentioned medium must not answer: implemented**
+   (`integrations/dsh-director/lib/channels.mjs:858-905`). The wake is steered by
+   `channels.setGroupWake` (`integrations/dsh-director/index.mjs:402-419`); `handleGroup`
+   reads `asked` and, when it is false, records the message (the relay above) and returns
+   before the wake - no turn, and no line into the room either (no notice, no confirmation
+   line).
+   A channel that does not send `asked` keeps the old behaviour: every group message it
+   hands in is one that called the steward.
 
 ## Bounds and refusals this delta keeps
 
-* Size: the bridge's `MEDIA_LIMITS` (image 20 MiB, file 25 MiB, voice 2 MiB SILK) describe
-  an over-bound medium as `too_large` and it is never fetched.
-* Rate: the library's `limits.inbound_per_channel_hour`, counted from its own index, is
-  the per-hour bound for stored media; one past it is refused `too_large`.
+* Size: the bridge's `MEDIA_LIMITS` (`integrations/wechat-bridge/bridge.mjs:67`: image
+  20 MiB, file 25 MiB, a voice source 2 MiB, a voice 2 min 5 s) describes an over-bound
+  medium as `too_large`, and it is never fetched.
+* Rate: the library's `limits.inbound_per_channel_hour` (20), counted from its own index,
+  is the per-hour bound for stored media; one past it is refused `too_large`. Measured: it
+  counts a channel's inbound `rows` whether they came from a 1:1 message or a group, so a
+  busy group shares that hour with the owner's own media - this is the bound the open
+  question below is about, and it is reason to change the bound, not the rule that storage
+  is not gated on the mention.
 * Type: the first bytes' signature against the shared table; a voice container carrying a
   video stream is refused `type`; a host that cannot read a voice's length refuses
   `unsupported`.
-* A group the host does not serve, or a host without a media library, keeps today's
-  answer: nothing is stored.
+* A group the host does not serve, or a host without a media library: nothing is stored and
+  nothing is fetched, and the message itself still goes on (the group's relay then decides
+  it - an unbound room is refused `group_not_bound` there).
 * Group scope: one group's ref is never shown to another group's turn (the audience rule
-  above), and the bridge keeps its own group ring separate from the 1:1 ring.
+  above), and the bridge keeps its own group ring separate from the 1:1 ring. On the wake
+  path it is enforced by the reader's own scope - `list_group_recent` filters both its
+  answered pairs and its kept media by one `channel` and one `group_ref`
+  (`core/state_groups.py:1219-1254`) - and by the wake being built for that one group
+  (`integrations/dsh-director/index.mjs:402-419`). Measured over the same records in two
+  groups by
+  `tests/unit/test_steward_groups.py::test_a_later_mention_turn_sees_an_unmentioned_medium_in_its_group_alone`:
+  group A's `recent` names the kept medium's ref, group B's is empty.
+
+## "Later", measured: bounded, not guaranteed
+
+The owner's word is that a kept medium must be readable later, so this is what the library
+actually promises a group row:
+
+* `covers()` (`integrations/dsh-director/lib/media.mjs:115-119`): the group's own turns
+  cover it, any owner turn covers every ref, and no other group's turn covers it.
+* Retention: `cleanup()` (`integrations/dsh-director/lib/media.mjs:440-451`) drops rows
+  older than `limits.retention_days` (**30**, from
+  `integrations/dsh-director/media-types.json`, which
+  `integrations/dsh-director/lib/media.mjs:53-55` reads) and then evicts oldest-first while
+  the library is over `limits.total_bytes` (**5 GiB**); it runs on start and daily while
+  the library is up. `protect()` only holds refs owed to a relay that has not committed.
+* So "later" is BOUNDED, not enforced: a group's medium is readable for at most 30 days and
+  only while the library stays inside its total bound, oldest first. It is not protected
+  like an owed relay ref, and there is a small window between `storeMedia` and the group's
+  relay in which an eviction under total-bytes pressure could drop it (the message would
+  then be refused invalid_inbound rather than stored). Closing either needs a decision
+  about protecting a group's rows, not a bug fix, and is left to the follow-up card.
 
 ## Measured, not assumed
 
-* Fetching on arrival costs one puppet fetch and one library write per group medium; the
-  bridge's live copy is evicted with its ring (`bridge.mjs:476-482`) and dies with the
-  container, so the bytes have to reach the library for "ask later" to be answerable at
-  all.
-* WeChat's own copy may be gone by the time the later question arrives, which is why the
-  answer path reads the library and never a fresh fetch.
+* The bridge fetches nothing on arrival: it describes a medium (`mediaOf`) and keeps the
+  live message in `live`. The one fetch is the channel's, through `GET /media/:media_id`
+  inside `storeMedia`, so one group medium costs one HTTP fetch, one library write, and -
+  with item 3 - one `groups.list()` read.
+* The bridge's live copy is dropped from `live` when its event leaves the group ring
+  (`integrations/wechat-bridge/bridge.mjs:477-482`) and dies with the container; after
+  that its `media_id` answers `404` (measured by the bridge half's own suite). A fetch
+  later than that window is impossible, which is why the bytes have to reach the library
+  for "ask later" to be answerable at all - and why the answer path reads the library,
+  never the bridge.
 
 ## Deployment precondition (measured 2026-11-23; corrects a claim I first made from timestamps)
 
-The bridge container mounts only its token file: `/opt/wechat-bridge` (bridge.mjs, main.mjs,
-node_modules) is baked into the image `aitelier-wechat-bridge:local` (image created
-2026-11-22T20:52:33Z, the files in it dated 17:28). A change to `bridge.mjs` therefore does
-not reach production by merging, and not by restarting that container either: it takes one
-image rebuild and one container recreate, and a recreate loses the WeChat login, so it
-needs the owner's QR scan - the same window already owed for the 1:1 image CDN refusal
-(`iss-c8597b02f70d4640`).
+The two halves of this delta travel in different carriers, and only one of them costs the
+owner's QR scan.
 
-I first wrote here that the running image predates the fork patch that widens the native
-plugin's incoming message types: the patch landed in this repository at 21:25:04Z
+* **The bridge half** (`integrations/wechat-bridge/**` -> the bridge container). The bridge
+  container mounts only its token file: `/opt/wechat-bridge` (`bridge.mjs`, `main.mjs`,
+  `node_modules`) is baked into the image `aitelier-wechat-bridge:local` (image created
+  2026-11-22T20:52:33Z, the files in it dated 17:28). A change to
+  `integrations/wechat-bridge/bridge.mjs` therefore does not reach production by merging,
+  and not by restarting that container either: it takes one image rebuild and one
+  container recreate, and a recreate loses the WeChat login in memory, so it needs the
+  owner's QR scan - the same window already owed for the 1:1 image CDN refusal
+  (`iss-c8597b02f70d4640`).
+* **The plugin and host halves** (`integrations/dsh-director/lib/channels.mjs`,
+  `integrations/dsh-channel-wechat/index.mjs`). Both are loaded by the STEWARD DRIVER's own
+  process: `core/dsh_driver.py:350-353` declares the channel plugins, and `:749` inserts
+  the enabled ones into the profile of the driver whose `role == "steward"`, at that
+  driver's start. They are in neither the bridge container nor the
+  `aitelier-dsh-host` supervisor. So this half needs the steward driver's process restarted
+  (the supervisor relaunches it with the same session); the bridge, the other drivers and
+  their in-flight work are untouched, and no QR scan is involved. Whoever deploys this must
+  not treat it as a whole-host restart.
+
+Neither carrier has been rebuilt, recreated or restarted for this delta.
+
+I first wrote here that the running bridge image predates the fork patch that widens the
+native plugin's incoming message types: the patch landed in this repository at 21:25:04Z
 (`c55f520bb6`) and the image was created at 20:52:33Z. That was an inference from
 timestamps and it is false. Grepping the running container's addon finds the fork's cause
 chain inside it - `CDN HTTP status` matches in
@@ -116,8 +195,15 @@ rather than blocked; only a real group image, after this code lands, can settle 
 
 ## Open questions this delta leaves to measurement
 
-* The group record path (`groupInbound`) has not been read for whether it writes
-  `attachments_json` for an un-answered inbound message or only for the reply.
 * The cost of one ingest per group medium against `limits.inbound_per_channel_hour` in a
-  busy group is unmeasured; if a group's normal traffic brushes the bound, the bound is
-  the thing to change, not the rule that storage is not gated on the mention.
+  busy group is unmeasured; if a group's normal traffic brushes the bound, the bound is the
+  thing to change, not the rule that storage is not gated on the mention.
+* Whether protecting a group's kept rows from retention (the "Later" section above) is
+  wanted: it changes what the total-bytes bound evicts, which is an owner's decision, not
+  a detail of this seam.
+* What a group quota refusal costs a kept medium: past `group_per_hour`/`member_per_hour`
+  the relay keeps an `over_quota` row without `attachments_json`
+  (`core/state_groups.py:795-796`), so the file is in the library but its history row does
+  not name it, and the reader in item 4 (which returns only rows carrying that metadata)
+  does not show it. This card stores the file and records it whenever the relay accepts the
+  message.

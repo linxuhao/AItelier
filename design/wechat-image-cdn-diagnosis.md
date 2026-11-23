@@ -164,24 +164,27 @@ field was rejected without keeping any content.
 
 ### 6.3 Which pair the CDN accepts for an image
 
-`filetype` 1 with `cdnbigimgurl`, versus `filetype` 2 with `cdnmidimgurl`. The fork in this tree
-now tries the second pair automatically: when the CDN refuses the first attempt it retries once
-with the mid-size id as `quality = MediaQuality::Standard`
-(`neo-fork/0001-incoming-message-types.patch:465`–`:478`, whose comment cites this section). That
-needs a rebuilt native module and a fresh login (a QR scan); what remains is one live image
-message through a recreated bridge. Whether that retry is accepted is still open.
+`filetype` 1 with `cdnbigimgurl`, versus `filetype` 2 with `cdnmidimgurl`. Only the first half of
+that choice was the question, and it is answered: the profile was wrong, and the id was not. One
+live image message through a recreated bridge (§9) showed the same id refused as `filetype` 1 and
+served as `filetype` 2, so the fork in this tree asks for the standard-size picture first on the
+id a payload carries, falls back to the original-size picture of that same id, and keeps a
+distinct second id as the last resort.
 
 ## 7. What is not determined
 
 - Which field the CDN rejected (§5, §6.2).
 - Whether the image id WeChat advertised for this account is a bare id at all (§6.1).
-- Whether the rebuilt fork's mid-size retry is accepted — untestable without one live image
-  message through a recreated bridge.
+- Whether an id the CDN refuses at both profiles exists. §9 measured the original-size refusal
+  followed by the standard-size success on one id; an id refused at both was not observed, and the
+  third profile (`Thumbnail`, 3) is deliberately not shipped because nothing measured it.
 
-The instrument and the retry are now built into the fork patch in this tree (two
-`neo cdn download:` diagnostic lines, the attempt line and the `served:` line, plus the one-shot
-mid-size retry at patch lines 465–478). The CDN refusal itself is not fixed. What remains is one
-live image message through a recreated bridge; that needs the owner's QR window, which is why
+The instrument and the retry ladder are built into the fork patch in this tree (two
+`neo cdn download:` diagnostic lines, the attempt line and the `served:` line). One live image
+message through a recreated bridge (§9) showed the ladder working: the first profile was refused
+and the second served the picture on the id the message carried. The 400 is still not explained
+field by field (§5, §6.2), but no arriving image is lost to it any more. What the rebuild now
+needs is one image message after the new image is running: that needs the owner's QR window, so
 this document stops at the diagnosis.
 
 ## 8. Measurements versus inferences in this document
@@ -199,4 +202,35 @@ reader does not have to infer the split:
 4. §6: moving the fetch to the steward's read would only move the same failing POST later, and
    the library write happens once per ingested medium; both follow from the call sites, and
    neither is witnessed in the retained bytes.
-5. §6.1–§6.3 and §7 are proposed observations and undetermined questions, not findings.
+5. §6.1 and §6.2 are proposed observations and undetermined questions, not findings. §6.3's
+   question is answered by measurement in §9, which states its own provenance.
+
+## 9. What one live image message settled (2026-11-23T09:59Z)
+
+The question §6.3 left open — which pair the CDN accepts for an image — is answered, and the
+answer is neither of the pairs §6 set out: **the id and the profile are separate facts, and it
+was the profile that was wrong.** The payload carried one 194-character picture id; the CDN
+refused it as `filetype=1` and served the same id as `filetype=2`:
+
+| attempt | the bridge's own log line | outcome |
+|---|---|---|
+| 1 | `09:59:11.53Z variant=primary quality=Original filetype=1 … file_id_len=194 all_hex=true` | refused (next attempt 2.81 s later) |
+| 2 | `09:59:14.34Z variant=primary-standard quality=Standard filetype=2 … file_id_len=194 all_hex=true` | `served` at `09:59:20.31Z` (5.97 s) |
+
+Both attempts carry a `primary…` label, and the ladder in this tree names the fallback id's
+candidate `mid`, so the two attempts that ran both asked for the payload's own id: the second did
+not switch to `cdnmidimgurl`. Whether this payload carried a `cdnmidimgurl` at all was not
+measured — the second attempt was answered, so the walk never reached that candidate.
+
+What follows from it:
+
+- §5's "the image request shape is refused" holds. What does not hold is §6.3's guess that the
+  accepted pair was `filetype` 2 **with** `cdnmidimgurl`: the picture is served as `filetype` 2 on
+  the id the payload already carried.
+- §7's third bullet is withdrawn: the question it asked was answered by a different pair than it
+  named. What replaces it is the boundary now stated there — an id that refuses both profiles is
+  still unmeasured.
+- The costs above are wall-clock gaps between the bridge's own log lines. They are not a claim
+  about the CDN's latency, and one message is one sample.
+- The measurement was taken on a probe image, not on the image this tree builds: no picture has
+  been fetched through the shipped ladder yet.

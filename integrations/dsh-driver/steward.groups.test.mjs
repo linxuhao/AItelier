@@ -221,7 +221,9 @@ test('design/steward-group-media.md: relay carries kept only when true; the noti
   await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'check' });
   await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'sent' });
   await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'failed', attempts: 2 });
-  const [down, check, sent, failed] = host.calls.slice(2, 6).map(c => c.body);
+  await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'failed', attempts: 3,
+    reason: 'room_backstop' });
+  const [down, check, sent, failed, reason] = host.calls.slice(2, 7).map(c => c.body);
   assert.match(down.request_key, /^group-media-notice-check:/);
   assert.notEqual(down.request_key, check.request_key, 'a check is a dry run: a fresh key each time');
   assert.deepEqual({ ...down, request_key: undefined }, { request_key: undefined, channel: 'wechat', group_ref: 'r1', epoch: 'E1',
@@ -229,14 +231,18 @@ test('design/steward-group-media.md: relay carries kept only when true; the noti
   assert.ok(!('channel_down' in check));
   assert.match(sent.request_key, /^group-media-notice:wechat:[0-9a-f]{16}:E1:sent$/, 'one commit key per epoch: a retry is State\'s replay');
   assert.match(failed.request_key, /^group-media-notice:wechat:[0-9a-f]{16}:E1:failed:2$/);
+  assert.ok(!('reason' in failed), 'a failed attempt with no code says nothing it does not know');
+  assert.equal(reason.reason, 'room_backstop', 'the failed send\'s own code travels to State');
+  assert.equal(reason.phase, 'failed');
+  assert.match(reason.request_key, /:failed:3$/);
   assert.ok(!sent.request_key.includes('r1'), 'the room is digested in the key');
   const receipt = { rows_before: 2, rows_after: 0, files_unlinked: 1, files_shared: 1, bytes_freed: 33 };
   assert.deepEqual(await ops.recordPurge({ channel: 'wechat', groupRef: 'r1', epoch: 'E2', receipt }), { refused: 'purge_incomplete' });
-  assert.deepEqual(host.calls[6].body.receipt, receipt);
-  assert.match(host.calls[6].body.request_key, /^group-media-purge:wechat:[0-9a-f]{16}:E2:[0-9a-f]{16}$/);
+  assert.deepEqual(host.calls[7].body.receipt, receipt);
+  assert.match(host.calls[7].body.request_key, /^group-media-purge:wechat:[0-9a-f]{16}:E2:[0-9a-f]{16}$/);
   await ops.expireMedia();
   assert.deepEqual(host.calls.map(c => c.path.split('/').at(-1)), ['relay_group_message', 'relay_group_message', 'group_media_notice',
-    'group_media_notice', 'group_media_notice', 'group_media_notice', 'record_group_media_purge', 'expire_group_media']);
+    'group_media_notice', 'group_media_notice', 'group_media_notice', 'group_media_notice', 'record_group_media_purge', 'expire_group_media']);
   assert.deepEqual(host.calls.at(-1).body, {});
   assert.ok(host.calls.every(c => c.readAs === undefined), 'never with the public-read header');
 });

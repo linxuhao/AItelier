@@ -877,11 +877,14 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     signal).then(result, refused),
     // design/steward-group-media.md section 2: a media-switch notice's check (a dry run: a fresh
     // key, nothing recorded), sent (after the channel took the line: one key per epoch, so a
-    // commit retried after a lost answer is State's replay) or failed (one key per attempt).
-    mediaNotice: ({ channel, groupRef, epoch, notice, phase, channelDown, attempts = 0 }, signal) => request('/api/state/commands/group_media_notice', {
+    // commit retried after a lost answer is State's replay) or failed (one key per attempt). A
+    // failed attempt also carries the send's own short code (`reason`, for example room_not_bound),
+    // so a switch left owed after a failed notice names its cause instead of only notice_not_sent.
+    mediaNotice: ({ channel, groupRef, epoch, notice, phase, channelDown, attempts = 0, reason }, signal) => request('/api/state/commands/group_media_notice', {
       request_key: phase === 'check' ? `group-media-notice-check:${randomUUID()}`
         : `group-media-notice:${channel}:${digest(groupRef)}:${epoch}:${phase}${phase === 'failed' ? `:${attempts}` : ''}`,
-      channel, group_ref: groupRef, epoch, notice, phase, ...(channelDown === true ? { channel_down: true } : {}) }, signal)
+      channel, group_ref: groupRef, epoch, notice, phase, ...(channelDown === true ? { channel_down: true } : {}),
+      ...(typeof reason === 'string' && reason ? { reason } : {}) }, signal)
       .then(result, refused),
     // Section 6: the witness of a purge of a group's kept media (counts only).
     recordPurge: ({ channel, groupRef, epoch, receipt }, signal) => request('/api/state/commands/record_group_media_purge', {

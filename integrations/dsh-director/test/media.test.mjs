@@ -852,6 +852,24 @@ test('kept: only with a group audience and source in; the row carries kept, an a
   assert.deepEqual(lib.keptAudiences(), ['group:wechat:r1']);
 });
 
+test('F2 (section 11): kept media never spend the owner\'s hour - each group has its own kept_per_group_hour', async () => {
+  const lib = createMediaLibrary({ root: root(), limits: { ...MEDIA_LIMITS, inbound_per_channel_hour: 2, kept_per_group_hour: 3 } });
+  let n = 0;
+  const open = async () => { n += 1; return png(10 + n, 10); };
+  for (let i = 0; i < 3; i += 1) assert.ok((await lib.ingest(keptIn('r1', `k${i}`), open)).ref, 'r1 kept within its bound');
+  const before = n;
+  assert.deepEqual(await lib.ingest(keptIn('r1', 'k3'), open), { refused: 'too_large' }, 'r1\'s fourth kept file this hour');
+  assert.equal(n, before, 'not fetched');
+  assert.ok((await lib.ingest(keptIn('r2', 'j0'), open)).ref, 'another group counts its own');
+  // The owner's own hour is untouched by four kept files.
+  assert.ok((await lib.ingest({ ...owner, messageRef: 'dm1', index: 0 }, open)).ref, 'the owner\'s DM after the kept ones');
+  assert.ok((await lib.ingest({ ...owner, messageRef: 'dm2', index: 0 }, open)).ref);
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'dm3', index: 0 }, open), { refused: 'too_large' }, 'the owner\'s own bound still holds');
+  // ...and the owner's hour spent does not close a group's kept bound.
+  assert.ok((await lib.ingest(keptIn('r2', 'j1'), open)).ref);
+  assert.equal(MEDIA_LIMITS.kept_per_group_hour, 30);
+});
+
 test('kept (R3): one day, exact at read time - resolves at 23h59m, not at 24h+1s before any sweep; cleanup drops it and keeps an addressed row of the same age', async () => {
   let now = Date.parse('2026-11-23T00:00:00Z');
   const lib = createMediaLibrary({ root: root(), now: () => now });

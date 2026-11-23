@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). limits.call_body_bytes is the steward gateway's request body bound (api/steward_gateway.py MAX_BODY), which media_call checks its base64 against before calling. limits.kept_hours is how long a kept medium lives - a group file sent without mentioning the steward, stored only while that group's switch is on (design/steward-group-media.md section 4): lib/media.mjs stops resolving it and cleans it, and the backend stops listing and deletes its kept_media row. Office documents, archives and executables are deliberately absent (v1).",
+  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). limits.call_body_bytes is the steward gateway's request body bound (api/steward_gateway.py MAX_BODY), which media_call checks its base64 against before calling. limits.kept_hours is how long a kept medium lives - a group file sent without mentioning the steward, stored only while that group's switch is on (design/steward-group-media.md section 4): lib/media.mjs stops resolving it and cleans it, and the backend stops listing and deletes its kept_media row. limits.kept_per_group_hour is the kept media's own hourly bound, per group (design/steward-group-media.md section 11): kept rows are not counted in inbound_per_channel_hour, which is the owner's. Office documents, archives and executables are deliberately absent (v1).",
   "limits": {
     "image_bytes": 20971520,
     "file_bytes": 26214400,
@@ -9,6 +9,7 @@
     "voice_ms": 120000,
     "image_pixels": 40000000,
     "inbound_per_channel_hour": 20,
+    "kept_per_group_hour": 30,
     "retention_days": 30,
     "kept_hours": 24,
     "total_bytes": 5368709120,

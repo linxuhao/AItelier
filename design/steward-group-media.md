@@ -371,10 +371,13 @@ The answered pairs keep their own `limit` (default 6, at most 20). All three are
 time as today. The wake (`integrations/dsh-director/index.mjs:411-412`) trims to
 `GROUP_LIMITS.recentChars` by dropping the oldest entry that is NOT `kept`, so a busy
 conversation cannot push the twenty out. Kept entries are bounded by their count: one
-attachment line each from the bridge, about 90 characters, about 1.8k for twenty. A backstop
-`keptChars: 4000` next to `recentChars` (`lib/channels.mjs:264`) drops the oldest kept
-entries only past that. `withAttachmentLines` (`lib/media.mjs:140-148`) renders them as it
-does today.
+attachment line each from the bridge, about 90 characters, about 1.8k for twenty. `keptChars:
+4000` next to `recentChars` (`lib/channels.mjs`, `trimRecent`) is what the kept entries may use
+before they take room from the answered pairs: past `recentChars + keptChars` the oldest
+answered entries go, and past it still a kept entry's sender name longer than `keptNameChars`
+(8) is shortened. A kept entry is never dropped there: the backend's twenty is the bound
+(long names, voice durations or several files to a message can pass 4000 characters).
+`withAttachmentLines` (`lib/media.mjs:140-148`) renders them as it does today.
 
 ### 8. `covers()`, narrowed
 
@@ -446,12 +449,11 @@ takes the steward's two-start check (design-steward 7.7.17 item 12).
   and writes nothing. That costs one `groups.list()` read and one backend command per such
   medium, and no bytes. Passing the switch to the bridge's whitelist would save that, but it
   needs an image rebuild and the owner's QR scan, so it is left out.
-* **The library's `inbound_per_channel_hour` (20)** still counts kept rows together with the
-  owner's 1:1 rows, so a busy group with the switch on can use up the owner's hour. That is
-  the open question already listed at the end of this document. The fix is to exclude
-  `kept` rows from that count and give them a per-group bound. It is one filter in `ingest`
-  (`lib/media.mjs:394-398`), but it is a bound decision for the director, not part of these
-  rulings.
+* **The library's `inbound_per_channel_hour` (20)** no longer counts kept rows, so a busy
+  group with the switch on cannot use up the owner's hour: a kept medium is held to its own
+  group's `kept_per_group_hour` (**30**, in `media-types.json`), counted the same way from the
+  index, and refused `too_large` past it. A bound decision: it awaits the platform director's
+  sign-off before any group's switch is turned on in production.
 * `withAttachments`, `placeholder`, `attachmentLine`, the group ring, `send_media` budgets.
 
 ### 12. Tests (all in disposable containers)
@@ -676,6 +678,16 @@ built):
 * The library adds `keptAudiences()`; a purge that cannot unlink puts the rows back.
 * An un-mentioned message without files is not relayed (`nothing_kept`).
 * `messages_30d` and `last_message_at` both leave kept rows out.
+* After the independent check (2026-11-23): a notice commit the backend did not answer is
+  retried at the start of every pass, whether or not the group is still listed with it, and
+  nothing else is sent to that group until it is answered; a pass takes its guard before it
+  reads `groups.list()`. The bridge's 409 `not_logged_in` / `room_not_bound` and 429
+  `room_backstop` (answered before `say()`) spend no attempt; a send that may have started (a
+  host `send_timeout` among them) spends one. A `sent` on-commit while a purge is owed answers
+  `purge_owed`, writes and records nothing, and the host asks again after its receipt.
+  清空记录 while the switch is on owes a purge (reason `clear`) of the library's kept copies;
+  `media_purges` lists a debt whatever the switch says, and the sweep purges an on group only
+  when it is listed as owing one.
 
 ## What the shipped code already settles
 
@@ -779,7 +791,8 @@ here:
   counts a channel's inbound `rows` whether they came from a 1:1 message or a group, so a
   busy group shares that hour with the owner's own media - this is the bound the open
   question below is about, and it is reason to change the bound, not the rule that storage
-  is not gated on the mention.
+  is not gated on the mention. (Changed 2026-11-23: a kept row is not counted there; it has
+  its own `kept_per_group_hour`, Owner rulings section 11.)
 * Type: the first bytes' signature against the shared table; a voice container carrying a
   video stream is refused `type`; a host that cannot read a voice's length refuses
   `unsupported`.
@@ -875,8 +888,9 @@ rather than blocked; only a real group image, after this code lands, can settle 
 * The cost of one ingest per group medium against `limits.inbound_per_channel_hour` in a
   busy group is unmeasured; if a group's normal traffic brushes the bound, the bound is the
   thing to change, not the rule that storage is not gated on the mention. (Still open after
-  2026-11-23, now only for groups whose switch is on; the suggested change is in Owner
-  rulings section 11.)
+  2026-11-23, now only for groups whose switch is on: kept media have their own
+  `kept_per_group_hour` (30), Owner rulings section 11, awaiting the director's sign-off;
+  whether 30 suits a busy group is the part still unmeasured.)
 * Whether protecting a group's kept rows from retention (the "Later" section above) is
   wanted: it changes what the total-bytes bound evicts, which is an owner's decision, not
   a detail of this seam. (2026-11-23: with a one-day life the window is a day, not 30; still

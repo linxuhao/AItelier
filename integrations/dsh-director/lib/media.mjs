@@ -18,7 +18,8 @@
  *      gets the first answer, so the relayed message it builds is the same request);
  *   2. a chat channel's inbound media are held to limits.inbound_per_channel_hour, counted
  *      from the index (so a restart keeps the count); one past it is refused too_large -
- *      the design's placeholder for every over-limit attachment;
+ *      the design's placeholder for every over-limit attachment; a kept medium is counted
+ *      apart, per group, against limits.kept_per_group_hour, and never in the owner's hour;
  *   3. then `open({signal})` gives the bytes, counted as they come and cut at the bound (a
  *      declared size is never trusted) and under a deadline (first byte, then the whole
  *      file: a source that stalls is aborted and answered `unavailable`, so one stuck
@@ -412,9 +413,17 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
         return { refused: code };
       };
       if (meta.source === 'in' && CHANNEL_SOURCES.has(meta.channel)) {
+        // A kept medium (a group's un-mentioned file) never spends the owner's hour: it is held
+        // to its own group's kept_per_group_hour, and inbound_per_channel_hour counts every other
+        // inbound row of the channel (design/steward-group-media.md section 11).
         const hour = now() - 3600000;
-        const taken = rows.filter(row => row.source === 'in' && row.channel === meta.channel && Date.parse(row.at) > hour).length;
-        if (taken >= limits.inbound_per_channel_hour) { log('media_refused', { reason: 'rate' }); return refuse('too_large'); }
+        const kept = meta.kept === true;
+        const taken = rows.filter(row => row.source === 'in' && row.channel === meta.channel && Date.parse(row.at) > hour
+          && (row.kept === true) === kept && (!kept || row.audience === meta.audience)).length;
+        if (taken >= (kept ? limits.kept_per_group_hour : limits.inbound_per_channel_hour)) {
+          log('media_refused', { reason: kept ? 'kept_rate' : 'rate' });
+          return refuse('too_large');
+        }
       }
       try {
         const row = await store(meta, open, signal);

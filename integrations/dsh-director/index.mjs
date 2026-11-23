@@ -107,7 +107,6 @@ export function registerGroupWake({ ctx, channels, host, groupTurns, agentExists
     // (design/steward-group-media.md section 7).
     const recent = trimRecent((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? []);
     const media = typeof host.wakeMedia === 'function' ? await host.wakeMedia() : undefined;
-    const images = media?.images ?? [];
     // Only the KEPT entries of this wake's own recent may spend the image budget, newest first.
     // An owner's or another group's ref is never in this list: recent was read with this wake's
     // (channel, groupRef), and channels.mjs already checked the message's own attachments against
@@ -130,6 +129,9 @@ export function registerGroupWake({ ctx, channels, host, groupTurns, agentExists
       ? { ...entry, attachments: await shown(entry.attachments) } : entry));
     const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
       ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: await shown(attachments, true) } : {}) }], recent: shownRecent } };
+    // Read the images only now: `line` fills the host's array while the lines above render,
+    // and a host whose `images` getter answers a fresh copy must still send what it filled.
+    const images = media?.images ?? [];
     ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) },
       ...images.map(attachment => ({ type: 'image', attachment }))],
       source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: label, question_ids: [message_id],

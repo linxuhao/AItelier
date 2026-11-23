@@ -419,7 +419,9 @@ export interface DirectorHost {
    *  `line(attachment, {attach})` renders one attachment's wake line: with `attach` the host
    *  reads and saves the bytes and the line ends 原图已附; without it, or when no image could
    *  be saved, the line names the ref and the media_call hint. `images` are the resulting
-   *  ImageAttachmentRefs, one native image block each, appended after the wake's text block.
+   *  ImageAttachmentRefs, one native image block each, appended after the wake's text block:
+   *  the wake attaches the images the host filled while the lines rendered, read after all
+   *  lines were awaited, so a host whose `images` getter answers a fresh copy still works.
    *  Absent, or an empty `images`, adds no block. */
   wakeMedia?(): Promise<{ line(attachment: object, options?: { attach?: boolean }): string | Promise<string>;
     images: unknown[] }>;

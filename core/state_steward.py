@@ -458,21 +458,27 @@ class StateSteward:
         # it such an approval is refused before anything changes.
         self.driver_runner = None
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                columns = {r[1] for r in conn.execute("PRAGMA table_info(state_steward_schedules)")}
-                for name, ddl in TARGET_COLUMNS:
-                    if name not in columns:
-                        try:
-                            conn.execute(f"ALTER TABLE state_steward_schedules ADD COLUMN {name} {ddl}")
-                        except sqlite3.OperationalError as exc:  # another service added it first
-                            if "duplicate column" not in str(exc):
-                                raise
-                conn.commit()
-            self._migrate_kinds()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "steward", self._initialize_schema)
         # Step 25 C11: the family group's exit check and bindings (core.state_groups), set by
         # StateService once both exist; without it no group reminder can be written.
         self.groups = None
+
+    def _initialize_schema(self):
+        """The schema setup, run once per process per database file (core.state_schema_setup)."""
+        with self.store.db.get_connection() as conn:
+            conn.executescript(SCHEMA)
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(state_steward_schedules)")}
+            for name, ddl in TARGET_COLUMNS:
+                if name not in columns:
+                    try:
+                        conn.execute(f"ALTER TABLE state_steward_schedules ADD COLUMN {name} {ddl}")
+                    except sqlite3.OperationalError as exc:  # another service added it first
+                        if "duplicate column" not in str(exc):
+                            raise
+            conn.commit()
+        self._migrate_kinds()
 
     def _migrate_kinds(self):
         """A proposals table whose kind CHECK is not SCHEMA's (made before the archive

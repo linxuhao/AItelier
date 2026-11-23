@@ -589,6 +589,38 @@ def _refusal(exc) -> str:
     return str(exc).split(":", 1)[0]
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        # Additive (message time): every source row written before it has no
+        # channel time, which is what NULL means.
+        add_column_if_missing(conn, "state_message_sources", "channel_at", "TEXT")
+        # Step 24.2 (design-steward 7.8.12): an inbound message's attachments as metadata
+        # (core.media_types.normalise_attachments): never a byte, never a file name.
+        add_column_if_missing(conn, "state_message_sources", "attachments_json", "TEXT")
+        added = {column: add_column_if_missing(conn, "state_owner_channel_status", column, definition)
+                 for column, definition in _STATUS_COLUMNS}
+        # Once each, when its column is added: a placeholder row waits for a real reading;
+        # a real outage starts now.
+        if added["live"]:
+            marks = ",".join("?" * len(STATUS_PLACEHOLDERS))
+            conn.execute(f"UPDATE state_owner_channel_status SET live=0 WHERE connected=0 AND detail IN ({marks})",
+                         sorted(STATUS_PLACEHOLDERS))
+        if added["down_since"]:
+            conn.execute("UPDATE state_owner_channel_status SET down_since=? WHERE connected=0 AND live=1",
+                         (_now().isoformat(),))
+        # Step 23 (design-steward 7.7.9): a code is an ACCOUNT code (6 digits, 1:1 chat)
+        # or a GROUP code (core.state_groups); a group code may carry the group's name.
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(state_owner_channel_codes)")}
+        if "kind" not in columns:
+            conn.execute("ALTER TABLE state_owner_channel_codes ADD COLUMN kind TEXT NOT NULL DEFAULT 'account' "
+                         "CHECK(kind IN ('account','group'))")
+        if "label" not in columns:
+            conn.execute("ALTER TABLE state_owner_channel_codes ADD COLUMN label TEXT")
+        conn.commit()
+
+
 class StateChannels:
     def __init__(self, store, actor, driver_id=None, steward=None, inbox=None, pepper=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
@@ -598,39 +630,17 @@ class StateChannels:
         self._pepper = pepper
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                # Additive (message time): every source row written before it has no
-                # channel time, which is what NULL means.
-                add_column_if_missing(conn, "state_message_sources", "channel_at", "TEXT")
-                # Step 24.2 (design-steward 7.8.12): an inbound message's attachments as metadata
-                # (core.media_types.normalise_attachments): never a byte, never a file name.
-                add_column_if_missing(conn, "state_message_sources", "attachments_json", "TEXT")
-                added = {column: add_column_if_missing(conn, "state_owner_channel_status", column, definition)
-                         for column, definition in _STATUS_COLUMNS}
-                # Once each, when its column is added: a placeholder row waits for a real reading;
-                # a real outage starts now.
-                if added["live"]:
-                    marks = ",".join("?" * len(STATUS_PLACEHOLDERS))
-                    conn.execute(f"UPDATE state_owner_channel_status SET live=0 WHERE connected=0 AND detail IN ({marks})",
-                                 sorted(STATUS_PLACEHOLDERS))
-                if added["down_since"]:
-                    conn.execute("UPDATE state_owner_channel_status SET down_since=? WHERE connected=0 AND live=1",
-                                 (_now().isoformat(),))
-                # Step 23 (design-steward 7.7.9): a code is an ACCOUNT code (6 digits, 1:1 chat)
-                # or a GROUP code (core.state_groups); a group code may carry the group's name.
-                columns = {row[1] for row in conn.execute("PRAGMA table_info(state_owner_channel_codes)")}
-                if "kind" not in columns:
-                    conn.execute("ALTER TABLE state_owner_channel_codes ADD COLUMN kind TEXT NOT NULL DEFAULT 'account' "
-                                 "CHECK(kind IN ('account','group'))")
-                if "label" not in columns:
-                    conn.execute("ALTER TABLE state_owner_channel_codes ADD COLUMN label TEXT")
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "owner_channels", _initialize_schema, store.db)
             if inbox is not None:  # the inbox's owner writers scan their text first
                 inbox.owner_text_guard = self.owner_text_guard
             # Only the steward's own service repairs the steward's channel ledger: a
             # director's, an owner's or the recovery actor's starts nothing here.
-            if self.driver_id is not None and self.steward.is_steward():
+            # The settled check first: is_steward() opens a connection, and every
+            # driver request would pay for it after the start has been settled.
+            if (self.driver_id is not None and self.store.db.db_path not in _START_SETTLED
+                    and self.steward.is_steward()):
                 self._settle_at_start()
 
     # ---------------------------------------------------------------- a start's repair

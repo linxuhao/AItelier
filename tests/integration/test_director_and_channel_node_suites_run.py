@@ -4,10 +4,12 @@ What it runs: one ``node --test`` invocation from the suite directory, and nothi
 
 * ``integrations/dsh-channel-wechat`` -- argv ``[<node>, "--test", "index.test.mjs"]``,
   the suite's own npm-script argv, the file named explicitly because it sits at the suite
-  root rather than under a ``test/`` directory. The floor is ``ℹ tests 33`` /
-  ``ℹ pass 33`` / ``ℹ fail 0``, measured in the shipped image on 2026-11-22 (tree
-  ebc3447ed98e, node v24.22.3, 3.0 s on this row's own timer): 17 until the WeChat media
-  interface tests landed.
+  root rather than under a ``test/`` directory. The floor is ``ℹ tests 35`` /
+  ``ℹ pass 35`` / ``ℹ fail 0``, measured in the shipped image on 2026-11-23 at
+  ``f7a325a1fb`` (node v24.22.3, 3.7 s on this row's own timer): 17 until the WeChat media
+  interface tests landed, 33 until a group's medium was kept without a mention
+  (``iss-68dac765c59c4dbe``; two group-event cases: a file stored through storeMedia with
+  its room, and the refusals of a room this host does not serve).
 
 The counts are floors, not guesses: a run that prints fewer ``tests`` or fewer ``pass``
 than the numbers above has silently dropped cases, and this row goes RED and says so.
@@ -95,8 +97,8 @@ class Suite:
 WECHAT = Suite(
     name="dsh-channel-wechat",
     files=("index.test.mjs",),
-    expected_tests=33,
-    expected_pass=33,
+    expected_tests=35,
+    expected_pass=35,
 )
 
 

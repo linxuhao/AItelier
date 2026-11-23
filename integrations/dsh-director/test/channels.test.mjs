@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies, channelText, MORE, alertText } from '../lib/channels.mjs';
+import { createMediaLibrary } from '../lib/media.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { PROPOSAL_KINDS } from '../lib/proposals.mjs';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -2574,4 +2575,94 @@ test('24.2b: an empty body with no attachments is still nothing_to_send; malform
     assert.deepEqual(await s.channels.ownerMessageSent('m-3', 'text', undefined, { attachments }), { mirrored: false, reason: 'invalid_attachments' });
   assert.deepEqual(s.order, []);
   assert.equal(only(s.calls, 'recordDelivery').length, 0);
+});
+
+// --- the owner's ruling of 2026-11-22 (design/steward-group-media.md): a group's medium is kept
+// without a mention, and only the mention opens a turn ------------------------------------------
+// The bridge describes a bound room's image, voice or file whether or not it calls the steward
+// (integrations/wechat-bridge/bridge.mjs relayGroup) and the channel plugin stores it before the
+// message comes here; these drive both arms of what this side does with such a message.
+
+/** The first bytes of a 640x480 PNG: the library reads its size from the header. */
+const png = (width = 640, height = 480) => {
+  const head = Buffer.alloc(33);
+  Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(head, 0);
+  head.writeUInt32BE(width, 16); head.writeUInt32BE(height, 20);
+  return head;
+};
+
+/** A group world with the real media library: the host serves one room, `r1`. */
+function groupMediaWorld({ relay, list } = {}) {
+  const fake = fakeHost(), relayed = [], woken = [], logs = [], sent = [], bound = [];
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-group-media-'));
+  const library = createMediaLibrary({ root: join(dir, 'media') });
+  const media = { ingest: (meta, open) => library.ingest(meta, open), resolve: async ref => library.lookup(ref),
+    setProtected: fn => library.setProtected(fn) };
+  const groups = {
+    list: list ?? (async () => ({ owner_refs: { wechat: 'wxid_owner' },
+      groups: [{ channel: 'wechat', group_ref: 'r1', label: '家', mention_prefix: '@管家' }] })),
+    relay: async message => { relayed.push(message);
+      return relay ?? { message_id: `g-${relayed.length}`, sender_role: 'member', sender_label: '成员甲' }; },
+    bind: async () => ({ bound: true }),
+  };
+  // The 1:1 rule: a member is never the bound account. A group's file must not consult it.
+  fake.host.senderBound = async ({ senderRef }) => { bound.push(senderRef); return { bound: senderRef === 'wxid_owner' }; };
+  const channels = createOwnerChannels({ host: fake.host, groups, media, owedFile: join(dir, 'owed.json'),
+    log: (event, fields) => logs.push([event, fields]) });
+  const unregister = channels.service.register({ name: 'wechat', status: () => ({ connected: true }),
+    send: async (text, options) => { sent.push({ to: 'owner', text, options }); return {}; },
+    sendGroup: async (room, text) => { sent.push({ to: 'group', room, text }); return {}; },
+    setRooms: async () => {} });
+  channels.setGroupWake(async wake => { woken.push(wake); });
+  channels.ready();
+  return { channels, calls: fake.calls, bound, relayed, woken, logs, sent, library, unregister, dir,
+    store: (messageRef, extra = {}) => channels.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_m1', messageRef,
+      index: 0, kind: 'image', ...extra }, async () => png()),
+    inbound: (messageRef, extra = {}) => channels.service.inbound({ channel: 'wechat', senderRef: 'wxid_m1', messageRef,
+      text: '', at: NOW(), conversationRef: 'r1', ...extra }) };
+}
+
+test('group media: an un-mentioned message\'s file is stored for its room and recorded in the group, and starts no turn; the same group\'s mention starts exactly one', async () => {
+  const w = groupMediaWorld();
+  // What the channel plugin does first (index.mjs deliver -> storeMedia), and then inbound.
+  const stored = await w.store('g-a1', { conversationRef: 'r1' });
+  assert.match(stored.ref, /^m_[0-9a-f]{16}$/);
+  assert.equal(w.library.lookup(stored.ref).audience, 'group:wechat:r1', 'kept for that room, never the owner\'s');
+  assert.deepEqual(await w.inbound('g-a1', { asked: false, attachments: [{ kind: 'image', ref: stored.ref }] }), { accepted: true });
+  assert.deepEqual(w.relayed, [{ channel: 'wechat', groupRef: 'r1', senderRef: 'wxid_m1', messageRef: 'g-a1', text: '[图片]',
+    at: w.relayed[0].at, attachments: [{ kind: 'image', ref: stored.ref, mime: 'image/png', size: 33 }] }],
+  'recorded in the group: the placeholder line and the metadata the backend keeps in attachments_json');
+  assert.equal(w.woken.length, 0, 'no turn for a message that does not call the steward');
+  assert.deepEqual(w.sent, [], 'and nothing said back into the room');
+  // The same group's @-message, after it: exactly one turn, carrying what the steward is asked.
+  assert.deepEqual(await w.inbound('g-a2', { senderRef: 'wxid_m2', text: '这个图上是什么', asked: true }), { accepted: true });
+  assert.equal(w.relayed.length, 2);
+  assert.deepEqual(w.relayed[1], { channel: 'wechat', groupRef: 'r1', senderRef: 'wxid_m2', messageRef: 'g-a2',
+    text: '这个图上是什么', at: w.relayed[1].at });
+  assert.equal(w.woken.length, 1, 'exactly one turn, for the mention');
+  assert.equal(w.woken[0].groupRef, 'r1');
+  assert.equal(w.woken[0].text, '这个图上是什么');
+  assert.equal(w.woken[0].message_id, 'g-2');
+  assert.deepEqual(w.logs.filter(([event]) => event === 'group_message_accepted').map(([, fields]) => fields.asked ?? true),
+    [false, true], 'the accepted line says which of the two it was: recorded, or asked');
+  w.unregister();
+});
+
+test('group media: a room this host does not serve is refused before any byte is fetched, and a group\'s file never asks the 1:1 binding', async () => {
+  const w = groupMediaWorld();
+  let opened = false;
+  assert.deepEqual(await w.channels.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'g-x', index: 0,
+    kind: 'image', conversationRef: 'r-unknown' }, async () => { opened = true; return png(); }), { refused: 'unsupported' });
+  assert.equal(opened, false, 'nothing of an unserved room\'s was fetched');
+  assert.deepEqual(w.library.rows, [], 'and nothing stored');
+  const stored = await w.store('g-y', { conversationRef: 'r1' });
+  assert.match(stored.ref, /^m_[0-9a-f]{16}$/, 'a member\'s file in a served room is stored');
+  assert.equal(w.library.lookup(stored.ref).audience, 'group:wechat:r1');
+  assert.deepEqual(w.bound, [], 'host.senderBound is the 1:1 rule and is not what decides a group\'s file');
+  // A host that cannot answer the room read (its backend down) is transient: the plugin holds
+  // the message and asks again instead of storing a file against a room nobody vouched for.
+  const down = groupMediaWorld({ list: async () => { throw new Error('ECONNREFUSED'); } });
+  assert.deepEqual(await down.store('g-z', { conversationRef: 'r1' }), { refused: 'unavailable' });
+  assert.deepEqual(down.library.rows, [], 'nothing stored against a room nobody vouched for');
+  w.unregister(); down.unregister();
 });

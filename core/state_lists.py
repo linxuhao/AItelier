@@ -99,6 +99,24 @@ def forget_group_senders(conn, channel, group_ref, refs) -> None:
                  f"done_by_ref IN ({marks})", (channel, group_ref, *refs))
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        if add_column_if_missing(conn, "state_steward_list_items", "channel", "TEXT"):
+            # The items of before step 23.1 go to the one group bound now (none or several:
+            # they stay unassigned, the dashboard shows them so).
+            live = conn.execute("SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL"
+                                ).fetchall() if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_owner_groups'").fetchone() else []
+            add_column_if_missing(conn, "state_steward_list_items", "group_ref", "TEXT")
+            if len(live) == 1:
+                conn.execute("UPDATE state_steward_list_items SET channel=?, group_ref=? WHERE channel IS NULL",
+                             (live[0][0], live[0][1]))
+        add_column_if_missing(conn, "state_steward_list_items", "group_ref", "TEXT")
+        conn.commit()
+
+
 class StateLists:
     def __init__(self, store, actor, driver_id=None, steward=None, groups=None, public_view=False):
         self.store, self.actor, self.driver_id = store, actor, driver_id
@@ -106,20 +124,9 @@ class StateLists:
         self.project_read_trusted = store.project_read_trusted
         self.public_view = public_view
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                if add_column_if_missing(conn, "state_steward_list_items", "channel", "TEXT"):
-                    # The items of before step 23.1 go to the one group bound now (none or several:
-                    # they stay unassigned, the dashboard shows them so).
-                    live = conn.execute("SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL"
-                                        ).fetchall() if conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_owner_groups'").fetchone() else []
-                    add_column_if_missing(conn, "state_steward_list_items", "group_ref", "TEXT")
-                    if len(live) == 1:
-                        conn.execute("UPDATE state_steward_list_items SET channel=?, group_ref=? WHERE channel IS NULL",
-                                     (live[0][0], live[0][1]))
-                add_column_if_missing(conn, "state_steward_list_items", "group_ref", "TEXT")
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "lists", _initialize_schema, store.db)
 
     # ---------------------------------------------------------------- who is writing
     def _caller(self, conn, turn, as_owner, project_id=None, group=None, unassigned=False):

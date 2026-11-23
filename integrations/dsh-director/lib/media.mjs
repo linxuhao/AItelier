@@ -174,6 +174,15 @@ export function attachmentLine(attachment) {
   if (attachment.kind === 'voice' && Number.isInteger(attachment.durationMs)) return `[${name} ${attachment.ref}，${clock(attachment.durationMs)}]`;
   return `[${name} ${attachment.ref}${attachment.mime ? '，' + attachment.mime : ''}${Number.isInteger(attachment.size) ? '，' + bytes(attachment.size) : ''}]`;
 }
+/** A group wake's `recent` as the lines the group sees: one entry the backend returns for a
+ *  medium kept without a mention carries its metadata (`attachments`), which is rendered by
+ *  attachmentLine here exactly as the current message's own attachments are; every entry
+ *  without attachments (an answered question/reply pair) is the very object it was. */
+export function withAttachmentLines(entries) {
+  if (!Array.isArray(entries)) return entries;
+  return entries.map(entry => Array.isArray(entry?.attachments)
+    ? { ...entry, attachments: entry.attachments.map(attachmentLine) } : entry);
+}
 
 class Refused extends Error { constructor(code) { super(code); this.refused = code; } }
 

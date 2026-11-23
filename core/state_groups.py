@@ -243,6 +243,42 @@ def _now():
     return state_channels._now()
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        # Step 24.2 (7.8.12): a group message's attachments as metadata (core.media_types).
+        add_column_if_missing(conn, "state_group_messages", "attachments_json", "TEXT")
+        # Step 23.1 (7.7.24): a channel binds several groups. The live database of step 23
+        # carries the one-live-group-per-channel index (CREATE ... IF NOT EXISTS never
+        # removes it), and its bound group may have no name; a question row records the
+        # turn that took it (post_group_reply answers it only in that turn, 7.7.7).
+        conn.execute("DROP INDEX IF EXISTS state_owner_groups_one_live")
+        add_column_if_missing(conn, "state_group_messages", "turn", "TEXT")
+        # r44w (7.7.7): a withheld reply's row names the owner-conversation line it caused.
+        add_column_if_missing(conn, "state_group_messages", "owner_notice", "TEXT")
+        for (channel, group_ref) in conn.execute(
+                "SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL AND "
+                "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
+            conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
+                         (StateGroups._free_label(conn), channel, group_ref))
+        # Director 602 defect 6: a live group's name is unique in the database too. A name two
+        # live groups share (none should: the code refuses it) is renamed on the later one
+        # first, so the index can be made.
+        seen = set()
+        for (channel, group_ref, label) in conn.execute(
+                "SELECT channel,group_ref,label FROM state_owner_groups WHERE revoked_at IS NULL "
+                "ORDER BY bound_at").fetchall():
+            if label in seen:
+                label = StateGroups._free_label(conn)
+                conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
+                             (label, channel, group_ref))
+            seen.add(label)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS state_owner_groups_live_label ON "
+                     "state_owner_groups(label) WHERE revoked_at IS NULL")
+        conn.commit()
+
+
 class StateGroups:
     def __init__(self, store, actor, driver_id=None, steward=None, channels=None, public_view=False):
         self.store, self.actor, self.driver_id = store, actor, driver_id
@@ -251,38 +287,9 @@ class StateGroups:
         self.public_view = public_view
         from core.state_privacy import UntrustedDatabase
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                # Step 24.2 (7.8.12): a group message's attachments as metadata (core.media_types).
-                add_column_if_missing(conn, "state_group_messages", "attachments_json", "TEXT")
-                # Step 23.1 (7.7.24): a channel binds several groups. The live database of step 23
-                # carries the one-live-group-per-channel index (CREATE ... IF NOT EXISTS never
-                # removes it), and its bound group may have no name; a question row records the
-                # turn that took it (post_group_reply answers it only in that turn, 7.7.7).
-                conn.execute("DROP INDEX IF EXISTS state_owner_groups_one_live")
-                add_column_if_missing(conn, "state_group_messages", "turn", "TEXT")
-                # r44w (7.7.7): a withheld reply's row names the owner-conversation line it caused.
-                add_column_if_missing(conn, "state_group_messages", "owner_notice", "TEXT")
-                for (channel, group_ref) in conn.execute(
-                        "SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL AND "
-                        "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
-                    conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
-                                 (self._free_label(conn), channel, group_ref))
-                # Director 602 defect 6: a live group's name is unique in the database too. A name two
-                # live groups share (none should: the code refuses it) is renamed on the later one
-                # first, so the index can be made.
-                seen = set()
-                for (channel, group_ref, label) in conn.execute(
-                        "SELECT channel,group_ref,label FROM state_owner_groups WHERE revoked_at IS NULL "
-                        "ORDER BY bound_at").fetchall():
-                    if label in seen:
-                        label = self._free_label(conn)
-                        conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
-                                     (label, channel, group_ref))
-                    seen.add(label)
-                conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS state_owner_groups_live_label ON "
-                             "state_owner_groups(label) WHERE revoked_at IS NULL")
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "groups", _initialize_schema, store.db)
 
     # ---------------------------------------------------------------- helpers
     @staticmethod
@@ -1220,15 +1227,36 @@ class StateGroups:
     def list_group_recent(self, channel, group_ref, limit=6):
         """The steward's host: the group's last answered questions and the replies that went
         out (a withheld reply as the sentence the group saw), oldest first - a group wake's
-        `recent`, which is data."""
+        `recent`, which is data. Also this group's inbound messages that carry attachments and
+        were never answered: a medium the group kept without calling the steward (design
+        steward-group-media.md) is relayed as a question and opens no turn, so the pairs can
+        never show it; it comes back as its own entry with the metadata that names it (kind,
+        ref and, when the library knew them, mime/size/durationMs - never a byte or a name),
+        in the place its time gives it among the pairs. Both parts keep their own last
+        `limit` rows, so a group full of kept media cannot push the answered pairs out."""
         with self.store.transaction() as conn:
             self.steward._steward(conn)
+            bound = max(1, min(int(limit), 20))
             rows = conn.execute(
-                "SELECT q.at, q.sender_ref, q.sender_role, q.body AS q, r.body AS a FROM state_group_messages q "
+                "SELECT q.at, q.rowid AS ord, q.sender_ref, q.sender_role, q.body AS q, r.body AS a "
+                "FROM state_group_messages q "
                 "JOIN state_group_messages r ON r.message_id=q.answered_by WHERE q.channel=? AND q.group_ref=? "
                 "AND q.direction='in' ORDER BY q.at DESC, q.rowid DESC LIMIT ?",
-                (channel, group_ref, max(1, min(int(limit), 20)))).fetchall()
-            return {"recent": [{"at": r["at"], "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
-                                                                         r["sender_role"]),
-                                "q": r["q"], "a": r["a"]} for r in reversed(rows)]}
+                (channel, group_ref, bound)).fetchall()
+            kept = conn.execute(
+                "SELECT at, rowid AS ord, sender_ref, sender_role, body AS q, attachments_json "
+                "FROM state_group_messages WHERE channel=? AND group_ref=? AND direction='in' "
+                "AND answered_by IS NULL AND attachments_json IS NOT NULL "
+                "ORDER BY at DESC, rowid DESC LIMIT ?",
+                (channel, group_ref, bound)).fetchall()
+            entries = [(r["at"], r["ord"], {"at": r["at"],
+                                            "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
+                                                                     r["sender_role"]),
+                                            "q": r["q"], "a": r["a"]}) for r in rows]
+            entries += [(r["at"], r["ord"], {"at": r["at"],
+                                             "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
+                                                                      r["sender_role"]),
+                                             "q": r["q"], "attachments": json.loads(r["attachments_json"])})
+                        for r in kept]
+            return {"recent": [entry for _, _, entry in sorted(entries, key=lambda item: (item[0], item[1]))]}
 

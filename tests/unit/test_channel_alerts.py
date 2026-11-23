@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from core import state_channels
+from core import state_channels, state_schema_setup
 from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
@@ -295,6 +295,8 @@ def test_a_migrated_outage_is_due_ten_minutes_after_the_migration(alerts):
         conn.execute("ALTER TABLE state_owner_channel_status DROP COLUMN up_since")
         conn.execute("ALTER TABLE state_owner_channel_status DROP COLUMN live")
         conn.commit()
+    # The upgraded backend's first service: schema setup runs once per handle and file.
+    state_schema_setup.forget()
     StateService(a.world.db, actor="fixture", project_read_trusted=True).channels  # noqa: B018
     since = a.row()["down_since"]
     assert since == T0.isoformat()

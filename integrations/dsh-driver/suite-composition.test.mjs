@@ -177,15 +177,19 @@ const scriptOf = async () => {
 // what to write instead; a wrong guess here is worse than a red suite.
 //
 // The script carries ONE flag, and its value is pinned here rather than passed
-// through. The repository gate runs this suite with two CPUs and a 300 s budget
-// (aitelier/tools/run_tests/impl.py: NODE_SCRIPT_TIMEOUT, and the container's
-// `--cpus 2`), and node --test's own default concurrency saturates that shape: the
-// gate cuts the run at its budget and reports the project failed - rc 124 at 300 s
-// with 574 tests reached, 544 passed. Measured in that same container shape on this
-// tree: 213 s at concurrency 2 and 348 s at 4, so the value is not free to move up
-// and the default is not free to come back. A flag this guard does not know is
-// refused as well: an unobserved flag can turn into a filter that runs a subset
-// while the file list below still looks complete.
+// through. The repository gate runs this suite with two CPUs and a 600 s budget
+// (aitelier/tools/run_tests/impl.py: NODE_SCRIPT_TIMEOUT; it was 300 s until
+// 2026-11-23, when the gate's own arm measured 209 s and a repeat 245.2 s against
+// it). Every timing quoted here was measured while that OLD 300 s budget was in
+// force, and the budget was smaller than the suite: at node's default a two-CPU
+// container gets concurrency 1 and the suite took 338 s
+// (tests/integration/test_driver_node_suite_runs.py), so a run that reached the
+// budget was cut there and became a `timed out after 300s: <suite command>` check,
+// which reports the project failed. The pin stays because 2 is the concurrency
+// those timings were measured at: moving it has to come with its own measurement,
+// which the flag makes possible. A flag this guard does not know is refused as
+// well: an unobserved flag can turn into a filter that runs a subset while the
+// file list below still looks complete.
 const TEST_CONCURRENCY = '2';
 
 const checkScriptShape = script => {
@@ -196,7 +200,7 @@ const checkScriptShape = script => {
   assert.deepEqual(globs, [], `the test script passes a glob (${globs.join(', ')}). A partial glob runs fewer files than it looks like: name every test file, or use bare \`node --test\` to discover them.`);
   const flags = words.filter(word => word.startsWith('--'));
   const pinned = [`--test-concurrency=${TEST_CONCURRENCY}`];
-  assert.deepEqual(flags, pinned, `the test script must pass exactly ${pinned.join(', ')} and no other flag (found ${flags.join(', ') || 'none'}). Without it node's default concurrency overruns the gate's 300 s budget in two CPUs; a higher value spends the same budget faster (213 s at 2, 348 s at 4 measured in that shape); and a flag this guard does not know is one nobody observes.`);
+  assert.deepEqual(flags, pinned, `the test script must pass exactly ${pinned.join(', ')} and no other flag (found ${flags.join(', ') || 'none'}). The concurrency is pinned so the gate always runs the shape this suite's budget was measured in (see the comment above); a different value has to come with its own measurement, and a flag this guard does not know is one nobody observes.`);
   return words.filter(word => !word.startsWith('--'));
 };
 

@@ -300,7 +300,9 @@ class SQLiteDirectorMessaging:
         self._id_factory = id_factory or (lambda: str(uuid4()))
         self._redactor = redactor
         if not isinstance(store.db, UntrustedDatabase):
-            initialize(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "director_messaging", initialize, store.db)
 
     def for_actor(self, actor):
         return type(self)(self.store, actor, clock=self._clock,

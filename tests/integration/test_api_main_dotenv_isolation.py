@@ -95,6 +95,15 @@ AITELIER_ADMIN_TOKEN="fixture-admin-token"
 TREE_PACKAGES = ("api", "core", "models", "aitelier", "cli",
                  "configs", "agent_configs", "templates")
 TREE_FILES = ("llm_providers.example.json", "model_routes.example.json")
+# ...and the DATA a package reads at import time, which no package directory
+# above carries: `api.steward_gateway` evaluates `media_types.limits()` at import
+# (`MAX_BODY`), and `core.media_types` resolves that table as
+# `<parents[1]>/integrations/dsh-director/media-types.json`. Missing it made
+# `import api.main` raise FileNotFoundError in the copy, so this fixture — not
+# the product — was the thing out of date. The fixture asserts the copied bytes
+# equal the repository's, so a stale or partial copy fails here instead of
+# quietly teaching the child a different table.
+TREE_DATA_FILES = ("integrations/dsh-director/media-types.json",)
 
 
 def _copy_tree(dst: Path) -> Path:
@@ -104,6 +113,10 @@ def _copy_tree(dst: Path) -> Path:
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     for name in TREE_FILES:
         shutil.copy2(REPO_ROOT / name, dst / name)
+    for name in TREE_DATA_FILES:
+        target = dst / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / name, target)
     (dst / ".env").write_text(DOTENV_TEXT)
     return dst
 
@@ -115,6 +128,10 @@ def tree(tmp_path_factory) -> Path:
     copied = _copy_tree(root / "tree")
     assert (copied / "api" / "main.py").is_file()
     assert (copied / ".env").read_text() == DOTENV_TEXT
+    # Byte identity, not mere presence: the child imports this copy, so a
+    # partial or stale data file would make the test measure a different table.
+    for name in TREE_DATA_FILES:
+        assert (copied / name).read_bytes() == (REPO_ROOT / name).read_bytes(), name
     return copied
 
 

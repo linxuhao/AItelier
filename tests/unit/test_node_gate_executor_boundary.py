@@ -89,6 +89,11 @@ def _tree(root):
 def test_every_npm_command_goes_through_the_bounded_profiles(tmp_path, monkeypatch, trap_npm):
     repo = _repo(tmp_path, npmrc="legacy-peer-deps=true\n")
     t = Transport(monkeypatch)
+    # Pin the two budgets apart, so that a phase charged to the other phase's
+    # budget shows up here: at their real values both are 600 s, and four equal
+    # numbers can be permuted without this test noticing.
+    monkeypatch.setattr(rt, "NODE_INSTALL_TIMEOUT", 111)
+    monkeypatch.setattr(rt, "NODE_SCRIPT_TIMEOUT", 222)
     node = rt._run_node_checks(repo, run_id="run-1")
     assert node["passed"] is True and node["dir"] == "web"
     assert [c["profile"] for c in t.calls] == ["node_fetch", "node_run", "node_run", "node_run"]
@@ -105,7 +110,7 @@ def test_every_npm_command_goes_through_the_bounded_profiles(tmp_path, monkeypat
         assert c["npm_cache"] == str(ticket / "cache")
         assert c["run_id"] == "run-1"
     assert all(c["workdir"] == str(ticket / "src" / "web") for c in t.calls)
-    assert [c["timeout"] for c in t.calls] == [600, 600, 300, 300]
+    assert [c["timeout"] for c in t.calls] == [111, 111, 222, 222]
     # The fetch works in the FULL snapshot (sources included), with the project's
     # own .npmrc present — npm 12 and the gate's command line decide, not a view.
     assert "shared/util.js" in t.calls[0]["src_files"]

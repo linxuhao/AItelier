@@ -19,7 +19,7 @@ import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
 import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
-import { attachmentLine } from './lib/media.mjs';
+import { attachmentLine, withAttachmentLines } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
@@ -429,7 +429,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
     while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
     const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
-      ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent } };
+      ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent: withAttachmentLines(recent) } };
     ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],
       source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: label, question_ids: [message_id],
         sender_refs: [senderRef] } })));

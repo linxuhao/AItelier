@@ -234,15 +234,22 @@ def pack(chunks, limit=PUSH_CHARS):
     return messages
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+
 class StateOwnerQuestions:
     def __init__(self, store, actor, driver_id=None, steward=None, inbox=None, channels=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
         self.steward, self.inbox, self.channels = steward, inbox, channels
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "owner_questions", _initialize_schema, store.db)
 
     # ---------------------------------------------------------------- reads
     @staticmethod

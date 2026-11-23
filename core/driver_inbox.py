@@ -121,6 +121,38 @@ def decode_conversation_cursor(cursor):
     return payload[0], payload[1]
 
 
+def _initialize_schema(db) -> None:
+    """The schema setup, run once per process per database file (core.state_schema_setup)."""
+    with db.get_connection() as conn:
+        conn.executescript(SCHEMA)
+        # Additive (driver -> user messages): every existing row is a
+        # driver-addressed message, which is what 'driver' means.
+        add_column_if_missing(conn, "driver_inbox_messages", "audience",
+                              "TEXT NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user'))")
+        # Additive (the user -> driver half of one conversation). Every
+        # existing row keeps channel NULL: a driver-addressed message
+        # that no human wrote is not part of the user's thread, and the
+        # rows the driver sent the user are recognised by `audience`.
+        add_column_if_missing(conn, "driver_inbox_messages", "channel",
+                              "TEXT CHECK(channel IN ('user'))")
+        # Additive (tagged segments). NULL means the message was written
+        # as one body, which is what every row before this column was.
+        add_column_if_missing(conn, "driver_inbox_messages", "segments_json", "TEXT")
+        # Additive (the questions a reply answers). NULL means the reply
+        # cites none, which is every row written before this column.
+        add_column_if_missing(conn, "driver_inbox_messages", "answers_json", "TEXT")
+        # Additive (the driver's own questions a row withdraws). NULL means
+        # the row withdraws nothing, which is every row before this column.
+        add_column_if_missing(conn, "driver_inbox_messages", "withdraws_json", "TEXT")
+        # Additive (step 24.2b, design-steward 7.8.12a "消息带附件"): the message's
+        # attachments [{id, kind, mime, size, name}] (core.media_types). NULL means
+        # none, which is every row written before this column.
+        add_column_if_missing(conn, "driver_inbox_messages", "attachments_json", "TEXT")
+        # Step 24.2b: the dashboard's conversation uploads the messages will carry.
+        state_conversation_uploads.ensure_schema(conn)
+        conn.commit()
+
+
 class DriverInbox:
     def __init__(self, store, actor, driver_id=None):
         self.store, self.actor, self.driver_id = store, actor, driver_id
@@ -130,34 +162,9 @@ class DriverInbox:
         # (a hit retires the code and is refused code_sent_to_bound_account). None: no check.
         self.owner_text_guard = None
         if not isinstance(store.db, UntrustedDatabase):
-            with store.db.get_connection() as conn:
-                conn.executescript(SCHEMA)
-                # Additive (driver -> user messages): every existing row is a
-                # driver-addressed message, which is what 'driver' means.
-                add_column_if_missing(conn, "driver_inbox_messages", "audience",
-                                      "TEXT NOT NULL DEFAULT 'driver' CHECK(audience IN ('driver','user'))")
-                # Additive (the user -> driver half of one conversation). Every
-                # existing row keeps channel NULL: a driver-addressed message
-                # that no human wrote is not part of the user's thread, and the
-                # rows the driver sent the user are recognised by `audience`.
-                add_column_if_missing(conn, "driver_inbox_messages", "channel",
-                                      "TEXT CHECK(channel IN ('user'))")
-                # Additive (tagged segments). NULL means the message was written
-                # as one body, which is what every row before this column was.
-                add_column_if_missing(conn, "driver_inbox_messages", "segments_json", "TEXT")
-                # Additive (the questions a reply answers). NULL means the reply
-                # cites none, which is every row written before this column.
-                add_column_if_missing(conn, "driver_inbox_messages", "answers_json", "TEXT")
-                # Additive (the driver's own questions a row withdraws). NULL means
-                # the row withdraws nothing, which is every row before this column.
-                add_column_if_missing(conn, "driver_inbox_messages", "withdraws_json", "TEXT")
-                # Additive (step 24.2b, design-steward 7.8.12a "消息带附件"): the message's
-                # attachments [{id, kind, mime, size, name}] (core.media_types). NULL means
-                # none, which is every row written before this column.
-                add_column_if_missing(conn, "driver_inbox_messages", "attachments_json", "TEXT")
-                # Step 24.2b: the dashboard's conversation uploads the messages will carry.
-                state_conversation_uploads.ensure_schema(conn)
-                conn.commit()
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "driver_inbox", _initialize_schema, store.db)
 
     @staticmethod
     def _segments(segments):

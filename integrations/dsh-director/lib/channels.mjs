@@ -699,33 +699,52 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     },
 
     /** Step 24.2 (design-steward 7.8.12): store one attachment of a message that arrived on a
-     *  channel, BEFORE the message is handed in. In order: (1) the sender must be the channel's
-     *  current binding (the host's read-only check; a host it cannot reach is `unavailable`,
-     *  transient like inbound's) - otherwise channel_sender_not_bound and `open` is never
-     *  called, so not one byte of a stranger's is fetched; (2) idempotent by (channel,
-     *  messageRef, index): a stored one answers its ref (a refused one its refusal) without
-     *  calling `open`; (3) only then `open({signal})` gives the bytes, held to the library's
-     *  limits, deadlines and type table. Answers {ref,
-     *  kind, mime, size, durationMs?} or {refused}. A group message has no media in 24.2
-     *  (refused unsupported), nor does a host without a media library. */
+     *  channel, BEFORE the message is handed in. In order: (1) the message must come from
+     *  somewhere this host serves - a 1:1 sender that is the channel's current binding
+     *  (`host.senderBound`) or, for a `conversationRef`, a group the host lists (the same read
+     *  the wake and the bridge's whitelist use); the read is the host's, and a host it cannot
+     *  reach is `unavailable`, transient like inbound's - otherwise channel_sender_not_bound
+     *  (1:1) or unsupported (a room this host does not serve) and `open` is never called, so
+     *  not one byte is fetched; (2) idempotent by (channel, messageRef, index): a stored one
+     *  answers its ref (a refused one its refusal) without calling `open`; (3) only then
+     *  `open({signal})` gives the bytes, held to the library's limits, deadlines and type
+     *  table. Answers {ref, kind, mime, size, durationMs?} or {refused}. A host without a
+     *  media library stores nothing (unsupported).
+     *
+     *  The row's AUDIENCE follows the message (design/steward-group-media.md, the owner's
+     *  ruling of 2026-11-22): `owner` for a 1:1 message, `group:<channel>:<conversationRef>`
+     *  for a group's - so the room's own turns cover it (`lib/media.mjs: covers()`) and no
+     *  other group's do. Storage is not gated on the mention: an un-mentioned message's files
+     *  are kept here just the same, for a later mention in that room to read. */
     async storeMedia(meta = {}, open) {
-      const { channel, senderRef, messageRef, index, kind } = meta;
+      const { channel, senderRef, messageRef, index, kind, conversationRef } = meta;
       if (!CHANNEL_NAMES.includes(channel) || !text(senderRef) || !text(messageRef) || !Number.isInteger(index) || index < 0
         || !MEDIA_KINDS.includes(kind) || typeof open !== 'function') return { refused: 'invalid_media' };
-      if (meta.conversationRef !== undefined || !media || typeof host.senderBound !== 'function') return { refused: 'unsupported' };
+      if (!media) return { refused: 'unsupported' };
+      // A group's file names its room (host.d.ts); a room that is not a name is not a message.
+      if (conversationRef !== undefined && !text(conversationRef)) return { refused: 'invalid_media' };
+      if (conversationRef === undefined && typeof host.senderBound !== 'function') return { refused: 'unsupported' };
       try {
         await hostReady();
-        const answer = await host.senderBound({ channel, senderRef });
-        if (answer?.bound !== true) {
-          log('channel_media_refused', { channel, reason: 'channel_sender_not_bound' });
-          return { refused: 'channel_sender_not_bound' };
+        if (conversationRef === undefined) {
+          const answer = await host.senderBound({ channel, senderRef });
+          if (answer?.bound !== true) {
+            log('channel_media_refused', { channel, reason: 'channel_sender_not_bound' });
+            return { refused: 'channel_sender_not_bound' };
+          }
+        } else if (!(await servesGroup(channel, conversationRef))) {
+          // Not a room this host serves: nothing is fetched, and the closed set has no word
+          // for it - the host cannot take a file there at all.
+          log('channel_media_refused', { channel, reason: 'channel_group_not_bound' });
+          return { refused: 'unsupported' };
         }
       } catch (error) {
         log('channel_media_failed', { channel, error: short(error) });
         return { refused: 'unavailable' };
       }
+      const audience = conversationRef === undefined ? 'owner' : `group:${channel}:${conversationRef}`;
       let stored;
-      try { stored = await media.ingest({ channel, messageRef, index, audience: 'owner', source: 'in' }, open); }
+      try { stored = await media.ingest({ channel, messageRef, index, audience, source: 'in' }, open); }
       catch (error) { log('channel_media_failed', { channel, error: short(error) }); return { refused: 'unavailable' }; }
       return stored && (stored.ref || stored.refused) ? stored : { refused: 'unavailable' };
     },
@@ -814,6 +833,15 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       return true;
     } catch (error) { log('group_send_failed', { channel, group_ref: groupRef, error: short(error) }); return false; }
   };
+  /** Whether `channel`'s live groups include this room - the read the wake's own label
+   *  lookup and the bridge's whitelist use (host.groups.list, the backend's owner groups).
+   *  It is asked before a group message's first byte is fetched (storeMedia); a host that
+   *  cannot answer throws and storeMedia answers `unavailable`, which the channel holds. */
+  const servesGroup = async (channel, groupRef) => {
+    if (typeof groups?.list !== 'function') return false;
+    const listed = await groups.list();
+    return (listed?.groups ?? []).some(group => group.channel === channel && group.group_ref === groupRef);
+  };
   /** The bridge's whitelist from the host: each channel's bound account and its bound group. */
   const refreshRooms = async () => {
     if (typeof groups?.list !== 'function') return;
@@ -827,9 +855,16 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       }
     } catch (error) { log('group_rooms_failed', { error: short(error) }); }
   };
-  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments }) => {
+  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments, asked }) => {
     const seen = { channel, group_ref: groupRef, sender_ref: senderRef, length: body.length };
     if (!groups || !text(groupRef)) return { accepted: false, reason: 'no_groups' };
+    // design/steward-group-media.md item 5 (the owner's ruling of 2026-11-22): STORAGE is not
+    // gated on the mention - the files are stored before the message comes here - and HANDLING
+    // is. A message that does not call the steward (`asked: false`, the bridge's own word) is
+    // recorded in the group's history by the relay below and stops there: no wake (no turn),
+    // no line into the room. A channel that does not say leaves the old behaviour: every group
+    // message it hands in is one that called the steward.
+    const mentioned = asked !== false;
     let result;
     try {
       await hostReady();
@@ -853,13 +888,18 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     // cap, before the group and member quotas; a confirming reply is always accepted, so its
     // 「正在执行」 comes with a wake); the group gets the backend's one line, which its send
     // budget already counted.
-    if (result?.confirmation_line) await sendGroupLine(channel, groupRef, result.confirmation_line);
+    if (result?.confirmation_line && mentioned) await sendGroupLine(channel, groupRef, result.confirmation_line);
     if (result?.refused) {
       log('group_message_refused', { ...seen, reason: String(result.refused) });
-      if (result.notice) await sendGroupLine(channel, groupRef, result.notice);
+      if (result.notice && mentioned) await sendGroupLine(channel, groupRef, result.notice);
       return { accepted: false, reason: String(result.refused) };
     }
     if (result?.duplicate) return { accepted: true, duplicate: true };
+    if (!mentioned) {
+      // Recorded, not asked: the log line says which, so an un-mentioned medium is visible.
+      log('group_message_accepted', { ...seen, asked: false });
+      return { accepted: true };
+    }
     log('group_message_accepted', seen);
     // Taken by the host and not yet steered: a failure here loses the question (never
     // doubles it); the dashboard shows it unanswered.

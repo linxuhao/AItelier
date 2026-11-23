@@ -20,7 +20,7 @@
 # container on the gate's own shape (`docker run --rm --network none --cpus 2
 # --memory 2g`,
 # an `npm ci`/`npm install --offline` install then `npm test` inside the gate's
-# 300 s script budget);
+# 600 s script budget);
 # the log named in each entry is kept beside the run's report, not in the
 # repository.
 #

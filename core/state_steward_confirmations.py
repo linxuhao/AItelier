@@ -357,7 +357,9 @@ class StateStewardConfirmations:
         self.store, self.actor, self.driver_id, self.steward, self.groups = store, actor, driver_id, steward, groups
         self.project_read_trusted = store.project_read_trusted
         if not isinstance(store.db, UntrustedDatabase):
-            ensure_schema(store.db)
+            # Once per process per database file (core.state_schema_setup).
+            from core.state_schema_setup import once
+            once(store.db, "steward_confirmations", ensure_schema, store.db)
 
     def create(self, name, arguments, requester_message_id, audience="owner", question_ids=None):
         """The host's request for one confirmation: {code, text, channel, reply_to_message_id,

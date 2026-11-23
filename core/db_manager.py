@@ -426,7 +426,9 @@ class DBManager:
         """Consistent online backup of the live DB (WAL-safe) to a sibling file.
 
         Uses a fresh source connection so the backup does not depend on the
-        in-flight migration transaction state.
+        in-flight migration transaction state. Overwriting the database file in
+        place requires a backend restart; otherwise structural repair (schema
+        setup) will not run again.
         """
         backup_path = f"{self.db_path}.{suffix}.bak"
         src = sqlite3.connect(self.db_path)

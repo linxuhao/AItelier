@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from core import state_channels, state_groups
+from core import state_channels, state_groups, state_schema_setup
 from core.state_commands import ProjectPrivate, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
@@ -230,6 +230,8 @@ def test_director_602_6_a_default_name_skips_another_channels_live_code_and_live
         conn.execute("DROP INDEX state_owner_groups_live_label")
         conn.execute("UPDATE state_owner_groups SET label=? WHERE group_ref=?", (state_groups.DEFAULT_GROUP_LABEL, ROOM))
         conn.commit()
+    # The upgraded backend's first service: schema setup runs once per handle and file.
+    state_schema_setup.forget()
     StateService(world.db, actor="fixture", project_read_trusted=True)
     labels = rows(world, "SELECT label FROM state_owner_groups WHERE revoked_at IS NULL ORDER BY bound_at")
     assert sorted(labels) == sorted({(state_groups.DEFAULT_GROUP_LABEL,), (state_groups.DEFAULT_GROUP_LABEL + "2",)})
@@ -245,6 +247,8 @@ def test_the_migration_drops_the_one_live_index_and_names_an_unnamed_bound_group
                      "WHERE revoked_at IS NULL")
         conn.execute("UPDATE state_owner_groups SET label=NULL")
         conn.commit()
+    # The upgraded backend's first service: schema setup runs once per handle and file.
+    state_schema_setup.forget()
     StateService(world.db, actor="fixture", project_read_trusted=True)
     assert rows(world, "SELECT name FROM sqlite_master WHERE name='state_owner_groups_one_live'") == []
     assert rows(world, "SELECT label FROM state_owner_groups") == [("家庭群",)]
@@ -364,6 +368,40 @@ def test_with_two_groups_family_memory_recent_and_names_stay_in_their_group(worl
         ask(world, f"aa{i}")
     assert ask(world, "aa19")["refused"] == "member_quota"
     assert "message_id" in ask(world, "bb0", room=ROOM2)
+
+
+def test_a_later_mention_turn_sees_an_unmentioned_medium_in_its_group_alone(world):
+    """Criterion c4 of iss-68dac765c59c4dbe: the medium is relayed with its attachments
+    metadata and no turn ever takes it - exactly what the channel hands in when a bound
+    room's message does not call the steward (design/steward-group-media.md) - and the later
+    turn's `recent` still shows it, as its own entry naming the ref; the other bound group's
+    `recent` shows nothing of it. The two-group scope is asserted, not only a presence."""
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    ref = "m_0123456789abcdef"
+    moment = state_channels._now()
+    at = lambda seconds: (moment + timedelta(seconds=seconds)).isoformat()  # noqa: E731
+    kept = execute(world.steward, "relay_group_message",
+                   {"request_key": "g-img", "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER,
+                    "channel_message_ref": "img1", "body": "[图片]", "channel_at": at(0),
+                    "attachments": [{"kind": "image", "ref": ref, "mime": "image/jpeg", "size": 1234}]},
+                   allow_write=True)
+    ask(world, "a-plain", "一句没有叫管家的话", at=at(1))  # unanswered too, but no attachments
+    later = ask(world, "a2", "这个图上是什么", at=at(2))
+    reply(world, later["message_id"], "是一只猫", turn="ta")
+    assert rows(world, "SELECT answered_by IS NULL FROM state_group_messages WHERE message_id=?",
+                (kept["message_id"],)) == [(1,)]
+    recent_a = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})["recent"]
+    recent_b = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM2})["recent"]
+    # A, oldest first: the kept medium as its own entry, then the answered pair; the unanswered
+    # text question is not a medium and stays out.
+    assert [entry.get("q") for entry in recent_a] == ["[图片]", "这个图上是什么"]
+    assert recent_a[0]["attachments"] == [{"kind": "image", "ref": ref, "mime": "image/jpeg", "size": 1234}]
+    assert "a" not in recent_a[0]
+    assert (recent_a[1]["q"], recent_a[1]["a"]) == ("这个图上是什么", "「这个图上是什么」\n是一只猫")
+    assert "一句没有叫管家的话" not in str(recent_a)
+    # B sees nothing of A's medium (and has no history of its own).
+    assert recent_b == [] and ref not in str(recent_b)
 
 
 def test_the_account_cap_is_one_for_both_groups(world):

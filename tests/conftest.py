@@ -102,6 +102,17 @@ def _release_instance_lock():
         _sched._instance_lock_fh = None
 
 
+@pytest.fixture(autouse=True)
+def _state_schema_setup_per_test():
+    """State schema setup runs once per process per database file
+    (core.state_schema_setup). Each test starts as a fresh process would, so a
+    database a test recreates at a path and inode an earlier test used is set up
+    again rather than taken for the old one."""
+    from core import state_schema_setup
+    state_schema_setup.forget()
+    yield
+
+
 @pytest.fixture(scope="session")
 def _state_templates(tmp_path_factory):
     from tests.support.state_template import TemplateCache

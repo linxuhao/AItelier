@@ -1,6 +1,7 @@
 # File: api/dependencies.py
 
 import copy
+import inspect
 import os
 import threading
 import time
@@ -34,6 +35,29 @@ def get_db_manager() -> DBManager:
 def get_workspace_manager() -> WorkspaceManager:
     """FastAPI 依赖注入：获取物理工作区管理器"""
     return ws_instance
+
+
+# The State routes take these two through the async variants below. FastAPI runs a
+# sync dependency in anyio's 40-token thread pool, so each State request queued for
+# a token once per trivial getter (backend latency study 2026-11-22). The variants
+# run on the event loop and still honour `app.dependency_overrides[get_db_manager]`
+# / `[get_workspace_manager]` (a zero-argument callable, sync or async, as every
+# override in this repository is); the plain functions above stay as they are for
+# direct calls and every other route.
+async def _on_loop(request: Request, dependency):
+    overrides = getattr(getattr(request, "app", None), "dependency_overrides", None) or {}
+    value = overrides.get(dependency, dependency)()
+    if inspect.isawaitable(value):
+        value = await value
+    return value
+
+
+async def get_db_manager_on_loop(request: Request) -> DBManager:
+    return await _on_loop(request, get_db_manager)
+
+
+async def get_workspace_manager_on_loop(request: Request) -> WorkspaceManager:
+    return await _on_loop(request, get_workspace_manager)
 
 
 def _existing_repo_code_path(project_id: str,

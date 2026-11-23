@@ -6,6 +6,8 @@
 
 import hmac
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from fastapi import HTTPException, Request
 
@@ -130,6 +132,37 @@ def driver_registry():
     return drivers.registry_for(get_db_manager())
 
 
+# One request's identity, resolved once (api.state_graph_routers.get_service).
+# Outside `identity_resolved_once` nothing is kept and every call resolves anew.
+_RESOLVED: ContextVar = ContextVar("aitelier_request_identity", default=None)
+
+
+@contextmanager
+def identity_resolved_once():
+    """Inside this block `request_identity` and the driver-token lookups behind it
+    and behind `write_denial_reason` run once and are reused: one `lookup_token`
+    (one connection, one throttled `_touch`) per request instead of one per
+    question. Every verdict is computed from the same answers as before."""
+    token = _RESOLVED.set({})
+    try:
+        yield
+    finally:
+        _RESOLVED.reset(token)
+
+
+def _resolved(key, compute):
+    kept = _RESOLVED.get()
+    if kept is None:
+        return compute()
+    if key not in kept:
+        kept[key] = compute()
+    return kept[key]
+
+
+def _lookup_token(registry, token):
+    return _resolved(("token", registry, token), lambda: registry.lookup_token(token))
+
+
 def request_identity(request):
     """WHO this request is, from the raw credential only (never from arguments).
 
@@ -140,6 +173,12 @@ def request_identity(request):
     token is 'cli_owner' (the owner's terminal, minted below), and a registered
     driver token is 'driver'.
     """
+    # The request is kept beside its identity, so its id cannot be reused by
+    # another request object while the block lives.
+    return _resolved(("identity", id(request)), lambda: (request, _request_identity(request)))[1]
+
+
+def _request_identity(request):
     from core import drivers
     headers = getattr(request, "headers", None) if request is not None else None
     email = None
@@ -157,7 +196,7 @@ def request_identity(request):
         return None
     token = presented_token(request)
     if token and not is_via_cloudflare(request):
-        row = registry.lookup_token(token)
+        row = _lookup_token(registry, token)
         if row is not None:
             if (row["driver_id"] == drivers.OWNER_CLI_DRIVER_ID
                     and ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN)):
@@ -306,7 +345,7 @@ def write_denial_reason(request: Request) -> str | None:
             if ADMIN_TOKEN and hmac.compare_digest(token, ADMIN_TOKEN):
                 return None
         else:
-            row = registry.lookup_token(token)
+            row = _lookup_token(registry, token)
             if row is not None:
                 return _steward_denial(request, row)
     email = cf_access.email_from_request_headers(request.headers, request.cookies)

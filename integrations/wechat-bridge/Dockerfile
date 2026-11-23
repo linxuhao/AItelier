@@ -21,7 +21,8 @@ COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 # npm run scripts call `npm` by name; the package's own `npm test` needs it on PATH.
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-COPY --chmod=0444 neo-fork/pin.json neo-fork/0001-incoming-message-types.patch neo-fork/0002-saved-login.patch /fork-input/WORKDIR /fork/repo
+COPY --chmod=0444 neo-fork/pin.json neo-fork/0001-incoming-message-types.patch neo-fork/0002-saved-login.patch /fork-input/
+WORKDIR /fork/repo
 # The pin is fetched by commit, never by branch, and what arrived is checked against the
 # commit pin.json names before anything is read out of it.
 RUN git init -q . \

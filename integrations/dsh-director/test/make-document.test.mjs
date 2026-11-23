@@ -187,7 +187,7 @@ test('make_document in a group: the title and body pass the exit check first; wi
   assert.match(refused.reason, /private_project/);
   assert.equal(w.calls.make.length, 0, 'the host never ran');
   assert.equal(w.turns.open().officeDocs, 0);
-  assert.deepEqual(w.calls.checks.at(-1), { turn: w.turns.open().turn, kind: 'file', checkOnly: true, text: `${LETTER.title}\n写进秘密项目的名字` });
+  assert.deepEqual(w.calls.checks.at(-1), { turn: w.turns.open().turn, kind: 'file', checkOnly: true, text: `${LETTER.title}\n写进秘密项目的名字\n写进秘密项目的名字` });
   // The title alone can be what is withheld; an xlsx's cells are checked too.
   assert.equal((await w.make({ ...LETTER, title: '秘密项目' })).refused, 'withheld');
   assert.equal((await w.make({ format: 'xlsx', title: '表', rows: [['a'], ['秘密项目']] })).refused, 'withheld');
@@ -195,6 +195,44 @@ test('make_document in a group: the title and body pass the exit check first; wi
   const made = await w.make(LETTER);
   assert.ok(made.ref, JSON.stringify(made));
   assert.equal(w.calls.make.at(-1)[1], R1, 'stored as this group\'s');
+});
+
+test('make_document in a group: the check reads the text as the file shows it - markup never splits a word past it (review S1)', async () => {
+  const w = world({ audience: R1, withheld: ['AItelier'] });
+  for (const body of ['我们的 AI**telier** 项目', '# AI*telier*', '| a |\n|---|\n| AI**telier** |', '- AI**telier**']) {
+    const refused = await w.make({ ...LETTER, body });
+    assert.equal(refused.refused, 'withheld', body);
+    assert.match(w.calls.checks.at(-1).text, /AItelier/, body);
+  }
+  assert.equal(w.calls.make.length, 0, 'the host never ran');
+  assert.equal(w.turns.open().officeDocs, 0);
+});
+
+test('make_document in a group: an xlsx within the limits always fits the 256 KiB check; past them it is too_large before any check (review N1)', async () => {
+  const L = MEDIA_LIMITS, wide = '\u{20000}'; // a 4-byte character
+  assert.ok(L.office_sheet_chars_group < L.office_sheet_chars);
+  // The worst case a group may send: 2,000 rows x 30 cells, office_sheet_chars_group 4-byte characters, the longest title and sheet name.
+  let left = L.office_sheet_chars_group;
+  const rows = Array.from({ length: L.office_rows }, () => Array.from({ length: L.office_cols }, () => (left-- > 0 ? wide : '')));
+  const w = world({ audience: R1 });
+  const made = await w.make({ format: 'xlsx', title: wide.repeat(60), sheet: wide.repeat(31), rows });
+  assert.ok(made.ref, JSON.stringify(made).slice(0, 200));
+  const bytes = Buffer.byteLength(w.calls.checks.at(-1).text);
+  assert.ok(bytes > 250_000 && bytes <= 262_144, String(bytes));
+  // One more character: too_large in a group, before the check; the owner's turn takes it.
+  rows[L.office_rows - 1][L.office_cols - 1] = wide;
+  const before = w.calls.checks.length;
+  w.nextTurn(R1);
+  const refused = await w.make({ format: 'xlsx', title: '表', rows });
+  assert.equal(refused.refused, 'too_large');
+  assert.match(refused.reason, new RegExp(String(L.office_sheet_chars_group)));
+  assert.equal(w.calls.checks.length, before);
+  assert.ok((await world().make({ format: 'xlsx', title: '表', rows })).ref);
+  // The byte bound itself: limits that would let more through are still cut at 262,144 bytes, nothing sent to check.
+  const loose = world({ audience: R1, budget: { office_sheet_chars_group: 10 ** 6 } });
+  const big = await loose.make({ format: 'xlsx', title: '表', rows: Array.from({ length: 200 }, () => ['字'.repeat(L.office_cell_chars)]) });
+  assert.deepEqual(big, { refused: 'too_large', reason: MAKE_DOCUMENT_REASONS.too_large });
+  assert.deepEqual([loose.calls.checks.length, loose.calls.make.length, loose.turns.open().officeDocs], [0, 0, 0]);
 });
 
 test('a group\'s file: sent into its own group under its title, refused in another group, usable in the owner\'s turn', async () => {
@@ -215,6 +253,14 @@ test('a group\'s file: sent into its own group under its title, refused in anoth
   const plain = await w.lib.ingest({ channel: 'generated', source: 'generated', audience: R1 }, async () => pdfBytes);
   const fresh = world({ audience: R1, library: w.lib });
   await fresh.send({ ref: plain.ref });
+  assert.match(fresh.calls.files.at(-1)[1].name, /^file-[0-9a-f]{8}\.pdf$/);
+  // Only make_document's own files go by their name (review N1, r07): a group member's upload
+  // named like a document keeps the made-up name.
+  const upload = await w.lib.ingest({ channel: 'wechat', messageRef: 'u' + ++ids, index: 0, audience: R1, source: 'in', name: '账单.pdf' },
+    async () => Buffer.concat([pdfBytes, Buffer.from('upload')]));
+  assert.equal(w.lib.lookup(upload.ref).name, '账单.pdf');
+  const sentUpload = await fresh.send({ ref: upload.ref });
+  assert.equal(sentUpload.sent, true, JSON.stringify(sentUpload));
   assert.match(fresh.calls.files.at(-1)[1].name, /^file-[0-9a-f]{8}\.pdf$/);
   const weird = await w.lib.ingest({ channel: 'generated', source: 'generated', audience: R1, name: '../x.pdf' }, async () => Buffer.concat([pdfBytes, Buffer.from('2')]));
   await fresh.send({ ref: weird.ref });

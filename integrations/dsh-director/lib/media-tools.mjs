@@ -585,7 +585,10 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         const sheet = args.sheet ?? 'Sheet1';
         if (!validTitle(sheet) || [...sheet].length > SHEET_CHARS || /[[\]]/.test(sheet))
           return refuse('invalid_request', `sheet is 1-${SHEET_CHARS} characters without / \\ : * ? [ ] " < > |`);
-        const cells = sheetCells(args.rows, limits);
+        // A group's xlsx is held to office_sheet_chars_group: its check text (below) then always
+        // fits the backend's TEXT_CHECK_BYTES, separators and 4-byte characters included.
+        const group = audience().kind !== 'owner';
+        const cells = sheetCells(args.rows, group ? { ...limits, office_sheet_chars: limits.office_sheet_chars_group } : limits);
         if (cells.refused) return cells;
         content = { sheet, ...cells };
       } else {
@@ -608,8 +611,11 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       const giveBack = answer => { record.officeDocs = Math.max(0, (record.officeDocs ?? 1) - 1); return answer; };
       if (turn.kind !== 'owner') {
         // A group's file is checked as a group reply is, before anything is made (7.8.12c "九").
-        const text = checkText({ title: args.title, body: args.body, sheet: content.sheet, rows: format === 'xlsx' ? args.rows : undefined });
-        if (Buffer.byteLength(text) > TEXT_CHECK_BYTES) return giveBack(refuse('too_large', `a group's file is at most ${TEXT_CHECK_BYTES} bytes of text`));
+        // The body as written and as the file shows it (review S1: `AI**telier**` shows "AItelier").
+        const text = format === 'xlsx' ? checkText({ title: args.title, sheet: content.sheet, rows: args.rows })
+          : checkText({ title: args.title, body: args.body, blocks: content.blocks });
+        // Unreachable within the limits above; kept so a check is never sent cut.
+        if (Buffer.byteLength(text) > TEXT_CHECK_BYTES) return giveBack(refuse('too_large'));
         if (typeof media.postGroup !== 'function') return giveBack(refuse('office_unavailable'));
         let check;
         try { check = await media.postGroup({ turn: turns.open()?.turn, kind: 'file', checkOnly: true, text }, exec.signal); }
@@ -641,7 +647,7 @@ const MAKE_HOST_REFUSALS = Object.freeze(new Set(['office_unavailable', 'busy', 
  *  refusal from the backend's check (group_send_budget, group_quota_account) passes on as it is. */
 export const MAKE_DOCUMENT_REASONS = Object.freeze({
   invalid_request: 'format 是 pdf、docx 或 xlsx；pdf、docx 给 body，xlsx 给 rows',
-  too_large: '内容太多：正文最多 20,000 字，表格最多 2,000 行 × 30 列',
+  too_large: '内容太多：正文最多 20,000 字，表格最多 2,000 行 × 30 列、合计 80,000 字（群里 50,000 字）',
   withheld: '这份文件的内容不能发进这个群，做不了：照实说做不了，不要换个说法再试',
   turn_document_budget: '这一回合做的文件够多了',
   office_unavailable: '本机的文档转换没有就绪，请业主看宿主日志',

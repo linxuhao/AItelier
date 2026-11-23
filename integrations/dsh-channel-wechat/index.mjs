@@ -108,11 +108,14 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     throw new Error(`bridge answered ${response.status} for a media fetch`);
   };
 
-  /** Step 24.2: the inbound attachments of a 1:1 event, into `resolved` (kept on the held
-   *  message across retries, so a stored file is never asked for twice). A description the
-   *  bridge marked too_large or gone, or that has no media_id, is refused without storeMedia;
-   *  the rest are stored one by one. Returns 'unbound' when storeMedia answers
-   *  channel_sender_not_bound (the rest are not fetched); throws when an answer is transient. */
+  /** Step 24.2: the inbound attachments of an event, into `resolved` (kept on the held message
+   *  across retries, so a stored file is never asked for twice). A description the bridge marked
+   *  too_large or gone, or that has no media_id, is refused without storeMedia; the rest are
+   *  stored one by one. A group event's are stored with its room (`conversationRef`), so the
+   *  library keeps them for that room (design/steward-group-media.md, the owner's ruling of
+   *  2026-11-22) whether or not the message calls the steward. Returns 'unbound' when storeMedia
+   *  answers channel_sender_not_bound (the rest are not fetched); throws when an answer is
+   *  transient. */
   async function storeAttachments(event, items, resolved) {
     for (let index = resolved.length; index < items.length; index++) {
       const item = items[index];
@@ -124,6 +127,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
         continue;
       }
       const meta = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, index, kind: item.kind,
+        ...(event.type === 'group_message' && event.room_ref ? { conversationRef: event.room_ref } : {}),
         ...(typeof item.mime === 'string' && item.mime ? { mime: item.mime } : {}),
         ...(typeof item.name === 'string' && item.name ? { name: item.name } : {}) };
       const answer = await ownerChannels.storeMedia(meta, openMedia(item.media_id));
@@ -151,9 +155,12 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
    *  pause, however long that takes, so the cursor stays on it and nothing after it
    *  overtakes it. */
   async function deliver(event) {
-    // Step 24.2: a 1:1 message's files are stored first (storeMedia), and inbound is called once
+    // Step 24.2: a message's files are stored first (storeMedia), and inbound is called once
     // every one has a ref or a refusal; a stranger's (channel_sender_not_bound) go without any.
-    const items = event.type === 'message' && Array.isArray(event.attachments)
+    // A group message's files take the same path (design/steward-group-media.md item 2): the
+    // bridge describes a bound room's image, voice or file whether or not it calls the steward,
+    // and the host stores it against that room - a medium kept for a later mention.
+    const items = (event.type === 'message' || event.type === 'group_message') && Array.isArray(event.attachments)
       ? event.attachments.filter(item => item && MEDIA_KINDS.includes(item.kind)) : [];
     const resolved = [];
     let unbound = false;
@@ -161,8 +168,12 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     // host answers it finally (accepted or refused), so it never holds the owner's 1:1 messages.
     const room = event.type === 'group_message' || event.type === 'group_bind'
       ? { conversationRef: event.room_ref, ...(event.type === 'group_bind' ? { groupBind: { prefix: event.prefix, code: event.code } } : {}) } : {};
+    // design/steward-group-media.md item 5: the bridge says whether the message called the
+    // steward (`asked`); the host records a group message either way but opens a turn only for
+    // the mention. Not sent for 1:1 or a group code, and never invented when the bridge omits it.
+    const asked = event.type === 'group_message' && typeof event.asked === 'boolean' ? { asked: event.asked } : {};
     const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref,
-      text: event.type === 'group_bind' ? event.code : event.text ?? '', at: event.at, ...room };
+      text: event.type === 'group_bind' ? event.code : event.text ?? '', at: event.at, ...room, ...asked };
     let pause = retryMs;
     for (let attempt = 1; !stopping.signal.aborted; attempt++) {
       let reason;

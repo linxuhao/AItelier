@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, writeFileSync, chmodSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMediaLibrary, sniff, imageSize, covers, placeholder, attachmentLine, MEDIA_LIMITS, REF_PATTERN }
+import { createMediaLibrary, sniff, imageSize, covers, placeholder, attachmentLine, withAttachmentLines, MEDIA_LIMITS, REF_PATTERN }
   from '../lib/media.mjs';
 import { createOwnerChannels } from '../lib/channels.mjs';
 import { registerMediaTools, UrlLedger } from '../lib/media-tools.mjs';
@@ -328,6 +328,21 @@ test('placeholders and wake lines', () => {
   assert.equal(attachmentLine({ kind: 'voice', ref, durationMs: 23000 }), `[语音 ${ref}，0:23]`);
   assert.equal(attachmentLine({ kind: 'image', ref, mime: 'image/jpeg', size: 1258291 }), `[图片 ${ref}，image/jpeg，1.2 MB]`);
   assert.equal(attachmentLine({ kind: 'image', refused: 'too_large' }), '[图片 过大未收]');
+});
+
+test('a group wake\'s recent: a kept medium names its ref, a pair without attachments is untouched', () => {
+  const ref = 'm_3f9a000000000000';
+  const pair = { at: '2026-11-22T10:00:00+00:00', sender: '爸爸', q: '问一句', a: '答一句' };
+  const kept = { at: '2026-11-22T10:01:00+00:00', sender: '妈妈', q: '[图片]',
+    attachments: [{ kind: 'image', ref, mime: 'image/jpeg', size: 1258291 },
+      { kind: 'voice', ref: 'm_0123456789abcdef', durationMs: 23000 }] };
+  const recent = withAttachmentLines([pair, kept]);
+  assert.equal(recent[0], pair, 'an entry without attachments is the very object it was');
+  assert.deepEqual(recent[1].attachments, [`[图片 ${ref}，image/jpeg，1.2 MB]`, '[语音 m_0123456789abcdef，0:23]']);
+  assert.equal(recent[1].q, '[图片]', 'the body the relay kept stays as it was');
+  assert.deepEqual(kept.attachments[0], { kind: 'image', ref, mime: 'image/jpeg', size: 1258291 },
+    'the metadata the backend returned is not rewritten');
+  assert.deepEqual(withAttachmentLines([]), []); assert.equal(withAttachmentLines(undefined), undefined);
 });
 
 // --- ownerChannels: storeMedia, attachments, sendFile, with a fake channel ------------------

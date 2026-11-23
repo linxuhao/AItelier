@@ -1227,15 +1227,36 @@ class StateGroups:
     def list_group_recent(self, channel, group_ref, limit=6):
         """The steward's host: the group's last answered questions and the replies that went
         out (a withheld reply as the sentence the group saw), oldest first - a group wake's
-        `recent`, which is data."""
+        `recent`, which is data. Also this group's inbound messages that carry attachments and
+        were never answered: a medium the group kept without calling the steward (design
+        steward-group-media.md) is relayed as a question and opens no turn, so the pairs can
+        never show it; it comes back as its own entry with the metadata that names it (kind,
+        ref and, when the library knew them, mime/size/durationMs - never a byte or a name),
+        in the place its time gives it among the pairs. Both parts keep their own last
+        `limit` rows, so a group full of kept media cannot push the answered pairs out."""
         with self.store.transaction() as conn:
             self.steward._steward(conn)
+            bound = max(1, min(int(limit), 20))
             rows = conn.execute(
-                "SELECT q.at, q.sender_ref, q.sender_role, q.body AS q, r.body AS a FROM state_group_messages q "
+                "SELECT q.at, q.rowid AS ord, q.sender_ref, q.sender_role, q.body AS q, r.body AS a "
+                "FROM state_group_messages q "
                 "JOIN state_group_messages r ON r.message_id=q.answered_by WHERE q.channel=? AND q.group_ref=? "
                 "AND q.direction='in' ORDER BY q.at DESC, q.rowid DESC LIMIT ?",
-                (channel, group_ref, max(1, min(int(limit), 20)))).fetchall()
-            return {"recent": [{"at": r["at"], "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
-                                                                         r["sender_role"]),
-                                "q": r["q"], "a": r["a"]} for r in reversed(rows)]}
+                (channel, group_ref, bound)).fetchall()
+            kept = conn.execute(
+                "SELECT at, rowid AS ord, sender_ref, sender_role, body AS q, attachments_json "
+                "FROM state_group_messages WHERE channel=? AND group_ref=? AND direction='in' "
+                "AND answered_by IS NULL AND attachments_json IS NOT NULL "
+                "ORDER BY at DESC, rowid DESC LIMIT ?",
+                (channel, group_ref, bound)).fetchall()
+            entries = [(r["at"], r["ord"], {"at": r["at"],
+                                            "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
+                                                                     r["sender_role"]),
+                                            "q": r["q"], "a": r["a"]}) for r in rows]
+            entries += [(r["at"], r["ord"], {"at": r["at"],
+                                             "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
+                                                                      r["sender_role"]),
+                                             "q": r["q"], "attachments": json.loads(r["attachments_json"])})
+                        for r in kept]
+            return {"recent": [entry for _, _, entry in sorted(entries, key=lambda item: (item[0], item[1]))]}
 

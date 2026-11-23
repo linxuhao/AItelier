@@ -215,9 +215,13 @@ Hz 16-bit named `<durationMs>ms.wav`, an image named `<messageId>.jpg|.png` by i
   kind, mime?, name?, size?}]` - a description only, nothing is fetched on arrival. Over the
   size WeChat reports (image 20 MiB, file 25 MiB, the voice's SILK 2 MiB): `too_large:
   true` and no `media_id`. In the stranger buffer (`owner_ref` set, another sender):
-  `gone: true` and no `media_id`. Group messages stay text only. A file (49) is let in only
-  when its appmsg XML is in the payload and says type 6 with no quote; the fork filing 49
-  under Wechaty's `Unknown` is accepted by the raw type.
+  `gone: true` and no `media_id`. A bound room's image, voice or file is described the same
+  way and pushed as one `group_message` event whether or not it calls the steward
+  (design/steward-group-media.md, the owner's ruling of 2026-11-22): `text` is the
+  prefix-stripped caption, `""` when it does not call the steward, and `asked` says which of
+  the two it was; an unbound room still takes only its `@prefix group-code`. A file (49) is
+  let in only when its appmsg XML is in the payload and says type 6 with no quote; the fork
+  filing 49 under Wechaty's `Unknown` is accepted by the raw type.
 - `GET /media/<media_id>` (`<seq>.<index>`; anything else is `404`) → the bytes (a voice as
   `audio/wav`, with its length in `x-voice-duration-ms`: the milliseconds the fork's
   `<durationMs>ms.wav` name states, else the WAV header's byte rate), fetched from WeChat now

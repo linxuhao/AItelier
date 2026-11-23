@@ -796,9 +796,28 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
                 "output": f"{type(e).__name__}: {e}"}
 
 
-# The node gate's command budgets, unchanged from the local runner they replace.
+# The node gate's command budgets. NODE_SCRIPT_TIMEOUT was 300, inherited from
+# the local runner this gate replaces rather than derived from anything; it is
+# now measured.
+#   * 300 s was already behind the work it had to cover: the driver suite's
+#     serial wall is 338 s at node's default concurrency (a 2-CPU container gets
+#     concurrency 1), which is why that suite runs --test-concurrency=2
+#     (tests/integration/test_driver_node_suite_runs.py records it).
+#   * at --test-concurrency=2 the observed greens were 163 s, 166 s and 221 s
+#     at 693 tests (host load 5-16), 199 s at 725 tests (load 12-23), 219 s at
+#     773 tests (load 15-35), and on 2026-11-23 209 s in a seven-arm gate-shape
+#     pass (load 10-37) and 245.2 s for the same arm alone (load 13.26).
+#   * what 600 costs, and what still bounds it: a command that really hangs now
+#     burns up to 600 s before `timed out after Ns` is printed. build and test
+#     are BOTH charged to this budget, so one node project can hang for 1200 s,
+#     and across NODE_PROJECT_CAP projects the node phase's own worst case is
+#     8 * 4 * 600 s = 19200 s. Nothing encloses that phase: REPO_GATE_TIMEOUT =
+#     MAX_LAUNCH_TIMEOUT_SECONDS = 12600 s is passed to the repo-gate script and
+#     to the relay's upstream call, not to _run_node_checks. Each individual
+#     hang is still a measured red naming the timeout; only the wait before it
+#     is longer.
 NODE_INSTALL_TIMEOUT = 600
-NODE_SCRIPT_TIMEOUT = 300
+NODE_SCRIPT_TIMEOUT = 600
 # The snapshot the node gate runs on. Over either cap the gate is unmeasured.
 SNAPSHOT_MAX_ENTRIES = 50_000
 SNAPSHOT_MAX_BYTES = 1 << 30

@@ -177,15 +177,18 @@ const scriptOf = async () => {
 // what to write instead; a wrong guess here is worse than a red suite.
 //
 // The script carries ONE flag, and its value is pinned here rather than passed
-// through. The repository gate runs this suite with two CPUs and a 300 s budget
-// (aitelier/tools/run_tests/impl.py: NODE_SCRIPT_TIMEOUT, and the container's
-// `--cpus 2`), and node --test's own default concurrency saturates that shape: the
-// gate cuts the run at its budget and reports the project failed - rc 124 at 300 s
-// with 574 tests reached, 544 passed. Measured in that same container shape on this
-// tree: 213 s at concurrency 2 and 348 s at 4, so the value is not free to move up
-// and the default is not free to come back. A flag this guard does not know is
-// refused as well: an unobserved flag can turn into a filter that runs a subset
-// while the file list below still looks complete.
+// through. The repository gate runs this suite with two CPUs and a 600 s budget
+// (aitelier/tools/run_tests/impl.py: NODE_SCRIPT_TIMEOUT; it was 300 s until
+// 2026-11-23, when the gate's own arm measured 209 s and a repeat 245.2 s against
+// it), and the container's `--cpus 2` is what makes its own default concurrency
+// saturate: every number below was taken under the OLD 300 s budget, where the
+// gate cut the run at its budget and reported the project failed - rc 124 at
+// 300 s with 574 tests reached, 544 passed - while this same container shape on
+// this tree measured 213 s at concurrency 2 and 348 s at 4. The pin stays because
+// 2 is the shape all of those numbers were measured at: moving it has to come
+// with its own measurement, which the flag makes possible. A flag this guard does
+// not know is refused as well: an unobserved flag can turn into a filter that runs
+// a subset while the file list below still looks complete.
 const TEST_CONCURRENCY = '2';
 
 const checkScriptShape = script => {

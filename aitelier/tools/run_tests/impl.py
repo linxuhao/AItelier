@@ -807,17 +807,67 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int,
 #     at 693 tests (host load 5-16), 199 s at 725 tests (load 12-23), 219 s at
 #     773 tests (load 15-35), and on 2026-11-23 209 s in a seven-arm gate-shape
 #     pass (load 10-37) and 245.2 s for the same arm alone (load 13.26).
-#   * what 600 costs, and what still bounds it: a command that really hangs now
-#     burns up to 600 s before `timed out after Ns` is printed. build and test
-#     are BOTH charged to this budget, so one node project can hang for 1200 s,
-#     and across NODE_PROJECT_CAP projects the node phase's own worst case is
-#     8 * 4 * 600 s = 19200 s. Nothing encloses that phase: REPO_GATE_TIMEOUT =
-#     MAX_LAUNCH_TIMEOUT_SECONDS = 12600 s is passed to the repo-gate script and
-#     to the relay's upstream call, not to _run_node_checks. Each individual
-#     hang is still a measured red naming the timeout; only the wait before it
-#     is longer.
+#   * what 600 costs, and what bounds it: a command that really hangs now burns
+#     up to 600 s before `timed out after Ns` is printed. build and test are
+#     BOTH charged to this budget, so one node project can hang for 1200 s, and
+#     a project's four command call sites in `_run_node_project` (fetch and
+#     install at `NODE_INSTALL_TIMEOUT`, build and test at `NODE_SCRIPT_TIMEOUT`,
+#     all four 600 s) make one project's own worst case 4 * 600 = 2400 s. Each
+#     individual hang is still a MEASURED red naming its timeout; only the wait
+#     before it is longer.
+#   * across NODE_PROJECT_CAP projects that is 8 * 4 * 600 s = 19200 s for the
+#     whole project phase. REPO_GATE_TIMEOUT = MAX_LAUNCH_TIMEOUT_SECONDS =
+#     12600 s still reaches only the repo-gate script and the relay's upstream
+#     call, never `_run_node_checks` — so it never bounded this phase, and
+#     `NODE_PHASE_TIMEOUT` below is what does: the 19200 s figure is what that
+#     deadline now bounds, and a project already running when it passes still
+#     finishes and is reported as measured.
 NODE_INSTALL_TIMEOUT = 600
 NODE_SCRIPT_TIMEOUT = 600
+# The deadline that encloses the node gate's PROJECT PHASE — the bound the
+# 19200 s worst case above did not have. Read ONCE at the phase start
+# (`_node_phase_clock`, a monotonic clock) and checked BEFORE each project
+# starts: a project already in flight when the deadline passes finishes and is
+# reported as measured, so this never cuts a running command and never rewrites
+# a per-command `timed out after Ns` message. Every project the loop did not
+# reach is reported — one `unmeasured` entry each, `kind: phase_deadline`,
+# reason naming the deadline and its value — so the absence is neither a pass
+# nor a red, and `passed` keeps reflecting only the measured projects.
+#
+# 7200 s, and the two numbers it sits between:
+#   * at least one project's whole command budget, 4 * NODE_SCRIPT_TIMEOUT =
+#     2400 s: a project may spend every one of its four budgets and still
+#     finish, so the deadline can never be the reason a started project is
+#     reported unmeasured. Read AT the phase start, it also cannot stop the
+#     FIRST project from starting, so no phase that would have measured
+#     something measures nothing because of it;
+#   * strictly under the phase's unbounded worst case,
+#     NODE_PROJECT_CAP * 4 * NODE_SCRIPT_TIMEOUT = 19200 s, or it would enclose
+#     nothing.
+# 7200 s is three whole projects' budgets (3 * 2400), so the phase pays for
+# three projects in full and names the rest instead of outliving its caller.
+# The phase's own worst case is then 7200 + 2400 = 9600 s (the deadline, plus
+# the one project that started just under it and still finished), inside the
+# 12600 s deferral episode that waits for the step (`gate_deferral.
+# episode_max_seconds`) — no longer the 19200 s that outlived it.
+NODE_PHASE_TIMEOUT = 7200
+# WHY a project the phase did not reach says so with its OWN kind. The `kind` on
+# a `node["unmeasured"]` entry is the producer's word — the shared vocabulary is
+# `aitelier/gate_evidence.py` — and this one names a fact none of the existing
+# words says: the bound that left the project unmeasured is the GATE's own phase
+# deadline, not the repository's coverage (`capped`, `undeclared`), a refused
+# declaration, or a broken input (`ticket`, `unreadable`, `isolation`). Two
+# bounds under one word is the conflation that vocabulary exists to prevent.
+# Minted here, beside the deadline it names.
+#
+# NO READER NEEDS TEACHING, and that is a claim about the code, not a hope: the
+# only branch on `kind` anywhere in the tree is `_aggregate_node_projects`'s
+# split of `declaration` (a coverage STATEMENT, counted in its own summary
+# clause) from everything else, which is treated as a project entry — exactly
+# what this word names, so it lands in the "N of M measured" arithmetic and in
+# the summary beside `capped` and `undeclared`. `gate_evidence.report_state`
+# reads `node_unmeasured` presence, never its kinds.
+ABSENCE_PHASE_DEADLINE = "phase_deadline"
 # The snapshot the node gate runs on. Over either cap the gate is unmeasured.
 SNAPSHOT_MAX_ENTRIES = 50_000
 SNAPSHOT_MAX_BYTES = 1 << 30
@@ -996,6 +1046,18 @@ def _remove_owned(ticket: Path) -> None:
     shutil.rmtree(ticket, ignore_errors=True)
 
 
+def _node_phase_clock() -> float:
+    """The clock the node gate's project-phase deadline reads.
+
+    One indirection instead of `time.monotonic()` inline, so a test can drive
+    the deadline with a clock it controls rather than by sleeping
+    (`tests/unit/test_node_gate_phase_deadline.py`). Monotonic on purpose: the
+    deadline bounds an ELAPSED wait, and a wall clock that jumps backwards
+    would extend it.
+    """
+    return time.monotonic()
+
+
 def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
     """npm install/build/test gate for EVERY node project in the repository.
 
@@ -1012,6 +1074,16 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
     ``_aggregate_node_projects``; each project is snapshotted and run through
     `_run_node_project` independently, so one project's red (or its inability
     to install) can neither mask nor be masked by another's.
+
+    The phase over those projects is enclosed by `NODE_PHASE_TIMEOUT`: the
+    deadline is read once at the phase start and checked BEFORE each project
+    starts, so the phase's 8 * 4 * 600 s worst case cannot outlive its caller. A
+    project already in flight is never cut — it finishes and is reported as
+    measured — and every project the loop did not reach gets its own
+    ``unmeasured`` entry (``kind: phase_deadline``, reason naming the deadline
+    and its value). Such an entry is an absence like any other: it is never a
+    pass and never a red, and ``passed`` keeps reflecting only the measured
+    projects.
 
     Nothing of the repository executes in this process. Every npm command runs
     in the bounded CPU container on a snapshot under the gate's own ticket
@@ -1041,7 +1113,23 @@ def _run_node_checks(repo: Path, *, run_id: str = "") -> dict | None:
         # always read (`dir`, `checks`, `passed`), unchanged.
         return _run_node_project(repo, projects[0], run_id=run_id)
     results = []
-    for project in projects:
+    deadline = _node_phase_clock() + NODE_PHASE_TIMEOUT
+    for index, project in enumerate(projects):
+        if _node_phase_clock() >= deadline:
+            # The phase deadline passed: this project is NOT started, and
+            # neither is any project after it. Each is named through the same
+            # mechanism as every other project this run did not visit, so the
+            # absence is neither a pass nor a red — and the summary counts it
+            # against the projects the gate measured.
+            for skipped in projects[index:]:
+                absent.append({
+                    "dir": str(skipped.relative_to(repo)) or ".",
+                    "kind": ABSENCE_PHASE_DEADLINE,
+                    "reason": (f"not visited: the node gate's project phase "
+                               f"deadline ({NODE_PHASE_TIMEOUT} s, "
+                               "NODE_PHASE_TIMEOUT) passed before it started; "
+                               "the projects before it were measured")})
+            break
         try:
             results.append(_run_node_project(repo, project, run_id=run_id))
         except Exception as e:                      # noqa: BLE001 - see below
@@ -1119,8 +1207,10 @@ def _aggregate_node_projects(results: list[dict], absent: list[dict]) -> dict:
     * ``unmeasured`` names every project that was not measured — one entry per
       project, with its reason and its ``kind``, including projects past
       ``NODE_PROJECT_CAP``, projects the repository's own
-      ``node_projects.json`` omits, and a declaration the gate would not honour
-      — so a reader can never mistake the absence for a pass.
+      ``node_projects.json`` omits, a declaration the gate would not honour,
+      and projects the phase deadline (`NODE_PHASE_TIMEOUT`, ``kind:
+      phase_deadline``) passed before the loop reached them — so a reader can
+      never mistake the absence for a pass.
     * ``skipped`` is True whenever something was not measured. When NOTHING was
       measured it keeps its single-project meaning (`passed: True, skipped:
       True`, the old "node gate not measured: ..." words), which the fold turns

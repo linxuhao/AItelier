@@ -1211,6 +1211,18 @@ export function deleteStewardConnection(connId: string): Promise<unknown> {
 export function stewardConnectionTools(connId: string): Promise<StewardConnectionTools> {
   return _get('/api/steward/connections/' + encodeURIComponent(connId) + '/tools');
 }
+
+// The steward's basic-capabilities table: the backend decides each route from the live
+// deployment and the owner's stored connection ticks; the view only renders it.
+export type StewardCapabilityProvider = 'native' | 'mcp' | 'missing';
+export interface StewardCapability {
+  id: string; label: string; provider: StewardCapabilityProvider;
+  conn_id: string | null; tool: string | null; detail: string | null;
+}
+export interface StewardCapabilities { capabilities: StewardCapability[] }
+export function listStewardCapabilities(): Promise<StewardCapabilities> {
+  return _get('/api/steward/capabilities');
+}
 export function setStewardConnectionTools(connId: string, tools: StewardToolChange[]): Promise<StewardConnectionTools> {
   return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/tools', {tools});
 }

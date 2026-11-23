@@ -307,6 +307,94 @@ def unbind_channel(channel: Channel, service=Depends(get_service)):
     return service.channels.unbind(channel)
 
 
+# --- the basic-capabilities table (owner 2026-11-23) ------------------------------------------
+# This catalog names the CAPABILITIES and the FACTS that could carry them. It never names a
+# provider: every row below is decided at request time from the live deployment and the
+# owner's stored connection ticks. Add a capability here, not an answer.
+CAPABILITIES = (
+    {"id": "vision", "label": "Vision", "tool": None, "native_fact": "image_route"},
+    {"id": "transcribe", "label": "Transcription", "tool": "transcribe_audio", "native_fact": None},
+    {"id": "tts", "label": "Speech", "tool": "generate_speech", "native_fact": None},
+    {"id": "ocr", "label": "Image text", "tool": "ocr_image", "native_fact": None},
+)
+
+
+def _routes():
+    """The live model-route table; a seam so a test can supply a real routes file."""
+    from core.model_routes import get_routes
+    return get_routes()
+
+
+def _native_fact(name):
+    """The single deployment fact behind a native capability, or None when absent.
+
+    `image_route` is the backend's own reading of the route table the driver's model
+    bridge uses (`core/dsh_driver.route_input` -> integrations/dsh-driver/model.mjs):
+    no measured `_input`, or no route whose every candidate accepts images, means the
+    deployment cannot send images to a model, so vision is not native here.
+    """
+    if name != "image_route":
+        return None
+    routes = _routes()
+    if not routes.measures_input:
+        return None
+    for model in routes.names():
+        try:
+            if routes.accepts_image(model):
+                return f"model_routes:{model}"
+        except RuntimeError:
+            continue
+    return None
+
+
+def _mcp_tool(service, tool_name):
+    """The stored connection whose owner ticked `tool_name`, or None.
+
+    The ticks are the State records written by PUT /connections/{id}/tools; an unticked
+    tool or a connection with no such tool names nobody, so the row reads missing.
+    """
+    try:
+        listed = service.steward_connections.list_connections()
+    except StateGraphError:
+        return None
+    for conn in listed.get("connections", []):
+        if not conn.get("enabled"):
+            continue
+        try:
+            tools = service.steward_connections.list_connection_tools(conn["conn_id"])["tools"]
+        except (StateGraphError, KeyError):
+            continue
+        for tool in tools:
+            if tool.get("raw_name") == tool_name and tool.get("allowed"):
+                return conn["conn_id"], tool["raw_name"]
+    return None
+
+
+@router.get("/capabilities", dependencies=[Depends(authz.require_reader)])
+def list_capabilities(service=Depends(get_service)):
+    """Each capability with the route it ACTUALLY takes in this deployment.
+
+    `provider` is `native` only while the deployment fact is present, `mcp` only while
+    a stored connection has that tool enabled, else `missing` (naming nobody). The view
+    renders these values; it does not decide them.
+    """
+    _owner(service)
+    rows = []
+    for cap in CAPABILITIES:
+        conn_id = tool = fact = None
+        if cap["tool"]:
+            found = _mcp_tool(service, cap["tool"])
+            if found:
+                conn_id, tool = found
+        else:
+            fact = _native_fact(cap["native_fact"])
+        provider = "mcp" if tool else "native" if fact else "missing"
+        rows.append({"id": cap["id"], "label": cap["label"], "provider": provider,
+                     "conn_id": conn_id, "tool": tool,
+                     "detail": fact or (f"{conn_id}: {tool}" if tool else None)})
+    return {"capabilities": rows}
+
+
 @router.get("/message-sources", dependencies=[Depends(authz.require_reader)])
 def message_sources(ids: str = "", service=Depends(get_service)):
     """Which channel each of these messages came from or went to; an absent id came

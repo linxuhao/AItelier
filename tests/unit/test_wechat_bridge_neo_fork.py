@@ -469,7 +469,7 @@ def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin
     # precedes the apply: an unverified patch would make the pin a comment.
     read = re.search(rf"const\s+patch\s*=\s*readFileSync\('([^']*{re.escape(name)})'\)", native)
     assert read, f"the native stage never reads {name}"
-    compare = re.search(r"if \(sha256\(patch\) !== pin\.patch\.sha256\) throw new Error\(", native)
+    compare = re.search(r"if \(sha256\(patch\) !== pin\.patches\[0\]\.sha256\) throw new Error\(", native)
     assert compare, "the native stage applies the patch without checking pin.json's sha256 for it"
     check_at = re.search(r"git apply --check (\S+)", native)
     apply_at = re.search(r"git apply (?!-)(\S+)", native)

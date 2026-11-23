@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMediaLibrary, sniff, imageSize, covers, audienceLabel, placeholder, attachmentLine, withAttachmentLines, limitsFor, MEDIA_LIMITS,
-  DIRECTOR_TOTAL_BYTES, REF_PATTERN } from '../lib/media.mjs';
+  DIRECTOR_TOTAL_BYTES, REF_PATTERN, GONE_WINDOW_MS } from '../lib/media.mjs';
 import { createOwnerChannels } from '../lib/channels.mjs';
 import { registerMediaTools, UrlLedger } from '../lib/media-tools.mjs';
 import { GROUP_TOOLS } from '../lib/group-turns.mjs';
@@ -206,6 +206,84 @@ test('library: a refusal is the attachment\'s answer for good - a replay (an hou
   clock += (MEDIA_LIMITS.retention_days + 1) * 24 * 3600 * 1000;
   again.cleanup();
   assert.ok(!readFileSync(again.indexFile, 'utf8').includes('"refused"'));
+});
+
+test('library: a keyed gone refusal lapses after an hour - a replay then fetches once and stores the bytes; inside the hour nothing is fetched', async () => {
+  assert.equal(GONE_WINDOW_MS, 60 * 60 * 1000, 'the window is one hour');
+  const t0 = Date.parse('2026-11-23T19:08:43Z');
+  let now = t0;
+  const r = root();
+  const lib = createMediaLibrary({ root: r, now: () => now });
+  const meta = { ...owner, messageRef: 'cdn', index: 0 };
+  let fetched = 0;
+  const timedOut = async () => { fetched += 1; throw Object.assign(new Error('410'), { refused: 'gone' }); };
+  const bytes = png(64, 64);
+  const reachable = async () => { fetched += 1; return bytes; };
+  assert.deepEqual(await lib.ingest(meta, timedOut), { refused: 'gone' });
+  assert.equal(fetched, 1);
+  now = t0 + 59 * 60 * 1000 + 59 * 1000;
+  assert.deepEqual(await lib.ingest(meta, reachable), { refused: 'gone', duplicate: true }, 'still inside the window');
+  assert.equal(fetched, 1, 'not one byte fetched inside the window');
+  now = t0 + GONE_WINDOW_MS;   // exactly an hour: the row is no longer younger than the window
+  const answer = await lib.ingest(meta, reachable);
+  assert.match(answer.ref, REF_PATTERN);
+  assert.equal(fetched, 2, 'one re-fetch past the window');
+  assert.equal(lib.rows.length, 1);
+  assert.deepEqual(readFileSync(lib.lookup(answer.ref).path), bytes);
+  // The refusal row was never deleted or rewritten: the index stays append-only.
+  const lines = readFileSync(lib.indexFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(lines.length, 2);
+  assert.deepEqual(lines[0], { refused: 'gone', channel: 'wechat', messageRef: 'cdn', index: 0, at: new Date(t0).toISOString() });
+  assert.equal(lines[1].ref, answer.ref);
+  // A restart reads the same: the stored row (not the old refusal) answers without a fetch.
+  const replay = await createMediaLibrary({ root: r, now: () => now }).ingest(meta, reachable);
+  assert.equal(replay.ref, answer.ref); assert.equal(replay.duplicate, true);
+  assert.equal(fetched, 2);
+});
+
+test('library: type, too_large and unsupported answer from the row however old it is - the byte source is never called', async () => {
+  const t0 = Date.parse('2026-11-23T19:08:43Z');
+  let now = t0;
+  const r = root();
+  const lib = createMediaLibrary({ root: r, now: () => now });
+  const first = [['t', 'type', async () => zip()], ['l', 'too_large', async () => png(8000, 8000)], ['u', 'unsupported', async () => png(0, 0)]];
+  for (const [key, expected, open] of first)
+    assert.equal((await lib.ingest({ ...owner, messageRef: key, index: 0 }, open)).refused, expected, key);
+  assert.equal(lib.rows.length, 0);
+  now = t0 + 7 * 24 * 60 * 60 * 1000;   // well past the window, the hourly count and the kept day
+  let fetched = 0;
+  const never = async () => { fetched += 1; throw new Error('the byte source must not be called'); };
+  const again = createMediaLibrary({ root: r, now: () => now });
+  for (const [key, expected] of first)
+    assert.deepEqual(await again.ingest({ ...owner, messageRef: key, index: 0 }, never), { refused: expected, duplicate: true }, key);
+  assert.equal(fetched, 0, 'not one byte fetched, however old the rows are');
+  assert.equal(again.rows.length, 0);
+  assert.equal(readFileSync(again.indexFile, 'utf8').trim().split('\n').length, 3, 'the three refusals are still in the index');
+});
+
+test('library: a re-fetch after the window that fails gone again writes a new row - the newest one, not the first, restarts the window', async () => {
+  const t0 = Date.parse('2026-11-23T19:08:43Z');
+  let now = t0;
+  const lib = createMediaLibrary({ root: root(), now: () => now });
+  const meta = { ...owner, messageRef: 'cdn', index: 0 };
+  let fetched = 0;
+  const timedOut = async () => { fetched += 1; throw Object.assign(new Error('410'), { refused: 'gone' }); };
+  assert.deepEqual(await lib.ingest(meta, timedOut), { refused: 'gone' });
+  assert.equal(fetched, 1);
+  now = t0 + GONE_WINDOW_MS + 60 * 1000;
+  assert.deepEqual(await lib.ingest(meta, timedOut), { refused: 'gone' }, 'the old row lapsed: the source was asked again');
+  assert.equal(fetched, 2);
+  const lines = readFileSync(lib.indexFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(lines.map(row => row.refused), ['gone', 'gone'], 'both rows stay, append-only');
+  assert.equal(lines[1].at, new Date(now).toISOString(), 'the fresh row carries the later time');
+  const bytes = png(32, 32);
+  const reachable = async () => { fetched += 1; return bytes; };
+  now += 59 * 60 * 1000;   // the first row is long lapsed, the fresh one is still inside its window
+  assert.deepEqual(await lib.ingest(meta, reachable), { refused: 'gone', duplicate: true }, 'the newest row answers');
+  assert.equal(fetched, 2, 'nothing fetched inside the new window');
+  now += 2 * 60 * 1000;    // an hour past the fresh row
+  assert.match((await lib.ingest(meta, reachable)).ref, REF_PATTERN);
+  assert.equal(fetched, 3, 'one re-fetch past the new window');
 });
 
 test('library: a source that stalls is cut by its deadline (unavailable, transient), and the ingests behind it still complete', async () => {

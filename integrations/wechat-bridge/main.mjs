@@ -5,7 +5,8 @@
  *
  *  No bot is built here. Step 19.1 (design §7.2.1): when the fork has a saved login (its
  *  `PuppetNeo.savedLoginStatus()`; PUPPET_NEO_STATE_DIR and PUPPET_NEO_STATE_KEY_FILE, set by
- *  run.sh, say where), the bridge resumes it at once with `makeBot({resume: true})` - no QR;
+ *  run.sh, say where), the bridge resumes it at once with `makeBot({resume: true,
+ *  expectUsername})` - no QR, whatever the resume answers;
  *  otherwise it starts `idle` and builds and starts a bot only when POST /login asks for a
  *  QR, a fresh one for each request. A QR nobody scanned in time, a logout or a puppet
  *  failure before a login leave it `idle` again; the process ends only on SIGINT/SIGTERM
@@ -39,14 +40,16 @@ catch (error) { log(error.message); process.exit(78); }
 
 // No `name`: Wechaty then keeps its memory card in memory only and writes no file (the
 // container's root filesystem is read-only; the saved login is the fork's, not Wechaty's).
-const makeBot = ({ resume = false } = {}) => WechatyBuilder.build({ puppet: new PuppetNeo(resume ? { resume: true } : undefined) });
-// Step 19.1: the fork's saved login - its status ({present, off?, writes, write_failures},
-// never the login itself) and its deletion - and the account the last QR login was with,
-// recorded in the same directory. A fork without these calls has no saved login.
+// `options`: none for a QR login, {resume: true, expectUsername?} for a resume (step 19.1).
+const makeBot = options => WechatyBuilder.build({ puppet: new PuppetNeo(options) });
+// Step 19.1: the fork's saved login - only its status ({present, off?, writes,
+// write_failures}, never the login itself; the bridge never deletes it) - and the account the
+// last QR login was with, which the bridge records in its own directory outside the fork's
+// data/ (WECHAT_BRIDGE_ACCOUNT_DIR, set by run.sh). A fork without savedLoginStatus() has no
+// saved login.
 const savedLogin = typeof PuppetNeo.savedLoginStatus === 'function' ? {
   status: () => PuppetNeo.savedLoginStatus(),
-  forget: async () => { await PuppetNeo.forgetSavedLogin(); },
-  ...accountRecord(process.env.PUPPET_NEO_STATE_DIR),
+  ...accountRecord(process.env.WECHAT_BRIDGE_ACCOUNT_DIR),
 } : undefined;
 const skipLogin = process.env.WECHAT_BRIDGE_SKIP_LOGIN === '1';
 // Step 24.2: POST /send-file hands the fork a FileBox whose name says what it goes out as

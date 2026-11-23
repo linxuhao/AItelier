@@ -1566,27 +1566,27 @@ test('run.sh gives /tmp a 32 MiB tmpfs (one fetched media file at a time)', () =
 });
 
 // --- step 19.1: the saved login (design-steward 7.2.1) -----------------------------------------
-/** The fork's saved login as main.mjs hands it in, faked: `present` and the write counts are
- *  what savedLoginStatus() answers (`off` set: its configuration error, present false);
- *  `account` is the recorded QR-login account (null: none). `forgotten` counts forget() calls. */
+/** The saved login as main.mjs hands it in, faked: `present` and the write counts are what the
+ *  fork's savedLoginStatus() answers (`off` set: its configuration error, present false);
+ *  `account` is the bridge's own record of the last QR-login account (null: none). The api has
+ *  no way to delete anything: the bridge never deletes a saved login, only the fork does. */
 function fakeSaved({ present = true, off, account = 'wxid_bot', writes = 0, writeFailures = 0 } = {}) {
-  const saved = { present, off, account, writes, writeFailures, forgotten: 0, recorded: [], recordError: undefined,
-    forgetError: undefined, statusCalls: 0 };
-  saved.api = {
+  const saved = { present, off, account, writes, writeFailures, recorded: [], recordError: undefined, statusCalls: 0 };
+  saved.api = Object.freeze({
     status: () => {
       saved.statusCalls++;
       return saved.off ? { present: false, off: saved.off, writes: 0, write_failures: 0 }
         : { present: saved.present, writes: saved.writes, write_failures: saved.writeFailures };
     },
-    forget: async () => { saved.forgotten++; if (saved.forgetError) throw saved.forgetError; saved.present = false; },
     readAccount: () => saved.account ?? undefined,
     recordAccount: id => { if (saved.recordError) throw saved.recordError; saved.recorded.push(id); saved.account = id; },
-  };
+  });
   return saved;
 }
 // A test that hangs fails at this bound instead of holding up the suite.
 const LIMIT = { timeout: 15_000 };
 const FAST = Object.freeze({ waitMs: 200, retryMs: Object.freeze([30, 60, 90]), holdGroupMs: 150, countLogMs: 40 });
+const RESUME = Object.freeze({ resume: true, expectUsername: 'wxid_bot' });
 const resumed = async (options = {}) => {
   const saved = options.saved ?? fakeSaved();
   const s = await started({ savedLogin: saved.api, resumeLimits: FAST, ...options });
@@ -1602,7 +1602,7 @@ test('saved login: the limits are code constants, the resume bound strictly abov
   assert.ok(RESUME_LIMITS.waitMs > 70_000);
 });
 
-test('saved login: none to resume starts idle (boot) and builds no bot; one to resume goes resuming -> logged_in with no QR', LIMIT, async () => {
+test('saved login: none to resume starts idle (boot) and builds no bot; one to resume goes resuming -> logged_in with no QR, expecting the recorded account', LIMIT, async () => {
   const none = await resumed({ saved: fakeSaved({ present: false }) });
   try {
     const [, body] = await none.json('/status');
@@ -1617,7 +1617,7 @@ test('saved login: none to resume starts idle (boot) and builds no bot; one to r
     let [, body] = await s.json('/status');
     assert.deepEqual([body.phase, body.logged_in, body.resumable, typeof body.since], ['resuming', false, true, 'string']);
     assert.equal(s.bots.length, 1);
-    assert.deepEqual(s.bot().options, { resume: true });
+    assert.deepEqual(s.bot().options, RESUME, 'the account the last QR login was with is handed to the fork');
     await s.bridge.settled();
     assert.deepEqual(s.bot().calls, ['start']);
     s.bot().emit('login', { id: 'wxid_bot' });
@@ -1626,6 +1626,18 @@ test('saved login: none to resume starts idle (boot) and builds no bot; one to r
       ['logged_in', true, 'wxid_bot', undefined, undefined, true]);
     assert.ok(logs.includes('logged in (the saved login resumed)'));
     assert.deepEqual(s.saved.recorded, [], 'a resumed login does not rewrite the record');
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: with no account recorded (the first start after the upgrade) the resume expects none and is taken as it comes', LIMIT, async () => {
+  const s = await resumed({ saved: fakeSaved({ account: null }) });
+  try {
+    assert.deepEqual(s.bot().options, { resume: true }, 'no expectUsername: the fork compares nothing');
+    await s.bridge.settled();
+    s.bot().emit('login', { id: 'wxid_whoever' });
+    const [, body] = await s.json('/status');
+    assert.deepEqual([body.phase, body.user_id, body.resumable], ['logged_in', 'wxid_whoever', true]);
+    assert.deepEqual(s.saved.recorded, [], 'only a QR login is recorded');
   } finally { await s.bridge.close(); }
 });
 
@@ -1654,12 +1666,32 @@ test('saved login: refused, unreadable, throttled and none each leave their idle
   }
 });
 
-test('saved login: a passing failure (network, busy, a start that throws, no answer in time) is idle resume_failed and is tried again', LIMIT, async () => {
+test('saved login: the fork\'s word is read from the error\'s message and from its data, whichever carries it', LIMIT, async () => {
+  for (const [shape, reason] of [['data', 'resume_throttled'], ['message', 'resume_throttled'], ['string', 'resume_throttled'],
+    ['data-mismatch', 'resume_account_mismatch']]) {
+    const s = await resumed();
+    try {
+      await s.bridge.settled();
+      const word = shape === 'data-mismatch' ? 'RESUME_MISMATCH' : 'RESUME_THROTTLED';
+      let error;
+      if (shape === 'string') error = `${word}: cap reached`;
+      else if (shape === 'message') error = new Error(`${word}: cap reached`);
+      else { error = new Error('Neo serve failed'); error.data = `${word}: cap reached`; }
+      s.bot().emit('error', error);
+      assert.deepEqual([s.bridge.state.phase, s.bridge.state.idle_reason], ['idle', reason], shape);
+      await sleepMs(150);
+      assert.equal(s.bots.length, 1, `${shape}: not retried`);
+    } finally { await s.bridge.close(); }
+  }
+});
+
+test('saved login: a passing failure (network, busy, a start that throws, no answer in time, a logout with no error) is idle resume_failed and is tried again', LIMIT, async () => {
   const cases = [
     ['network', bot => bot.emit('error', new Error('Neo could not resume the saved login: timed out'))],
     ['busy', bot => bot.emit('error', new Error('RESUME_BUSY: another resume is running'))],
     ['start', undefined],
     ['silence', () => {}],
+    ['logout', bot => bot.emit('logout', { id: 'wxid_bot' })],
   ];
   for (const [name, happen] of cases) {
     const s = await resumed({ prepare: (bot, opts) => { if (name === 'start' && opts?.resume && !bot.done) bot.startError = new Error('no session'); } });
@@ -1669,7 +1701,7 @@ test('saved login: a passing failure (network, busy, a start that throws, no ans
       await until(() => s.bridge.state.idle_reason === 'resume_failed' || s.bots.length > 1, 1000);
       if (s.bots.length === 1) assert.deepEqual([s.bridge.state.phase, s.bridge.state.idle_reason], ['idle', 'resume_failed'], name);
       await until(() => s.bots.length === 2, 1000);
-      assert.deepEqual(s.bots[1].options, { resume: true }, name);
+      assert.deepEqual(s.bots[1].options, RESUME, name);
       assert.ok(s.bots[0].calls.includes('stop'), `${name}: the first bot was stopped`);
     } finally { await s.bridge.close(); }
   }
@@ -1684,7 +1716,7 @@ test('saved login: retries at retryMs (3), each on a new bot after the last one 
     // The first bot stops slowly: the first retry (after 30 ms) must wait for it.
     const stop = bot.stop;
     bot.stop = async () => { if (index === 0) await sleepMs(150); await stop(); order.push(`${index}:stopped`); };
-    assert.deepEqual(opts, { resume: true });
+    assert.deepEqual(opts, RESUME);
   } });
   try {
     await until(() => s.bots.length === 4 && s.bridge.state.idle_reason === 'resume_failed' && !s.bridge.state.logged_in, 2000);
@@ -1714,6 +1746,23 @@ test('saved login: POST /login is refused 409 resuming while resuming, taken in 
   } finally { await s.bridge.close(); }
 });
 
+test('saved login: a retry already waiting for the last bot\'s slow stop does not start once a QR login was accepted meanwhile', LIMIT, async () => {
+  const s = await resumed({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 }, prepare: (bot, opts) => {
+    if (opts?.resume) { const stop = bot.stop; bot.stop = async () => { await sleepMs(300); await stop(); }; }
+  } });
+  try {
+    await s.bridge.settled();
+    s.bot().emit('error', new Error('Neo could not resume the saved login: offline'));
+    assert.equal(s.bridge.state.idle_reason, 'resume_failed');
+    await sleepMs(80); // the 30 ms retry now waits in settle() for the slow stop
+    assert.equal((await s.json('/login', { method: 'POST' }))[0], 202);
+    await sleepMs(500);
+    assert.equal(s.bots.length, 2, 'only the QR bot was added');
+    assert.equal(s.bots[1].options, undefined);
+    assert.equal(s.bridge.state.phase, 'starting', 'no resume runs beside the QR login');
+  } finally { await s.bridge.close(); }
+});
+
 test('saved login: an ended resume\'s bot changes nothing later - its login, error or logout', LIMIT, async () => {
   const s = await resumed();
   try {
@@ -1730,72 +1779,104 @@ test('saved login: an ended resume\'s bot changes nothing later - its login, err
   } finally { await s.bridge.close(); }
 });
 
-test('saved login: a resume that comes back as another account is deleted, its bot stopped, nothing sent; idle resume_account_mismatch', LIMIT, async () => {
+test('saved login: RESUME_MISMATCH (the fork found another account and deleted it) is idle resume_account_mismatch, not resumable, nothing sent, no retry, no QR', LIMIT, async () => {
+  const s = await resumed();
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('message', message({ text: 'not for anyone' }));
+    bot.emit('error', new Error('RESUME_MISMATCH: the saved login is another account'));
+    bot.emit('logout', { id: 'wxid_bot' });
+    await s.bridge.settled();
+    // Even if the fork's deletion failed and the file is still there, it is not resumable here.
+    assert.equal(s.saved.present, true);
+    const [, body] = await s.json('/status');
+    assert.deepEqual([body.phase, body.idle_reason, body.logged_in, body.resumable], ['idle', 'resume_account_mismatch', false, false]);
+    assert.deepEqual(bot.calls, ['start', 'stop']);
+    assert.deepEqual(bot.said, []);
+    assert.deepEqual(await s.json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'x' } }), [409, { error: 'not_logged_in' }]);
+    await s.json('/rooms', { method: 'PUT', body: { owner_ref: 'wxid_owner', rooms: [] } });
+    assert.deepEqual(await events(s), [], 'what it held is dropped, not released');
+    await sleepMs(250);
+    assert.equal(s.bots.length, 1, 'no retry and no QR by itself');
+    assert.deepEqual(s.saved.recorded, []);
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: a resumed login that still comes back as another account than expected is not taken (idle resume_account_mismatch, never logged)', LIMIT, async () => {
   const logs = [];
-  let releaseStop;
-  const s = await resumed({ log: line => logs.push(line), prepare: bot => {
-    const stop = bot.stop;
-    bot.stop = async () => { await new Promise(resolve => { releaseStop = resolve; }); await stop(); };
-  } });
+  const s = await resumed({ log: line => logs.push(line) });
   try {
     await s.bridge.settled();
     const bot = s.bot();
     bot.emit('login', { id: 'wxid_other' });
     bot.emit('message', message({ text: 'not for anyone' }));
-    // Until the bot has stopped and the file is gone, no QR login may start.
-    let [, body] = await s.json('/status');
-    assert.deepEqual([body.phase, body.logged_in, body.user_id], ['resuming', false, undefined]);
-    assert.deepEqual(await s.json('/login', { method: 'POST' }), [409, { refused: 'resuming' }]);
-    assert.deepEqual(await s.json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'x' } }), [409, { error: 'not_logged_in' }]);
-    assert.equal(s.saved.forgotten, 0, 'deleted only once the bot has stopped');
-    releaseStop();
-    await s.bridge.settled();
-    [, body] = await s.json('/status');
-    assert.deepEqual([body.phase, body.idle_reason, body.logged_in, body.resumable], ['idle', 'resume_account_mismatch', false, false]);
-    assert.equal(s.saved.forgotten, 1);
-    assert.deepEqual(bot.said, []);
-    assert.deepEqual(await events(s), []);
-    await s.json('/rooms', { method: 'PUT', body: { owner_ref: 'wxid_owner', rooms: [] } });
-    assert.deepEqual(await events(s), [], 'what it held is dropped, not released');
-    assert.ok(!logs.some(line => line.includes('wxid_other')), 'the account is never logged');
-    await sleepMs(250);
-    assert.equal(s.bots.length, 1, 'no retry');
-  } finally { await s.bridge.close(); }
-});
-
-test('saved login: a deletion that fails still never calls it resumable in this process; a start with no account recorded deletes it unresumed', LIMIT, async () => {
-  const failing = fakeSaved();
-  failing.forgetError = new Error('EROFS');
-  const logs = [];
-  const s = await resumed({ saved: failing, log: line => logs.push(line) });
-  try {
-    await s.bridge.settled();
-    s.bot().emit('login', { id: 'wxid_other' });
     await s.bridge.settled();
     const [, body] = await s.json('/status');
-    assert.deepEqual([body.idle_reason, body.resumable], ['resume_account_mismatch', false]);
-    assert.ok(failing.present, 'the file is still there');
-    assert.ok(logs.includes('deleting the saved login failed: EROFS'));
+    assert.deepEqual([body.phase, body.idle_reason, body.logged_in, body.user_id, body.resumable],
+      ['idle', 'resume_account_mismatch', false, undefined, false]);
+    assert.deepEqual(bot.calls, ['start', 'stop']);
+    await s.json('/rooms', { method: 'PUT', body: { owner_ref: 'wxid_owner', rooms: [] } });
+    assert.deepEqual(await events(s), []);
+    assert.ok(!logs.some(line => line.includes('wxid_other')), 'the account is never logged');
+    await sleepMs(250);
+    assert.equal(s.bots.length, 1);
   } finally { await s.bridge.close(); }
-
-  const unrecorded = await resumed({ saved: fakeSaved({ account: null }) });
-  try {
-    await unrecorded.bridge.settled();
-    const [, body] = await unrecorded.json('/status');
-    assert.deepEqual([body.phase, body.idle_reason, body.resumable], ['idle', 'resume_account_mismatch', false]);
-    assert.equal(unrecorded.saved.forgotten, 1);
-    assert.deepEqual(unrecorded.bots, [], 'WeChat is never asked');
-  } finally { await unrecorded.bridge.close(); }
 });
 
-test('saved login: a QR login records its account; a record that cannot be written leaves it logged in and not resumable', LIMIT, async () => {
-  const s = await resumed({ saved: fakeSaved({ present: false, account: null }) });
+test('saved login: after a mismatch, a QR login (once the fork has written its saved login) is resumable again, and a later local drop resumes it', LIMIT, async () => {
+  const s = await resumed({ loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 } });
+  try {
+    await s.bridge.settled();
+    s.saved.present = false; // the fork deleted the other account's file
+    s.bot().emit('error', new Error('RESUME_MISMATCH'));
+    await s.bridge.settled();
+    assert.equal((await s.json('/status'))[1].resumable, false);
+    const qr = await s.login();
+    assert.deepEqual(s.saved.recorded, ['wxid_bot']);
+    assert.equal((await s.json('/status'))[1].resumable, false, 'nothing written for this login yet');
+    s.saved.present = true;
+    s.saved.writes++;
+    assert.equal((await s.json('/status'))[1].resumable, true);
+    qr.emit('logout', { id: 'wxid_bot' });
+    await until(() => s.bots.length === 3 && s.bridge.state.phase === 'resuming', 1000);
+    assert.deepEqual(s.bots[2].options, RESUME);
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: a QR login records its account; resumable only once the fork has written since its QR was asked for', LIMIT, async () => {
+  const s = await resumed({ saved: fakeSaved({ present: false, account: null, writes: 3 }) });
   try {
     await s.login();
     assert.deepEqual(s.saved.recorded, ['wxid_bot']);
+    // The fork's first write failed: an older file (here: another account's) is still there.
     s.saved.present = true;
-    assert.equal((await s.json('/status'))[1].resumable, true);
+    s.saved.writeFailures++;
+    let [, body] = await s.json('/status');
+    assert.deepEqual([body.resumable, body.writes, body.write_failures], [false, 3, 1], 'never optimistic');
+    // A later write (a cookie update) succeeds: the file on disk is now this login's.
+    s.saved.writes++;
+    [, body] = await s.json('/status');
+    assert.deepEqual([body.resumable, body.writes, body.write_failures], [true, 4, 1]);
+    // A local drop now resumes this account.
+    s.bot().emit('logout', { id: 'wxid_bot' });
+    await until(() => s.bots.length === 2 && s.bridge.state.phase === 'resuming', 1000);
+    assert.deepEqual(s.bots[1].options, RESUME);
   } finally { await s.bridge.close(); }
+
+  // The first write failed and the login drops here: no resume of the older file.
+  const d = await resumed({ saved: fakeSaved({ present: true, account: 'wxid_old' }), loginLimits: { ...LOGIN_LIMITS, minGapMs: 0 } });
+  try {
+    await d.bridge.settled();
+    d.bot().emit('error', new Error('RESUME_UNREADABLE'));
+    const qr = await d.login();
+    d.saved.writeFailures++;
+    assert.equal((await d.json('/status'))[1].resumable, false);
+    qr.emit('logout', { id: 'wxid_bot' });
+    await d.bridge.settled();
+    await sleepMs(150);
+    assert.deepEqual([d.bots.length, d.bridge.state.phase, d.bridge.state.idle_reason], [2, 'idle', 'logged_out']);
+  } finally { await d.bridge.close(); }
 
   const logs = [];
   const failing = fakeSaved({ present: false, account: 'wxid_old' });
@@ -1804,25 +1885,30 @@ test('saved login: a QR login records its account; a record that cannot be writt
   try {
     await f.login();
     failing.present = true;
+    failing.writes++;
     const [, body] = await f.json('/status');
-    assert.deepEqual([body.phase, body.resumable], ['logged_in', false]);
+    assert.deepEqual([body.phase, body.resumable], ['logged_in', false], 'the record on disk still names another account');
     assert.ok(logs.some(line => line.startsWith('the account logged in with could not be recorded') && line.endsWith('ENOSPC')));
   } finally { await f.bridge.close(); }
 });
 
-test('saved login: write failures are counted apart and never read as off; off logs its reason only', LIMIT, async () => {
+test('saved login: /status carries the fork\'s write counts; write failures never read as off; off shows no counts and logs its reason only', LIMIT, async () => {
   const logs = [];
   const saved = fakeSaved({ writes: 4, writeFailures: 2 });
   const s = await resumed({ saved, log: line => logs.push(line) });
   try {
     await s.bridge.settled();
     s.bot().emit('login', { id: 'wxid_bot' });
-    assert.equal((await s.json('/status'))[1].resumable, true);
+    let [, body] = await s.json('/status');
+    assert.deepEqual([body.resumable, body.writes, body.write_failures], [true, 4, 2]);
     await until(() => logs.includes('saved login: 4 writes, 2 write failures'), 1000);
     await sleepMs(150);
     assert.equal(logs.filter(line => line.startsWith('saved login: ')).length, 1, 'unchanged counts are not logged again');
     saved.writes = 5;
     await until(() => logs.includes('saved login: 5 writes, 2 write failures'), 1000);
+    saved.writeFailures = 9;
+    [, body] = await s.json('/status');
+    assert.deepEqual([body.resumable, body.writes, body.write_failures], [true, 5, 9]);
     assert.ok(!logs.some(line => line.includes('off')), logs.join('\n'));
   } finally { await s.bridge.close(); }
 
@@ -1831,9 +1917,11 @@ test('saved login: write failures are counted apart and never read as off; off l
     const o = await resumed({ saved: fakeSaved({ off }), log: line => offLogs.push(line) });
     try {
       assert.ok(offLogs.includes(`saved login off (${off})`), off);
-      assert.equal((await o.json('/status'))[1].resumable, false);
+      const [, body] = await o.json('/status');
+      assert.equal(body.resumable, false);
+      assert.ok(!('writes' in body) && !('write_failures' in body), `${off}: no write counts`);
       await sleepMs(100);
-      assert.ok(!offLogs.some(line => line.startsWith('saved login: ')), `${off}: no write counts`);
+      assert.ok(!offLogs.some(line => line.startsWith('saved login: ')), `${off}: no write counts logged`);
       assert.deepEqual(o.bots, []);
     } finally { await o.bridge.close(); }
   }
@@ -1859,7 +1947,7 @@ test('saved login off (WECHAT_BRIDGE_SAVE_LOGIN=0) and no saved-login calls at a
       await s.bridge.settled();
       await sleepMs(100);
       await status();
-      out.push(s.bots.length, saved?.recorded ?? [], saved?.forgotten ?? 0);
+      out.push(s.bots.length, saved?.recorded ?? []);
       return out;
     } finally { await s.bridge.close(); }
   };
@@ -1884,7 +1972,7 @@ test('saved login: a login that ends here with its saved login still on disk is 
     s.bot().emit('logout', { id: 'wxid_bot' });
     assert.equal(s.bridge.state.idle_reason, 'logged_out');
     await until(() => s.bots.length === 2 && s.bridge.state.phase === 'resuming', 1000);
-    assert.deepEqual(s.bots[1].options, { resume: true });
+    assert.deepEqual(s.bots[1].options, RESUME);
     assert.deepEqual(s.bots[0].calls, ['start', 'stop']);
     s.bots[1].emit('login', { id: 'wxid_bot' });
     // WeChat ends it: the fork deletes the saved login before the puppet reports the logout.
@@ -1893,6 +1981,33 @@ test('saved login: a login that ends here with its saved login still on disk is 
     await s.bridge.settled();
     await sleepMs(100);
     assert.deepEqual([s.bots.length, s.bridge.state.phase, s.bridge.state.idle_reason], [2, 'idle', 'logged_out']);
+  } finally { await s.bridge.close(); }
+});
+
+test('saved login: a media download that fails (400, Err) never resumes, asks for a QR or changes resumable', LIMIT, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'wechat-bridge-media-'));
+  const s = await resumed({ tmpDir: tmp, makeFileBox, fetchLimits: { ...MEDIA_FETCH, attempts: 2 } });
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('login', { id: 'wxid_bot' });
+    await withRooms(s);
+    const photo = mediaMessage({ kind: 'image', id: 'p400', fail: 'download failed: HTTP 400 Err' });
+    bot.emit('message', photo);
+    const id = (await events(s)).at(-1).attachments[0].media_id;
+    const before = (await s.json('/status'))[1];
+    assert.deepEqual(await s.json('/media/' + id), [503, { error: 'unavailable' }]);
+    // Wechaty reports a failed download as an error event too.
+    bot.emit('error', new Error('download failed: HTTP 400 Err'));
+    assert.deepEqual(await s.json('/media/' + id), [410, { error: 'gone' }]);
+    await s.bridge.settled();
+    await sleepMs(150);
+    const after = (await s.json('/status'))[1];
+    assert.deepEqual([after.phase, after.logged_in, after.resumable, after.qr], ['logged_in', true, before.resumable, undefined]);
+    assert.equal(before.resumable, true);
+    assert.equal(s.bots.length, 1, 'no resume and no QR bot');
+    assert.deepEqual(bot.calls, ['start'], 'the live bot is never stopped');
+    assert.equal(photo.fetched.count, 2);
   } finally { await s.bridge.close(); }
 });
 
@@ -1969,6 +2084,23 @@ test('saved login: what a login held is dropped when that login ends; each kind 
   } finally { await c.bridge.close(); }
 });
 
+test('saved login: a group flood larger than the 1:1 hold never pushes the held 1:1 messages out (each kind has its own bound)', LIMIT, async () => {
+  const s = await resumed({ ringSize: 3, groupRingSize: 50, resumeLimits: { ...FAST, holdGroupMs: 60_000 } });
+  try {
+    await s.bridge.settled();
+    const bot = s.bot();
+    bot.emit('login', { id: 'wxid_bot' });
+    bot.emit('message', message({ id: 'o1', text: 'owner 1' }));
+    for (let i = 0; i < 20; i++) bot.emit('message', roomMessage({ id: `g${i}`, text: `@管家 flood ${i}` }));
+    bot.emit('message', message({ id: 'o2', text: 'owner 2' }));
+    bot.emit('message', message({ id: 'o3', text: 'owner 3' }));
+    await withRooms(s);
+    const out = (await events(s)).map(e => e.message_ref);
+    assert.deepEqual(out.filter(ref => ref.startsWith('o')), ['o1', 'o2', 'o3'], out.join(' '));
+    assert.equal(out.length, 23);
+  } finally { await s.bridge.close(); }
+});
+
 test('saved login: the account record is written atomically (0600, no temporary left) and read back; anything odd reads as none', LIMIT, () => {
   const dir = mkdtempSync(join(tmpdir(), 'wechat-bridge-account-'));
   const record = accountRecord(dir);
@@ -1993,7 +2125,18 @@ test('saved login: the account record is written atomically (0600, no temporary 
   assert.throws(() => accountRecord(join(dir, 'missing')).recordAccount('wxid_bot'));
 });
 
-test('run.sh: the saved login\'s key (0600, read-only file mount) and state (0700, read-write directory mount), outside ~/.aitelier-secrets', LIMIT, () => {
+test('the bridge and main.mjs never delete a saved-login file: no delete call reaches the fork, no account.v1 path is named', LIMIT, () => {
+  const bridgeSource = readFileSync(new URL('./bridge.mjs', import.meta.url), 'utf8');
+  const mainSource = readFileSync(new URL('./main.mjs', import.meta.url), 'utf8');
+  for (const [name, source] of [['bridge.mjs', bridgeSource], ['main.mjs', mainSource]]) {
+    assert.doesNotMatch(source, /forgetSavedLogin|deleteSavedLogin|account\.v1|PUPPET_NEO_STATE_DIR\)/, name);
+    assert.doesNotMatch(source, /\bforget\s*\(/, name);
+  }
+  // main.mjs records the account in the bridge's own directory, never the fork's.
+  assert.match(mainSource, /accountRecord\(process\.env\.WECHAT_BRIDGE_ACCOUNT_DIR\)/);
+});
+
+test('run.sh: the saved login\'s key (0600, read-only file mount), state (0700, read-write directory mount) and the bridge\'s account record (its own directory, outside data/), outside ~/.aitelier-secrets', LIMIT, () => {
   const home = mkdtempSync(join(tmpdir(), 'wechat-bridge-save-'));
   mkdirSync(join(home, '.aitelier-secrets'));
   writeFileSync(join(home, '.aitelier-secrets', 'wechat-bridge-token'), 'throwaway\n');
@@ -2006,33 +2149,38 @@ test('run.sh: the saved login\'s key (0600, read-only file mount) and state (070
   const after = (args, flag) => args.filter((arg, i) => args[i - 1] === flag);
   const state = join(home, '.local/share/aitelier/wechat-bridge-state');
   const key = join(home, '.local/share/aitelier/wechat-bridge-key');
+  const account = join(home, '.local/share/aitelier/wechat-bridge-account');
   // A state directory left open by hand is closed again.
   mkdirSync(state, { recursive: true });
   chmodSync(state, 0o755);
   const args = run({});
   assert.deepEqual(after(args, '--volume'), [`${home}/.aitelier-secrets/wechat-bridge-token:/home/bridge/.aitelier-secrets/wechat-bridge-token:ro`,
-    `${key}/key:/home/bridge/saved-login-key:ro`, `${state}/data:/home/bridge/state:rw`]);
-  assert.deepEqual(after(args, '--env'), ['PUPPET_NEO_STATE_DIR=/home/bridge/state', 'PUPPET_NEO_STATE_KEY_FILE=/home/bridge/saved-login-key']);
+    `${key}/key:/home/bridge/saved-login-key:ro`, `${state}/data:/home/bridge/state:rw`, `${account}:/home/bridge/account:rw`]);
+  assert.deepEqual(after(args, '--env'), ['PUPPET_NEO_STATE_DIR=/home/bridge/state', 'PUPPET_NEO_STATE_KEY_FILE=/home/bridge/saved-login-key',
+    'WECHAT_BRIDGE_ACCOUNT_DIR=/home/bridge/account']);
   assert.equal(args.at(-2), 'aitelier-wechat-bridge:local', 'the mounts come before the image');
   const keyBytes = readFileSync(join(key, 'key'));
   assert.equal(keyBytes.length, 32);
   assert.equal(statSync(join(key, 'key')).mode & 0o777, 0o600);
-  for (const dir of [state, join(state, 'data'), key]) assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
+  for (const dir of [state, join(state, 'data'), key, account]) assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
   assert.ok(!readdirSync(key).some(name => name !== 'key'), 'no temporary key left');
   for (const path of after(args, '--volume').slice(1)) assert.ok(!path.includes('.aitelier-secrets'), path);
+  assert.ok(!account.startsWith(state), 'the record is not inside the saved login\'s directory');
   // A second start keeps the key: it is made once.
   run({});
   assert.deepEqual(readFileSync(join(key, 'key')), keyBytes);
-  // The off switch: neither mount nor variable, and the saved login and record deleted (never
-  // read); the resume times and the key stay.
+  // The off switch (run.sh, before the container starts - never the bridge): neither mount
+  // nor variable, and the saved login and record deleted (never read); the resume times and
+  // the key stay.
   const data = join(state, 'data');
-  for (const name of ['account.v1', 'account.user', 'account.v1.tmp-0011223344556677', 'account.user.tmp-aa', 'resumes'])
-    writeFileSync(join(data, name), 'x');
+  for (const name of ['account.v1', 'account.v1.tmp-0011223344556677', 'resumes']) writeFileSync(join(data, name), 'x');
+  for (const name of ['account.user', 'account.user.tmp-aa']) writeFileSync(join(account, name), 'x');
   const off = run({ WECHAT_BRIDGE_SAVE_LOGIN: '0' });
   assert.deepEqual(after(off, '--volume'), [`${home}/.aitelier-secrets/wechat-bridge-token:/home/bridge/.aitelier-secrets/wechat-bridge-token:ro`]);
   assert.deepEqual(after(off, '--env'), []);
-  assert.ok(!off.some(arg => arg.includes('PUPPET_NEO')));
+  assert.ok(!off.some(arg => arg.includes('PUPPET_NEO') || arg.includes('WECHAT_BRIDGE_ACCOUNT_DIR')));
   assert.deepEqual(readdirSync(data), ['resumes']);
+  assert.deepEqual(readdirSync(account), []);
   assert.ok(existsSync(join(key, 'key')));
   // Off with nothing on disk at all still starts.
   const empty = mkdtempSync(join(tmpdir(), 'wechat-bridge-empty-'));

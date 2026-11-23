@@ -125,10 +125,10 @@ phone`, `connected`, or why not).
   the default bridge every other container on `docker0` could reach it with only the
   token in the way. No other container shares its network. Processes on the host can
   still reach the container's own address on that network; the token guards that;
-- three host mounts: the token file read-only, and the saved login's key file
-  (read-only) and directory (read-write), see "Saved login" (only the token with
-  `WECHAT_BRIDGE_SAVE_LOGIN=0`); outbound network is allowed
-  (WeChat's servers);
+- four host mounts: the token file read-only, the saved login's key file (read-only) and
+  directory (read-write), and the bridge's account record directory (read-write), see
+  "Saved login" (only the token with `WECHAT_BRIDGE_SAVE_LOGIN=0`); outbound network is
+  allowed (WeChat's servers);
 - `--restart unless-stopped`: a start resumes the saved login, or with none is `idle` and
   asks WeChat for nothing, so a restart (a crash, a host reboot) never asks for a QR. A
   crash loop is held by the puppet's resume cap (6 an hour, 20 a day). (`on-failure:N`
@@ -150,8 +150,9 @@ no `name`); the only thing written to disk is the saved login, by the puppet.
 
 Design: steward design §7.2.1. The puppet (the fork's second patch) keeps the login
 encrypted on disk and, at the bridge's start, resumes it: a fresh bot built with
-`makeBot({resume: true})`, phase `resuming`, then `logged_in` - no QR, no phone prompt. With
-nothing to resume (or saving off) the start is `idle` (`boot`) exactly as before.
+`makeBot({resume: true, expectUsername})`, phase `resuming`, then `logged_in` - no QR, no
+phone prompt. With nothing to resume (or saving off) the start is `idle` (`boot`) exactly as
+before. No resume outcome ever makes the bridge ask for a QR by itself.
 
 Where it lives (all created by `run.sh`; none of it under `~/.aitelier-secrets`, which the
 backend container mounts whole):
@@ -161,9 +162,20 @@ backend container mounts whole):
   (`PUPPET_NEO_STATE_KEY_FILE`).
 - `~/.local/share/aitelier/wechat-bridge-state/data/` - 0700, mounted read-write as the
   directory `/home/bridge/state` (`PUPPET_NEO_STATE_DIR`): `account.v1` (the login,
-  AES-256-GCM, written and read by the puppet only - its bytes never reach JavaScript),
-  `resumes` (resume times, for the cap; not secret) and `account.user` (the account the last
-  QR login was with, written by the bridge).
+  AES-256-GCM, written, read and deleted by the puppet only - its bytes never reach
+  JavaScript) and `resumes` (resume times, for the cap; not secret). The bridge never
+  writes, reads or deletes anything here; it sees only `savedLoginStatus()` (`present`
+  from lstat, `off`, `writes`, `write_failures`).
+- `~/.local/share/aitelier/wechat-bridge-account/` - 0700, mounted read-write as the
+  directory `/home/bridge/account` (`WECHAT_BRIDGE_ACCOUNT_DIR`): `account.user`, the user
+  id the last QR login was with, written by the bridge (0600, atomic rename) and handed to
+  each resume as `expectUsername`. It is kept out of `data/` on purpose (the platform
+  director's ruling 9): an old copy of `data/` put back - another account's login, from
+  before a QR login replaced it - cannot bring its own record with it, so the puppet finds
+  the mismatch. The id is plain text here (the puppet compares it as it is), which is why it
+  is not next to the ciphertext: a copy of `data/` alone carries no account name. Putting
+  back old copies of both directories is not caught (uid 1000 on this host, the accepted
+  boundary).
 
 Who can read it: the bridge's container, and any process of uid 1000 on this host (both the
 key and the login) - the file is "this logged-in device": with it and the key, anyone can
@@ -172,15 +184,21 @@ container mounts these directories. Keep both out of backups and support bundles
 
 What the bridge does with it:
 
-- A resume that comes back as another account than the one recorded at the last QR login
-  (or with none recorded) is deleted, its bot stopped, nothing sent, and the bridge stays
-  `idle` (`resume_account_mismatch`) until a QR is asked for.
+- A resume whose saved login is another account than the recorded one: the puppet
+  compares before it connects, deletes the file under its writer lock and answers
+  `RESUME_MISMATCH`; the bridge stops the bot, sends nothing, and stays `idle`
+  (`resume_account_mismatch`, `resumable: false`) until a QR is asked for. With no account
+  recorded yet (the first start after the upgrade) nothing is compared. Should a resumed
+  login still report another account, the bridge does not take it either (same idle
+  reason; the file is left to the puppet).
 - A resume WeChat refuses (`resume_rejected`: the puppet has deleted the file), a file the
   puppet cannot read (`resume_unreadable`: kept), one past the resume cap
-  (`resume_throttled`) or none after all (`boot`) leave the bridge `idle`, no retry. A
-  passing failure (the network, the puppet busy with another resume, no answer within 150
-  s) is `idle` (`resume_failed`) and tried again after 30 s, 2 min and 10 min, each on a new
-  bot once the last one has stopped; a QR asked for meanwhile cancels the retries.
+  (`resume_throttled`; a mismatch counts toward the cap, `busy` does not) or none after all
+  (`boot`) leave the bridge `idle`, no retry. The puppet's word (`RESUME_*`) is read from
+  the error's message or its `data`. A passing failure (the network, the puppet busy with
+  another resume, a logout with no answer, no answer within 150 s) is `idle`
+  (`resume_failed`) and tried again after 30 s, 2 min and 10 min, each on a new bot once
+  the last one has stopped; a QR asked for meanwhile cancels the retries.
 - A login that ends here (the network, a watchdog) while its saved login is still on disk
   is resumed the same way; one WeChat ended (logged out on the phone, kicked, refused) took
   the file with it and is not.
@@ -189,21 +207,29 @@ What the bridge does with it:
   minutes after the start (then they pass the usual rules with no room bound, so their
   content is dropped, never stored), 1:1 messages until that first `PUT` (each kind at most
   its ring's size, the oldest dropped). What a login held is dropped when that login ends.
-- A failed write never turns saving off: the puppet counts writes and write failures, and
-  the bridge logs them at most once an hour, only when they changed (`saved login: n
-  writes, m write failures`). Saving is off only for a configuration error the puppet
-  names at the start (`saved login off (not_configured|key|dir)`).
-- If the process dies after the login was reported and before the puppet's first write,
-  that one QR scan is lost: the next start finds nothing to resume.
+- A failed write never turns saving off: the puppet counts writes and write failures,
+  `/status` carries both, and the bridge logs them at most once an hour, only when they
+  changed (`saved login: n writes, m write failures`). Saving is off only for a
+  configuration error the puppet names at the start (`saved login off
+  (not_configured|key|dir)`), and then `/status` carries no counts.
+- `resumable` is never optimistic: after a QR login it turns true only once the puppet has
+  written since that QR was asked for (a first write that failed leaves an older file on
+  disk, maybe another account's), and it stays false when the account could not be
+  recorded or this process got `RESUME_MISMATCH`, until the next QR login.
+- One QR scan is lost if the process dies after the login was reported and before the
+  puppet's first write (the next start finds nothing to resume, or an older file), or
+  between the puppet's first write and the bridge's record of the new account (the next
+  start expects the previous account, and the puppet deletes the new file as a mismatch).
 
 Deleting it: logging this device out on the phone ("退出 Linux 微信") ends the login on
 WeChat's side, and the puppet deletes the file at once. The off switch is
-`WECHAT_BRIDGE_SAVE_LOGIN=0 sh run.sh` (after removing the container): neither mount nor
+`WECHAT_BRIDGE_SAVE_LOGIN=0 sh run.sh` (after removing the container): no mount and no
 variable, so the bridge behaves exactly as before 19.1 (the login in memory only, a restart
-means a new QR), and `run.sh` deletes `data/account.v1`, `data/account.user` and their
-temporary files (only deleted, never read; `resumes` and the key stay, so the cap holds
-when it is turned on again). A local delete does not sign the device out of WeChat: log it
-out on the phone for that. Neither way needs an image rebuild.
+means a new QR), and `run.sh` - before the container starts, never the bridge - deletes
+`data/account.v1`, the account record and their temporary files (only deleted, never read;
+`resumes` and the key stay, so the cap holds when it is turned on again). A local delete
+does not sign the device out of WeChat: log it out on the phone for that. Neither way needs
+an image rebuild.
 
 After a silent restart the puppet knows no peer yet (it only writes to someone who has
 written to this login), so the owner has to send the steward a message first, as after a
@@ -234,7 +260,7 @@ Every request
 needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthorized"}`.
 
 - `GET /status` → `{phase, idle_reason?, logged_in, user_id?, qr?, qr_svg?, since,
-  resumable}`. `phase`: `idle` (no QR, not logged in, no bot running; `idle_reason` is
+  resumable, writes?, write_failures?}`. `phase`: `idle` (no QR, not logged in, no bot running; `idle_reason` is
   `boot`, `qr_expired`, `qr_cancelled`, `logged_out`, `login_failed`, or for the saved
   login `resume_rejected`, `resume_unreadable`, `resume_throttled`, `resume_failed`,
   `resume_account_mismatch`), `starting` (a QR was requested and has not appeared yet),
@@ -242,14 +268,16 @@ needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthoriz
   being resumed, no QR) or `logged_in`. `qr` (the payload) and `qr_svg` (it drawn as an
   SVG, absent if it cannot be drawn within 64 KiB) only in `waiting_qr`; `since` is when the
   current phase began (a resume stuck in `resuming` shows here). `resumable`: a saved login
-  is on disk (the puppet's word, never a guess) for the recorded account; always `false`
-  with saving off.
+  is on disk (the puppet's `present`, never a guess) that this process has not refused and,
+  after a QR login here, that the puppet has written since (see "Saved login"); always
+  `false` with saving off. `writes` and `write_failures`: the puppet's counts, only with
+  saving on (a write failure is never `off`).
 - `POST /login` (no body) → `202 {phase: "starting"}`: build and start a fresh bot, and
   a new QR follows in `/status` (usually within seconds). Taken only while `idle`;
   otherwise it changes nothing and answers `409 {refused}`: `already_logged_in` (log out
   on the phone first to change accounts), `qr_waiting` (a QR is waiting or was just
   scanned: scan that one), `login_starting` (the last request has not shown its QR yet),
-  `resuming` (the saved login is being resumed; also while a mismatched one is deleted),
+  `resuming` (the saved login is being resumed),
   `login_disabled` (`WECHAT_BRIDGE_SKIP_LOGIN=1`); or `429 {refused: "rate_limited",
   retry_after_s}`: at least 2 minutes between two accepted requests, at most 5 in any
   hour and 12 in any 24 hours (`LOGIN_LIMITS`, kept in memory; the director's

@@ -22,8 +22,9 @@
  *  events, start/stop and Contact.find) and `types` is Wechaty's `types`, both handed in
  *  by main.mjs, so the tests never load the real puppet. `renderQr` (qr-svg.mjs, also
  *  handed in) draws the login QR as an SVG for the dashboard; `savedLogin` (main.mjs: the
- *  fork's saved-login calls and `accountRecord`) is the saved login, absent when the
- *  puppet has none. */
+ *  fork's `savedLoginStatus()` and the bridge's own `accountRecord`) is the saved login,
+ *  absent when the puppet has none. The bridge never deletes a saved-login file: only the
+ *  fork does (refused, ended by WeChat, or another account than expected). */
 import { createServer } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, constants, createReadStream, fstatSync, fsyncSync, openSync, readFileSync, renameSync, rmSync,
@@ -124,18 +125,23 @@ const HOUR_MS = 3_600_000, DAY_MS = 24 * HOUR_MS;
 export const RESUME_LIMITS = Object.freeze({ waitMs: 150_000, retryMs: Object.freeze([30_000, 120_000, 600_000]),
   holdGroupMs: 120_000, countLogMs: HOUR_MS });
 /** The fork's error prefixes for a resume that did not resume, and the idle reason each
- *  leaves. RESUME_BUSY (another resume still running in the fork) is passing: retried. */
+ *  leaves; none of them asks for a QR. RESUME_MISMATCH: the saved login was another account
+ *  than the expectUsername it was given, and the fork has deleted it. RESUME_BUSY (another
+ *  resume still running in the fork) is passing: retried, as is any other error. */
 const RESUME_ENDS = Object.freeze({ RESUME_REJECTED: 'resume_rejected', RESUME_UNREADABLE: 'resume_unreadable',
-  RESUME_THROTTLED: 'resume_throttled', RESUME_NONE: 'boot' });
+  RESUME_THROTTLED: 'resume_throttled', RESUME_NONE: 'boot', RESUME_MISMATCH: 'resume_account_mismatch' });
+const RESUME_WORD = /\bRESUME_(?:NONE|UNREADABLE|THROTTLED|REJECTED|BUSY|MISMATCH)\b/;
 /** `savedLoginStatus().off`, the fork's closed set of configuration errors. A failed write is
  *  never one of them: writes and write_failures are counted apart. */
 const SAVED_LOGIN_OFF = new Set(['not_configured', 'key', 'dir']);
-/** The account logged in with a QR, recorded next to the saved login (design 7.2.1, the
- *  platform director's ruling 9): a resume that comes back as any other account is deleted. */
+/** The account logged in with a QR (design 7.2.1, the platform director's ruling 9 and his
+ *  notes 653-654), recorded by the bridge in its own directory (WECHAT_BRIDGE_ACCOUNT_DIR,
+ *  run.sh), never in the fork's data/: a copy of data/ put back cannot bring an old record
+ *  with it. Each resume hands it to the fork as expectUsername; the fork compares. */
 export const ACCOUNT_FILE = 'account.user';
 const ACCOUNT_FILE_MAX = 4096;
 
-/** The account record in `dir` (the saved login's directory): readAccount() -> the user id
+/** The account record in `dir` (the bridge's account directory): readAccount() -> the user id
  *  recorded at the last QR login, or undefined (none, unreadable, a link or not a file);
  *  recordAccount(id) writes it atomically (a 0600 temporary file, fsync, rename, the
  *  directory fsynced) and throws when it cannot. No dir: nothing is read, a write throws. */
@@ -437,14 +443,26 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   const bootStatus = savedStatus();
   const saving = Boolean(bootStatus) && bootStatus.off === undefined;
   if (bootStatus && !saving) log(`saved login off (${SAVED_LOGIN_OFF.has(bootStatus.off) ? bootStatus.off : 'unknown'})`);
-  // The account the last QR login was with, and whether this process found the saved login
-  // to be another one (it is then never called resumable until the next QR login).
+  // The account the last QR login was with, handed to each resume as expectUsername (none
+  // recorded, e.g. the first start after the upgrade: the fork compares nothing).
   let recorded = saving ? savedLogin.readAccount() : undefined;
-  let mismatched = false;
-  /** What /status calls resumable: a saved login is on disk (the fork's `present`, never a
-   *  guess), an account is recorded for it, and this process has not refused it. */
-  const resumable = () => saving && !mismatched && recorded !== undefined && Boolean(savedStatus()?.present);
-
+  // Not resumable until the next QR login: a resume here was another account
+  // (RESUME_MISMATCH), or a QR login's account could not be recorded (the record on disk may
+  // name another one, so the next resume would be refused).
+  let refused = false;
+  // After a QR login in this process: the fork's `writes` when its QR was asked for. The
+  // saved login on disk is that login's only once the fork has written since; a first write
+  // that failed leaves an older one, maybe another account's.
+  let qrWrites, writesBefore;
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  /** What /status calls resumable, never optimistic: a saved login is on disk (the fork's
+   *  `present`, from lstat), this process has not refused it, and after a QR login here the
+   *  fork has written that login's. */
+  const resumable = () => {
+    if (!saving || refused) return false;
+    const status = savedStatus();
+    return Boolean(status?.present) && (writesBefore === undefined || count(status.writes) > writesBefore);
+  };
 
   // changes with every request and every end; each bot's events and each timer carry the
   // generation they were made for, so those of an earlier attempt do nothing. `tasks`
@@ -481,14 +499,15 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     if (old) void stopBot(old);
   };
 
-  /** Step 19.1: one resume of the saved login - a fresh bot with `makeBot({resume: true})`,
-   *  its own generation, no QR. Only from idle with no bot of its own. */
+  /** Step 19.1: one resume of the saved login - a fresh bot with `makeBot({resume: true,
+   *  expectUsername})` (no expectUsername when none is recorded), its own generation, no QR.
+   *  Only from idle with no bot of its own. */
   const resume = () => {
     const mine = ++generation;
     setState({ phase: 'resuming', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
     log('resuming the saved login (no QR)');
     let fresh;
-    try { fresh = makeBot({ resume: true }); }
+    try { fresh = makeBot({ resume: true, ...(recorded === undefined ? {} : { expectUsername: recorded }) }); }
     catch (error) {
       log('building the puppet failed: ' + short(error));
       resumeFailed();
@@ -540,28 +559,6 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     log(`the saved login will be tried again in ${Math.round(delay / 1000)} s`);
     scheduleResume(delay);
   };
-  /** The saved login is not the account logged in with a QR (or none is recorded): delete
-   *  it, stop the bot, connect nothing, and only then go idle (resume_account_mismatch).
-   *  Until then the phase stays `resuming`, so no QR login can start and write a new saved
-   *  login that this deletion would take. */
-  const mismatch = why => {
-    const mine = ++generation;
-    clearTimers();
-    retriesLeft = 0;
-    mismatched = true;
-    held.length = 0;
-    setState({ phase: 'resuming', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
-    log(`the saved login is not the account logged in with a QR (${why}): deleting it, connecting nothing`);
-    const old = bot;
-    bot = undefined;
-    void track((async () => {
-      if (old) await stopBot(old);
-      try { await savedLogin.forget(); }
-      catch (error) { log('deleting the saved login failed: ' + short(error)); }
-      if (mine === generation) end('resume_account_mismatch');
-    })());
-  };
-
   /** The hold's release: each held message of the current login through relay(), in arrival
    *  order; one of an ended login is dropped. */
   const release = which => {
@@ -585,11 +582,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   if (saving) {
     countTimer = setInterval(() => {
       const status = savedStatus();
-      const number = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
-      const line = `${number(status?.writes)}/${number(status?.write_failures)}`;
+      const line = `${count(status?.writes)}/${count(status?.write_failures)}`;
       if (!status || line === counted) return;
       counted = line;
-      log(`saved login: ${number(status.writes)} writes, ${number(status.write_failures)} write failures`);
+      log(`saved login: ${count(status.writes)} writes, ${count(status.write_failures)} write failures`);
     }, resumeLimits.countLogMs);
     countTimer.unref?.();
   }
@@ -622,17 +618,21 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     target.on('login', user => {
       if (!current()) return;
       const resumed = state.phase === 'resuming';
-      // Step 19.1: a resumed login must be the account the last QR login was with.
-      if (resumed && (recorded === undefined || user?.id !== recorded))
-        return mismatch(recorded === undefined ? 'no account recorded' : 'another account');
+      // Step 19.1: the fork compares a resume with expectUsername (RESUME_MISMATCH). Should a
+      // resumed login still come back as another account, it is not taken: idle, nothing
+      // relayed, its bot stopped (the file is the fork's to delete, never the bridge's).
+      if (resumed && recorded !== undefined && user?.id !== recorded) {
+        refused = true;
+        return end('resume_account_mismatch');
+      }
       clearTimers();
       setState({ phase: 'logged_in', logged_in: true, user_id: user?.id, qr: undefined, qr_svg: undefined });
       log(resumed ? 'logged in (the saved login resumed)' : 'logged in');
       if (resumed || !saving || !user?.id) return;
-      mismatched = false;
-      try { savedLogin.recordAccount(user.id); recorded = user.id; }
+      writesBefore = qrWrites;
+      try { savedLogin.recordAccount(user.id); recorded = user.id; refused = false; }
       catch (error) {
-        recorded = undefined;
+        refused = true;
         log('the account logged in with could not be recorded, so its saved login will not be resumed: ' + short(error));
       }
     });
@@ -649,7 +649,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       log('error: ' + short(error));
       if (!current()) return;
       if (state.phase === 'resuming') {
-        const outcome = /\bRESUME_(?:NONE|UNREADABLE|THROTTLED|REJECTED|BUSY)\b/.exec(String(error?.message ?? error?.data ?? error))?.[0];
+        // The fork's word may be in the message or in `data` (the puppet's own error shape).
+        const said = [error?.message, error?.data].filter(part => part !== undefined).join(' ') || String(error);
+        const outcome = RESUME_WORD.exec(said)?.[0];
+        if (outcome === 'RESUME_MISMATCH') refused = true;
         return RESUME_ENDS[outcome] ? end(RESUME_ENDS[outcome]) : resumeFailed();
       }
       // An error while logged in is only logged (Wechaty reports message handling failures
@@ -681,6 +684,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     if (wait > 0) return [429, { refused: 'rate_limited', retry_after_s: Math.ceil(wait / 1000) }];
     accepted.push(at);
     const mine = ++generation;
+    if (saving) qrWrites = count(savedStatus()?.writes);
     setState({ phase: 'starting', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
     log('login QR requested');
     let fresh;
@@ -1071,6 +1075,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       if (request.method === 'GET' && url.pathname === '/status') {
         const body = { phase: state.phase, ...(state.idle_reason ? { idle_reason: state.idle_reason } : {}),
           logged_in: state.logged_in, since: state.since, resumable: resumable() };
+        // Ruling 6: the fork's write counts, the reader of how often it writes; only with
+        // saving on, so a write failure never looks like off and off never shows counts.
+        const counts = saving ? savedStatus() : undefined;
+        if (counts) Object.assign(body, { writes: count(counts.writes), write_failures: count(counts.write_failures) });
         if (state.user_id) body.user_id = state.user_id;
         if (state.qr) body.qr = state.qr;
         if (state.qr_svg) body.qr_svg = state.qr_svg;
@@ -1142,12 +1150,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     }
   });
 
-  // Step 19.1: a start with a saved login resumes it; one with no account recorded for it
-  // deletes it unasked (a resume could only end in the same deletion, after touching WeChat).
-  if (saving && loginEnabled && bootStatus.present) {
-    if (recorded === undefined) mismatch('no account recorded');
-    else resumeEpisode(0);
-  }
+  // Step 19.1: a start with a saved login resumes it.
+  if (saving && loginEnabled && bootStatus.present) resumeEpisode(0);
 
   return {
     server,

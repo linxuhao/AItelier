@@ -735,6 +735,16 @@ export interface DriverConversationEntry {
   /** The sender's own questions this row withdraws (withdraw_user_question),
    *  each with its reason. Absent when it withdraws none. */
   withdraws?: { message_id: string; segment_id: string; reason: string }[];
+  /** Step 24.2b: the files this message carries. Absent (not empty) when it has none. */
+  attachments?: DriverConversationAttachment[];
+}
+/** One attachment of a conversation message (design 7.8.12a). `id` is a dashboard
+ *  upload's `u_` upload_id or a library `m_` ref; the bytes are at `mediaUrl`. A refused
+ *  one (the host's library did not take it, or nobody came for it) carries `refused` and
+ *  may have no id. A channel message's attachment may lack mime and size. */
+export interface DriverConversationAttachment {
+  id?: string; kind: 'image' | 'voice' | 'file' | string; mime?: string; size?: number; name?: string;
+  refused?: string;
 }
 export interface DriverConversation {
   project_id: string; messages: DriverConversationEntry[]; has_more: boolean;
@@ -770,14 +780,62 @@ export function dshDriverConversationUnread(projectId?: string): Promise<DriverC
  *  delivery. `replyToMessageId` is stored on the row; the driver may be offline. */
 export function sendDriverConversationMessage(projectId: string, body: string,
   options: {replyToMessageId?: string | null; targetDriverId?: string | null;
-    answers?: DriverConversationAnswerRef[] | null} = {}): Promise<unknown> {
+    answers?: DriverConversationAnswerRef[] | null; attachments?: string[] | null} = {}): Promise<unknown> {
   const args: Record<string, unknown> = {request_key: crypto.randomUUID(), project_id: projectId, body};
   if (options.replyToMessageId) args.reply_to_message_id = options.replyToMessageId;
   if (options.targetDriverId) args.target_driver_id = options.targetDriverId;
   // Sent only when there is a question to close, so an ordinary reply is the
   // same request it always was.
   if (options.answers?.length) args.answers = options.answers;
+  // Likewise the upload_ids: only when the message carries files.
+  if (options.attachments?.length) args.attachments = options.attachments;
   return _post('/api/state/commands/send_user_conversation_message', args);
+}
+/** The same-origin route that serves one attachment's bytes to this project's readers
+ *  (a `u_` upload or an `m_` ref named by the conversation). */
+export function mediaUrl(projectId: string, id: string): string {
+  return '/api/dsh-drivers/' + encodeURIComponent(projectId) + '/conversation/media/' + encodeURIComponent(id);
+}
+export interface ConversationUpload {
+  upload_id: string; kind: string; mime: string; size: number; name: string;
+}
+/** How long one upload may take: a phone on a slow line sending 25 MiB needs far more
+ *  than `_request`'s 10 seconds. */
+export const UPLOAD_TIMEOUT_MS = 120000;
+/** Step 24.2b: stage one file for the conversation (design 7.8.12a "上传"). The body is
+ *  the raw bytes, not multipart; the server decides the kind from the first bytes, so the
+ *  name is only the name shown. It is an XMLHttpRequest rather than `_request`: it needs
+ *  its own 120 s timeout and upload progress, which fetch does not report. A refusal is an
+ *  ApiError whose message is the server's code (`too_large`, `type`, `rate_limited`,
+ *  `staging_full`, ...). */
+export function uploadConversationFile(projectId: string, file: Blob, name: string,
+  // eslint-disable-next-line no-unused-vars -- a parameter name inside a function type
+  onProgress?: (fraction: number) => void): Promise<ConversationUpload> {
+  const $auth = get(authStore);
+  if (!$auth.canWrite) {
+    return Promise.reject(new ApiError(403, 'Read-only access — sign in as an authorized user to make changes.',
+      $auth.email ? 'write_denied_not_a_writer' : 'write_denied_not_authenticated'));
+  }
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/dsh-drivers/' + encodeURIComponent(projectId) + '/conversation/uploads?name='
+      + encodeURIComponent(name));
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('X-AItelier-Upload', '1');
+    if (file.type) xhr.setRequestHeader('Content-Type', file.type);
+    if (onProgress) xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(event.loaded / event.total); };
+    xhr.onload = () => {
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(xhr.responseText || '{}') as Record<string, unknown>; } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(data as unknown as ConversationUpload); return; }
+      const detail = typeof data.detail === 'string' ? data.detail : '';
+      reject(new ApiError(xhr.status, detail || xhr.statusText || 'Request failed', (data.code as string) || null, data.detail ?? null));
+    };
+    xhr.ontimeout = () => reject(new ApiError(0, 'Request timed out'));
+    xhr.onerror = () => reject(new ApiError(0, 'Network error'));
+    xhr.send(file);
+  });
 }
 /** Advance the persisted read marker to a message the user was actually shown. */
 export function markDriverConversationRead(projectId: string, messageId: string): Promise<unknown> {

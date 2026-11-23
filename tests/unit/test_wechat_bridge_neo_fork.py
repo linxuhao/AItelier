@@ -135,12 +135,25 @@ def apply_patch(patch: str, root: Path) -> None:
         target.write_text("".join(patched), encoding="utf-8")
 
 
+def applied_snapshot(tmp_path: Path, pin: dict, name: str) -> Path:
+    """The vendored upstream, copied into tmp_path and patched, as the image build does."""
+    snapshot = tmp_path / name
+    for entry in pin["files"]:
+        copy = snapshot / entry["path"]
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes((SNAPSHOT / entry["path"]).read_bytes())
+    apply_patch((REPO / pin["patch"]["path"]).read_text(encoding="utf-8"), snapshot)
+    return snapshot
+
+
 RUST_EPRINTLN = "eprintln!("
 DOWNLOAD_CALL = "cdn_client(account)?.download(&descriptor)"
 DOWNLOAD_HANDLER = re.compile(r"Operation::DownloadMedia\s*\{(?P<fields>[^}]*)\}\s*=>\s*\{")
 DOWNLOAD_FIELDS = {"file_id", "fallback_file_id", "aes_key", "quality", "expected_bytes"}
-# The fields the fix's design note documents for the one diagnostic line, and no others.
-DIAGNOSTIC_FIELDS = {"quality", "filetype", "downpicformat", "size_class", "file_id_len", "has_slash", "has_query"}
+# The fields the fix's design note documents for the attempt's request line, and no others.
+DIAGNOSTIC_FIELDS = {
+    "variant", "quality", "filetype", "downpicformat", "size_class", "file_id_len", "has_slash", "has_query",
+}
 
 
 def balanced_slice(text: str, opening: int) -> tuple[int, int]:
@@ -232,14 +245,33 @@ def split_arguments(text: str) -> list[str]:
     return [argument for argument in arguments if argument]
 
 
-def the_diagnostic_call(rust: str) -> str:
-    """The one eprintln! call the applied native source emits for a CDN attempt."""
-    assert rust.count(RUST_EPRINTLN) == 1, (
-        f"the applied native source has {rust.count(RUST_EPRINTLN)} eprintln! calls, the fix documents one"
+def eprintln_calls(rust: str) -> list[str]:
+    """Every eprintln! call in the applied native source, in source order."""
+    calls: list[str] = []
+    start = 0
+    while (at := rust.find(RUST_EPRINTLN, start)) != -1:
+        _, end = balanced_slice(rust, at + len(RUST_EPRINTLN) - 1)
+        calls.append(rust[at:end])
+        start = end
+    return calls
+
+
+def the_diagnostic_calls(rust: str) -> tuple[str, str]:
+    """The two eprintln! calls the applied source emits for one CDN attempt: the request
+    line, emitted before the download, and the line naming the variant that answered."""
+    calls = eprintln_calls(rust)
+    assert len(calls) == 2, (
+        f"the applied native source has {len(calls)} eprintln! calls, the fix documents the "
+        "attempt's request line and the line naming the variant that answered"
     )
-    call_at = rust.index(RUST_EPRINTLN)
-    _, end = balanced_slice(rust, call_at + len(RUST_EPRINTLN) - 1)
-    return rust[call_at:end]
+    request, served = calls
+    assert "downpicformat=1" in request, "the first diagnostic is not the attempt's request line"
+    return request, served
+
+
+def the_diagnostic_call(rust: str) -> str:
+    """The one request line: one per attempt, emitted before the download."""
+    return the_diagnostic_calls(rust)[0]
 
 
 def download_media_handler(rust: str) -> str:
@@ -307,13 +339,7 @@ def test_the_patch_touches_only_pinned_files(pin: dict) -> None:
 
 
 def test_the_patch_applies_to_the_pinned_bytes(tmp_path: Path, pin: dict) -> None:
-    snapshot = tmp_path / "pin"
-    for entry in pin["files"]:
-        copy = snapshot / entry["path"]
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        copy.write_bytes((SNAPSHOT / entry["path"]).read_bytes())
-
-    apply_patch((REPO / pin["patch"]["path"]).read_text(encoding="utf-8"), snapshot)
+    snapshot = applied_snapshot(tmp_path, pin, "pin")
 
     # The addon: outgoing is still the one thing dropped; every other type is carried
     # with the type and raw payload the wire gave it.
@@ -438,13 +464,7 @@ def test_the_image_overlays_exactly_the_fork_addon_and_its_dist(pin: dict) -> No
 
 
 def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(tmp_path: Path, pin: dict) -> None:
-    snapshot = tmp_path / "pin2"
-    for entry in pin["files"]:
-        copy = snapshot / entry["path"]
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        copy.write_bytes((SNAPSHOT / entry["path"]).read_bytes())
-
-    apply_patch((REPO / pin["patch"]["path"]).read_text(encoding="utf-8"), snapshot)
+    snapshot = applied_snapshot(tmp_path, pin, "pin2")
 
     puppet = (snapshot / "src/puppet-neo.ts").read_text(encoding="utf-8")
     native_ts = (snapshot / "src/native.ts").read_text(encoding="utf-8")
@@ -503,7 +523,7 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     _, loop_end = balanced_slice(handler, loop_open)
     loop_body = handler[loop_open:loop_end]
     download_at = loop_body.index(DOWNLOAD_CALL)
-    succeeded_at = loop_body.index("Ok(downloaded) => break downloaded")
+    succeeded_at = loop_body.index("Ok(downloaded) => {")
     failed_at = loop_body.index("Err(err) =>")
     assert download_at < succeeded_at < failed_at
     # A second download happens only after the first one returned Err: the single `continue;`
@@ -537,8 +557,8 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
         "the Err arm does more than retry once and otherwise return the error"
     )
 
-    # One diagnostic line per attempt: it names the request fields and the id's shape,
-    # never an id, an AES key or a message byte.
+    # The attempt's line names the request fields and the id's shape, never an id, an AES
+    # key or a message byte; the second line (the answered variant) has its own test.
     diagnostic = the_diagnostic_call(rust)
     template, template_end = rust_string_literal(diagnostic)
     labels = format_labels(template)
@@ -546,6 +566,7 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
         f"the diagnostic writes {labels}, the fix documents {sorted(DIAGNOSTIC_FIELDS)} once each"
     )
     assert dict(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=\{([^{}]*)\}", template)) == {
+        "variant": "variant",
         "quality": "quality:?",
         "filetype": "filetype",
         "size_class": "size_class",
@@ -556,7 +577,9 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     assert "downpicformat=1" in template, "the diagnostic does not pin the download format it asks for"
     assert "file_id_len={}" in template, "the diagnostic does not measure the id's length"
     placeholders, anonymous = format_placeholders(template)
-    assert anonymous == 1 and placeholders == {"quality", "filetype", "size_class", "shape_slash", "shape_query"}, (
+    assert anonymous == 1 and placeholders == {
+        "variant", "quality", "filetype", "size_class", "shape_slash", "shape_query",
+    }, (
         f"the diagnostic formats {sorted(placeholders)} and {anonymous} anonymous values"
     )
     assert split_arguments(diagnostic[template_end : diagnostic.rindex(")")]) == ["file_id.len()"], (
@@ -567,3 +590,137 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     # ...and the two booleans it reports are predicates over the id, not the id.
     assert "let shape_slash = file_id.contains('/');" in handler
     assert "let shape_query = file_id.contains('?');" in handler
+
+
+def test_a_refused_image_retries_the_mid_id_as_the_crates_standard_profile(tmp_path: Path, pin: dict) -> None:
+    """The one retry sends `cdnmidimgurl` with filetype 2, and the log says which answered."""
+    snapshot = applied_snapshot(tmp_path, pin, "fallback")
+    rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
+    handler = download_media_handler(rust)
+
+    # The filetype is the crate's, read from the profile the attempt's descriptor carries.
+    # No list of `MediaQuality` arms is written here: the local match this replaces made the
+    # native stage's `cargo build` fail the moment upstream added a variant (E0004), and a
+    # test that only reads text cannot see that, so what is pinned is the absence of a list.
+    assert "let filetype = quality.filetype();" in handler, (
+        "the filetype is not read from the crate's own MediaQuality mapping"
+    )
+    local_arms = re.findall(
+        r"MediaQuality::[A-Za-z]+(?:\s*\|\s*MediaQuality::[A-Za-z]+)*\s*(?:if [^=]+)?=>", handler
+    )
+    assert local_arms == [], (
+        f"the handler writes its own MediaQuality arms instead of asking the crate: {local_arms}"
+    )
+
+    # ...and it is read per attempt, inside the loop: a filetype fixed once per medium could
+    # not change for the retry, which would repeat the pairing the CDN already refused.
+    loop_open = handler.index("{", handler.index("let downloaded = loop {"))
+    _, loop_end = balanced_slice(handler, loop_open)
+    loop_body = handler[loop_open:loop_end]
+    assert "let filetype = quality.filetype();" in loop_body, (
+        "the filetype is chosen once per medium, so the retry sends the refused one again"
+    )
+
+    # The retry is one, and it swaps both halves of the request: the id, and the profile the
+    # crate maps to filetype 2 (`Standard`) for a mid-size image - the pair design/
+    # wechat-image-cdn-diagnosis.md section 6.3 names for `cdnmidimgurl`.
+    assert handler.count("attempted_fallback = true;") == 1, (
+        "the handler does not make exactly one retry on the second id"
+    )
+    retry_at = handler.index("attempted_fallback = true;")
+    retry = handler[retry_at : handler.index("continue;", retry_at)]
+    assert "mid_size = true;" in retry, "the retry swaps the id but not the variant the log names"
+    assert "quality = MediaQuality::Standard;" in retry, (
+        "the retry sends the mid-size id as the full-size profile, so its filetype is 1 again"
+    )
+    assert "file_id = fallback_file_id.clone().unwrap();" in retry, (
+        "the retry does not download the second id"
+    )
+    assert handler.count("quality = MediaQuality::Standard;") == 1, (
+        "the mid-size profile is set somewhere other than the one retry"
+    )
+
+    # The descriptor carries the loop's profile, so the request itself asks for filetype 2,
+    # not only the log line.
+    descriptor_open = handler.index("{", handler.index("let descriptor = MediaDescriptor {"))
+    _, descriptor_end = balanced_slice(handler, descriptor_open)
+    descriptor = handler[descriptor_open:descriptor_end]
+    assert re.search(r"^\s*quality,$", descriptor, re.MULTILINE), (
+        "the descriptor pins one profile, so the retry's profile never reaches the request"
+    )
+    for pinned in ("MediaQuality::Original", "MediaQuality::Standard"):
+        assert pinned not in descriptor, f"the descriptor pins {pinned}, not the attempt's profile"
+
+    # And the answer names which variant produced the bytes: same redacted shape summary as
+    # the request line, no id, no key, no byte.
+    request, served = the_diagnostic_calls(rust)
+    assert "variant={variant}" in request, "the request line does not name the variant it sends"
+    assert "variant={variant}" in served and "filetype={filetype}" in served, (
+        "the line for a download that worked does not name the variant the CDN served"
+    )
+    assert 'let variant = if mid_size { "mid" } else { "primary" };' in handler, (
+        "the variant the diagnostics print is not the one the retry switches"
+    )
+    assert handler.index("let variant = if mid_size") < handler.index(RUST_EPRINTLN), (
+        "the variant is chosen after the line that prints it"
+    )
+    # It reports the attempt's own numbers, not a second request's.
+    served_template, served_end = rust_string_literal(served)
+    assert format_labels(served_template) == ["variant", "filetype", "file_id_len", "has_slash", "has_query"]
+    assert format_placeholders(served_template) == ({"variant", "filetype", "shape_slash", "shape_query"}, 1)
+    assert split_arguments(served[served_end : served.rindex(")")]) == ["file_id.len()"], (
+        "the served line formats more than the id's length"
+    )
+    for forbidden in ("{file_id}", "{aes_key}", "{body}", "{bytes}", "aes_key", "body", "bytes"):
+        assert forbidden not in served, f"the served line carries {forbidden!r}"
+    # Emitted where the bytes are: inside the Ok arm, after the download that produced them.
+    assert handler.index(DOWNLOAD_CALL) < handler.index(served) < handler.index("break downloaded;")
+
+
+def test_the_file_branch_keeps_one_request_and_its_own_profile(tmp_path: Path, pin: dict) -> None:
+    """A file is never the image's fallback: one request, and the profile it was asked for."""
+    snapshot = applied_snapshot(tmp_path, pin, "file-arm")
+    rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
+    handler = download_media_handler(rust)
+
+    # The retry is an image's, and the addon says so itself rather than relying on the
+    # caller that happens to pass no second id for a file: a file handed one is still one
+    # request. (The shape of the guard is pinned by the retry test above; here the gate it
+    # reads is.)
+    bound = re.search(r"let is_image = (?P<expression>[^;]+);", handler)
+    assert bound, "the retry is not gated on a named image flag"
+    expression = bound["expression"].strip()
+    assert expression in {"quality == MediaQuality::Original", "MediaQuality::Original == quality"}, (
+        f"the retry is gated on {expression!r}, so a file would be retried as a mid-size image"
+    )
+
+    # A file's own filetype: the descriptor carries the profile the caller asked for, the
+    # crate maps `File` to 5 (`LargeFile` 7 beyond 25 MiB), and no line here can turn a file
+    # into another size - the only profile the handler ever forces is the image's mid one.
+    descriptor_open = handler.index("{", handler.index("let descriptor = MediaDescriptor {"))
+    _, descriptor_end = balanced_slice(handler, descriptor_open)
+    assert re.search(r"^\s*quality,$", handler[descriptor_open:descriptor_end], re.MULTILINE), (
+        "a file's request does not carry the profile it was asked for"
+    )
+    parsed = re.search(r"let quality = match quality\.as_str\(\) \{(?P<arms>[^}]*)\}", handler)
+    assert parsed, "the handler no longer reads the profile the caller asked for"
+    assert dict(re.findall(r'"(?P<name>\w+)"\s*=>\s*MediaQuality::(?P<variant>\w+)', parsed["arms"])) == {
+        "original": "Original",
+        "file": "File",
+        "large_file": "LargeFile",
+    }, "the profile a caller asks for is not the one the request carries"
+    reassignments = re.findall(r"^[ \t]*quality = MediaQuality::(\w+);[ \t]*$", handler, re.MULTILINE)
+    assert set(reassignments) <= {"Standard"}, (
+        f"the handler reassigns the request's profile to {reassignments}, so a file can be "
+        "asked for as another size than the one it was sent as"
+    )
+
+    # One request per attempt: the handler has one download call, inside the loop, and the
+    # loop's only back edge is the image's retry (pinned in the retry test).
+    loop_open = handler.index("{", handler.index("let downloaded = loop {"))
+    _, loop_end = balanced_slice(handler, loop_open)
+    loop_body = handler[loop_open:loop_end]
+    assert handler.count(DOWNLOAD_CALL) == 1, (
+        f"the handler downloads {handler.count(DOWNLOAD_CALL)} times, so a file is asked for twice"
+    )
+    assert loop_body.count(DOWNLOAD_CALL) == 1, "the file request leaves the one attempt loop"

@@ -9,10 +9,13 @@ the owner on the dashboard, never by the steward:
   someone else's server and is judged here: `https://`, or `http://` only to the very
   host the connection already names; never a reserved address (the backend, dev_mcp,
   zvec-grep, the host itself - core.state_steward_connections), and the address judged
-  is the one connected to. The metadata's `issuer` must be the server asked; the
-  resource must be on the connection's origin; S256 PKCE must be supported.
+  is the one connected to. The metadata's `issuer` must be the server asked (a trailing
+  '/' aside); the resource must be on the connection's origin; S256 PKCE must be
+  supported. A server that answers without a token (Google's Workspace servers) is
+  read at the well-known protected-resource address instead of a 401's header.
 - CLIENT: the owner's own client_id (and secret), or one dynamic registration
-  (RFC 7591), kept in the connection's secret file.
+  (RFC 7591), kept in the connection's secret file. SCOPE: the owner's (dashboard),
+  else what the server lists; Google's with `openid email` added, for the identity.
 - AUTHORIZE: `start` makes a `state` (bound to the owner session that asked, single
   use, 10 minutes) and a PKCE S256 verifier, and answers the authorization URL (with
   `resource`, RFC 8707, and `prompt=login` - Google: `select_account consent` - so a
@@ -134,7 +137,7 @@ def judge_endpoint(url: str, conn_url: str) -> str:
         ip = ipaddress.ip_address(address)
         if address in reserved or ip.is_loopback or ip.is_unspecified:
             raise OAuthError("oauth_endpoint_refused: reserved_endpoint")
-    return sorted(found)[0]
+    return sc.preferred_address(found)
 
 
 def _request(method: str, url: str, conn_url: str, **kwargs) -> httpx.Response:
@@ -208,9 +211,14 @@ def discover(conn_url: str) -> dict:
     """{resource, issuer, scope, metadata} for one connection address (see the module)."""
     challenge = _request("POST", conn_url, conn_url, json=INITIALIZE,
                          headers={"Accept": "application/json, text/event-stream"})
-    if challenge.status_code != 401:
+    if challenge.status_code == 401:
+        params = parse_www_authenticate(challenge.headers.get("www-authenticate", ""))
+    elif 200 <= challenge.status_code < 300:
+        # A server that answers `initialize` without a token (Google's Workspace servers
+        # want one only for the calls): its metadata is at the well-known address.
+        params = {}
+    else:
         raise OAuthError(f"oauth_discovery_failed: the server answered {challenge.status_code}, not 401")
-    params = parse_www_authenticate(challenge.headers.get("www-authenticate", ""))
     candidates = [params["resource_metadata"]] if params.get("resource_metadata") else _well_known(
         conn_url, "oauth-protected-resource")
     prm = None
@@ -227,10 +235,17 @@ def discover(conn_url: str) -> dict:
     servers = prm.get("authorization_servers")
     if not isinstance(servers, list) or not servers or not isinstance(servers[0], str):
         raise OAuthError("oauth_discovery_failed: no authorization server")
-    issuer = servers[0]
-    metadata = authorization_server(issuer, conn_url)
+    metadata = authorization_server(servers[0], conn_url)
     scope = params.get("scope") or " ".join(s for s in (prm.get("scopes_supported") or []) if isinstance(s, str))
-    return {"resource": resource, "issuer": issuer, "scope": scope, "metadata": metadata}
+    # The issuer as the server's own metadata spells it (the `iss` the callback carries).
+    return {"resource": resource, "issuer": metadata["issuer"], "scope": scope, "metadata": metadata}
+
+
+def _same_issuer(named, issuer: str) -> bool:
+    """The metadata's issuer is the one asked; a trailing '/' alone does not differ
+    (Google's resources name `https://accounts.google.com/`, its metadata
+    `https://accounts.google.com`)."""
+    return isinstance(named, str) and named.rstrip("/") == issuer.rstrip("/")
 
 
 def authorization_server(issuer: str, conn_url: str) -> dict:
@@ -246,7 +261,7 @@ def authorization_server(issuer: str, conn_url: str) -> dict:
         if response.status_code != 200:
             continue
         metadata = _json(response, "oauth_discovery_failed")
-        if metadata.get("issuer") != issuer:
+        if not _same_issuer(metadata.get("issuer"), issuer):
             # Another issuer's document (an origin-root one for a path issuer): try the next.
             mismatch = True
             continue
@@ -288,6 +303,38 @@ def set_client(conn_id: str, client_id: str | None, client_secret: str | None) -
     else:
         secret.pop("client", None)
     sc.write_secret(conn_id, secret)
+
+
+def set_scope(conn_id: str, scope: str | None) -> None:
+    """The scopes the owner asks for (space-separated); empty: what the server lists."""
+    with _lock(conn_id):
+        secret = _secret(conn_id)
+        if scope:
+            secret["scope"] = scope
+        else:
+            secret.pop("scope", None)
+        sc.write_secret(conn_id, secret)
+
+
+def scope_of(conn_id: str) -> str | None:
+    """The owner's scopes for this connection, if any (not a secret: shown on the dashboard)."""
+    scope = _secret(conn_id).get("scope")
+    return scope if isinstance(scope, str) and scope else None
+
+
+GOOGLE_ISSUER_HOST = "accounts.google.com"
+# Google issues an id_token with the account's email only for these; without them the
+# bound identity is unknown and the connection can never be enabled (7.8.6).
+IDENTITY_SCOPES = ("openid", "email")
+
+
+def requested_scope(conn_id: str, issuer: str, listed: str) -> str:
+    """The scope of an authorization request: the owner's, else what the server listed;
+    for Google with `openid email` added."""
+    words = (scope_of(conn_id) or listed or "").split()
+    if urlsplit(issuer).hostname == GOOGLE_ISSUER_HOST:
+        words += [w for w in IDENTITY_SCOPES if w not in words]
+    return " ".join(dict.fromkeys(words))
 
 
 def _client_for(conn_id: str, conn_url: str, issuer: str, metadata: dict, redirect: str) -> dict:
@@ -361,9 +408,10 @@ def start(row, actor: str) -> dict:
     query = {"response_type": "code", "client_id": client["client_id"], "redirect_uri": redirect,
              "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
              "resource": found["resource"]}
-    if found["scope"]:
-        query["scope"] = found["scope"]
-    if urlsplit(found["issuer"]).hostname == "accounts.google.com":
+    scope = requested_scope(row["conn_id"], found["issuer"], found["scope"])
+    if scope:
+        query["scope"] = scope
+    if urlsplit(found["issuer"]).hostname == GOOGLE_ISSUER_HOST:
         query.update(prompt="select_account consent", access_type="offline")
     else:
         query["prompt"] = "login"

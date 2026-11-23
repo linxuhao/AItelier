@@ -1170,7 +1170,8 @@ export interface StewardConnection {
   conn_id: string; label: string; url: string; auth_kind: 'none' | 'header' | 'oauth';
   header_name: string | null; visibility: StewardVisibility; enabled: boolean;
   generation: number; config_version: number; secret: 'set' | 'unset' | 'oauth_needs_consent';
-  auth_identity: string | null; identity_confirmed?: boolean; created_at: string; updated_at: string;
+  auth_identity: string | null; identity_confirmed?: boolean; oauth_scope?: string | null;
+  created_at: string; updated_at: string;
   last_probe_at: string | null; last_error: string | null; last_change: string; usable: boolean;
   tool_counts: {all: number; allowed: number; outward: number; changed: number; new: number};
 }
@@ -1230,6 +1231,9 @@ export interface StewardConfirmation {
 export function setStewardOAuthClient(connId: string, clientId: string | null, clientSecret: string | null): Promise<unknown> {
   return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/client',
     {client_id: clientId, client_secret: clientSecret});
+}
+export function setStewardOAuthScope(connId: string, scope: string | null): Promise<unknown> {
+  return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/scope', {scope});
 }
 export function startStewardOAuth(connId: string): Promise<{conn_id: string; authorize_url: string}> {
   return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/start');

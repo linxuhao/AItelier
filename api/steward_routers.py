@@ -623,6 +623,18 @@ def set_oauth_client(conn_id: str, body: OAuthClient, service=Depends(get_servic
     return _connection_call(service.steward_connections.oauth_client_set, conn_id, body.client_id, body.client_secret)
 
 
+class OAuthScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope: str | None = Field(default=None, max_length=1000)
+
+
+@router.put("/connections/{conn_id}/oauth/scope", dependencies=[Depends(authz.require_writer)])
+def set_oauth_scope(conn_id: str, body: OAuthScope, service=Depends(get_service)):
+    """The scopes asked for at the next authorization; empty: what the server lists."""
+    _owner(service)
+    return _connection_call(service.steward_connections.oauth_scope_set, conn_id, body.scope)
+
+
 @router.post("/connections/{conn_id}/oauth/start", dependencies=[Depends(authz.require_writer)])
 async def start_oauth(conn_id: str, service=Depends(get_service)):
     """{authorize_url}: where the owner's browser signs in at the connection's service."""

@@ -927,6 +927,7 @@ class TestTheStewardReadersRefuseTheAnonymous:
              {"project_id": C.OPEN, "upload_id": C.CONVERSATION_UPLOAD, "ref": "m_0123456789abcdef"}),
             ("GET", f"/api/dsh-drivers/{C.OPEN}/conversation/media/{C.CONVERSATION_UPLOAD}", None),
             ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/client", {"client_id": "c"}),
+            ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/scope", {"scope": "s"}),
         ]
         results = {}
         try:

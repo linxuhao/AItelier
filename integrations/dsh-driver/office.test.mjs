@@ -10,7 +10,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createOfficeRunner, officeMediaOps, OFFICE_IMAGE_LAYOUT, OFFICE_LIMITS, SELFCHECK_TEXT } from './office.mjs';
+import { createOfficeRunner, officeHostLabel, officeMediaOps, selfcheckRead, OFFICE_IMAGE_LAYOUT, OFFICE_LIMITS, SELFCHECK_TEXT } from './office.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { ooxml } from '../dsh-director/test/fixtures/zip-samples.mjs';
 
@@ -61,7 +61,11 @@ test('start: an earlier process\'s labelled containers and job directories go, t
   writeFileSync(join(r.dir, 'state', 'office-tmp', 'j-old', 'x'), 'left');
   await r.runner.start();
   const calls = r.calls();
-  assert.deepEqual(calls[0], ['ps', '-aq', '--filter', 'label=aitelier.office=1']);
+  // Only this host's own containers (review N7): the label names its state dir, not every office job on the daemon.
+  assert.match(r.runner.label, /^aitelier\.office\.host=[0-9a-f]{16}$/);
+  assert.equal(r.runner.label, officeHostLabel(join(r.dir, 'state', 'office-tmp')));
+  assert.notEqual(officeHostLabel('/a/office-tmp'), officeHostLabel('/b/office-tmp'));
+  assert.deepEqual(calls[0], ['ps', '-aq', '--filter', `label=${r.runner.label}`]);
   assert.deepEqual(calls[1], ['rm', '-f', 'abc123def456', '0123456789ab']);
   assert.deepEqual(calls[2], ['image', 'inspect', '--format', '{{.Id}}', IMAGE]);
   assert.equal(r.jobsLeft().length, 0, 'the old job directory went');
@@ -70,7 +74,10 @@ test('start: an earlier process\'s labelled containers and job directories go, t
   const [fonts, check] = r.runs();
   assert.equal(fonts[fonts.indexOf('--entrypoint') + 1], OFFICE_IMAGE_LAYOUT.allfontsgen);
   const fontsDir = join(r.dir, 'state', 'office-fonts', 'abababababab');
-  assert.ok(fonts.includes(`${fontsDir}:/job/out:rw`));
+  // Made in a fresh directory beside the cache and renamed into place (review N4).
+  const madeIn = fonts.find(arg => arg.endsWith(':/job/out:rw')).split(':')[0];
+  assert.ok(madeIn.startsWith(join(r.dir, 'state', 'office-fonts', '.new-')), madeIn);
+  assert.equal(existsSync(madeIn), false);
   assert.ok(existsSync(join(fontsDir, 'AllFonts.js')) && existsSync(join(fontsDir, 'font_selection.bin')));
   assert.equal(check[check.indexOf('--entrypoint') + 1], OFFICE_IMAGE_LAYOUT.docbuilder);
   assert.ok(readFileSync(join(r.files.capture, 'build.docbuilder'), 'utf8').includes(SELFCHECK_TEXT));
@@ -128,7 +135,7 @@ test('a job\'s container: fixed hardening, the pinned id, read-only in/ and font
   const pairs = (flag, value) => args.some((a, i) => a === flag && args[i + 1] === value);
   for (const [flag, value] of [['--network', 'none'], ['--log-driver', 'none'], ['-u', '1234:5678'], ['--cap-drop', 'ALL'],
     ['--security-opt', 'no-new-privileges'], ['--pids-limit', '128'], ['--cpus', '2'], ['--memory', '1g'], ['--memory-swap', '1g'],
-    ['--ulimit', 'fsize=67108864'], ['--tmpfs', '/tmp:rw,size=256m,mode=1777'], ['--label', 'aitelier.office=1'],
+    ['--ulimit', 'fsize=67108864'], ['--tmpfs', '/tmp:rw,size=256m,mode=1777'], ['--label', 'aitelier.office=1'], ['--label', r.runner.label],
     ['--entrypoint', OFFICE_IMAGE_LAYOUT.docbuilder]])
     assert.ok(pairs(flag, value), `${flag} ${value}`);
   assert.ok(args.includes('--rm') && args.includes('--read-only'));
@@ -198,6 +205,84 @@ test('the wall clock: the host kills the container by its name and answers timeo
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 100);
   assert.deepEqual(await r.runner.generate(LETTER, controller.signal), { refused: 'timeout' });
+});
+
+test('a kill is waited for before the slot is let go (bounded); a caller aborting while it waits gives up its place (review N2, N3)', async () => {
+  const r = rig({}, { limits: { wallMs: 200, queueWaitMs: 5000, killWaitMs: 5000 } });
+  await r.runner.start();
+  r.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 600 } });
+  const answer = await r.runner.generate(LETTER);
+  assert.deepEqual(answer, { refused: 'timeout' });
+  const name = r.runs().at(-1)[r.runs().at(-1).indexOf('--name') + 1];
+  assert.ok(r.calls().some(args => args[0] === 'kill-done' && args[1] === name), 'answered only once docker kill returned');
+  assert.deepEqual(r.jobsLeft(), []);
+  // A kill that hangs is waited for killWaitMs only.
+  const hung = rig({}, { limits: { wallMs: 200, killWaitMs: 300 } });
+  await hung.runner.start();
+  hung.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 2500 } });
+  let started = Date.now();
+  assert.deepEqual(await hung.runner.generate(LETTER), { refused: 'timeout' });
+  assert.ok(Date.now() - started < 1500, String(Date.now() - started));
+  // A second job waits behind the first until the first one's kill is done.
+  r.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 600 } });
+  const first = r.runner.generate(LETTER);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  r.setPlan({ run: { write: 'pdf' }, kill: { sleepMs: 600 } });
+  const second = await r.runner.generate(LETTER);
+  assert.ok(second.bytes);
+  await first;
+  const log = r.calls();
+  const [firstAt, secondAt] = log.map((args, i) => (args[0] === 'run' ? i : -1)).filter(i => i >= 0).slice(-2);
+  const firstName = log[firstAt][log[firstAt].indexOf('--name') + 1];
+  const killDone = log.findIndex(args => args[0] === 'kill-done' && args[1] === firstName);
+  assert.ok(killDone > firstAt && killDone < secondAt, 'the next container starts only after the kill');
+  // Aborted while waiting for the slot: timeout at once, not after queueWaitMs; the queue goes on.
+  r.setPlan({ run: { sleepMs: 1500, write: 'pdf' } });
+  const holder = r.runner.generate(LETTER);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const controller = new AbortController();
+  started = Date.now();
+  setTimeout(() => controller.abort(), 100);
+  assert.deepEqual(await r.runner.generate(LETTER, controller.signal), { refused: 'timeout' });
+  assert.ok(Date.now() - started < 1000, String(Date.now() - started));
+  const runsBefore = r.runs().length;
+  assert.deepEqual(await r.runner.generate(LETTER, AbortSignal.abort()), { refused: 'timeout' }, 'already aborted');
+  assert.equal(r.runs().length, runsBefore, 'an aborted waiter never runs a container');
+  await holder;
+  r.setPlan({ run: { write: 'pdf' } });
+  assert.ok((await r.runner.generate(LETTER)).bytes, 'the slot is free again');
+});
+
+test('the font cache: a cut-off allfontsgen leaves no cache; a failed read-back drops a damaged one, made again next time (review N4)', async () => {
+  const r = rig({ fonts: { partial: true, code: 1 } });
+  await r.runner.start();
+  assert.equal(r.runner.status().reason, 'fonts_failed');
+  const fontsRoot = join(r.dir, 'state', 'office-fonts');
+  assert.deepEqual(readdirSync(fontsRoot), [], 'neither a half cache nor its fresh directory is left');
+  // A damaged cache that looks whole (both files there): the self-check fails, the cache goes.
+  const fontsDir = join(fontsRoot, 'abababababab');
+  mkdirSync(fontsDir, { recursive: true });
+  writeFileSync(join(fontsDir, 'AllFonts.js'), 'window["__fonts_fi');
+  writeFileSync(join(fontsDir, 'font_selection.bin'), '');
+  mkdirSync(join(fontsRoot, '.new-left'));
+  let good = false;
+  const damaged = rig({}, { fontsRoot, verifyPdf: async path => (good ? readFileSync(path, 'utf8') : '') });
+  await damaged.runner.start();
+  assert.equal(existsSync(join(fontsRoot, '.new-left')), false, 'a fresh directory an earlier process left goes at start');
+  assert.equal(damaged.runs().filter(args => args.includes(OFFICE_IMAGE_LAYOUT.allfontsgen)).length, 0, 'it looked whole');
+  assert.equal(damaged.runner.status().reason, 'selfcheck_failed');
+  assert.equal(existsSync(fontsDir), false, 'dropped');
+  good = true;
+  damaged.tick(OFFICE_LIMITS.retryMs + 1);
+  assert.ok((await damaged.runner.generate(LETTER)).bytes);
+  assert.equal(damaged.runs().filter(args => args.includes(OFFICE_IMAGE_LAYOUT.allfontsgen)).length, 1, 'made again');
+  assert.equal(readFileSync(join(fontsDir, 'AllFonts.js'), 'utf8'), 'window["__fonts_files"] = [];');
+});
+
+test('the self-check\'s read-back: the sentence whatever spacing, line breaks or punctuation width the reader gives (review S2)', () => {
+  assert.equal(/[\p{P}\s]/u.test(SELFCHECK_TEXT), false, 'letters only');
+  for (const text of [SELFCHECK_TEXT, ` ${[...SELFCHECK_TEXT].join(' ')} `, '管家文档自检：一页中文。', '管家文档自检:一页\r\n中文.', '\ufeff管家文档\u3000自检 一页中文\n', '管家\u2f42档自检一页中\u2f42']) assert.equal(selfcheckRead(text), true, JSON.stringify(text));
+  for (const text of ['', '管家文档自检一页', '管家文档自检一页英文', undefined, 42]) assert.equal(selfcheckRead(text), false, JSON.stringify(text));
 });
 
 test('reading: a docx goes through x2t to a PDF the reader reads in the job directory; an xlsx is dumped to text', async () => {

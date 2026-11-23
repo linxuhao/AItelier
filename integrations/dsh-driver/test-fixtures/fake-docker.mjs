@@ -4,7 +4,8 @@
 // $FAKE_DOCKER_PLAN (JSON, read on every call so a test can change it between calls):
 //   inspect: {code, stdout, stderr}         `docker image inspect ...`
 //   ps: "id id"                             `docker ps -aq --filter ...`
-//   fonts: {code, write: true}              a run whose entrypoint is allfontsgen
+//   fonts: {code, write: true, partial}     a run whose entrypoint is allfontsgen (partial: a cut-off AllFonts.js only)
+//   kill: {sleepMs}                         `docker kill <name>`: answers after sleepMs, then logs ["kill-done", name]
 //   run: {code, sleepMs, write, from, stdout, stderr}  any other run (docbuilder, x2t)
 // A run's output goes to the file the job names: docbuilder's `builder.SaveFile("...", "/job/out/<name>")`
 // line, x2t's <m_sFileTo>; `write` is "pdf" (%PDF- and the job's own script or task, so its text
@@ -24,14 +25,18 @@ const answer = ({ code = 0, stdout = '', stderr = '' } = {}) => {
 
 if (args[0] === 'image') answer(plan.inspect);
 else if (args[0] === 'ps') answer({ stdout: plan.ps ?? '' });
-else if (args[0] === 'rm' || args[0] === 'kill') answer();
+else if (args[0] === 'rm') answer();
+else if (args[0] === 'kill') {
+  setTimeout(() => { appendFileSync(process.env.FAKE_DOCKER_LOG, JSON.stringify(['kill-done', args[1]]) + '\n'); answer(); }, plan.kill?.sleepMs ?? 0);
+}
 else if (args[0] === 'run') {
   const mount = target => { const i = args.findIndex((a, k) => args[k - 1] === '-v' && a.split(':')[1] === target); return i < 0 ? undefined : args[i].split(':')[0]; };
   const out = mount('/job/out'), input = mount('/job/in');
   const entrypoint = args[args.indexOf('--entrypoint') + 1];
   if (entrypoint.endsWith('allfontsgen')) {
     const step = plan.fonts ?? {};
-    if (step.write !== false && !step.code) {
+    if (step.partial) writeFileSync(join(out, 'AllFonts.js'), 'window["__fonts_fi');
+    else if (step.write !== false && !step.code) {
       writeFileSync(join(out, 'AllFonts.js'), 'window["__fonts_files"] = [];');
       writeFileSync(join(out, 'font_selection.bin'), Buffer.alloc(16));
     }

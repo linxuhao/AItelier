@@ -13,23 +13,28 @@
  *  constant or the host's random name: no model or user string is ever on a command line or in
  *  the task XML - a document's content is only in /job/in/src.* or the DATA line.
  *
- *  One job at a time per host (queueWaitMs, then busy); a job past wallMs is killed by its name
- *  (`docker kill`) and answered timeout; the job directory is removed when the job ends, however
- *  it ends. Outputs are read only from the names the host chose, with O_NOFOLLOW and lstat, under
- *  the size cap, and their type is checked (a PDF's magic, a docx's or xlsx's zip directory).
+ *  One job at a time per host (queueWaitMs, then busy; a caller's abort while waiting: timeout);
+ *  a job past wallMs (or aborted) is killed by its name (`docker kill`, awaited up to killWaitMs
+ *  before the slot is let go and the job directory removed) and answered timeout; the job
+ *  directory is removed when the job ends, however it ends. Outputs are read only from the
+ *  names the host chose, with O_NOFOLLOW and lstat, under the size cap, and their type is
+ *  checked (a PDF's magic, a docx's or xlsx's zip directory).
  *  The exit mapping (7.8.12c "八"): the host's own kill -> timeout; any other non-zero exit (137
  *  out of memory included) -> convert_failed; docker itself not starting the job (spawn error,
  *  exit 125-127) -> office_unavailable; exit 0 without a good output -> convert_failed.
  *
- *  start(): removes containers labelled aitelier.office=1 an earlier process left and the
+ *  start(): removes the containers an earlier process of THIS host left (by its own label
+ *  aitelier.office.host=<id of its state dir>; every job also carries aitelier.office=1) and the
  *  office-tmp directory, then the self-check: the image is there, the font cache exists or is
- *  made, and a fixed one-page PDF made from the template reads back (verifyPdf) with its
- *  sentence. Until it passes every job answers office_unavailable; a job tries it again at most
- *  once per retryMs. Logs carry a format, a mime, a size, an elapsed time, a refusal code and the
- *  self-check state - never a title, a name, content or stderr. */
-import { randomBytes } from 'node:crypto';
+ *  made (into a fresh directory renamed into place, so a cut-off run never leaves half a cache),
+ *  and a fixed one-page PDF made from the template reads back (verifyPdf) with its sentence; a
+ *  read-back that fails drops the font cache, so the next try makes it again. Until it passes
+ *  every job answers office_unavailable; a job tries it again at most once per retryMs. Logs
+ *  carry a format, a mime, a size, an elapsed time, a refusal code and the self-check state -
+ *  never a title, a name, content or stderr. */
+import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open as openFile, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open as openFile, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { spawn as spawnChild } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +43,7 @@ import { OFFICE_FONT, OFFICE_FORMATS, dataLine } from '../dsh-director/lib/offic
 
 export const OFFICE_LIMITS = Object.freeze({
   wallMs: 60000, // one container's wall clock; then `docker kill` by its name
+  killWaitMs: 15000, // how long that kill is waited for before the slot is let go
   queueWaitMs: 30000, // one container per host; a job that waits longer answers busy
   retryMs: 10 * 60 * 1000, // a failed self-check is tried again by a job at most this often
   stdoutBytes: 256 * 1024, stderrBytes: 4096, // stdout over the cap is convert_failed; stderr keeps its tail
@@ -57,6 +63,8 @@ export const OFFICE_IMAGE_LAYOUT = Object.freeze({
   themes: '/var/www/onlyoffice/documentserver/sdkjs/slide/themes',
 });
 export const OFFICE_LABEL = 'aitelier.office=1';
+/** The label naming one host's jobs: its state dir's office-tmp, hashed (startup removes only these). */
+export const officeHostLabel = tmpRoot => `aitelier.office.host=${createHash('sha256').update(String(tmpRoot)).digest('hex').slice(0, 16)}`;
 export const OFFICE_NAME_PREFIX = 'aitelier-office-';
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
 const TEMPLATES = Object.freeze({
@@ -77,8 +85,13 @@ const READ_EXT = Object.freeze({
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
 });
 const DUMP_PREFIX = 'OFFICE_XLSX ';
-/** The self-check's sentence: made into a one-page PDF and read back, character for character. */
-export const SELFCHECK_TEXT = '管家文档自检：一页中文。';
+/** The self-check's sentence: made into a one-page PDF and read back, character for character
+ *  (letters only: a PDF reader may give punctuation in another width). */
+export const SELFCHECK_TEXT = '管家文档自检一页中文';
+/** Whether a read-back holds the sentence: compared NFKC-normalized, without white space or
+ *  punctuation (a reader may split the line, space the characters or widen a colon). */
+export const selfcheckRead = text => typeof text === 'string'
+  && text.normalize('NFKC').replace(/[\s\p{P}]+/gu, '').includes(SELFCHECK_TEXT);
 
 /** The x2t task: every path the host's own; 513 is PDF. */
 const x2tTask = ext => `<?xml version="1.0" encoding="utf-8"?>
@@ -114,25 +127,33 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
   const rooted = typeof tmpRoot === 'string' && isAbsolute(tmpRoot) && typeof fontsRoot === 'string' && isAbsolute(fontsRoot);
   const pinned = typeof image === 'string' && IMAGE_ID.test(image);
   const fontsDir = pinned && rooted ? join(fontsRoot, image.slice(7, 19)) : undefined;
+  const hostLabel = officeHostLabel(tmpRoot);
   let tail = Promise.resolve();
   let status = { state: 'pending', checkedAt: -Infinity };
 
-  async function acquire() {
+  /** The one slot: {release}, or {refused} - busy past queueWaitMs, timeout when the caller
+   *  aborted while waiting (its place in the queue is given up either way). */
+  async function acquire(signal) {
     const previous = tail;
-    let release, timer;
+    let release, timer, onAbort;
     const mine = new Promise(resolve => { release = resolve; });
     tail = previous.then(() => mine);
-    const turn = await Promise.race([previous.then(() => true),
-      new Promise(resolve => { timer = setTimeout(() => resolve(false), limits.queueWaitMs); })]);
+    const turn = await Promise.race([previous.then(() => 'turn'),
+      new Promise(resolve => { timer = setTimeout(() => resolve('busy'), limits.queueWaitMs); }),
+      new Promise(resolve => {
+        onAbort = () => resolve('timeout');
+        if (signal?.aborted) onAbort(); else signal?.addEventListener?.('abort', onAbort, { once: true });
+      })]);
     clearTimeout(timer);
-    if (!turn) { release(); return undefined; }
-    return release;
+    signal?.removeEventListener?.('abort', onAbort);
+    if (turn !== 'turn') { release(); return { refused: turn }; }
+    return { release };
   }
 
   /** One docker command: {code, signal, stdout, overflow, spawnError, killedByUs, stderrTail}. */
   function dockerRun(args, { signal, wallMs, name, keepStdout = false } = {}) {
     return new Promise(resolve => {
-      let child, done = false, killedByUs = false, overflow = false, outBytes = 0;
+      let child, done = false, killedByUs = false, overflow = false, outBytes = 0, killed;
       const out = [];
       let errTail = Buffer.alloc(0);
       try { child = spawn(docker, args, { env, stdio: ['ignore', 'pipe', 'pipe'] }); }
@@ -140,8 +161,15 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
       const kill = () => {
         if (killedByUs) return;
         killedByUs = true;
-        // The container is killed by its name (the client's own death would not stop it).
-        if (name) { try { spawn(docker, ['kill', name], { env, stdio: 'ignore' }).on('error', () => {}); } catch { /* none */ } }
+        // The container is killed by its name (the client's own death would not stop it); the
+        // answer waits for that kill (bounded), so the next job never overlaps this one.
+        if (name) {
+          killed = new Promise(settle => {
+            const bound = setTimeout(settle, limits.killWaitMs);
+            const end = () => { clearTimeout(bound); settle(); };
+            try { spawn(docker, ['kill', name], { env, stdio: 'ignore' }).on('error', end).on('close', end); } catch { end(); }
+          });
+        }
         try { child.kill('SIGKILL'); } catch { /* gone */ }
       };
       const wall = wallMs ? setTimeout(kill, wallMs) : undefined;
@@ -151,7 +179,8 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
         done = true;
         clearTimeout(wall);
         signal?.removeEventListener?.('abort', kill);
-        resolve({ ...fields, killedByUs, overflow, stdout: Buffer.concat(out), stderrTail: errTail });
+        const answer = { ...fields, killedByUs, overflow, stdout: Buffer.concat(out), stderrTail: errTail };
+        if (killed) killed.then(() => resolve(answer)); else resolve(answer);
       };
       child.on('error', () => finish({ spawnError: true }));
       child.stdout.on('data', chunk => {
@@ -199,7 +228,7 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
    *  name, its own directories, the pinned id and the entrypoint). */
   function runArgs(name, dir, entrypoint, task, { fonts = true, outDir } = {}) {
     const B = OFFICE_IMAGE_LAYOUT.bin;
-    return ['run', '--rm', '--name', name, '--label', OFFICE_LABEL, '--network', 'none', '--log-driver', 'none',
+    return ['run', '--rm', '--name', name, '--label', OFFICE_LABEL, '--label', hostLabel, '--network', 'none', '--log-driver', 'none',
       '-u', `${uid}:${gid}`, '--read-only', '--tmpfs', `/tmp:rw,${limits.tmpfs}`, '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges', '--pids-limit', String(limits.pids), '--cpus', limits.cpus,
       '--memory', limits.memory, '--memory-swap', limits.memory, '--ulimit', `fsize=${limits.fsize}`,
@@ -259,22 +288,31 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
     } catch { return { refused: 'convert_failed' }; } finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {}); }
   }
 
-  /** The font cache of this image: there, or made now by allfontsgen into its directory. */
+  /** The font cache of this image: there, or made now by allfontsgen into a fresh directory
+   *  beside it that is renamed into place only once allfontsgen exited 0 with both files - so a
+   *  run cut off half-way never leaves a cache that looks whole. */
   async function fonts() {
-    const there = async () => {
+    const there = async dir => {
       for (const file of ['AllFonts.js', 'font_selection.bin']) {
-        try { if (!(await lstat(join(fontsDir, file))).isFile()) return false; } catch { return false; }
+        try { if (!(await lstat(join(dir, file))).isFile()) return false; } catch { return false; }
       }
       return true;
     };
-    if (await there()) return true;
-    await mkdir(fontsDir, { recursive: true, mode: 0o700 });
-    await chmod(fontsDir, 0o700);
-    const L = OFFICE_IMAGE_LAYOUT;
-    const run = await dockerRun(runArgs(freshName(), undefined, L.allfontsgen,
-      [`--input=${L.coreFonts}`, '--allfonts=/job/out/AllFonts.js', '--selection=/job/out/font_selection.bin', '--use-system=true'],
-      { fonts: false, outDir: fontsDir }), { wallMs: limits.wallMs });
-    return !exitRefusal(run) && there();
+    if (await there(fontsDir)) return true;
+    await mkdir(fontsRoot, { recursive: true, mode: 0o700 });
+    const fresh = await mkdtemp(join(fontsRoot, '.new-'));
+    try {
+      await chmod(fresh, 0o700);
+      const L = OFFICE_IMAGE_LAYOUT;
+      const name = freshName();
+      const run = await dockerRun(runArgs(name, undefined, L.allfontsgen,
+        [`--input=${L.coreFonts}`, '--allfonts=/job/out/AllFonts.js', '--selection=/job/out/font_selection.bin', '--use-system=true'],
+        { fonts: false, outDir: fresh }), { wallMs: limits.wallMs, name });
+      if (exitRefusal(run) || !(await there(fresh))) return false;
+      await rm(fontsDir, { recursive: true, force: true });
+      await rename(fresh, fontsDir);
+      return there(fontsDir);
+    } finally { await rm(fresh, { recursive: true, force: true }).catch(() => {}); }
   }
 
   async function selfcheck() {
@@ -297,12 +335,14 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
             try {
               await writeFile(join(dir, 'out', 'check.pdf'), made.bytes, { mode: 0o600 });
               const text = typeof verifyPdf === 'function' ? await verifyPdf(join(dir, 'out', 'check.pdf')) : undefined;
-              if (typeof text !== 'string' || !text.replace(/\s+/g, '').includes(SELFCHECK_TEXT)) reason = 'selfcheck_failed';
+              if (!selfcheckRead(text)) reason = 'selfcheck_failed';
             } finally { await rm(dir, { recursive: true, force: true }).catch(() => {}); }
           }
         }
       }
     } catch { reason = 'selfcheck_failed'; }
+    // A PDF that was not made or read right may be a damaged font cache: made again next time.
+    if (reason === 'selfcheck_failed' && fontsDir) await rm(fontsDir, { recursive: true, force: true }).catch(() => {});
     status = { state: reason ? 'unavailable' : 'ready', reason, checkedAt: now() };
     if (reason) log(`office_unavailable: ${reason}`);
     else log('office_ready ' + JSON.stringify({ elapsed_ms: now() - started }));
@@ -316,7 +356,7 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
   }
 
   /** Every job: the slot, then the self-check, then `work()`; one log line. */
-  async function slot(fields, work) {
+  async function slot(fields, work, signal) {
     const started = now();
     const done = answer => {
       log('office_job ' + JSON.stringify({ ...fields, elapsed_ms: now() - started,
@@ -324,8 +364,8 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
       return answer;
     };
     if (!pinned) return done({ refused: 'office_unavailable' });
-    const release = await acquire();
-    if (!release) return done({ refused: 'busy' });
+    const { release, refused } = await acquire(signal);
+    if (refused) return done({ refused });
     try {
       if (!(await available())) return done({ refused: 'office_unavailable' });
       return done(await work());
@@ -338,7 +378,7 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
     return slot({ op: 'make', format: spec.format }, async () => {
       const made = await make(spec, signal);
       return made.bytes ? { bytes: made.bytes, mime: OFFICE_FORMATS[spec.format].mime } : made;
-    });
+    }, signal);
   }
 
   /** A docx or pptx row converted to a PDF: `use(path)` runs on it inside the job's directory
@@ -357,7 +397,7 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
       const bytes = await output(dir, 'out.pdf', limits.pdfBytes);
       if (!bytes || bytes.subarray(0, 5).toString('latin1') !== '%PDF-') return { refused: 'convert_failed' };
       return {};
-    });
+    }, signal);
     try {
       refused = converted.refused;
       if (refused) return { refused };
@@ -384,23 +424,29 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
         if (!parsed || !Number.isSafeInteger(parsed.sheet_count) || !Array.isArray(parsed.sheets)) return { refused: 'convert_failed' };
         return { result: parsed };
       } finally { if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {}); }
-    });
+    }, signal);
   }
 
   /** Startup: an earlier process's containers (by label) and job directories go, then the
    *  self-check. Nothing at all when no image is configured (the feature is off). */
   async function start() {
     if (!pinned) { status = { state: 'unavailable', reason: 'no_image_configured', checkedAt: now() }; log('office_unavailable: no_image_configured'); return; }
-    if (rooted) await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
-    const left = await dockerRun(['ps', '-aq', '--filter', `label=${OFFICE_LABEL}`], { wallMs: limits.wallMs, keepStdout: true });
+    if (rooted) {
+      await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+      // A font cache an earlier process was making when it stopped.
+      for (const entry of await readdir(fontsRoot).catch(() => []))
+        if (entry.startsWith('.new-')) await rm(join(fontsRoot, entry), { recursive: true, force: true }).catch(() => {});
+    }
+    // Only this host's own (another host or the acceptance script may share the docker daemon).
+    const left = await dockerRun(['ps', '-aq', '--filter', `label=${hostLabel}`], { wallMs: limits.wallMs, keepStdout: true });
     const ids = left.code === 0 ? left.stdout.toString('utf8').split(/\s+/).filter(id => /^[0-9a-f]{12,64}$/.test(id)) : [];
     if (ids.length) await dockerRun(['rm', '-f', ...ids], { wallMs: limits.wallMs });
-    const release = await acquire();
+    const { release } = await acquire();
     if (!release) return;
     try { await selfcheck(); } finally { release(); }
   }
 
-  return { generate, withPdf, readSheet, start, status: () => ({ ...status }) };
+  return { generate, withPdf, readSheet, start, status: () => ({ ...status }), label: hostLabel };
 }
 
 const PAGES_SPEC = /^([1-9]\d{0,5})(?:-([1-9]\d{0,5}))?$/;

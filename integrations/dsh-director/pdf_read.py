@@ -17,12 +17,17 @@ limits itself:
   4. seccomp (x86_64 only), which closes those: socket and socketpair of every
      family, connect, bind, listen, accept, sendto/sendmsg/sendmmsg, io_uring,
      execve/execveat, fork/vfork and a clone that is not a thread, unshare/setns,
-     ptrace, process_vm_readv/writev, pidfd_open/getfd/send_signal, and kill, tkill,
-     tgkill and rt_(tg)sigqueueinfo at any process but this one fail with EPERM
-     (clone3 with ENOSYS, so a thread falls back to clone).
+     ptrace, process_vm_readv/writev, pidfd_open/getfd/send_signal, kill, tkill,
+     tgkill and rt_(tg)sigqueueinfo at any process but this one, and a file owner set
+     to another process (fcntl F_SETOWN, F_SETOWN_EX, F_SETSIG; ioctl FIOSETOWN,
+     SIOCSPGRP: SIGIO or F_SETSIG's signal would go to that owner) fail with EPERM
+     (clone3 with ENOSYS, so a thread falls back to clone). With no owner set, O_ASYNC
+     signals nobody; F_NOTIFY and F_SETLEASE make the caller itself the owner.
   What stays open even with every layer: reading inside the allowed paths, writing
-  files of up to 8 MiB each in the output directory until the CPU limit, and the
-  descriptors the host gave (stdout and stderr). Each layer fails open: the result's
+  files of up to 8 MiB each in the output directory until the CPU limit, the
+  descriptors the host gave (stdout and stderr), and System V IPC (any message queue,
+  semaphore set or shared memory segment in the IPC namespace whose mode lets
+  this user in). Each layer fails open: the result's
   `sandbox` names exactly the layers in place, joined by "+" - "landlock" (files and
   TCP) or "landlock_fs" (files only), then "seccomp" - or "none", and the read goes on.
 
@@ -111,6 +116,11 @@ DENIED_SYSCALLS = (
 # A signal only to this process (its first argument, a 32-bit pid or tgid, must be ours).
 SELF_ONLY_SYSCALLS = (62, 129, 200, 234, 297)  # kill rt_sigqueueinfo tkill tgkill rt_tgsigqueueinfo
 SYS_CLONE, SYS_CLONE3 = 56, 435
+# A process to signal through a file's owner: refused by command, every other fcntl and ioctl stays.
+# Both calls take cmd as an unsigned int, so only args[1]'s low word counts. x86_64 has no fcntl64.
+SYS_FCNTL, SYS_IOCTL = 72, 16
+OWNER_FCNTLS = (8, 15, 10)  # F_SETOWN F_SETOWN_EX F_SETSIG
+OWNER_IOCTLS = (0x8901, 0x8902)  # FIOSETOWN SIOCSPGRP
 
 
 class _RulesetAttr(ctypes.Structure):
@@ -174,7 +184,8 @@ def _landlock(syscall, input_path, out_dir):
 
 def seccomp_program(pid):
     """The seccomp filter as (code, jt, jf, k): DENIED_SYSCALLS and any non-x86_64 call -> EPERM,
-    clone3 -> ENOSYS, clone without CLONE_THREAD -> EPERM, SELF_ONLY_SYSCALLS at another pid -> EPERM."""
+    clone3 -> ENOSYS, clone without CLONE_THREAD -> EPERM, SELF_ONLY_SYSCALLS at another pid -> EPERM,
+    fcntl with an OWNER_FCNTLS command and ioctl with an OWNER_IOCTLS command -> EPERM."""
     program = [
         (BPF_LD_W_ABS, 4, 0, 0), (BPF_JEQ_K, AUDIT_ARCH_X86_64, 0, "deny"),  # seccomp_data.arch
         (BPF_LD_W_ABS, 0, 0, 0), (BPF_JGE_K, X32_SYSCALL_BIT, "deny", 0),  # seccomp_data.nr
@@ -182,6 +193,14 @@ def seccomp_program(pid):
         (BPF_JEQ_K, SYS_CLONE3, "enosys", 0),
         (BPF_JEQ_K, SYS_CLONE, "clone", 0),
         *[(BPF_JEQ_K, nr, "self", 0) for nr in SELF_ONLY_SYSCALLS],
+        (BPF_JEQ_K, SYS_FCNTL, "fcntl", 0),
+        (BPF_JEQ_K, SYS_IOCTL, "ioctl", 0),
+        (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
+        "fcntl", (BPF_LD_W_ABS, 24, 0, 0),  # args[1] low word: cmd
+        *[(BPF_JEQ_K, cmd, "deny", 0) for cmd in OWNER_FCNTLS],
+        (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
+        "ioctl", (BPF_LD_W_ABS, 24, 0, 0),
+        *[(BPF_JEQ_K, cmd, "deny", 0) for cmd in OWNER_IOCTLS],
         (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
         "clone", (BPF_LD_W_ABS, 16, 0, 0), (BPF_JSET_K, CLONE_THREAD, "allow", "deny"),  # args[0] low word: flags
         "self", (BPF_LD_W_ABS, 20, 0, 0), (BPF_JEQ_K, 0, 0, "deny"),  # args[0] high word

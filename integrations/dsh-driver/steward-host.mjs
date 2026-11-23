@@ -1087,8 +1087,9 @@ export function createPdfReader({ python, script = PDF_READ_SCRIPT, tmpRoot, att
         const joined = Buffer.concat([errTail, chunk]);
         errTail = Buffer.from(joined.subarray(Math.max(0, joined.length - limits.stderrBytes)));
       });
-      // The leader's exit takes whatever it left behind in its group with it.
-      child.on('exit', (code, sig) => { exit = { code, signal: sig }; killGroup(); armGrace(); });
+      // The leader's exit takes whatever it left behind in its group with it, and ends the wall clock:
+      // a call whose child exited is never answered as timeout (review CHK-2).
+      child.on('exit', (code, sig) => { exit = { code, signal: sig }; clearTimeout(wall); killGroup(); armGrace(); });
       child.on('close', (code, sig) => finish({ code: exit?.code ?? code, signal: exit?.signal ?? sig }));
       if (signal?.aborted) ours();
     });

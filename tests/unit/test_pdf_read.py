@@ -23,6 +23,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -588,6 +589,77 @@ def test_a_hijacked_child_cannot_open_a_socket_of_any_family_signal_fork_or_exec
     for family in ("AF_UNIX", "AF_INET", "AF_INET6"):
         for kind in ("SOCK_STREAM", "SOCK_DGRAM"):
             assert f"{family} {kind}" in rec
+
+
+HIJACK_OWNER = r"""
+import fcntl, importlib.util, json, os, socket, struct, sys, termios
+script, out_dir = sys.argv[1:3]
+victims = dict(zip(("setown", "setown_ex", "setown_pgrp", "fiosetown", "siocspgrp"), map(int, sys.argv[3].split(","))))
+spec = importlib.util.spec_from_file_location("pdf_read_owner", script)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+inherited = socket.socketpair()  # like the host's stdout and stderr: a socket made before harden
+sandbox = module.harden(None, out_dir)
+F_SETOWN_EX, F_OWNER_PID, F_SETSIG, FIOSETOWN, SIOCSPGRP = 15, 1, 10, 0x8901, 0x8902
+def attempt(fn):
+    try:
+        fn()
+        return "ok"
+    except OSError as exc:
+        return type(exc).__name__
+rec = {"sandbox": sandbox}
+def pipe_owner(name, set_owner):
+    # Make another process the owner of a pipe's read end, then O_ASYNC and a write: SIGIO goes to the owner.
+    r, w = os.pipe()
+    rec[name] = attempt(lambda: set_owner(r))
+    rec["F_SETFL O_ASYNC " + name] = attempt(lambda: fcntl.fcntl(r, fcntl.F_SETFL, fcntl.fcntl(r, fcntl.F_GETFL) | os.O_ASYNC))
+    rec["write " + name] = attempt(lambda: os.write(w, b"x"))
+    rec["ioctl FIONREAD " + name] = attempt(lambda: fcntl.ioctl(r, termios.FIONREAD, b"\0\0\0\0"))
+pipe_owner("setown", lambda fd: fcntl.fcntl(fd, fcntl.F_SETOWN, victims["setown"]))
+pipe_owner("setown_ex", lambda fd: fcntl.fcntl(fd, F_SETOWN_EX, struct.pack("ii", F_OWNER_PID, victims["setown_ex"])))
+pipe_owner("setown_pgrp", lambda fd: fcntl.fcntl(fd, fcntl.F_SETOWN, -victims["setown_pgrp"]))
+r, w = os.pipe()
+rec["setsig"] = attempt(lambda: fcntl.fcntl(r, F_SETSIG, 9))
+def socket_owner(name, request, owner):
+    a, b = inherited
+    rec[name] = attempt(lambda: fcntl.ioctl(a.fileno(), request, struct.pack("i", owner)))
+    rec["ioctl FIOASYNC " + name] = attempt(lambda: fcntl.ioctl(a.fileno(), termios.FIOASYNC, struct.pack("i", 1)))
+    rec["write " + name] = attempt(lambda: os.write(b.fileno(), b"x"))
+socket_owner("fiosetown", FIOSETOWN, victims["fiosetown"])
+socket_owner("siocspgrp", SIOCSPGRP, -victims["siocspgrp"])
+rec["F_GETOWN"] = attempt(lambda: fcntl.fcntl(inherited[0].fileno(), fcntl.F_GETOWN))
+print(json.dumps(rec))
+"""
+
+
+def test_a_hijacked_child_cannot_make_another_process_a_file_owner(tmp_path):
+    """Recheck CHK-1: kill and its kin were refused, but fcntl F_SETOWN / F_SETOWN_EX (a pid or a
+    process group) with O_ASYNC and a write, and ioctl FIOSETOWN / SIOCSPGRP on a socket, sent
+    SIGIO (or F_SETSIG's signal) to a process outside the sandbox. Each owner command is refused;
+    F_GETFL/F_SETFL, F_GETOWN and the ordinary ioctls (FIONREAD, FIOASYNC) still work."""
+    if not _seccomp_available():
+        pytest.skip("SKIPPED LOUDLY: this environment refuses a seccomp filter, so the reader reports no seccomp layer")
+    out = tmp_path / "out"
+    out.mkdir()
+    # Siblings of the child, each the leader of its own session and process group; SIGIO ends a sleep.
+    victims = [subprocess.Popen(["/bin/sleep", "60"], start_new_session=True) for _ in range(5)]
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-c", HIJACK_OWNER, str(SCRIPT), str(out), ",".join(str(v.pid) for v in victims)],
+                              capture_output=True, env=_env(tmp_path), cwd=tmp_path, timeout=60)
+        assert proc.returncode == 0, proc.stderr.decode()[-3000:]
+        rec = json.loads(proc.stdout)
+        time.sleep(0.3)  # a signal sent would have landed by now
+        killed = [v.pid for v in victims if v.poll() is not None]
+    finally:
+        for v in victims:
+            v.kill()
+            v.wait()
+    assert "seccomp" in rec.pop("sandbox")
+    owners = ("setown", "setown_ex", "setown_pgrp", "setsig", "fiosetown", "siocspgrp")
+    refused = {key: rec.pop(key) for key in owners}
+    assert refused == {key: "PermissionError" for key in owners}, refused
+    assert not killed, f"the sandboxed child signalled {killed} through a file owner"
+    assert rec and set(rec.values()) == {"ok"}, rec
 
 
 def test_the_seccomp_filter_is_well_formed():

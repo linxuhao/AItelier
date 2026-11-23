@@ -162,6 +162,17 @@ test('SEC-3: a descendant that left the group holding stdout does not hold the c
   } finally { killEscapee(b); }
 });
 
+test('CHK-2: the child exited before the wall clock and its escapee holds stdout past it: broken, not timeout (the exit ends the wall clock)', { timeout: 20000 }, async () => {
+  const b = bench();
+  const h = reader(b, escapingChild(b, 'escape-exit-near-wall', okBody()), { limits: { wallMs: 1000, closeGraceMs: 1500, queueWaitMs: 1500 } });
+  try {
+    const started = Date.now();
+    assert.deepEqual(await read(h, {}), { refused: 'broken' }, 'the wall clock fell inside the close grace');
+    assert.ok(Date.now() - started >= 1000, `the grace outlasted the wall clock (${Date.now() - started} ms)`);
+    assert.deepEqual(leftovers(b), []);
+  } finally { killEscapee(b); }
+});
+
 test('SEC-3: the same escapee with a hung leader: timeout at the wall clock plus the grace; a second call is not busy', { timeout: 20000 }, async () => {
   const b = bench();
   const h = reader(b, escapingChild(b, 'escape-hang', 'setInterval(() => {}, 1000);'), { limits: { wallMs: 800, closeGraceMs: 300, queueWaitMs: 1500 } });

@@ -3,9 +3,24 @@
  *  session whose route does not take images. Nothing of the image is read or sent. */
 export const noImageLine = ref => `[图片 ${ref?.name || ref?.attachmentId || ref?.id || '?'}：本路线不收图，未发送]`;
 
-/** `images` resolves an image block to its request URL. `textOnly` is a session whose route does
- *  not take images: every image block becomes noImageLine instead, and nothing throws. */
-export function openaiMessages(options, images = null, { textOnly = false } = {}) {
+/** Step 24.2c (design-steward 7.8.12a, 7.8.12b "八"): the line a file block becomes. A root role
+ *  that may not read files (the steward forbids `read`) is told the truth: the file cannot be
+ *  opened in that session, and a copy sent through the chat becomes a media ref read_document
+ *  reads. Every other session keeps the native-file-tools line. */
+export const fileLine = (ref, fileTools = true) => fileTools
+  ? `[file: ${ref.name ?? ref.id}; use the native file tools to inspect this attachment]`
+  : `[file: ${ref.name ?? ref.id}; files cannot be opened in this session - ask for it to be sent again through the chat, then read that media ref with read_document]`;
+
+/** `images` resolves an image block to its request URL. An image block stays an image_url part of
+ *  whatever role its message has, a role:'tool' result included (read_document's page images):
+ *  measured 2026-11-23 (design-steward 7.8.12b step 0 #2, one call each through AIGateway with
+ *  /completion's settings), ollamacloud, opencodego2 and opencodego3 deepseek-v4.1-flash and
+ *  deepseek/deepseek-flash all read digits from an image in a tool message; opencodego was over
+ *  its monthly quota, so unmeasured. `textOnly` is a session whose route does
+ *  not take images: every image block becomes noImageLine instead, and nothing throws. An image
+ *  block DSH marked `offloaded` is skipped: never read, never sent (7.8.12b "八" 4).
+ *  `fileTools: false` is a session that cannot open files (fileLine). */
+export function openaiMessages(options, images = null, { textOnly = false, fileTools = true } = {}) {
   const messages = options.system ? [{ role: 'system', content: options.system }] : [];
   for (const message of options.messages) {
     const text = [], reasoning = [], calls = [], parts = [];
@@ -13,16 +28,15 @@ export function openaiMessages(options, images = null, { textOnly = false } = {}
       if (block.type === 'text') text.push(block.text);
       else if (block.type === 'reasoning') reasoning.push(block.text);
       else if (block.type === 'tool-call') calls.push({ id: block.id, type: 'function', function: { name: block.name, arguments: block.arguments } });
+      else if (block.type === 'image' && block.offloaded === true) continue;
       else if (block.type === 'image' && textOnly) text.push(noImageLine(block.attachment));
       else if (block.type === 'image') {
         if (!images) throw new Error('driver bridge cannot forward an image without the durable attachment service');
         const url = images(block.attachment);
         if (!url) throw new Error(`driver bridge cannot forward image attachment ${block.attachment?.attachmentId ?? '?'}: no request bytes`);
         parts.push({ type: 'image_url', image_url: { url } });
-      } else if (block.type === 'file') {
-        const ref = block.attachment;
-        text.push(`[file: ${ref.name ?? ref.id}; use the native file tools to inspect this attachment]`);
-      } else throw new Error(`Unsupported driver message block: ${block.type}`);
+      } else if (block.type === 'file') text.push(fileLine(block.attachment, fileTools));
+      else throw new Error(`Unsupported driver message block: ${block.type}`);
     }
     if (message.role === 'developer') throw new Error('Driver route does not support incremental tool declarations');
     const joined = text.join('\n');
@@ -37,14 +51,20 @@ export function openaiMessages(options, images = null, { textOnly = false } = {}
 }
 
 
+/** The largest image one request carries, in raw bytes (readImageRequest's `maxBytes`). */
+export const REQUEST_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
+/** Base64 length of raw bytes, padding included (DSH dsh-llm `base64Length`). */
+const base64Length = bytes => Math.ceil(bytes / 3) * 4;
+
 /** Resolve every image block in this turn to a data URL through the durable
  *  attachment service. The adapter cannot read bytes itself, and a silent
  *  downgrade to a text placeholder would tell the model a picture exists while
- *  never sending it — so an unresolvable image is a loud error, not a hint. */
+ *  never sending it — so an unresolvable image is a loud error, not a hint.
+ *  An `offloaded` block is not read (7.8.12b "八" 4). */
 async function requestImageUrls(ctx, options, signal) {
   const refs = [];
   for (const message of options.messages) for (const block of message.content) {
-    if (block?.type === 'image' && block.attachment) refs.push(block.attachment);
+    if (block?.type === 'image' && block.attachment && block.offloaded !== true) refs.push(block.attachment);
   }
   if (!refs.length) return new Map();
   const attachments = ctx.get('attachments');
@@ -52,7 +72,7 @@ async function requestImageUrls(ctx, options, signal) {
   const urls = new Map();
   for (const ref of refs) {
     const info = await attachments.readImageRequest(ref,
-      { width: 2048, height: 2048, maxBytes: 4 * 1024 * 1024 }, signal);
+      { width: 2048, height: 2048, maxBytes: REQUEST_IMAGE_MAX_BYTES }, signal);
     urls.set(ref.attachmentId ?? ref.id,
       `data:${info.mediaType};base64,${Buffer.from(info.data).toString('base64')}`);
   }
@@ -76,6 +96,35 @@ export const declaresImage = routes => unmeasured(routes) || (takesImage(routes?
  *  never before the routes were measured. */
 export const wakeTakesImages = routes => !unmeasured(routes) && declaresImage(routes);
 
+/** The dashboard flag of the steward's standing route check (design-steward 7.8.12b "九"). */
+export const STEWARD_ROUTE_FLAG = '管家路线不收图';
+
+/** Step 24.2c (7.8.12b "九", 上线后常驻的检查): the steward process's route-input, checked on
+ *  every read (every pre-step read goes through it). An answer with `measured: false`, or a root
+ *  or child side without `image`, writes one log line - again only when the reason changes or
+ *  `everyMs` (10 min) has passed - and raises the dashboard flag through `flag(text)`; an answer
+ *  that takes images again clears it with `flag(undefined)`. The flag changes only on a change,
+ *  so a step writes nothing. The answer itself is passed on untouched. */
+export function routeStandingCheck(routeInput, { log = () => {}, flag = () => {}, now = Date.now, everyMs = 600000 } = {}) {
+  let logged, loggedAt = -Infinity, flagged;
+  return async function checkedRouteInput(signal) {
+    const routes = await routeInput(signal);
+    const reasons = [...(unmeasured(routes) ? ['measured:false'] : []),
+      ...(takesImage(routes?.root) ? [] : ['root text-only']), ...(takesImage(routes?.child) ? [] : ['child text-only'])];
+    const reason = reasons.join(', ');
+    if (reason && (reason !== logged || now() - loggedAt >= everyMs)) {
+      logged = reason; loggedAt = now();
+      log(`steward route takes no images (${reason}): photos and PDF pages reach it as text lines only`);
+    }
+    if (reason !== (flagged ?? '')) {
+      flagged = reason || undefined;
+      if (!reason) { logged = undefined; log('steward route takes images again'); }
+      flag(reason ? `${STEWARD_ROUTE_FLAG}（${reason}）` : undefined);
+    }
+    return routes;
+  };
+}
+
 /** The backend's `GET /api/dsh-drivers/{project}/route-input` ({root, child}), read at most once
  *  per `ttlMs` (60 s) and shared by every session of this process. `read(signal)` is the request.
  *  A read that fails answers the last good value, or text-only when there is none, and is tried
@@ -98,6 +147,60 @@ export function routeInputCache(read, { ttlMs = 60000, now = Date.now, log = () 
     })();
     return pending;
   };
+}
+
+// ---- Step 24.2c R-M3 (design-steward 7.8.12b "八" 4): only images the model has seen are offloaded ----
+
+/** DSH dsh-llm `offloadedImagePrefixCount` (lib/index.js:692-710, 0.2.1-rc.5), copied verbatim
+ *  because DSH does not export it; a test compares it with DSH `requiredImageOffload`. */
+export function offloadedImagePrefixCount(lengths, budget) {
+  const total = lengths.reduce((sum, bytes) => sum + bytes, 0);
+  const excessCount = budget.maxImages === void 0 ? 0 : Math.max(0, lengths.length - budget.maxImages);
+  const excessBytes = budget.maxBytes === void 0 ? 0 : Math.max(0, total - budget.maxBytes);
+  if (excessCount === 0 && excessBytes === 0) return 0;
+  const countQuantum = budget.countQuantum ?? 1;
+  const byteQuantum = budget.byteQuantum ?? 1;
+  const removeCount = excessCount === 0 ? 0 : Math.ceil(excessCount / countQuantum) * countQuantum;
+  const removeBytes = excessBytes === 0 ? 0 : Math.ceil(excessBytes / byteQuantum) * byteQuantum;
+  let count = 0;
+  let removedBytes = 0;
+  for (const imageBytes of lengths) {
+    if (count >= removeCount && (removeBytes === 0 || (byteQuantum === 1 ? removedBytes >= removeBytes : removedBytes > removeBytes))) break;
+    removedBytes += imageBytes;
+    count += 1;
+  }
+  return count;
+}
+
+/** The line an offloaded image becomes, from its attachment name alone, so every generation is
+ *  byte-identical (prefix cache). A page image (`<ref>#p<n>.jpg`) and a library image
+ *  (`<ref>.<ext>`) say how to look again; anything else says it cannot be seen again. */
+export function offloadedImagePlaceholder(ref) {
+  const name = typeof ref?.name === 'string' ? ref.name : '';
+  const page = /^(m_[0-9a-f]+)#p(\d+)\.jpg$/.exec(name);
+  if (page) return `[第 ${page[2]} 页图已移出上下文（文字仍在上面）；要再看请 read_document(ref=${page[1]}, pages=${page[2]})]`;
+  const image = /^(m_[0-9a-f]+)\.(png|jpe?g|gif|webp)$/.exec(name);
+  if (image) return `[图片 ${image[1]} 已移出上下文；要再看请 read_document(ref=${image[1]})]`;
+  return `[一张图已移出上下文（${name || ref?.attachmentId || '?'}），不能再看]`;
+}
+
+/** The base64 length of every image the model has already seen: the image blocks of the `user`
+ *  and `tool` messages before the last `assistant` message (the same two kinds DSH
+ *  `offloadOldestImages` walks), measured on the data URL actually sent. Everything after that
+ *  assistant message is the latest input and never counts. */
+function seenImageLengths(messages, urls) {
+  let last = -1;
+  messages.forEach((message, index) => { if (message.role === 'assistant') last = index; });
+  const lengths = [];
+  for (const message of messages.slice(0, Math.max(0, last))) {
+    if (message.role !== 'user' && message.role !== 'tool') continue;
+    for (const block of message.content) {
+      if (block?.type !== 'image' || block.offloaded === true) continue;
+      const url = urls.get(block.attachment?.attachmentId ?? block.attachment?.id);
+      lengths.push(url.length - url.indexOf(',') - 1);
+    }
+  }
+  return lengths;
 }
 
 /** Reasoning efforts the completion bridge accepts. */
@@ -299,9 +402,23 @@ export const rootReasoningEffort = value => REASONING_EFFORTS.includes(value) ? 
 
 /** Root completions default to rootEffort (the director plans and judges); native
  *  children default to workerEffort. The runtime passes both from roles.json. An
- *  explicit DSH reasoningEffort is passed through. */
-export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', workerEffort = 'high', retry = {},
-  routeInput = async () => TEXT_ONLY }) {
+ *  explicit DSH reasoningEffort is passed through.
+ *
+ *  Step 24.2c: `imageRetain` is the root role's roles.json `image_retain` (the steward's); with it
+ *  the root session keeps at most that many already-seen images (R-M3) and asks DSH to offload
+ *  the rest with IMAGE_OFFLOAD_REQUIRED. Its byte cap must hold one request image, or a large
+ *  photo would be offloaded the step after it was first seen: checked here, at install.
+ *  `rootReadsFiles` is false for a root role that forbids `read` (fileLine). */
+export function installHostModel(ctx, { LlmAdapter, LlmError, projectOffloadedImages }, { request, project, session, rootEffort = 'max',
+  workerEffort = 'high', retry = {}, routeInput = async () => TEXT_ONLY, imageRetain, rootReadsFiles = true }) {
+  if (imageRetain) {
+    if (!(imageRetain.max_base64_bytes >= base64Length(REQUEST_IMAGE_MAX_BYTES)))
+      throw new Error(`image_retain.max_base64_bytes ${imageRetain.max_base64_bytes} is under one request image (${base64Length(REQUEST_IMAGE_MAX_BYTES)} base64 bytes)`);
+    if (typeof LlmError !== 'function' || typeof projectOffloadedImages !== 'function')
+      throw new Error('image_retain needs DSH LlmError and projectOffloadedImages');
+  }
+  const retain = imageRetain && { maxImages: imageRetain.max_images, countQuantum: imageRetain.count_quantum,
+    maxBytes: imageRetain.max_base64_bytes, byteQuantum: imageRetain.byte_quantum };
   const retryOptions = { budgetMs: retry.budgetMs ?? modelRetryBudgetMs(), delayMs: retry.delayMs ?? RETRY_DELAY_MS,
     maxDelayMs: retry.maxDelayMs ?? RETRY_MAX_DELAY_MS, log: retry.log ?? stderrRetryLog,
     ...(retry.now ? { now: retry.now } : {}), ...(retry.sleep ? { sleep: retry.sleep } : {}),
@@ -321,17 +438,29 @@ export function installHostModel(ctx, { LlmAdapter }, { request, project, sessio
       // reads no image byte (the attachment service is not even asked) and sends one line per
       // image block instead (noImageLine) - never an image_url, never a throw.
       const routes = await routeInput(options.signal);
-      const textOnly = !unmeasured(routes) && !takesImage((options.sessionId ?? session) === session ? routes.root : routes.child);
-      const imageUrls = textOnly ? new Map() : await requestImageUrls(ctx, options, options.signal);
+      const root = (options.sessionId ?? session) === session;
+      const textOnly = !unmeasured(routes) && !takesImage(root ? routes.root : routes.child);
+      // R-M3 (7.8.12b "八" 4), the root session of a role with image_retain only: offloaded images
+      // become their fixed placeholder lines, and when the images already seen exceed the budget
+      // the call fails before any request, naming how many of the oldest DSH must offload.
+      const messages = root && retain ? projectOffloadedImages(options.messages, offloadedImagePlaceholder) : options.messages;
+      const imageUrls = textOnly ? new Map() : await requestImageUrls(ctx, { messages }, options.signal);
+      if (root && retain && !textOnly) {
+        const seen = seenImageLengths(messages, imageUrls);
+        const offloadImages = offloadedImagePrefixCount(seen, retain);
+        if (offloadImages > 0) throw new LlmError(`the root session keeps at most ${retain.maxImages} seen images`
+          + ` (${retain.maxBytes} base64 bytes); ${seen.length} are seen, offload the ${offloadImages} oldest`, 'IMAGE_OFFLOAD_REQUIRED', { offloadImages });
+      }
       // One signal for the whole call: a retry lives inside the same 30-minute
       // bound as the attempt it replaces, not a fresh one.
       const signal = options.signal ?? AbortSignal.timeout(1800000);
       const result = await completionWithRetry(request, `/api/dsh-drivers/${encodeURIComponent(project)}/completion`, {
         session_id: options.sessionId ?? session,
-        messages: openaiMessages(options, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id), { textOnly }),
+        messages: openaiMessages({ system: options.system, messages }, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id),
+          { textOnly, fileTools: !root || rootReadsFiles }),
         tools: options.tools?.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
         max_tokens: options.maxTokens ?? 32768,
-        reasoning_effort: options.reasoningEffort ?? ((options.sessionId ?? session) === session ? rootEffort : workerEffort),
+        reasoning_effort: options.reasoningEffort ?? (root ? rootEffort : workerEffort),
       }, signal, retryOptions);
       const blocks = [];
       if (result.reasoning_content) blocks.push({ type: 'reasoning', text: result.reasoning_content });

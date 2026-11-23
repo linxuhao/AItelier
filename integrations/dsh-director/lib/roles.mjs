@@ -12,11 +12,16 @@ export const ROLE_NAMES = ['director', 'worker', 'steward'];
 /** A table without these is refused; `steward` is optional (no steward, nothing changes). */
 const REQUIRED_ROLES = ['director', 'worker'];
 const TOP_KEYS = ['version', ...ROLE_NAMES];
-const ROLE_KEYS = ['route', 'reasoning_effort', 'compaction', 'prompt', 'presented', 'forbidden', 'presented_only', 'catalog'];
+const ROLE_KEYS = ['route', 'reasoning_effort', 'compaction', 'prompt', 'presented', 'forbidden', 'presented_only', 'catalog',
+  'child_route', 'image_retain'];
 /** Optional keys; `catalog: "host"` (step 24.1a): the role finds and calls its further tools
- *  only in the catalog its host gives for the turn (tool-discovery.mjs). */
-const OPTIONAL_KEYS = ['presented_only', 'catalog'];
+ *  only in the catalog its host gives for the turn (tool-discovery.mjs). `child_route`
+ *  (step 24.2c): the route the root's child sessions take instead of the worker route.
+ *  `image_retain` (step 24.2c): how many already-seen images the root session keeps in its
+ *  history (count and base64 bytes, each with its offload quantum); an adapter reads it. */
+const OPTIONAL_KEYS = ['presented_only', 'catalog', 'child_route', 'image_retain'];
 const CATALOGS = ['host'];
+const IMAGE_RETAIN_KEYS = ['max_images', 'count_quantum', 'max_base64_bytes', 'byte_quantum'];
 /** The roles a host may run its root session as (HostConfig.rootRole). */
 export const ROOT_ROLES = ['director', 'steward'];
 const COMPACTION_KEYS = ['thresholdRatio', 'retainTokens'];
@@ -65,6 +70,14 @@ export function validateRoles(table) {
       throw new Error(`roles: ${role}.presented_only must be a boolean`);
     if (Object.hasOwn(value, 'catalog') && !CATALOGS.includes(value.catalog))
       throw new Error(`roles: ${role}.catalog must be one of ${CATALOGS.join(', ')}`);
+    if (Object.hasOwn(value, 'child_route') && (typeof value.child_route !== 'string' || !value.child_route))
+      throw new Error(`roles: ${role}.child_route must be a non-empty string`);
+    if (Object.hasOwn(value, 'image_retain')) {
+      exactKeys(value.image_retain, IMAGE_RETAIN_KEYS, role + '.image_retain');
+      for (const key of IMAGE_RETAIN_KEYS)
+        if (!(Number.isInteger(value.image_retain[key]) && value.image_retain[key] > 0))
+          throw new Error(`roles: ${role}.image_retain.${key} must be a positive integer`);
+    }
   }
   return table;
 }

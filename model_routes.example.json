@@ -195,15 +195,55 @@
     "400. A project whose `model` is a concrete provider/model is looked up the",
     "same way. Fill an entry only after that candidate was seen reading the text",
     "in an image sent through AIGateway (the path /completion uses); a vendor",
-    "page saying 'vision supported' is not a measurement. The one entry below",
-    "is the vision judge, which reads screenshots on every run. Every other",
-    "candidate in this example is unmeasured, so `driver` and `worker` are",
-    "text-only here: images reach them as placeholder lines and media tools."
+    "page saying 'vision supported' is not a measurement.",
+    "",
+    "List EVERY candidate of every route, `[\"text\"]` for the unmeasured ones:",
+    "once `_input` exists it holds for the whole table, and the backend's",
+    "startup line names any candidate it lacks as `unlisted (text-only)`. That",
+    "set is empty for this example.",
+    "",
+    "What the image entries below rest on (2026-11-23, one AIGateway call per",
+    "candidate: a 64x32 PNG reading '4721', then a full A4 page of Chinese",
+    "rendered from an image-only PDF):",
+    "  * ollamacloud/deepseek-v4.1-flash — read both.",
+    "  * opencodego/deepseek-v4.1-flash — INFERRED: this account's quota was",
+    "    spent; two other accounts on the same endpoint and model id read both.",
+    "  * deepseek/deepseek-flash — reads images because AIGateway sends a",
+    "    request that carries one on the `openai/` path (same api_base, same",
+    "    key); the native deepseek path drops them.",
+    "  * localqwen/qwen3 — the vision judge, which reads screenshots every run.",
+    "So `driver`, `worker`, `steward`, `novel` and `vision` take images. Every",
+    "`[\"text\"]` entry is unmeasured, not refused — qwen3.8-max's native vision",
+    "included — so `flash`, `flash_review`, `glm`, `smart` and `novel_alt` are",
+    "text-only here until someone measures."
   ],
   "_input": {
-    "localqwen/qwen3": ["text", "image"]
+    "ollamacloud/deepseek-v4.1-flash": ["text", "image"],
+    "opencodego/deepseek-v4.1-flash": ["text", "image"],
+    "deepseek/deepseek-flash": ["text", "image"],
+    "localqwen/qwen3": ["text", "image"],
+    "ark/deepseek-v4-flash": ["text"],
+    "qwen/deepseek-v4-flash-0731": ["text"],
+    "ark/glm-5.3": ["text"],
+    "qwen/glm-5.2": ["text"],
+    "deepseek/deepseek-v4-pro": ["text"],
+    "qwen/qwen3.8-max": ["text"],
+    "ark/deepseek-v4-pro": ["text"]
   },
   "driver": [
+    "opencodego/deepseek-v4.1-flash",
+    "deepseek/deepseek-flash"
+  ],
+  "_steward_note": [
+    "The steward's route (integrations/dsh-director/roles.json: the steward's",
+    "`route` and its `child_route`). It reads photos and PDF page images, so",
+    "EVERY candidate here must list `image` in `_input`: one text-only",
+    "candidate makes the whole route text-only, and the steward process then",
+    "logs it and flags '管家路线不收图' on its dashboard status. It ends with the",
+    "pay-as-you-go candidate like every other route."
+  ],
+  "steward": [
+    "ollamacloud/deepseek-v4.1-flash",
     "opencodego/deepseek-v4.1-flash",
     "deepseek/deepseek-flash"
   ]

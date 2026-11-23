@@ -27,7 +27,7 @@ import { defaultLabels, defaultTexts, Clock, ContextInjection, connectionErrorMe
   Continuation, processSession, processAlive, backgroundProcesses, watchRefusal, dormancyRefusal, DORMANT_MIN_MINUTES,
   DORMANT_MAX_MINUTES, wakeAfterRefusal, LiveChildren, phaseReport, continuationWaitKey, DORMANT_COMPACT_MIN_TOKENS,
   IdleReview, TodoCli, settledAttempts, batchRedispatchRows, todoSummary, unfinishedWithoutChild, rebindRefusal,
-  grepHistory, historyPage } from './lib/core.mjs';
+  grepHistory, historyPage, statusError } from './lib/core.mjs';
 import { Outbox } from './lib/outbox.mjs';
 import { pumpFailure, startupFailure } from './lib/exit-cause.mjs';
 import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches } from './lib/capacity.mjs';
@@ -352,12 +352,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     }
     if (!watches.size) { clearInterval(watchTimer); watchTimer = undefined; }
   };
-  let hostError = '', completionError = '';
+  let hostError = '', completionError = '', routeFlag = '';
   let activity = Promise.resolve();
   const progress = op('progress');
   // Dormant is still idle, reported apart so a dashboard can say "asleep", not "idle".
   const currentPhase = () => waiting ? completionError ? 'failed' : idleReview?.dormant ? 'dormant' : 'waiting' : 'running';
-  const report = (phase, error = completionError || hostError, event) => {
+  const report = (phase, error = statusError({ completion: completionError, host: hostError, route: routeFlag }), event) => {
     // One report per call, in order; `phaseReport` names the live child SESSIONS,
     // reconciled against the registry, never the runIds the registry cannot answer for.
     const body = phaseReport({ phase, children, error, event });
@@ -465,6 +465,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
+    // Step 24.2c (7.8.12b "九"): the steward's route flag, in a slot of its own (review MP-1).
+    setRouteFlag: text => { routeFlag = typeof text === 'string' ? text : ''; return report(currentPhase()); },
     isDisposed: () => disposed,
     // Step 24.1a: true while the steward's turn record is marked external (lib/catalog.mjs):
     // the host marks the letters it writes then.

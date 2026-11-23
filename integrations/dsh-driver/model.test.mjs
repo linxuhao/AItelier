@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { openaiMessages, installHostModel, modelRetryBudgetMs, rootReasoningEffort, retryableClass,
-  RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER, routeInputCache, noImageLine, declaresImage, wakeTakesImages } from './model.mjs';
+  RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER, routeInputCache, noImageLine, declaresImage, wakeTakesImages,
+  fileLine, REQUEST_IMAGE_MAX_BYTES, routeStandingCheck, STEWARD_ROUTE_FLAG } from './model.mjs';
+import { loadRoles } from './roles.mjs';
 
 /** Step 24.2b: route-input answers for installHostModel. */
 const BOTH_IMAGE = async () => ({ root: ['text', 'image'], child: ['text', 'image'] });
@@ -189,6 +191,86 @@ test('noImageLine names the image by its name, else its id', () => {
     /without the durable attachment service/, 'outside a text-only session an unresolvable image still fails loudly');
 });
 
+// ---- Step 24.2c (design-steward 7.8.12b "八" 4, "十六" 适配器) ----
+
+/** One history with seen images past any retain budget (6 before the last assistant message), a
+ *  tool image and a file block: what a director or worker request looks like today. */
+const todayHistory = sessionId => ({ provider: 'aitelier', model: 'driver', sessionId, system: 'rules',
+  messages: [{ role: 'user', content: [{ type: 'text', text: 'look' },
+    ...[1, 2, 3, 4, 5, 6].map(n => ({ type: 'image', attachment: { attachmentId: `sha256:s${n}`, name: `m_000000000000000${n}.png` } }))] },
+  { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'read_image', arguments: '{}' }] },
+  { role: 'tool', toolCallId: 'c1', content: [{ type: 'image', attachment: { attachmentId: 'sha256:frame' } }] },
+  { role: 'assistant', content: [{ type: 'text', text: 'seen' }] },
+  { role: 'user', content: [{ type: 'text', text: 'file' }, { type: 'file', attachment: { id: 'f1', name: 'doc.pdf' } }] }] });
+const AQID = { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } };
+/** The exact body today's bridge sends for todayHistory (hand-written from the code before 24.2c). */
+const todayBody = (sessionId, effort) => JSON.stringify({ session_id: sessionId, messages: [
+  { role: 'system', content: 'rules' },
+  { role: 'user', content: [{ type: 'text', text: 'look' }, AQID, AQID, AQID, AQID, AQID, AQID] },
+  { role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_image', arguments: '{}' } }] },
+  { role: 'tool', content: [{ type: 'text', text: '' }, AQID], tool_call_id: 'c1' },
+  { role: 'assistant', content: 'seen' },
+  { role: 'user', content: 'file\n[file: doc.pdf; use the native file tools to inspect this attachment]' }],
+max_tokens: 32768, reasoning_effort: effort });
+
+function installed(extra) {
+  let adapter;
+  const sent = [], projected = [];
+  const attachments = { async readImageRequest() { return { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) }; } };
+  installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get: () => attachments },
+    { LlmAdapter: class {}, LlmError: class extends Error {}, projectOffloadedImages: messages => { projected.push(messages); return messages; } },
+    { project: 'alpha', session: 'root', routeInput: BOTH_IMAGE, ...extra,
+      async request(_path, body) { sent.push(body); return { text: 'ok', tool_calls: [], truncated: false, usage: {} }; } });
+  return { adapter, sent, projected };
+}
+
+test('24.2c: director and worker requests are byte-identical to today, and so is a steward child', async () => {
+  const roles = loadRoles();
+  const director = installed({ rootEffort: 'max', rootReadsFiles: !roles.director.forbidden.includes('read') });
+  await collect(director.adapter, todayHistory('root'));
+  await collect(director.adapter, todayHistory('child-1'));
+  assert.equal(JSON.stringify(director.sent[0]), todayBody('root', 'max'), 'the director root');
+  assert.equal(JSON.stringify(director.sent[1]), todayBody('child-1', 'high'), 'a director worker');
+  const steward = installed({ imageRetain: roles.steward.image_retain, rootReadsFiles: !roles.steward.forbidden.includes('read') });
+  await collect(steward.adapter, todayHistory('child-1'));
+  assert.equal(JSON.stringify(steward.sent[0]), todayBody('child-1', 'high'), 'a steward child: no offload, no placeholder, the native file line');
+  assert.deepEqual([...director.projected, ...steward.projected], [], 'no projection outside a root with image_retain');
+});
+
+test('24.2c: the file-block line is role-correct - a root that may not read files is told to have it resent through the chat', async () => {
+  assert.equal(fileLine({ id: 'f1', name: 'doc.pdf' }), '[file: doc.pdf; use the native file tools to inspect this attachment]');
+  const roles = loadRoles();
+  assert.ok(roles.steward.forbidden.includes('read') && !roles.director.forbidden.includes('read') && !roles.worker.forbidden.includes('read'));
+  const steward = installed({ imageRetain: roles.steward.image_retain, rootReadsFiles: false });
+  const fileOnly = sessionId => ({ provider: 'aitelier', model: 'driver', sessionId,
+    messages: [{ role: 'user', content: [{ type: 'file', attachment: { id: 'f1', name: 'doc.pdf' } }] }] });
+  await collect(steward.adapter, fileOnly('root'));
+  await collect(steward.adapter, fileOnly('child-1'));
+  assert.equal(steward.sent[0].messages[0].content,
+    '[file: doc.pdf; files cannot be opened in this session - ask for it to be sent again through the chat, then read that media ref with read_document]');
+  assert.ok(!steward.sent[0].messages[0].content.includes('native file tools'));
+  assert.equal(steward.sent[1].messages[0].content, '[file: doc.pdf; use the native file tools to inspect this attachment]', 'its children keep read');
+});
+
+test('24.2c: offloaded image blocks are skipped by openaiMessages, even on a text-only session', () => {
+  const messages = [{ role: 'user', content: [{ type: 'text', text: 'a' },
+    { type: 'image', offloaded: true, attachment: { attachmentId: 'sha256:gone' } }] }];
+  assert.deepEqual(openaiMessages({ messages }, () => { throw new Error('must not resolve'); }), [{ role: 'user', content: 'a' }]);
+  assert.deepEqual(openaiMessages({ messages }, null, { textOnly: true }), [{ role: 'user', content: 'a' }]);
+});
+
+test('24.2c: the runtime hands installHostModel the root role\'s image_retain, its file capability and the whole DSH llm module', () => {
+  const source = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
+  const call = callArguments(source, 'installHostModel');
+  assert.match(call, /^ctx, llm, \{/, 'the whole dsh-llm module: LlmAdapter, LlmError and projectOffloadedImages');
+  assert.equal(propertyValue(call, 'imageRetain'), 'rootEntry.image_retain');
+  assert.equal(propertyValue(call, 'rootReadsFiles'), "!rootEntry.forbidden.includes('read')");
+  assert.match(source, /const rootEntry = roles\[steward \? 'steward' : 'director'\];/);
+  assert.equal(REQUEST_IMAGE_MAX_BYTES, 4 * 1024 * 1024);
+  const urls = functionBody(readFileSync(new URL('./model.mjs', import.meta.url), 'utf8'), 'requestImageUrls');
+  assert.match(urls, /maxBytes: REQUEST_IMAGE_MAX_BYTES/, 'requestImageUrls reads at the exported cap');
+});
+
 test('route-input is read at most once a minute, shared by concurrent callers; a failure answers the last value or text-only', async () => {
   let clock = 0, reads = 0, fail = false, answer = { root: ['text', 'image'], child: ['image', 'text'] };
   const logs = [];
@@ -209,6 +291,47 @@ test('route-input is read at most once a minute, shared by concurrent callers; a
   assert.deepEqual(await fresh(), { root: ['text'], child: ['text'] }, 'never read: text-only');
   const odd = routeInputCache(async () => ({ root: 'image', child: null }));
   assert.deepEqual(await odd(), { root: ['text'], child: ['text'] }, 'a malformed answer takes no images');
+});
+
+test('24.2c standing route check: a text-only child or measured:false logs once (rate-limited) and flags; images again clear it', async () => {
+  let clock = 0, answer = { root: ['text', 'image'], child: ['text', 'image'] };
+  const logs = [], flags = [];
+  const read = async () => answer;
+  const checked = routeStandingCheck(read, { now: () => clock, log: line => logs.push(line), flag: text => flags.push(text) });
+  assert.equal(STEWARD_ROUTE_FLAG, '管家路线不收图');
+  assert.equal(await checked(), answer, 'the answer is passed on untouched');
+  assert.deepEqual([logs, flags], [[], []], 'a route that takes images: nothing');
+  // A text-only child (a text-only candidate added to the steward route).
+  answer = { root: ['text', 'image'], child: ['text'] };
+  assert.equal(await checked(), answer);
+  assert.deepEqual(flags, ['管家路线不收图（child text-only）']);
+  assert.equal(logs.length, 1); assert.match(logs[0], /^steward route takes no images \(child text-only\)/);
+  for (const at of [1, 1000, 599999]) { clock = at; await checked(); }
+  assert.equal(logs.length, 1, 'one line per reason within 10 min, however many steps read it');
+  assert.equal(flags.length, 1, 'the flag is written once, not per step');
+  clock = 600000; await checked();
+  assert.equal(logs.length, 2, 'the same reason is logged again after 10 min');
+  assert.equal(flags.length, 1);
+  // measured:false (the table has no _input): flagged, whatever the sides say.
+  answer = { root: ['text', 'image'], child: ['text', 'image'], measured: false };
+  await checked();
+  assert.match(logs[2], /\(measured:false\)/); assert.equal(flags.at(-1), '管家路线不收图（measured:false）');
+  answer = { root: ['text'], child: ['text'], measured: false };
+  await checked();
+  assert.match(logs[3], /\(measured:false, root text-only, child text-only\)/, 'a new reason is logged at once');
+  assert.equal(flags.at(-1), '管家路线不收图（measured:false, root text-only, child text-only）');
+  // Images again: the flag is cleared once, and a later text-only answer is logged at once.
+  answer = { root: ['text', 'image'], child: ['text', 'image'] };
+  await checked(); await checked();
+  assert.equal(flags.at(-1), undefined); assert.equal(flags.length, 4, 'cleared once');
+  assert.equal(logs.at(-1), 'steward route takes images again');
+  answer = { root: ['text'], child: ['text', 'image'] };
+  await checked();
+  assert.match(logs.at(-1), /\(root text-only\)/); assert.equal(flags.at(-1), '管家路线不收图（root text-only）');
+  // What routeInputCache answers when the backend never answered (text-only) is flagged too.
+  const flags2 = [];
+  await routeStandingCheck(routeInputCache(async () => { throw new Error('down'); }), { flag: text => flags2.push(text) })();
+  assert.deepEqual(flags2, ['管家路线不收图（root text-only, child text-only）']);
 });
 
 // The witness for the retry is a REAL loopback HTTP server reached through a

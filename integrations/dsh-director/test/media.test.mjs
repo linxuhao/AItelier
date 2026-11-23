@@ -484,6 +484,23 @@ test('audience: an owner turn covers every ref, a group turn only its own group\
   assert.ok(!covers(undefined, ownerRow));
 });
 
+test('audience (24.2c, group-media switch §8 R4): a kept row is its own group\'s alone - no owner turn, no other group, no project', () => {
+  // Synthetic kept rows: the 24.2b library never writes `kept` (the switch increment does).
+  const kept = { audience: 'group:wechat:r1', kept: true };
+  const r1 = { kind: 'group', channel: 'wechat', group_ref: 'r1' };
+  assert.ok(covers(r1, kept), 'its own group\'s turn covers it');
+  assert.ok(!covers({ kind: 'owner' }, kept), 'an owner turn does not (R4)');
+  assert.ok(!covers({ kind: 'group', channel: 'wechat', group_ref: 'r2' }, kept));
+  assert.ok(!covers({ kind: 'group', channel: 'slack', group_ref: 'r1' }, kept));
+  assert.ok(!covers({ kind: 'group', unknown: true }, kept));
+  // A kept row labelled for a project (never written) is nobody's.
+  assert.ok(!covers({ kind: 'project', project_id: 'p1' }, { audience: 'project:p1', kept: true }));
+  // Only `kept: true` counts; everything else is as before (R5): the owner covers a group's @ row.
+  for (const flag of [false, 'true', 1, undefined]) assert.ok(covers({ kind: 'owner' }, { audience: 'group:wechat:r1', kept: flag }), String(flag));
+  // 24.2b regression: a director's project turn still covers its own project's rows.
+  assert.ok(covers({ kind: 'project', project_id: 'p1' }, { audience: 'project:p1' }));
+});
+
 test('placeholders and wake lines', () => {
   assert.equal(placeholder({ kind: 'image', ref: 'm_1' }), '[图片]');
   assert.equal(placeholder({ kind: 'voice', ref: 'm_1', durationMs: 23000 }), '[语音 0:23]');

@@ -96,6 +96,13 @@ test('guard: in a group turn only the group tools, at most six calls; anything n
   g2.split([group('q')], 1);
   for (const name of ['portfolio_projects', 'family_memory_note', 'call_tool', 'request_confirmation', 'run_confirmed', 'media_call'])
     assert.equal(g2.guard(name), undefined, name);
+  // Step 24.2c (7.8.12b "五"): read_document is a group tool, presented to the steward, and the
+  // refusal sentence names it.
+  assert.ok(GROUP_TOOLS.has('read_document') && STEWARD_TOOLS.includes('read_document'));
+  assert.match(groupTurnRefusal, /read_document/);
+  const g3 = turns();
+  g3.split([group('q')], 1);
+  assert.equal(g3.guard('read_document'), undefined);
   assert.equal(g2.guard('search_tools'), answerNow, 'the discovery tools count toward the six like any call');
 });
 
@@ -129,7 +136,7 @@ test('guard (step 24, 7.8.8): a group turn calls its PUBLIC connection tools - d
 
 test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
   assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'group_reminder_set', 'list_add',
-    'list_check', 'list_show', 'media_call', 'portfolio_project', 'portfolio_projects', 'request_confirmation', 'run_confirmed',
+    'list_check', 'list_show', 'media_call', 'portfolio_project', 'portfolio_projects', 'read_document', 'request_confirmation', 'run_confirmed',
     'search_tools', 'send_media']);
   for (const name of ['list_show', 'list_add', 'list_check']) {
     const g = turns();

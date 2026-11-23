@@ -428,6 +428,18 @@ export class LiveChildren {
   sessionSet() { return new Set(this.ids()); }
 }
 
+/** The status error a report carries (backend `error`, at most 2000 characters): the completion's
+ *  error, else the host's, and the steward's route flag on a line of its own (review MP-1: the flag
+ *  has its own slot, so clearing or setting a host error never erases or hides it). The first part
+ *  is cut, never the flag, when both do not fit. */
+export const STATUS_ERROR_MAX = 2000;
+export function statusError({ completion = '', host = '', route = '' } = {}) {
+  const first = completion || host;
+  if (!route) return first.slice(0, STATUS_ERROR_MAX);
+  if (!first) return route.slice(0, STATUS_ERROR_MAX);
+  return first.slice(0, Math.max(0, STATUS_ERROR_MAX - route.length - 1)) + '\n' + route;
+}
+
 /** The phase report body: what this driver is doing. `subagents` names the live
  *  native child SESSIONS - the identity the agent registry can answer for - never
  *  runIds (iss-de1b4e7f644f4f0e). Its consumer counts the array (`running_subagents`

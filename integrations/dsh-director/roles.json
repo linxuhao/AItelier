@@ -27,6 +27,7 @@
   },
   "steward": {
     "route": "steward",
+    "child_route": "steward",
     "reasoning_effort": "high",
     "compaction": {"thresholdRatio": 0.5, "retainTokens": 12000},
     "prompt": "steward.md",
@@ -37,10 +38,11 @@
                   "handoff", "idle_dormant", "ask_owner", "close_question", "grep_chat_history",
                   "family_memory_note", "family_memory_show", "list_show", "list_add", "list_check", "list_remove",
                   "group_reminder_set",
-                  "search_tools", "call_tool", "request_confirmation", "run_confirmed", "media_call", "send_media",
+                  "search_tools", "call_tool", "request_confirmation", "run_confirmed", "media_call", "send_media", "read_document",
                   "connections_list", "connection_tools", "connection_refresh", "propose_connection_change"],
     "presented_only": true,
     "catalog": "host",
+    "image_retain": {"max_images": 4, "count_quantum": 4, "max_base64_bytes": 6291456, "byte_quantum": 1048576},
     "forbidden": ["bash", "read", "write", "edit", "grep", "read_image", "subagent", "subagent_fork", "workflow",
                   "todo_plan", "todo_status", "todo_finish", "todo_templates", "todo_rebind", "todo_begin", "todo_done",
                   "todo_report", "todo_batch_plan", "todo_batch_status", "watch_process"]

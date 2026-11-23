@@ -17,6 +17,7 @@ import { createRequire } from 'node:module';
 import { measuredEntryForTest } from './dsh-entry.mjs';
 import { registerMediaTools } from '../dsh-director/lib/media-tools.mjs';
 import { createOwnerChannels } from '../dsh-director/lib/channels.mjs';
+import { statusError } from '../dsh-director/lib/core.mjs';
 
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
@@ -115,6 +116,159 @@ test('events(): the media library\'s cleanup runs at the start (an expired row a
     await Promise.resolve(events.done).catch(() => {});
     assert.deepEqual(cleared, armed, 'stop() ends the hourly cleanup');
   } finally { Object.assign(globalThis, { setInterval: realSet, clearInterval: realClear }); }
+});
+
+test('24.2c standing route check, wired: the steward\'s route reads raise the dashboard flag in its own slot (held until events()), a restored connection clears only the host error, images again clear the flag; a director is not checked', async () => {
+  const realNow = Date.now;
+  let clock = realNow(), routes = { root: ['text', 'image'], child: ['text'] }, reads = 0;
+  Date.now = () => clock;
+  try {
+    const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+    const request = async (path, body, signal) => {
+      if (path === '/api/dsh-drivers/aitelier-home/route-input' || path === '/api/dsh-drivers/alpha/route-input') { reads += 1; return routes; }
+      if (path === '/api/drivers/me') return { driver_id: 'drv-home' };
+      if (path.endsWith('/context')) return { project_id: 'aitelier-home', driver_id: 'drv-home', event_seq: 1, nodes: [],
+        project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'protocol' };
+      if (path.endsWith('/activity') || path.endsWith('/heartbeat')) return { ok: true };
+      if (path === '/api/state/query/list_director_messages') return { result: { items: [], matched_total: 0, has_more: false } };
+      if (path === '/api/state/query/wait_for_state_change') return new Promise((_, reject) =>
+        signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+      return { result: {} };
+    };
+    const boot = async role => {
+      const runtime = new DriverRuntime({ project: 'aitelier-home', driver: 'drv-home', directory: stateDir, request, retryDelayMs: 10 });
+      await runtime.init();
+      const host = aitelierHost(env({ ...(role ? { AITELIER_DSH_ROLE: role } : {}), AITELIER_MEDIA_ROOT: mkdtempSync(join(tmpdir(), 'steward-media-')),
+        AITELIER_DSH_STATE_DIR: stateDir }), { request, runtime });
+      // The plugin's three status slots (index.mjs): completion/host error, then the route flag.
+      const calls = [], slots = { host: '', route: '' };
+      const api = { notify: async () => {}, eventMessage: text => text, isDisposed: () => false, ownerMessageSent: async () => {},
+        setHostError: async message => { calls.push(['set', message]); slots.host = message; },
+        clearHostError: async () => { calls.push(['clear']); slots.host = ''; },
+        setRouteFlag: async text => { calls.push(['route', text]); slots.route = text ?? ''; },
+        agent: { session: { snapshotEvents: () => [] }, steer: () => {} },
+        ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {}, goals: { get: () => undefined },
+          agents: { withoutInitiator: fn => fn() }, sessionPersistence: { flush: async () => {} } } };
+      return { host, runtime, calls, api, shown: () => statusError(slots) };
+    };
+    const steward = await boot('steward');
+    // A read before events() (the first step can come first): the flag waits for the status seam.
+    assert.equal(await steward.host.media.takesImages(), false);
+    assert.equal(reads, 1);
+    const events = await steward.host.events(steward.api);
+    try {
+      const flag = ['route', '管家路线不收图（child text-only）'];
+      assert.deepEqual(steward.calls, [flag], 'events() puts the held flag on the dashboard status');
+      await steward.host.media.takesImages();
+      assert.deepEqual(steward.calls, [flag], 'a read with the same answer writes nothing');
+      await steward.runtime.onConnectionRestored();
+      assert.deepEqual(steward.calls.at(-1), ['clear'], 'a restored connection clears the host error only');
+      assert.equal(steward.shown(), flag[1], 'the flag stays on the status');
+      clock += 60000; routes = { root: ['text', 'image'], child: ['text', 'image'] };
+      assert.equal(await steward.host.media.takesImages(), true);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(steward.calls.at(-1), ['route', undefined], 'images again: the flag is cleared');
+      const before = steward.calls.length;
+      await steward.runtime.onConnectionRestored();
+      assert.deepEqual(steward.calls.slice(before), [['clear']], 'no flag: a restored connection clears as before');
+      clock += 60000; routes = { root: ['text', 'image'], child: ['text', 'image'], measured: false };
+      await steward.host.media.takesImages();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(steward.calls.at(-1), ['route', '管家路线不收图（measured:false）']);
+    } finally {
+      events.stop();
+      await Promise.resolve(events.done).catch(() => {});
+    }
+    // A director: its route reads are not checked (it has no takesImages), and a restored
+    // connection clears the host error exactly as before.
+    const director = await boot(undefined);
+    assert.equal(director.host.media.takesImages, undefined);
+    // The owner cleared the director's goal (bindDriverGoal then binds none): no goal service needed.
+    director.api.agent.session.snapshotEvents = () => [{ type: 'goal/change', data: { operation: 'clear' } }];
+    const directorEvents = await director.host.events(director.api);
+    try {
+      await director.runtime.onConnectionRestored();
+      assert.deepEqual(director.calls, [['clear']]);
+    } finally {
+      directorEvents.stop();
+      await Promise.resolve(directorEvents.done).catch(() => {});
+    }
+  } finally { Date.now = realNow; }
+});
+
+test('MP-1: the route flag and the host error never erase each other - a group-setup recovery, a connection outage, and the route changing during one', async () => {
+  const realNow = Date.now;
+  let clock = realNow(), routes = { root: ['text'], child: ['text'] };
+  Date.now = () => clock;
+  try {
+    const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+    const request = async (path, body, signal) => {
+      if (path === '/api/dsh-drivers/aitelier-home/route-input') return routes;
+      if (path === '/api/drivers/me') return { driver_id: 'drv-home' };
+      if (path.endsWith('/context')) return { project_id: 'aitelier-home', driver_id: 'drv-home', event_seq: 1, nodes: [],
+        project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'protocol' };
+      if (path.endsWith('/activity') || path.endsWith('/heartbeat')) return { ok: true };
+      if (path === '/api/state/query/list_director_messages') return { result: { items: [], matched_total: 0, has_more: false } };
+      if (path === '/api/state/query/wait_for_state_change') return new Promise((_, reject) =>
+        signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+      return { result: {} };
+    };
+    const runtime = new DriverRuntime({ project: 'aitelier-home', driver: 'drv-home', directory: stateDir, request, retryDelayMs: 10 });
+    await runtime.init();
+    const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: mkdtempSync(join(tmpdir(), 'steward-media-')),
+      AITELIER_DSH_STATE_DIR: stateDir }), { request, runtime });
+    // index.mjs's slots and the status line they make.
+    const slots = { host: '', route: '' };
+    const api = { notify: async () => {}, eventMessage: text => text, isDisposed: () => false, ownerMessageSent: async () => {},
+      setHostError: async message => { slots.host = message; }, clearHostError: async () => { slots.host = ''; },
+      setRouteFlag: async text => { slots.route = text ?? ''; },
+      agent: { session: { snapshotEvents: () => [] }, steer: () => {} },
+      ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {}, goals: { get: () => undefined },
+        agents: { withoutInitiator: fn => fn() }, sessionPersistence: { flush: async () => {} } } };
+    const shown = () => statusError(slots);
+    const settle = () => new Promise(resolve => setImmediate(resolve));
+    const FLAG = '管家路线不收图（root text-only, child text-only）';
+    const events = await host.events(api);
+    try {
+      await host.media.takesImages(); await settle();
+      assert.equal(shown(), FLAG);
+      // (a) a group-turn setup failure, then its recovery (lib/group-turns.mjs: set, then clear).
+      await api.setHostError('group_turn_setup_failed: boom');
+      assert.equal(shown(), 'group_turn_setup_failed: boom\n' + FLAG, 'both, each on its own line');
+      await api.clearHostError();
+      for (let i = 0; i < 5; i += 1) { clock += 60000; await host.media.takesImages(); }
+      await settle();
+      assert.equal(shown(), FLAG, 'the recovery leaves the flag while the route is still text-only');
+      // (b) the connection is lost, and the route is fixed during the outage.
+      await runtime.onConnectionError(new Error('socket hang up'));
+      const lost = slots.host;
+      assert.ok(lost, 'the connection error is shown');
+      clock += 60000; routes = { root: ['text', 'image'], child: ['text', 'image'] };
+      assert.equal(await host.media.takesImages(), true); await settle();
+      assert.equal(shown(), lost, 'the route recovering does not erase the connection error');
+      // (c) the route breaks again during the same outage: both are shown.
+      clock += 60000; routes = { root: ['text'], child: ['text'] };
+      await host.media.takesImages(); await settle();
+      assert.equal(shown(), lost + '\n' + FLAG, 'the flag does not replace the connection error');
+      await runtime.onConnectionRestored();
+      assert.equal(shown(), FLAG, 'the connection back: only the flag is left');
+    } finally {
+      events.stop();
+      await Promise.resolve(events.done).catch(() => {});
+    }
+  } finally { Date.now = realNow; }
+});
+
+test('statusError: the completion or host error, then the route flag on its own line, within the backend\'s 2000 characters (the flag is never cut)', () => {
+  assert.equal(statusError({}), '');
+  assert.equal(statusError({ host: 'h' }), 'h');
+  assert.equal(statusError({ completion: 'c', host: 'h' }), 'c');
+  assert.equal(statusError({ route: 'r' }), 'r');
+  assert.equal(statusError({ completion: 'c', host: 'h', route: 'r' }), 'c\nr');
+  const long = statusError({ host: 'x'.repeat(5000), route: '管家路线不收图（root text-only）' });
+  assert.equal(long.length, 2000);
+  assert.ok(long.endsWith('\n管家路线不收图（root text-only）'));
+  assert.equal(statusError({ host: 'y'.repeat(5000) }).length, 2000);
 });
 
 test('the media root comes from AITELIER_MEDIA_ROOT (absolute) or there is none', () => {
@@ -219,7 +373,7 @@ test('the media tools are accepted by the pinned DSH defineTool', async t => {
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
   registerMediaTools({ tools: { register: tool => names.push(tool.name) } }, { ctx: {}, defineTool, jsonOutput, HarnessError: Error,
     media: {}, catalog: {}, turns: {}, channels: undefined, ledger: {} });
-  assert.deepEqual(names, ['media_call', 'send_media']);
+  assert.deepEqual(names, ['media_call', 'send_media', 'read_document']);
 });
 
 // --- step 24.2b (design-steward 7.8.12a "出站", 7.8.18 适配器与插件): an owner turn's send_media is

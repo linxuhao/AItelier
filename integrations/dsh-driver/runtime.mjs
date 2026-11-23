@@ -15,12 +15,12 @@
  *  different signature - and nothing imported this file's boot. The added names are
  *  SESSION_ENV, aitelierHost, attemptWorkState and stateRequest (the State retry policy,
  *  exported so its test can drive it). exports.test.mjs pins both lists. */
-import { declaresImage, installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, wakeTakesImages } from './model.mjs';
+import { declaresImage, installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, routeStandingCheck, wakeTakesImages } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia, createPdfReader } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -602,8 +602,23 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 24.2b (7.8.12a "路线能力"): which routes take images, read from the backend at most once
   // a minute (the model bridge asks on every step).
   let routeLog = () => {};
-  const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
+  const readRouteInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
     undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
+  // Step 24.2c (7.8.12b "九", 上线后常驻的检查): in the steward process every read is checked; a
+  // route that takes no images is logged and flagged on the dashboard status (its own slot,
+  // setRouteFlag, which events() hands over: until then the flag waits in routeFlag). A director
+  // is unchecked.
+  let routeFlag, routeFlagSink = () => {};
+  const routeInput = steward ? routeStandingCheck(readRouteInput, { log: line => routeLog(line),
+    flag: text => { routeFlag = text; routeFlagSink(text); } }) : readRouteInput;
+  // Step 24.2c (design-steward 7.8.12b "三", "七", "十一"): the steward's PDF reader - the host
+  // venv's python (AITELIER_MEDIA_PYTHON, core/dsh_driver.py) running the plugin's pdf_read.py in
+  // <state dir>/pdf-tmp; install() wipes that directory and starts the self-check.
+  let pdfLog = () => {};
+  const stateDir = env.AITELIER_DSH_STATE_DIR;
+  const pdfReader = steward && library ? createPdfReader({ python: env.AITELIER_MEDIA_PYTHON,
+    tmpRoot: typeof stateDir === 'string' && stateDir.startsWith('/') ? join(stateDir, 'pdf-tmp') : undefined,
+    attachments: () => attachmentStore(), log: line => pdfLog(line) }) : undefined;
   // Step 23 group wake (iss-0d20ef5dd9a44cd0): the optional directorHost hook for a group
   // @-turn's images. The plugin picks this group's own kept refs (and the message's own files)
   // and calls `line`; the read/saveImage step is the same wakeMedia the owner's wake uses, so
@@ -675,6 +690,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
       attachmentStore = () => ctx.get('attachments');
       routeLog = line => ctx.logger.warn(line);
+      pdfLog = line => (line.startsWith('pdf_reader_unavailable') ? ctx.logger.warn(line) : ctx.logger.info(line));
+      pdfReader?.start().catch(error => ctx.logger.warn(`pdf_reader_unavailable: ${String(error?.code ?? 'error')}`));
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
       const sendRequest = async (path, body, signal, readAs) => {
@@ -715,11 +732,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       request = suppliedRequest ?? stateRequest(sendRequest,
         { log: { warn: line => ctx.logger.warn(line), info: line => ctx.logger.info(line) } });
       // Efforts from roles.json; AITELIER_DSH_ROOT_REASONING_EFFORT still overrides the
-      // director (an invalid value: max, as before the table).
+      // director (an invalid value: max, as before the table). Step 24.2c (7.8.12b "八" 4): the
+      // root role's image_retain (the steward's; LlmError and projectOffloadedImages come with
+      // `llm`), and whether the root may read files at all (the steward forbids `read`).
+      const rootEntry = roles[steward ? 'steward' : 'director'];
       installHostModel(ctx, llm, { request, project, session: env.AITELIER_DSH_SESSION,
-        rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles[steward ? 'steward' : 'director'].reasoning_effort),
+        rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? rootEntry.reasoning_effort),
         workerEffort: roles.worker.reasoning_effort,
-        retry: modelRetryOptions(env), routeInput });
+        retry: modelRetryOptions(env), routeInput, imageRetain: rootEntry.image_retain,
+        rootReadsFiles: !rootEntry.forbidden.includes('read') });
       // Resolve the existing mounted secret file into DSH's private credential
       // store, never into the environment inherited by test/build subprocesses.
       const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';
@@ -990,7 +1011,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent, ownerChannelLogin, groupSend }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, setRouteFlag, isDisposed, memory, ownerMessageSent, ownerChannelLogin, groupSend }) {
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
@@ -1052,6 +1073,11 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         await setHostError(message);
       };
       runtime.onConnectionRestored = () => clearHostError();
+      if (steward) {
+        routeFlagSink = text => void Promise.resolve(setRouteFlag?.(text))
+          .catch(error => ctx.logger.warn('route flag: ' + String(error?.message ?? error).slice(0, 300)));
+        if (routeFlag) routeFlagSink(routeFlag);
+      }
       runtime.onEvent = async raw => {
         // The owner's memory requests are the runtime's, never a model turn: run them and
         // drop their events from what the steward is woken with.
@@ -1167,7 +1193,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 24.2: the media library behind storeMedia, media_call and send_media. 24.2b: an owner
   // turn's send_media is a steward message with the file (State, then the plugin's mirror).
   library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch,
-    owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) } }) } : {});
+    owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) },
+    reader: pdfReader, routeInput }) } : {});
   // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
   else if (library) {
     const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,

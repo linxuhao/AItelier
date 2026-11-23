@@ -107,7 +107,7 @@
   .driver-status{margin:.45rem 0;font-size:.76rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;padding:.5rem .65rem;}
   summary{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem 1rem;margin:0;line-height:1.3;}
   .driver-table{overflow:auto;max-height:240px;}table{font-size:.75rem;margin:.5rem 0 0;}th,td{padding:.35rem .5rem;white-space:nowrap;}
-  button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}small{display:block;max-width:400px;white-space:normal;color:var(--pico-del-color,#b91c1c);}
+  button{font-size:.7rem;padding:.2rem .5rem;margin:0 0 0 .5rem;width:auto;}small{display:block;max-width:400px;white-space:pre-line;color:var(--pico-del-color,#b91c1c);}
   p{margin:.4rem 0;}
   .unread{display:inline-block;margin:0 0 0 .35rem;padding:0 .35rem;border-radius:999px;background:var(--pico-primary,#2563eb);color:#fff;font-size:.65rem;line-height:1.5;}
 </style>

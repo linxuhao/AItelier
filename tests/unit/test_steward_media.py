@@ -353,6 +353,10 @@ def test_python_reads_the_same_media_types_table_as_the_host():
     assert media_types.limits()["image_pixels"] == 40_000_000
     # Review F4: the gateway's body bound is the table's, the one media_call counts against.
     assert gw.MAX_BODY == media_types.limits()["call_body_bytes"] == 40 * 1024 * 1024
+    # Step 24.2c (design-steward 7.8.12b "六"): read_document's bounds live in the same table.
+    assert {key: value for key, value in media_types.limits().items() if key.startswith("pdf_")} == {
+        "pdf_pages_with_images": 4, "pdf_pages_text_only": 30, "pdf_turn_images_owner": 16,
+        "pdf_turn_images_group": 8, "pdf_chars_page": 4000, "pdf_chars_call": 8000}
     # No office document, archive or executable type in v1.
     assert not {"application/zip", "application/msword", "application/x-msdownload"} & {t["mime"] for t in table["types"]}
 

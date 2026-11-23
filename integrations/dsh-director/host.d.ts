@@ -93,6 +93,10 @@ export interface DirectorApi {
   /** A host-side failure the status reports should carry (cleared with clearHostError). */
   setHostError(message: string): Promise<void>;
   clearHostError(): Promise<void>;
+  /** Step 24.2c (design-steward 7.8.12b "九"): the steward's route flag (管家路线不收图...), or
+   *  undefined to clear it. A slot of its own: the status carries it on its own line after the
+   *  host error, and setHostError/clearHostError never touch it. */
+  setRouteFlag(text: string | undefined): Promise<void>;
   isDisposed(): boolean;
   /** v1.2: the owner's memory store when config.memory is set (lib/memory/store.mjs), else
    *  undefined. A host records each owner/steward turn with memory.recordTurn(turnId,
@@ -344,8 +348,8 @@ export interface DirectorHost {
   };
   /** Step 24.2 (design-steward 7.8.12, 7.8.12a): the host's media library - one writer of
    *  `<media root>/<userId>/` (the root is the host's setting), lib/media.mjs. Declared, the
-   *  plugin's ownerChannels.storeMedia stores into it and the steward gets media_call and
-   *  send_media, a director (24.2b) media_call on its own project's refs through
+   *  plugin's ownerChannels.storeMedia stores into it and the steward gets media_call,
+   *  send_media and read_document, a director (24.2b) media_call on its own project's refs through
    *  DIRECTOR_MEDIA_TOOLS (index.mjs); undeclared (the built-in local host), neither tool is registered and
    *  storeMedia answers {refused: 'unsupported'}.
    *  - ingest: the library's one way in (no binding check: storeMedia makes that one first) -
@@ -381,6 +385,22 @@ export interface DirectorHost {
    *    and the owner's channel gets it as it gets a text reply. {message_id, mirror: {mirrored,
    *    channel?, reason?}} or {refused, reason?} (nothing written). Absent: an owner turn's
    *    send_media is refused `unsupported`.
+   *  - readDocument (optional; step 24.2c, design-steward 7.8.12b): read_document's host half.
+   *    The plugin has already judged the ref (covers, not kept), its kind and the page counts, and
+   *    passes `pages` as "n" or "a-b" (a range past the end is cut at the last page; a first page
+   *    past it is page_out_of_range with page_count), `images` (render page images or not) and
+   *    `maxPages`. For a PDF the host reads it in a bounded child of its own (the text layer
+   *    within pdf_chars_page and pdf_chars_call, each page image saved with
+   *    ctx.attachments.saveImage under the name `<ref>#p<n>.jpg`); for an image ref it saves the
+   *    library's bytes as one image named `<ref>.<ext>`. {kind: 'pdf' | 'image', page_count,
+   *    sandbox?, pages: [{n, text, chars, truncated, no_text_layer, image?: ImageAttachmentRef,
+   *    image_error?, error?}]} or {refused: unknown_ref | not_a_document | page_out_of_range |
+   *    too_many_pages | invalid_request | encrypted | unsupported_security | broken |
+   *    pdf_reader_unavailable | timeout | busy, page_count?}. Absent: read_document answers
+   *    pdf_reader_unavailable.
+   *  - takesImages (optional; step 24.2c): whether this process's route takes images now (the
+   *    judgement a wake's own images use); false, or absent, read_document renders no page
+   *    images and says so on every page.
    *  - kept (design/steward-group-media.md, owner 2026-11-23): `ingest`'s meta.kept marks a
    *    group's un-mentioned file (a group audience and source 'in' only) - that group's turns
    *    alone cover it, and it lives limits.kept_hours. keptAudiences (optional) names the
@@ -404,6 +424,11 @@ export interface DirectorHost {
     withdraw?(ref: string): { removed: number } | Promise<{ removed: number }>;
     sendToOwner?(file: { ref: string; caption?: string; replyTo?: string }, signal?: AbortSignal):
       Promise<{ message_id: string; mirror: { mirrored: boolean; channel?: string; reason?: string } } | { refused: string; reason?: string }>;
+    readDocument?(ref: string, options: { pages: string; images: boolean; maxPages: number }, signal?: AbortSignal):
+      Promise<{ kind: 'pdf' | 'image'; page_count: number; sandbox?: string; pages: Array<{ n: number; text: string; chars: number;
+        truncated: boolean; no_text_layer: boolean; image?: { attachmentId: string; mediaType: string; bytes: number; width: number;
+        height: number; name?: string }; image_error?: string; error?: string }> } | { refused: string; page_count?: number }>;
+    takesImages?(signal?: AbortSignal): Promise<boolean>;
     keptAudiences?(): Promise<string[]>;
     purgeKept?(audience: string): Promise<{ rows_before: number; rows_after: number; files_unlinked: number; files_shared: number;
       bytes_freed: number }>;

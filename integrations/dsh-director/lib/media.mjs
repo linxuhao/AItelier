@@ -38,8 +38,8 @@
  *  Refs are `m_` + 16 random hex characters, never a hash (they say nothing about whether
  *  two files are the same). Each row carries its AUDIENCE: `owner`, `group:<channel>:
  *  <group_ref>` or (a director's subdirectory, 24.2b) `project:<project_id>`;
- *  `covers(turnAudience, row)` is the one rule media_call and send_media use (an owner
- *  turn covers every ref except a kept medium, a group turn only its own group's).
+ *  `covers(turnAudience, row)` is the one rule media_call, send_media and read_document use (an
+ *  owner turn covers every ref except a kept medium, a group turn only its own group's).
  *
  *  A KEPT medium (design/steward-group-media.md, owner rulings 2026-11-23) is a group file
  *  sent without mentioning the steward, stored only while that group's switch is on: its row

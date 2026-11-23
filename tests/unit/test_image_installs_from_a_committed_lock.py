@@ -122,8 +122,17 @@ def _declared_dependencies() -> list[str]:
     return names
 
 
+def _is_hash_locked(argv: list[str]) -> bool:
+    """A `-r <file>` install that pip refuses unless every wheel matches a pinned
+    sha256, with no source builds and no resolver: it cannot float, so it is not
+    the second, unconstrained install path the test below refuses. The PDF
+    reader's requirements-pdf.txt is installed this way."""
+    return ("--require-hashes" in argv and "--only-binary=:all:" in argv
+            and "--no-deps" in argv and "-r" in argv and "-e" not in argv)
+
+
 def test_the_dockerfile_installs_python_through_the_lock():
-    installs = _pip_installs()
+    installs = [argv for argv in _pip_installs() if not _is_hash_locked(argv)]
     assert installs, "the Dockerfile runs no `pip install`; the image would have no dependencies"
     assert len(installs) == 1, (
         "more than one pip install run in the Dockerfile means a second install path, "

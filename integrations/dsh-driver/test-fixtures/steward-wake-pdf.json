@@ -1,0 +1,35 @@
+{
+ "_about": "One real steward wake whose driver_inbox holds the owner's dashboard message with one PDF upload, ids and times renamed: checked against a live wake by tests/unit/test_steward_wake_pdf_fixture.py (regenerate by hand from the rows it prints on a mismatch), read by integrations/dsh-driver/runtime.read-document.test.mjs. `uploads` holds each upload's bytes as latin-1 text: a two-page PDF, page 1 with a text layer, page 2 a drawing only (no text layer).",
+ "driver_inbox": [
+  {
+   "delivery_id": "delivery-owner-dashboard-pdf",
+   "message_id": "owner-dashboard-pdf",
+   "target_driver_id": "steward",
+   "seq": 1,
+   "status": "unread",
+   "version": 1,
+   "thread_id": "owner-dashboard-pdf",
+   "sender_driver_id": null,
+   "project_id": "aitelier-home",
+   "kind": "note",
+   "delivery_mode": "transient",
+   "subject": "Message from the user",
+   "body": "看看这张发票",
+   "refs_json": "{}",
+   "created_at": "2026-11-23T00:00:00+00:00",
+   "sender_kind": "user",
+   "attachments": [
+    {
+     "id": "u_00000000000000f1",
+     "kind": "file",
+     "mime": "application/pdf",
+     "size": 880,
+     "name": "invoice.pdf"
+    }
+   ]
+  }
+ ],
+ "uploads": {
+  "u_00000000000000f1": "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 90 >>\nstream\nBT /F1 24 Tf 72 720 Td (Invoice 2026-11 total 4721 EUR) Tj ET\n0 0 1 rg 72 600 200 60 re f\nendstream\nendobj\n5 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>\nendobj\n6 0 obj\n<< /Length 26 >>\nstream\n0.5 g 72 300 468 300 re f\nendstream\nendobj\n7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\nxref\n0 8\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000121 00000 n \n0000000247 00000 n \n0000000386 00000 n \n0000000512 00000 n \n0000000587 00000 n \ntrailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n657\n%%EOF\n"
+ }
+}

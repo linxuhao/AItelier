@@ -253,8 +253,12 @@ _ROLE_KEYS = ("route", "reasoning_effort", "compaction", "prompt", "presented", 
 # Optional in every role: true refuses any tool the role does not present.
 # `catalog: "host"` (step 24.1a): the role finds and calls its further tools only in the
 # catalog its host gives for the turn (the steward's own connections).
-_OPTIONAL_ROLE_KEYS = ("presented_only", "catalog")
+# `child_route` (step 24.2c): the route the root's child sessions take instead of the
+# worker route. `image_retain` (step 24.2c): how many already-seen images the root session
+# keeps in its history (count and base64 bytes, each with its offload quantum).
+_OPTIONAL_ROLE_KEYS = ("presented_only", "catalog", "child_route", "image_retain")
 _CATALOGS = ("host",)
+_IMAGE_RETAIN_KEYS = ("max_images", "count_quantum", "max_base64_bytes", "byte_quantum")
 _COMPACTION_KEYS = ("thresholdRatio", "retainTokens")
 _EFFORTS = ("off", "low", "high", "max")
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_]+")
@@ -318,6 +322,15 @@ def validate_roles(table):
             raise ValueError(f"roles: {role}.presented_only must be a boolean")
         if "catalog" in value and value["catalog"] not in _CATALOGS:
             raise ValueError(f"roles: {role}.catalog must be one of {', '.join(_CATALOGS)}")
+        if "child_route" in value and not (isinstance(value["child_route"], str) and value["child_route"]):
+            raise ValueError(f"roles: {role}.child_route must be a non-empty string")
+        if "image_retain" in value:
+            retain_images = value["image_retain"]
+            _exact_keys(retain_images, _IMAGE_RETAIN_KEYS, role + ".image_retain")
+            for key in _IMAGE_RETAIN_KEYS:
+                count = retain_images[key]
+                if not (_is_number(count) and float(count).is_integer() and count > 0):
+                    raise ValueError(f"roles: {role}.image_retain.{key} must be a positive integer")
     return table
 
 
@@ -398,16 +411,18 @@ def completion_route(row, session_id, roles=None):
 
     The root session is the project's role (the director, or the steward for its
     reserved project): the project row's model (the owner's per-project choice)
-    overrides that role's route in the table. Every other session is a worker and
-    gets the table's worker route - never anything the row says."""
+    overrides that role's route in the table. Every other session is a child: it
+    gets the root role's `child_route` when the table gives one (step 24.2c: the
+    steward's children take the steward route), else the table's worker route -
+    never anything the row says."""
     table = roles or _serving_roles()
     if session_id == row["session_id"]:
         return row["model"] or _root_entry(table, row.get("project_id"))["route"]
-    return table["worker"]["route"]
+    return _root_entry(table, row.get("project_id")).get("child_route") or table["worker"]["route"]
 
 
 # Any session id that is not the row's root session id: completion_route sends
-# every such session to the worker route, so one stands for all children.
+# every such session to the same child route, so one stands for all children.
 _ANY_CHILD_SESSION = object()
 
 
@@ -808,7 +823,10 @@ class DshDrivers:
                    AITELIER_DSH_MAX_ACTIVE_SUBAGENTS=str(MAX_ACTIVE_SUBAGENTS),
                    # Step 24.2 (design-steward 7.8.12a piece 3): the media root, given by this host to
                    # every driver process - a driver's own `~` is DSH_HOME's world under ~/.AItelier.
-                   AITELIER_MEDIA_ROOT=media_root())
+                   AITELIER_MEDIA_ROOT=media_root(),
+                   # Step 24.2c (design-steward 7.8.12b "三"): the python that runs the steward's
+                   # PDF reader (integrations/dsh-director/pdf_read.py) - this venv's, with pypdfium2.
+                   AITELIER_MEDIA_PYTHON=sys.executable)
         if role == "steward":
             # The plugin's root role (HostConfig.rootRole); a director gets no
             # variable at all. The memory owner is the one owner for now.

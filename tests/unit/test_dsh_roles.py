@@ -78,6 +78,10 @@ STEWARD = {"route": "driver", "reasoning_effort": "high",
            "forbidden": ["bash", "subagent", "todo_plan"], "presented_only": True}
 
 
+# A valid image_retain (step 24.2c), the steward's committed values.
+IMAGE_RETAIN = {"max_images": 4, "count_quantum": 4, "max_base64_bytes": 6291456, "byte_quantum": 1048576}
+
+
 def _with_steward(table, **changes):
     table["steward"] = {**copy.deepcopy(STEWARD), **changes}
 
@@ -108,6 +112,26 @@ MALFORMED = {
     # Step 24.1a: `catalog` is optional on any role and has one value.
     "unknown steward catalog": lambda t: _with_steward(t, catalog="dsh"),
     "boolean director catalog": lambda t: t["director"].update(catalog=True),
+    # Step 24.2c: `child_route` (a route name) and `image_retain` (four positive integers,
+    # exact keys) are optional on any role.
+    "misspelt steward child_route key": lambda t: _with_steward(t, child_routes="steward"),
+    "empty steward child_route": lambda t: _with_steward(t, child_route=""),
+    "non-string director child_route": lambda t: t["director"].update(child_route=1),
+    "null worker child_route": lambda t: t["worker"].update(child_route=None),
+    "misspelt image_retain key": lambda t: _with_steward(t, image_retain={
+        **IMAGE_RETAIN, "max_image": 4}),
+    "missing image_retain key": lambda t: _with_steward(t, image_retain={
+        k: v for k, v in IMAGE_RETAIN.items() if k != "byte_quantum"}),
+    "image_retain not an object": lambda t: _with_steward(t, image_retain=4),
+    "image_retain a list": lambda t: _with_steward(t, image_retain=[4, 4, 6291456, 1048576]),
+    "zero count_quantum": lambda t: _with_steward(t, image_retain={**IMAGE_RETAIN, "count_quantum": 0}),
+    "negative byte_quantum": lambda t: _with_steward(t, image_retain={**IMAGE_RETAIN, "byte_quantum": -1}),
+    "zero max_images": lambda t: _with_steward(t, image_retain={**IMAGE_RETAIN, "max_images": 0}),
+    "fractional max_images": lambda t: _with_steward(t, image_retain={**IMAGE_RETAIN, "max_images": 1.5}),
+    "boolean max_images": lambda t: _with_steward(t, image_retain={**IMAGE_RETAIN, "max_images": True}),
+    "string max_base64_bytes": lambda t: _with_steward(t, image_retain={
+        **IMAGE_RETAIN, "max_base64_bytes": "6291456"}),
+    "null director image_retain": lambda t: t["director"].update(image_retain=None),
     "missing director": lambda t: t.pop("director"),
 }
 
@@ -195,6 +219,35 @@ def test_the_steward_finds_its_tools_in_its_hosts_catalog():
 @pytest.mark.skipif(NODE is None, reason="node is not installed in this environment")
 def test_python_and_node_agree_on_a_catalog_role(tmp_path):
     table = _variant(lambda t: (_with_steward(t, catalog="host"), t["worker"].update(catalog="host")))
+    path = tmp_path / "roles.json"
+    path.write_text(json.dumps(table))
+    assert _python_parse(path) == _node_parse(path) == ("ok", table)
+
+
+def test_the_steward_takes_its_own_route_for_children_and_bounds_its_seen_images():
+    """Step 24.2c (design-steward 7.8.12b "九" 3, "八" 4): the repository's steward sends its
+    children to the steward route and keeps at most 4 seen images / 6 MiB of base64; the
+    byte cap is not below one request image (4 MiB raw = 5,592,408 base64 bytes)."""
+    table = load_roles()
+    steward = table["steward"]
+    assert steward["child_route"] == "steward" == steward["route"]
+    assert steward["image_retain"] == IMAGE_RETAIN
+    assert steward["image_retain"]["max_base64_bytes"] >= -(-4 * 1024 * 1024 // 3) * 4 == 5_592_408
+    for role in ("director", "worker"):
+        assert "child_route" not in table[role] and "image_retain" not in table[role]
+
+
+def test_child_route_and_image_retain_are_accepted_on_any_role():
+    table = _variant(lambda t: (t["director"].update(child_route="d-children", image_retain=dict(IMAGE_RETAIN)),
+                                t["worker"].update(image_retain={**IMAGE_RETAIN, "max_images": 1})))
+    assert validate_roles(copy.deepcopy(table)) == table
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed in this environment")
+def test_python_and_node_agree_on_child_route_and_image_retain(tmp_path):
+    table = _variant(lambda t: (_with_steward(t, child_route="s-children", image_retain=dict(IMAGE_RETAIN)),
+                                t["director"].update(child_route="d-children"),
+                                t["worker"].update(image_retain={**IMAGE_RETAIN, "byte_quantum": 1})))
     path = tmp_path / "roles.json"
     path.write_text(json.dumps(table))
     assert _python_parse(path) == _node_parse(path) == ("ok", table)

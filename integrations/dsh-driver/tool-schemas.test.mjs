@@ -87,6 +87,7 @@ test('every tool registrar of the steward and the director is accepted by the pi
   assert.deepEqual(by('portfolio'), ['handoff', 'portfolio_conversation', 'portfolio_inbox', 'portfolio_inbox_acknowledge', 'portfolio_project',
     'portfolio_projects', 'private_inbox', 'private_inbox_acknowledge']);
   assert.deepEqual(by('tool-discovery'), ['call_tool', 'search_tools']);
-  assert.deepEqual(by('media'), ['media_call', 'send_media']);
+  // Step 24.2c: read_document is registered whatever the host has (media: {} here), so its schema is checked too.
+  assert.deepEqual(by('media'), ['media_call', 'read_document', 'send_media']);
   assert.deepEqual(by('director-media'), ['media_call']);
 });

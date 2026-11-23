@@ -683,6 +683,13 @@ test('real pinned DSH: read_image is refused when the child route is text-only, 
     'route-input was read with the driver token: ' + JSON.stringify(seen.routeReads));
 });
 
+test('real pinned DSH: a table with no `_input` (measured: false) keeps read_image as before 24.2b', async (t) => {
+  const seen = await readImageThroughRoutes(t, { root: ['text'], child: ['text'], measured: false });
+  if (!seen) return;
+  assert.ok(Array.isArray(seen.tool.content) && seen.tool.content.some(part => part.type === 'image_url'),
+    'not refused, and the picture went out as image_url: ' + JSON.stringify(seen.tool.content).slice(0, 600));
+});
+
 test('real pinned DSH: with image routes for root and child, read_image succeeds and the next completion carries image_url', async (t) => {
   const seen = await readImageThroughRoutes(t, { root: ['text', 'image'], child: ['text', 'image'] });
   if (!seen) return;

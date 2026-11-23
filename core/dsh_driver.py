@@ -423,12 +423,26 @@ def route_modalities(route, routes=None):
     return ["text", "image"] if image else ["text"]
 
 
+def input_measured(routes=None):
+    """Whether the route table has an `_input` at all. Until it has (no
+    candidate measured yet) nothing is refused for carrying an image and the
+    adapter keeps declaring image input, as before step 24.2b; only the new
+    wake images stay placeholders."""
+    from core.model_routes import get_routes
+    return (routes or get_routes()).measures_input
+
+
 def route_input(row, roles=None, routes=None):
     """Step 24.2b (design-steward 7.8.12a "路线能力"): what the root session and
     the child sessions may each be sent, by the same completion_route the
-    completion endpoint routes by."""
-    return {"root": route_modalities(completion_route(row, row["session_id"], roles), routes),
-            "child": route_modalities(completion_route(row, _ANY_CHILD_SESSION, roles), routes)}
+    completion endpoint routes by. `measured: false` is added when the table
+    has no `_input` (input_measured): the adapter then keeps today's image
+    handling instead of reading both routes as text-only."""
+    out = {"root": route_modalities(completion_route(row, row["session_id"], roles), routes),
+           "child": route_modalities(completion_route(row, _ANY_CHILD_SESSION, roles), routes)}
+    if not input_measured(routes):
+        out["measured"] = False
+    return out
 
 
 def compaction_config(row, roles=None):

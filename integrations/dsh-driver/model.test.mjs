@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { openaiMessages, installHostModel, modelRetryBudgetMs, rootReasoningEffort, retryableClass,
-  RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER, routeInputCache, noImageLine } from './model.mjs';
+  RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER, routeInputCache, noImageLine, declaresImage, wakeTakesImages } from './model.mjs';
 
 /** Step 24.2b: route-input answers for installHostModel. */
 const BOTH_IMAGE = async () => ({ root: ['text', 'image'], child: ['text', 'image'] });
@@ -154,6 +154,31 @@ test('inputModalities is the intersection of the root and child routes', async (
   installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get() { return {}; } },
     { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request() { return {}; } });
   assert.deepEqual((await adapter.resolveModel('aitelier', 'driver')).inputModalities, ['text']);
+});
+
+test('OPS-1: a table with no `_input` (measured: false) keeps the image handling from before 24.2b', async () => {
+  const unmeasured = { root: ['text'], child: ['text'], measured: false };
+  const reads = [];
+  const attachments = { async readImageRequest(ref) { reads.push(ref.attachmentId); return { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) }; } };
+  const { adapter, sent } = routedAdapter(unmeasured, { attachments });
+  assert.deepEqual((await adapter.resolveModel('aitelier', 'driver')).inputModalities, ['text', 'image'], 'read_image and MCP images stay declared');
+  await collect(adapter, imageHistory('root'));
+  await collect(adapter, imageHistory('child-1'));
+  for (const body of sent) assert.equal(body.messages[0].content[1].type, 'image_url', 'history images still go out as image_url');
+  assert.deepEqual(reads, ['sha256:abc', 'sha256:frame', 'sha256:abc', 'sha256:frame']);
+  assert.equal(wakeTakesImages(unmeasured), false, 'the new wake images stay placeholder lines until the routes are measured');
+  const cached = routeInputCache(async () => unmeasured);
+  assert.deepEqual(await cached(), unmeasured, 'the cache keeps measured: false');
+  assert.deepEqual(await routeInputCache(async () => ({ root: ['text'], child: ['text'] }))(), { root: ['text'], child: ['text'] },
+    'an answer without the key is measured');
+});
+
+test('C2: the wake attaches images only on the intersection resolveModel declares', () => {
+  assert.equal(wakeTakesImages({ root: ['text', 'image'], child: ['text', 'image'] }), true);
+  assert.equal(wakeTakesImages({ root: ['text', 'image'], child: ['text'] }), false, 'root image, child text: DSH would project the block away');
+  assert.equal(wakeTakesImages({ root: ['text'], child: ['text', 'image'] }), false);
+  for (const routes of [{ root: ['text', 'image'], child: ['text', 'image'] }, { root: ['text', 'image'], child: ['text'] }, { root: ['text'], child: ['text'] }])
+    assert.equal(wakeTakesImages(routes), declaresImage(routes), JSON.stringify(routes));
 });
 
 test('noImageLine names the image by its name, else its id', () => {

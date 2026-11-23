@@ -62,6 +62,19 @@ async function requestImageUrls(ctx, options, signal) {
 /** Step 24.2b (design-steward 7.8.12a "路线能力"): what a route may be sent when nothing says more. */
 const TEXT_ONLY = Object.freeze({ root: Object.freeze(['text']), child: Object.freeze(['text']) });
 const takesImage = list => Array.isArray(list) && list.includes('image');
+/** `measured: false`: the backend's route table has no `_input` yet, so nothing was measured
+ *  (OPS-1). Image input then stays as it was before 24.2b - declared, and sent as image_url - and
+ *  only the new wake images stay placeholder lines. */
+const unmeasured = routes => routes?.measured === false;
+/** What resolveModel declares (7.8.12a "路线能力"): DSH does not say which session asks, so image
+ *  input only when the root's route AND the children's route both take images - or nothing was
+ *  measured yet. */
+export const declaresImage = routes => unmeasured(routes) || (takesImage(routes?.root) && takesImage(routes?.child));
+/** Whether a wake carries its images as native blocks: the same intersection resolveModel declares
+ *  (DSH replaces every image block with a text line before stream() when the model is declared
+ *  text-only, so a block on a mixed route would arrive as neither image nor media_call hint), and
+ *  never before the routes were measured. */
+export const wakeTakesImages = routes => !unmeasured(routes) && declaresImage(routes);
 
 /** The backend's `GET /api/dsh-drivers/{project}/route-input` ({root, child}), read at most once
  *  per `ttlMs` (60 s) and shared by every session of this process. `read(signal)` is the request.
@@ -75,7 +88,7 @@ export function routeInputCache(read, { ttlMs = 60000, now = Date.now, log = () 
       try {
         const answer = await read(signal);
         value = Object.freeze({ root: takesImage(answer?.root) ? ['text', 'image'] : ['text'],
-          child: takesImage(answer?.child) ? ['text', 'image'] : ['text'] });
+          child: takesImage(answer?.child) ? ['text', 'image'] : ['text'], ...(unmeasured(answer) ? { measured: false } : {}) });
         at = now();
         return value;
       } catch (error) {
@@ -297,17 +310,18 @@ export function installHostModel(ctx, { LlmAdapter }, { request, project, sessio
     async resolveModel(provider, model, signal) {
       // Step 24.2b (7.8.12a "路线能力"): DSH does not say which session asks, so image input is
       // declared only when the root's route AND the children's route both take images. Otherwise
-      // the file tool refuses read_image (the tool stays; the call is refused).
+      // the file tool refuses read_image (the tool stays; the call is refused). A table with no
+      // `_input` measured nothing: declared as before 24.2b (declaresImage).
       const routes = await routeInput(signal);
       return { provider, id: model, name: model, context: { contextWindow: 1000000 }, defaultMaxTokens: 32768,
-        inputModalities: takesImage(routes.root) && takesImage(routes.child) ? ['text', 'image'] : ['text'] };
+        inputModalities: declaresImage(routes) ? ['text', 'image'] : ['text'] };
     }
     async *stream(options) {
       // stream() knows its session: that session's own route decides. A route without images
       // reads no image byte (the attachment service is not even asked) and sends one line per
       // image block instead (noImageLine) - never an image_url, never a throw.
       const routes = await routeInput(options.signal);
-      const textOnly = !takesImage((options.sessionId ?? session) === session ? routes.root : routes.child);
+      const textOnly = !unmeasured(routes) && !takesImage((options.sessionId ?? session) === session ? routes.root : routes.child);
       const imageUrls = textOnly ? new Map() : await requestImageUrls(ctx, options, options.signal);
       // One signal for the whole call: a retry lives inside the same 30-minute
       // bound as the attempt it replaces, not a fresh one.

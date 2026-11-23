@@ -95,6 +95,11 @@ class ModelRoutes:
         # endpoint -> input kinds, from the top-level `_input` table. A
         # candidate it does not list takes text only.
         self._input: dict[str, list[str]] = {}
+        # Whether the table HAS an `_input` (even an empty one). Without it no
+        # candidate was measured yet, and the callers keep the behaviour from
+        # before `_input` existed (core.dsh_driver.input_measured): images are
+        # neither refused nor declared away.
+        self.measures_input = False
         self._load()
 
     def _load(self) -> None:
@@ -112,6 +117,7 @@ class ModelRoutes:
         for name, candidates in raw.items():
             if name == "_input":
                 self._input = self._parse_input(candidates)
+                self.measures_input = True
                 continue
             if name.startswith("_"):
                 continue  # "_comment" and friends

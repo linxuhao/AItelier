@@ -188,3 +188,37 @@ def test_text_on_a_text_route_and_an_image_on_an_image_route_go_through(runtime,
     assert response.status_code == 200, response.text
     assert gateways.built == ["blind", "seeing"]
     assert gateways.calls == [[TEXT], [IMAGE]]
+
+
+# ── no `_input` yet: today's behaviour (OPS-1) ───────────────────────────────
+
+def _unmeasured(tmp_path):
+    """The live table before the step-0 measurement: the same routes, no `_input`."""
+    (tmp_path / "model_routes.json").write_text(json.dumps({k: v for k, v in ROUTES.items() if k != "_input"}))
+    model_routes._CACHE.clear()
+
+
+def test_without_an_input_table_route_input_says_unmeasured(runtime, client, tmp_path):
+    _unmeasured(tmp_path)
+    row = _driver(runtime, "alpha", "")
+    assert _read(client, row).json() == {"root": ["text"], "child": ["text"], "measured": False}
+
+
+def test_without_an_input_table_an_image_is_not_refused(runtime, client, gateways, tmp_path):
+    """An adapter still running the pre-24.2b code sends history images as image_url on
+    every route; until `_input` is written they go through as they did before."""
+    _unmeasured(tmp_path)
+    row = _driver(runtime, "alpha", "blind")
+    response = _complete(client, row, row["session_id"], IMAGE)
+    assert response.status_code == 200, response.text
+    response = _complete(client, row, "child-1", IMAGE)
+    assert response.status_code == 200, response.text
+    assert gateways.calls == [[IMAGE], [IMAGE]]
+
+
+def test_an_empty_input_table_is_measured_and_refuses(runtime, client, gateways, tmp_path):
+    (tmp_path / "model_routes.json").write_text(json.dumps({**ROUTES, "_input": {}}))
+    model_routes._CACHE.clear()
+    row = _driver(runtime, "alpha", "")
+    assert _read(client, row).json() == {"root": ["text"], "child": ["text"]}
+    assert _complete(client, row, row["session_id"], IMAGE).json()["detail"] == "route_no_image"

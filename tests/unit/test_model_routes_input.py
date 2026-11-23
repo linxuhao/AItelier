@@ -118,6 +118,15 @@ def test_a_table_without_input_loads_as_it_always_did(tmp_path):
     assert plain.accepts_image("seeing") is False
 
 
+def test_only_a_table_with_an_input_table_measures_input(tmp_path):
+    """OPS-1: `measures_input` tells "nothing measured yet" (no `_input`, or no
+    table at all) from "measured, and text-only" (an `_input`, even an empty one)."""
+    assert _table(tmp_path, ROUTES).measures_input is False
+    assert ModelRoutes(tmp_path / "absent.json").measures_input is False
+    assert _table(tmp_path, {**ROUTES, "_input": {}}).measures_input is True
+    assert _table(tmp_path, {**ROUTES, "_input": INPUT}).measures_input is True
+
+
 def test_the_shipped_example_carries_a_valid_input_table():
     """The example a clean checkout runs on loads with its `_input`, and only
     the measured vision judge takes images: `driver` and `worker` name

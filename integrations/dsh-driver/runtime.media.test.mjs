@@ -300,3 +300,33 @@ test('real pinned DSH, route without images: a 503 fetch leaves the tick for the
   assert.ok(text.includes('[图片 未收：已取不到]'), text);
   assert.equal(seen.alive, true, 'the subscription survived the failed tick');
 });
+
+test('real pinned DSH, root route takes images but the child route does not (C2): no image block, the line says media_call', async (t) => {
+  const seen = await bootDirector(t, {
+    routes: { root: ['text', 'image'], child: ['text'] },
+    wake: [ownerMessage('m-3', [['u_00000000000000c1', 'image', 'image/png', 70]])],
+    uploads: { u_00000000000000c1: { bytes: png() } },
+    until: s => [{ name: 'the wake reached a completion', met: () => Boolean(wakeOf(s).completion) }],
+  });
+  if (!seen) return;
+  const { message, text } = wakeOf(seen.seen);
+  const [stored] = seen.seen.acks;
+  assert.match(stored.ref, REF);
+  assert.ok(typeof message.content === 'string', 'no image block: ' + JSON.stringify(message.content).slice(0, 400));
+  assert.ok(!text.includes('原图已附') && !text.includes('image omitted'), text);
+  assert.ok(text.includes(`[图片 ${stored.ref}，image/png，${png().length} B；本路线不收图：用 media_call 调 ocr_image 或 vision_critique；文件 `), text);
+});
+
+test('real pinned DSH, a table with no `_input` (measured: false): the wake image stays a placeholder line', async (t) => {
+  const seen = await bootDirector(t, {
+    routes: { root: ['text'], child: ['text'], measured: false },
+    wake: [ownerMessage('m-4', [['u_00000000000000d1', 'image', 'image/png', 70]])],
+    uploads: { u_00000000000000d1: { bytes: png() } },
+    until: s => [{ name: 'the wake reached a completion', met: () => Boolean(wakeOf(s).completion) }],
+  });
+  if (!seen) return;
+  const { message, text } = wakeOf(seen.seen);
+  const [stored] = seen.seen.acks;
+  assert.ok(typeof message.content === 'string', 'no image block');
+  assert.ok(text.includes(`[图片 ${stored.ref}，image/png，${png().length} B；本路线不收图：用 media_call 调 ocr_image 或 vision_critique；文件 `), text);
+});

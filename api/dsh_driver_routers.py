@@ -15,7 +15,7 @@ from api.state_graph_routers import get_service
 from core import ai_router, media_library
 from core import state_conversation_uploads as uploads
 from core.datadir import aitelier_home
-from core.dsh_driver import DshDrivers, completion_route, route_input, route_modalities
+from core.dsh_driver import DshDrivers, completion_route, input_measured, route_input, route_modalities
 from core.state_commands import ProjectPrivate, execute
 from core.state_graph import CLOSED_STATUSES, StateGraphError, StateNotFound, StateWriteBusy
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
@@ -505,7 +505,8 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     # Step 24.2b backstop (7.8.12a): an image on a route that does not take
     # images is refused here, before any gateway exists, so nothing reaches a
     # provider. The adapter normally rewrites such images to a text line first.
-    if _carries_image(body.messages) and "image" not in route_modalities(route):
+    # A table with no `_input` measured nothing: no refusal, as before 24.2b.
+    if _carries_image(body.messages) and input_measured() and "image" not in route_modalities(route):
         raise HTTPException(422, "route_no_image")
     if body.session_id not in sessions:
         # Native children (including resumed old children) have their own session.

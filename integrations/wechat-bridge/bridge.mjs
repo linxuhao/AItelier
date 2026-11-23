@@ -125,11 +125,10 @@ const HOUR_MS = 3_600_000, DAY_MS = 24 * HOUR_MS;
 export const RESUME_LIMITS = Object.freeze({ waitMs: 150_000, retryMs: Object.freeze([30_000, 120_000, 600_000]),
   holdGroupMs: 120_000, countLogMs: HOUR_MS });
 /** The fork's error prefixes for a resume that did not resume, and the idle reason each
- *  leaves; none of them asks for a QR. RESUME_MISMATCH (the fork's next round; the fork in
- *  this repository ignores expectUsername today): the saved login was another account than
- *  the expectUsername it was given, and the fork has deleted that file. Until that round
- *  lands the bridge's own check on login (attach) refuses such a login and the file stays.
- *  RESUME_BUSY (another
+ *  leaves; none of them asks for a QR. RESUME_MISMATCH: the saved login was another account
+ *  than the expectUsername it was given; the fork has stopped that account and deleted the
+ *  one file that attempt read. The bridge's own check on login (attach) stays as a second
+ *  guard. RESUME_BUSY (another
  *  resume still running in the fork) is passing: retried, as is any other error. */
 const RESUME_ENDS = Object.freeze({ RESUME_REJECTED: 'resume_rejected', RESUME_UNREADABLE: 'resume_unreadable',
   RESUME_THROTTLED: 'resume_throttled', RESUME_NONE: 'boot', RESUME_MISMATCH: 'resume_account_mismatch' });
@@ -140,9 +139,9 @@ const SAVED_LOGIN_OFF = new Set(['not_configured', 'key', 'dir']);
 /** The account logged in with a QR (design 7.2.1, the platform director's ruling 9 and his
  *  notes 653-654), recorded by the bridge in its own directory (WECHAT_BRIDGE_ACCOUNT_DIR,
  *  run.sh), never in the fork's data/: a copy of data/ put back cannot bring an old record
- *  with it. Each resume hands it to the fork as expectUsername, and the bridge compares a
- *  resumed login's user id with it itself (today the only check: the fork in this repository
- *  ignores expectUsername; its next round also compares and answers RESUME_MISMATCH). */
+ *  with it. Each resume hands it to the fork as expectUsername; the fork compares and answers
+ *  RESUME_MISMATCH, and the bridge compares a resumed login's user id with it again itself,
+ *  a second guard. None recorded: nothing is passed and nothing is compared. */
 export const ACCOUNT_FILE = 'account.user';
 const ACCOUNT_FILE_MAX = 4096;
 
@@ -624,10 +623,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       if (!current()) return;
       const resumed = state.phase === 'resuming';
       // Step 19.1 (ruling 9): a resumed login of another account than the recorded one is not
-      // taken - idle, nothing relayed or sent, its bot stopped. The bridge deletes nothing:
-      // today (the fork ignores expectUsername) the file stays and every start resumes and
-      // refuses it again, spending a resume slot each time; once the fork's next round lands
-      // it answers RESUME_MISMATCH (the 'error' handler) and deletes the file itself.
+      // taken - idle, nothing relayed or sent, its bot stopped. The fork already compares
+      // expectUsername and answers RESUME_MISMATCH (the 'error' handler), deleting that file;
+      // this is the second guard, should such a login ever be reported. The bridge deletes
+      // nothing: here the file stays, and every start resumes and refuses it again.
       if (resumed && recorded !== undefined && user?.id !== recorded) {
         refused = true;
         return end('resume_account_mismatch');

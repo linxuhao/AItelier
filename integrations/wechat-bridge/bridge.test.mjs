@@ -1779,7 +1779,7 @@ test('saved login: an ended resume\'s bot changes nothing later - its login, err
   } finally { await s.bridge.close(); }
 });
 
-test('saved login: after the fork\'s next round, RESUME_MISMATCH (the fork found another account and deleted that file) is idle resume_account_mismatch, not resumable, nothing sent, no retry, no QR', LIMIT, async () => {
+test('saved login: RESUME_MISMATCH (the fork compared expectUsername, found another account and deleted that file) is idle resume_account_mismatch, not resumable, nothing sent, no retry, no QR', LIMIT, async () => {
   const s = await resumed();
   try {
     await s.bridge.settled();
@@ -1803,7 +1803,7 @@ test('saved login: after the fork\'s next round, RESUME_MISMATCH (the fork found
   } finally { await s.bridge.close(); }
 });
 
-test('saved login: today (the fork ignores expectUsername) a resumed login of another account than recorded is refused by the bridge on login (idle resume_account_mismatch, not resumable, nothing sent, never logged, the file left, the next start compares again)', LIMIT, async () => {
+test('saved login: second guard - should a resumed login of another account than recorded ever be reported, the bridge refuses it on login (idle resume_account_mismatch, not resumable, nothing sent, never logged, the file left, the next start compares again)', LIMIT, async () => {
   const logs = [];
   const s = await resumed({ log: line => logs.push(line) });
   try {

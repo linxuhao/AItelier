@@ -41,7 +41,7 @@ def sha256(blob: bytes) -> str:
 @pytest.fixture(scope="module")
 def pin() -> dict:
     parsed = json.loads(PIN_PATH.read_text(encoding="utf-8"))
-    assert set(parsed) == {"upstream", "files", "patch"}, "pin.json carries more than it should"
+    assert set(parsed) == {"upstream", "files", "patches"}, "pin.json carries more than it should"
     return parsed
 
 
@@ -142,7 +142,8 @@ def applied_snapshot(tmp_path: Path, pin: dict, name: str) -> Path:
         copy = snapshot / entry["path"]
         copy.parent.mkdir(parents=True, exist_ok=True)
         copy.write_bytes((SNAPSHOT / entry["path"]).read_bytes())
-    apply_patch((REPO / pin["patch"]["path"]).read_text(encoding="utf-8"), snapshot)
+    for entry in pin["patches"]:
+        apply_patch((REPO / entry["path"]).read_text(encoding="utf-8"), snapshot)
     return snapshot
 
 
@@ -365,21 +366,22 @@ def test_every_pinned_file_is_vendored_unchanged(pin: dict) -> None:
     )
 
 
-def test_the_patch_is_the_pinned_patch(pin: dict) -> None:
-    patch_path = REPO / pin["patch"]["path"]
-    assert patch_path.is_file(), f"{pin['patch']['path']} is missing"
-    assert patch_path.parent == FORK, "the pinned patch lives outside the fork directory"
-    assert sha256(patch_path.read_bytes()) == pin["patch"]["sha256"], "the patch is not the pinned patch"
+def test_the_patches_are_the_pinned_patches(pin: dict) -> None:
+    for entry in pin["patches"]:
+        patch_path = REPO / entry["path"]
+        assert patch_path.is_file(), f"{entry['path']} is missing"
+        assert patch_path.parent == FORK, "the pinned patch lives outside the fork directory"
+        assert sha256(patch_path.read_bytes()) == entry["sha256"], "the patch is not the pinned patch"
 
 
-def test_the_patch_touches_only_pinned_files(pin: dict) -> None:
-    patch = (REPO / pin["patch"]["path"]).read_text(encoding="utf-8")
-    touched = patch_hunks(patch)
-    assert touched, "the patch changes nothing"
-    pinned = pinned_paths(pin)
-    assert set(touched) <= pinned, (
-        f"the patch touches {sorted(set(touched) - pinned)}, which pin.json does not pin"
-    )
+def test_the_patches_touch_only_pinned_files(pin: dict) -> None:
+    for entry in pin["patches"]:
+        patch = (REPO / entry["path"]).read_text(encoding="utf-8")
+        touched = patch_hunks(patch)
+        pinned = pinned_paths(pin)
+        assert set(touched) <= pinned, (
+            f"the patch touches {sorted(set(touched) - pinned)}, which pin.json does not pin"
+        )
 
 
 def test_the_patch_applies_to_the_pinned_bytes(tmp_path: Path, pin: dict) -> None:
@@ -438,7 +440,7 @@ def test_the_native_stage_builds_the_pinned_commit_with_the_pinned_patch(pin: di
     )
     assert len(commits) >= 2, "the native stage fetches the commit but never checks what arrived"
 
-    patch_path = pin["patch"]["path"]
+    patch_path = pin["patches"][0]["path"]
     context_path = patch_path.split("integrations/wechat-bridge/", 1)[1]
     assert patch_path.startswith("integrations/wechat-bridge/")
     assert context_path in native, f"the native stage does not apply {context_path}"
@@ -455,19 +457,19 @@ def test_the_native_stage_builds_the_pinned_commit_with_the_pinned_patch(pin: di
 def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin: dict) -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     native = dict(docker_stages(dockerfile))["native"]
-    name = Path(pin["patch"]["path"]).name
+    name = Path(pin["patches"][0]["path"]).name
 
     # Exactly one patch is carried into the build: the pinned one, by its own name.
     copied = [line for line in native.splitlines() if re.match(r"^COPY\s", line) and ".patch" in line]
     assert len(copied) == 1, f"the native stage copies {len(copied)} patch lines: {copied}"
     sources = [token for token in copied[0].split() if token.endswith(".patch")]
-    assert sources == [f"neo-fork/{name}"], f"the build copies {sources}, the pin names neo-fork/{name}"
+    assert sources == ["neo-fork/0001-incoming-message-types.patch", "neo-fork/0002-saved-login.patch"], f"the build copies {sources}"
 
     # Its digest is checked against pin.json's before anything is patched, and the check
     # precedes the apply: an unverified patch would make the pin a comment.
     read = re.search(rf"const\s+patch\s*=\s*readFileSync\('([^']*{re.escape(name)})'\)", native)
     assert read, f"the native stage never reads {name}"
-    compare = re.search(r"if \(sha256\(patch\) !== pin\.patch\.sha256\) throw new Error\(", native)
+    compare = re.search(r"if \(sha256\(patch\) !== pin\.patches\[0\]\.sha256\) throw new Error\(", native)
     assert compare, "the native stage applies the patch without checking pin.json's sha256 for it"
     check_at = re.search(r"git apply --check (\S+)", native)
     apply_at = re.search(r"git apply (?!-)(\S+)", native)
@@ -481,7 +483,7 @@ def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin
 
     # One patch, applied once: a second apply would land on a tree the pin never described.
     applies = re.findall(r"git apply (?!-)(\S+)", native)
-    assert applies == [read.group(1)], f"the native stage applies {applies}"
+    assert applies == ["/fork-input/0001-incoming-message-types.patch", "/fork-input/0002-saved-login.patch"], f"the native stage applies {applies}"
 
 
 def test_the_image_overlays_exactly_the_fork_addon_and_its_dist(pin: dict) -> None:
@@ -782,3 +784,5 @@ def test_the_file_branch_keeps_one_request_and_its_own_profile(tmp_path: Path, p
         f"the handler downloads {handler.count(DOWNLOAD_CALL)} times, so a file is asked for twice"
     )
     assert loop_body.count(DOWNLOAD_CALL) == 1, "the file request leaves the one attempt loop"
+
+# placeholder

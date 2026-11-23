@@ -77,8 +77,11 @@ def test_the_attachments_column_is_added_and_old_rows_read_unchanged(world):
     conn.commit()
     conn.close()
     assert "attachments_json" not in columns(world["path"], "driver_inbox_messages")
-    ada = StateService(world["db"], actor="driver:ada", driver_id="ada", project_read_trusted=True)
-    user = StateService(world["db"], actor="owner:user@example.test", project_read_trusted=True)
+    # The upgraded code's next process: a new handle runs the schema setup again
+    # (core.state_schema_setup.once runs it once per handle and file).
+    db = StateDatabase(world["path"])
+    ada = StateService(db, actor="driver:ada", driver_id="ada", project_read_trusted=True)
+    user = StateService(db, actor="owner:user@example.test", project_read_trusted=True)
     assert "attachments_json" in columns(world["path"], "driver_inbox_messages")
     conn = sqlite3.connect(world["path"])
     try:

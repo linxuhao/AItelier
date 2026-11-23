@@ -949,18 +949,135 @@ export function mediaRootFrom(env = process.env) {
 
 /** Step 24.2 (7.8.12 "模型怎么用"): a wake shows each owner message's attachments as one line
  *  each ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB]) - read from the message's source row,
- *  never from its text. A failed read leaves the wake as it was (its body has the placeholders). */
-export async function withAttachmentLines(request, result, signal) {
-  const ids = (result?.driver_inbox ?? []).filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string').map(m => m.message_id);
-  if (!ids.length) return result;
-  let sources;
-  try { const listed = await request('/api/state/query/message_sources', { message_ids: ids.slice(0, 200) }, signal); sources = (listed?.result ?? listed)?.sources; }
-  catch { return result; }
-  if (!sources) return result;
-  return { ...result, driver_inbox: result.driver_inbox.map(m => {
-    const files = sources?.[m?.message_id]?.attachments;
-    return Array.isArray(files) && files.length ? { ...m, attachments: files.map(attachmentLine) } : m;
-  }) };
+ *  never from its text. A failed read leaves the wake as it was (its body has the placeholders).
+ *  Step 24.2b (7.8.12a): `dashboard` (ingestDashboardAttachments' answer, message_id -> its
+ *  uploads as stored or refused) is used for those messages instead of a source row; `sources`
+ *  false reads no source row (a director has no channel messages); `line` writes one line (sync
+ *  or async, called in order - wakeMedia's attaches the image it names). */
+export async function withAttachmentLines(request, result, signal, { dashboard = new Map(), sources: readSources = true, line = attachmentLine } = {}) {
+  const users = (result?.driver_inbox ?? []).filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string');
+  const ids = readSources ? users.map(m => m.message_id).filter(id => !dashboard.has(id)) : [];
+  if (!ids.length && !users.some(m => dashboard.has(m.message_id))) return result;
+  let sources = {};
+  if (ids.length) {
+    try { const listed = await request('/api/state/query/message_sources', { message_ids: ids.slice(0, 200) }, signal); sources = (listed?.result ?? listed)?.sources ?? {}; }
+    catch { sources = {}; }
+  }
+  let changed = false;
+  const driver_inbox = [];
+  for (const m of result.driver_inbox) {
+    const files = m?.sender_kind === 'user' && typeof m.message_id === 'string'
+      ? (dashboard.get(m.message_id) ?? sources?.[m.message_id]?.attachments) : undefined;
+    if (!Array.isArray(files) || !files.length) { driver_inbox.push(m); continue; }
+    const lines = [];
+    for (const file of files) lines.push(await line(file));
+    driver_inbox.push({ ...m, attachments: lines });
+    changed = true;
+  }
+  return changed ? { ...result, driver_inbox } : result;
+}
+
+/** The library refusals ack_conversation_upload records (core/state_commands.py
+ *  AckConversationUpload.refused). Any other answer of `ingest` is not the upload's verdict. */
+const ACK_REFUSALS = new Set(['too_large', 'type', 'unsupported', 'gone']);
+
+/** The bytes of one staged upload from the backend's GET /api/dsh-drivers/{pid}/uploads/{id}
+ *  (`response`): the body when it answered them; 404 or 410 (swept after 7 days, or not this
+ *  driver's delivery) is the permanent `gone`, thrown as the library's own refusal so the key
+ *  keeps it; anything else is thrown as an error, which the library answers `unavailable`. */
+export async function uploadBody(response) {
+  if (response.ok) return response.body;
+  await response.body?.cancel?.().catch(() => {});
+  if (response.status === 404 || response.status === 410) throw Object.assign(new Error('gone'), { refused: 'gone' });
+  throw Object.assign(new Error(`staged upload: HTTP ${response.status}`), { status: response.status });
+}
+
+/** Step 24.2b (design-steward 7.8.12a "宿主入库"): the owner's dashboard uploads in one wake,
+ *  stored into this host's own library before the wake goes out ("先存后送") and acknowledged.
+ *  Each `u_` attachment of an owner message is ingested under (`dashboard`, message_id, its
+ *  index) - so a tick delivered again stores nothing twice - with `audience` ('owner' for the
+ *  steward, 'project:<pid>' for a director) and source 'in'; `fetchUpload(upload_id, signal)`
+ *  streams the staged bytes (uploadBody). Then `ack(upload_id, {ref} | {refused})`.
+ *
+ *  Failures (失败怎么算): only a TRANSIENT one is thrown - the fetch answered 5xx, the network
+ *  failed, the disk did not take the file (all `unavailable` from the library), or the ack's
+ *  request failed - so the runtime does not consume the tick and the next one tries again. A
+ *  verdict (gone, too_large, type, unsupported) is acknowledged and shown; an ack the backend
+ *  answers 404 (this driver is not a target) cannot succeed later, so it is logged, not thrown.
+ *  An attachment the backend already refused (swept) is shown as refused and not fetched.
+ *  @returns Map message_id -> one entry per attachment: {ref, kind, mime, size, durationMs?}
+ *    or {kind, refused}. */
+export async function ingestDashboardAttachments({ inbox, library, audience, fetchUpload, ack, log = () => {} }) {
+  const results = new Map();
+  for (const message of inbox ?? []) {
+    if (message?.sender_kind !== 'user' || typeof message.message_id !== 'string' || !Array.isArray(message.attachments) || !message.attachments.length) continue;
+    const files = [];
+    for (const [index, item] of message.attachments.entries()) {
+      if (typeof item?.id !== 'string' || !item.id.startsWith('u_') || item.refused) {
+        files.push({ kind: item?.kind, refused: item?.refused ?? 'gone' });
+        continue;
+      }
+      const stored = await library.ingest({ channel: 'dashboard', messageRef: message.message_id, index, audience, source: 'in' },
+        ({ signal }) => fetchUpload(item.id, signal));
+      if (stored.refused && !ACK_REFUSALS.has(stored.refused)) throw new Error(`dashboard upload ${item.id} not stored: ${stored.refused}`);
+      try { await ack(item.id, stored.refused ? { refused: stored.refused } : { ref: stored.ref }); }
+      catch (error) {
+        if (error?.status !== 404) throw error;
+        log(`ack_conversation_upload ${item.id}: ${String(error?.message ?? error).slice(0, 200)}`);
+      }
+      files.push(stored.refused ? { kind: item.kind, refused: stored.refused }
+        : { ref: stored.ref, kind: stored.kind, mime: stored.mime, size: stored.size,
+          ...(stored.durationMs !== undefined ? { durationMs: stored.durationMs } : {}) });
+    }
+    results.set(message.message_id, files);
+  }
+  return results;
+}
+
+/** What a model is told to do with a file it cannot see (7.8.12a "不收图的路线", "语音与文件"). */
+const MEDIA_HINTS = Object.freeze({ image: '用 media_call 调 ocr_image 或 vision_critique',
+  voice: '用 media_call 调 transcribe_audio 转写', file: '用 media_call 调 ocr_pdf 读' });
+
+/** Step 24.2b (7.8.12a): one attachment's wake line. An image sent as a native block says so
+ *  ([图片 m_…，image/jpeg，1.2 MB，原图已附]); any other file says how to read it - an image on a
+ *  route without images ("；本路线不收图：用 media_call 调 ocr_image 或 vision_critique"), a voice
+ *  (transcribe_audio), a file (ocr_pdf; a director's native file tools). A director's line also
+ *  names the library file's absolute path (`path`, "；文件 /…"). A refused one is its refusal line. */
+export function mediaLine(attachment, { attached = false, imageRoute = false, path, director = false } = {}) {
+  const line = attachmentLine(attachment);
+  if (!attachment?.ref) return line;
+  const kind = attachment.kind;
+  const note = attached ? '，原图已附'
+    : kind === 'image' ? `；${imageRoute ? '原图未附' : '本路线不收图'}：${MEDIA_HINTS.image}`
+      : kind === 'file' && director ? '；用原生文件工具读'
+        : `；${MEDIA_HINTS[kind] ?? MEDIA_HINTS.file}`;
+  return line.slice(0, -1) + note + (path ? `；文件 ${path}` : '') + ']';
+}
+
+/** Step 24.2b (7.8.12a "收图的路线"): the `line` for withAttachmentLines and the image blocks of
+ *  one wake. On an image route (`imageRoute`, the root session's) each image this host's library
+ *  holds is read and saved into DSH's attachment store (`attachments`, ctx.get('attachments')),
+ *  and its ImageAttachmentRef joins `images` for notify. An image that could not be saved keeps
+ *  its line with the media_call hint: an image is never dropped silently. `director`: the lines
+ *  carry the library file's absolute path. */
+export function wakeMedia({ library, imageRoute = false, attachments, director = false, log = () => {} }) {
+  const images = [];
+  const line = async attachment => {
+    if (!attachment?.ref) return attachmentLine(attachment);
+    const found = library.lookup(attachment.ref);
+    let attached = false;
+    if (imageRoute && attachment.kind === 'image' && found && typeof attachments?.saveImage === 'function') {
+      try {
+        const data = (await library.read(attachment.ref))?.bytes;
+        if (data) {
+          images.push(await attachments.saveImage({ data: new Uint8Array(data), mediaType: found.mime, name: `${attachment.ref}.${found.ext}` }));
+          attached = true;
+        }
+      } catch (error) { log(`image ${attachment.ref} not attached: ${String(error?.message ?? error).slice(0, 200)}`); }
+    }
+    return mediaLine(attachment, { attached, imageRoute, director, path: director ? found?.path : undefined });
+  };
+  return { line, images };
 }
 
 /** One State batch's wake (plugin step 7; step 24.2): its text - `shown`, the batch with its

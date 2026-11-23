@@ -20,7 +20,7 @@ import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, uploadBody, wakeMedia } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -589,7 +589,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // (core/dsh_driver.py _environment); without one there is no `media` capability. 24.2b
   // (7.8.12a "一个写者一个子目录"): the steward writes `<userId>/` (5 GiB), each director its own
   // `d-<driver_id>/` (1 GiB, limitsFor) - one writer per subdirectory.
-  let mediaLog = () => {}, gatewayToken;
+  // gatewayToken is this driver's token (install() reads it): the gateway's and the staged
+  // uploads' header. attachmentStore is DSH's attachment service (install()'s ctx).
+  let mediaLog = () => {}, gatewayToken, attachmentStore = () => undefined;
   const mediaRoot = mediaRootFrom(env);
   const mediaUser = steward ? env.AITELIER_DSH_MEMORY_USER || 'owner'
     : /^[A-Za-z0-9_.-]+$/.test(env.AITELIER_DRIVER_ID ?? '') ? `d-${env.AITELIER_DRIVER_ID}` : undefined;
@@ -602,6 +604,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let routeLog = () => {};
   const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
     undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
+  // Step 24.2b (7.8.12a "宿主入库"): one staged dashboard upload, streamed with this driver's token
+  // (the backend answers only a delivery target of the message carrying it), and its ack.
+  const fetchUpload = async (uploadId, signal) => uploadBody(await fetch(new URL(
+    `/api/dsh-drivers/${encodeURIComponent(project)}/uploads/${encodeURIComponent(uploadId)}`, env.AITELIER_URL),
+  { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal }));
+  const ackUpload = (uploadId, verdict) => request('/api/state/commands/ack_conversation_upload',
+    { project_id: project, upload_id: uploadId, ...verdict });
   const gatewayFetch = (connId, url, signal) => fetch(`${String(env.AITELIER_STEWARD_GATEWAY_URL ?? 'http://127.0.0.1:4445/api/steward/mcp').replace(/\/+$/, '')}/${encodeURIComponent(connId)}/fetch?url=${encodeURIComponent(url)}`,
     { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal: signal ?? AbortSignal.timeout(180000) });
   const host = {
@@ -646,6 +655,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       gatewayToken = token;
       // The library logs a mime and a size, never a name or a byte.
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
+      attachmentStore = () => ctx.get('attachments');
       routeLog = line => ctx.logger.warn(line);
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
@@ -1047,9 +1057,22 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // has a new id and is delivered. Stable across restarts: it depends on nothing local
         // (stateWake: not on the attachment lines either).
         // Step 24.2 (7.8.12): each owner message's attachments as one line each, from its source row.
-        const shown = steward && library ? await withAttachmentLines(request, result) : result;
+        // Step 24.2b (7.8.12a "宿主入库"): the owner's dashboard uploads are stored into this host's
+        // library and acknowledged first ("先存后送"); a transient failure throws, so this tick is
+        // not consumed and the next one tries again (the ingest key stores nothing twice). On an
+        // image route the images become native blocks of the wake; otherwise, and for voice and
+        // files, the lines say how to read them (a director's also name the library file).
+        let shown = result, images = [];
+        if (library) {
+          const dashboard = await ingestDashboardAttachments({ inbox: result.driver_inbox, library,
+            audience: steward ? 'owner' : `project:${project}`, fetchUpload, ack: ackUpload, log: line => ctx.logger.warn(line) });
+          const imageRoute = (await routeInput()).root.includes('image');
+          const media = wakeMedia({ library, imageRoute, attachments: attachmentStore(), director: !steward, log: line => ctx.logger.warn(line) });
+          shown = await withAttachmentLines(request, result, undefined, { dashboard, sources: steward, line: media.line });
+          images = media.images;
+        }
         const { text, id } = stateWake(result, inbox, shown);
-        await notify(text, { id });
+        await notify(text, images.length ? { id, images } : { id });
       };
       const inbox = await projectInbox();
       // Native goal rounds start/continue the director; bootstrap is not a human

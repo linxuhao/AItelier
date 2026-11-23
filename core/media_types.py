@@ -8,6 +8,13 @@ type is decided by its first bytes the same way on both sides. Here it serves th
 An attachment's METADATA is all the backend ever keeps of a chat message's files
 (`attachments_json` on the source row): kind, mime, size, durationMs and the library ref - or
 the refusal of the closed set. No byte, no file name.
+
+Step 24.2b (7.8.12a "消息带附件", "显示"): a conversation MESSAGE row carries its attachments in
+one shape, whoever wrote it - `{id, kind, mime, size, name}`, where `id` is a dashboard upload's
+`u_` upload_id or a library `m_` ref, and `refused` is added for one the host refused. A channel
+message's attachments live on its source row instead (above, no id and no name); the
+conversation shows them in the message shape: `ref` becomes `id`, a name is made up from the kind
+and the ref, and a refused one keeps its refusal and has no id.
 """
 from __future__ import annotations
 
@@ -22,6 +29,8 @@ TABLE_PATH = Path(__file__).resolve().parents[1] / "integrations" / "dsh-directo
 KINDS = ("image", "voice", "file")
 REFUSALS = ("too_large", "type", "unsupported", "gone")
 REF = re.compile(r"m_[0-9a-f]{16}")
+UPLOAD_ID = re.compile(r"u_[0-9a-f]{16}")
+NAME_MAX = 255
 MIME = re.compile(r"[a-z]+/[a-z0-9.+-]{1,80}")
 ATTACHMENTS_MAX = 10
 _FIELDS = {"kind", "ref", "refused", "mime", "size", "durationMs"}
@@ -82,3 +91,55 @@ def normalise_attachments(value) -> list[dict] | None:
                 out[field] = item[field]
         kept.append(out)
     return kept or None
+
+
+def ext_of(mime) -> str:
+    """The table's extension for a mime ('bin' when the table has none, as the host says)."""
+    return next((entry["ext"] for entry in table()["types"] if entry["mime"] == mime), "bin")
+
+
+def made_up_name(kind: str, ref: str, mime=None) -> str:
+    """The name shown for a library ref that never had one (the host's index keeps none): the
+    same `<kind>-<ref8>.<ext>` send_media gives the file it sends (lib/media-tools.mjs)."""
+    return f"{kind}-{ref[2:10]}.{ext_of(mime)}"
+
+
+def message_attachment(id, kind, mime, size, name, refused=None) -> dict:
+    """One attachment of a conversation message row, in the one shape (keys in this order);
+    anything else is refused invalid_attachment."""
+    if not isinstance(id, str) or not (UPLOAD_ID.fullmatch(id) or REF.fullmatch(id)):
+        raise StateGraphError("invalid_attachment: id is a u_ upload_id or an m_ ref")
+    if kind not in KINDS:
+        raise StateGraphError("invalid_attachment: kind")
+    if not isinstance(mime, str) or not MIME.fullmatch(mime):
+        raise StateGraphError("invalid_attachment: mime")
+    if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= 2 ** 31:
+        raise StateGraphError("invalid_attachment: size")
+    if (not isinstance(name, str) or not 1 <= len(name) <= NAME_MAX
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in name)):
+        raise StateGraphError("invalid_attachment: name")
+    if refused is not None and refused not in REFUSALS:
+        raise StateGraphError(f"invalid_attachment: refused is one of {', '.join(REFUSALS)}")
+    out = {"id": id, "kind": kind, "mime": mime, "size": size, "name": name}
+    if refused is not None:
+        out["refused"] = refused
+    return out
+
+
+def from_source_attachments(stored) -> list[dict]:
+    """A channel message's source-row attachments (as normalise_attachments stored them) in the
+    message shape: `ref` -> `id` with a made-up name; a refused one keeps `refused`, no id and no
+    name; mime and size only when the source row had them; durationMs is not part of the shape."""
+    shown = []
+    for item in stored or ():
+        out = {"id": item["ref"]} if "ref" in item else {}
+        out["kind"] = item["kind"]
+        for field in ("mime", "size"):
+            if field in item:
+                out[field] = item[field]
+        if "ref" in item:
+            out["name"] = made_up_name(item["kind"], item["ref"], item.get("mime"))
+        else:
+            out["refused"] = item["refused"]
+        shown.append(out)
+    return shown

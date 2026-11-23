@@ -6,6 +6,7 @@ import json
 import re
 import time
 from uuid import uuid4
+from core import state_conversation_uploads
 from core.driver_questions import CONVERSATION, all_questions, conversation_rows, open_question_count
 from core.drivers import CLI_OWNER_ACTOR, recipient_presence_block, touch_driver
 from core.message_body_guard import refuse_credential_body
@@ -139,6 +140,12 @@ class DriverInbox:
                 # Additive (the driver's own questions a row withdraws). NULL means
                 # the row withdraws nothing, which is every row before this column.
                 add_column_if_missing(conn, "driver_inbox_messages", "withdraws_json", "TEXT")
+                # Additive (step 24.2b, design-steward 7.8.12a "消息带附件"): the message's
+                # attachments [{id, kind, mime, size, name}] (core.media_types). NULL means
+                # none, which is every row written before this column.
+                add_column_if_missing(conn, "driver_inbox_messages", "attachments_json", "TEXT")
+                # Step 24.2b: the dashboard's conversation uploads the messages will carry.
+                state_conversation_uploads.ensure_schema(conn)
                 conn.commit()
 
     @staticmethod

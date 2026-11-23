@@ -27,6 +27,12 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# What a candidate can be sent. Every candidate takes text; `image` is recorded
+# per concrete candidate in the table's `_input`, and only once that candidate
+# was seen reading an image (design 7.8.12a, "route capability as measured").
+_INPUT_KINDS = frozenset({"text", "image"})
+_DEFAULT_INPUT = ("text",)
+
 
 def config_or_example(name: str) -> str:
     """`<name>` if the deployment has one, else the committed `<name>.example`.
@@ -86,6 +92,9 @@ class ModelRoutes:
         # role cannot name a string that is valid everywhere; the table states
         # the concrete string each endpoint accepts.
         self._effort: dict[str, dict[str, str]] = {}
+        # endpoint -> input kinds, from the top-level `_input` table. A
+        # candidate it does not list takes text only.
+        self._input: dict[str, list[str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -101,6 +110,9 @@ class ModelRoutes:
         if not isinstance(raw, dict):
             raise RuntimeError(f"{self._path}: expected an object at the top level")
         for name, candidates in raw.items():
+            if name == "_input":
+                self._input = self._parse_input(candidates)
+                continue
             if name.startswith("_"):
                 continue  # "_comment" and friends
             if isinstance(candidates, str):
@@ -154,6 +166,51 @@ class ModelRoutes:
                         f"{self._path}: route '{name}' candidate {c!r} names "
                         f"another route; candidates must be concrete")
             self._routes[name] = list(candidates)
+
+    def _parse_input(self, table) -> dict[str, list[str]]:
+        """`_input`: {"provider/model": ["text", "image"]}, keyed by CANDIDATE.
+
+        A top-level `_` key rather than a key on the route or the candidate,
+        because the parser refuses anything else there and every agent would
+        fail to start. A bad shape is a RuntimeError like any other bad table:
+        a typo silently read as "text only" would quietly turn images into
+        placeholders, and one read as "image" would turn turns into 400s.
+        """
+        if not isinstance(table, dict):
+            raise RuntimeError(
+                f"{self._path}: '_input' must map 'provider/model' to a list "
+                f"of input kinds")
+        out: dict[str, list[str]] = {}
+        for endpoint, kinds in table.items():
+            if "/" not in endpoint:
+                raise RuntimeError(
+                    f"{self._path}: '_input' key {endpoint!r} must be a "
+                    f"concrete 'provider/model', not a route")
+            if not isinstance(kinds, list) or not all(
+                    isinstance(k, str) and k in _INPUT_KINDS for k in kinds):
+                raise RuntimeError(
+                    f"{self._path}: '_input' {endpoint!r} must be a list drawn "
+                    f"from {sorted(_INPUT_KINDS)}, got {kinds!r}")
+            out[endpoint] = list(kinds)
+        return out
+
+    def input_for(self, candidate: str) -> list[str]:
+        """What this concrete candidate can be sent; unlisted means text only."""
+        return list(self._input.get(candidate, _DEFAULT_INPUT))
+
+    def accepts_image(self, model_name: str) -> bool:
+        """True only when EVERY candidate `model_name` resolves to takes images.
+
+        The sticky candidate is not enough: a BadRequestError is not failed
+        over (core/ai_router.py, the excluded errors), so a failover onto a
+        text-only candidate would make that turn a 400. The owner chose the
+        whole-route reading (2026-11-21, "if one model cannot see images, the
+        whole route cannot"). A concrete `provider/model` that is not a route
+        is its own single candidate and is looked up the same way. A bare
+        name that is not a route raises, as `resolve` does.
+        """
+        return all("image" in self.input_for(c)
+                   for c in self.resolve(model_name))
 
     def effort_for(self, model_name: str, endpoint: str) -> str | None:
         """The reasoning effort this route wants ON THIS ENDPOINT, or None.

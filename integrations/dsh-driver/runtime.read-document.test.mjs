@@ -10,8 +10,9 @@
  *  read_document on the ref the wake line names: the upload is stored and acknowledged, the wake
  *  line says read_document, the tool result holds the text block and one image block per page,
  *  and the adapter's next request carries those pages as image_url parts of the role:'tool'
- *  message. Without AITELIER_MEDIA_PYTHON (aitelier:latest has no pypdfium2 until it is
- *  rebuilt) the second test skips; run it under ctest-st.sh with the /tmp/pv venv. */
+ *  message. Without AITELIER_MEDIA_PYTHON the second test skips: the reader needs an interpreter
+ *  that has pypdfium2, which an image built from this repository installs at /usr/local/bin/python
+ *  (requirements-pdf.txt), and which the driver names for the children it starts. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -95,7 +96,7 @@ function model(body, seen) {
 test('real pinned DSH, the steward: the fixture\'s PDF goes from the wake line through read_document and the real reader to image_url parts of the role:\'tool\' message', { timeout: 240000 }, async (t) => {
   const python = process.env.AITELIER_MEDIA_PYTHON;
   if (!python) {
-    t.skip('AITELIER_MEDIA_PYTHON is not set: no python with pypdfium2 here (aitelier:latest has none until rebuilt); run this file under ctest-st.sh with the /tmp/pv venv');
+    t.skip('AITELIER_MEDIA_PYTHON is not set: name an interpreter that has pypdfium2 (an image built from this repository installs one at /usr/local/bin/python, requirements-pdf.txt; the driver names its own for the children it starts)');
     return;
   }
   const entry = await measuredEntryForTest(t);

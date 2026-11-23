@@ -11,7 +11,12 @@ export const fileLine = (ref, fileTools = true) => fileTools
   ? `[file: ${ref.name ?? ref.id}; use the native file tools to inspect this attachment]`
   : `[file: ${ref.name ?? ref.id}; files cannot be opened in this session - ask for it to be sent again through the chat, then read that media ref with read_document]`;
 
-/** `images` resolves an image block to its request URL. `textOnly` is a session whose route does
+/** `images` resolves an image block to its request URL. An image block stays an image_url part of
+ *  whatever role its message has, a role:'tool' result included (read_document's page images):
+ *  measured 2026-11-23 (design-steward 7.8.12b step 0 #2, one call each through AIGateway with
+ *  /completion's settings), ollamacloud, opencodego2 and opencodego3 deepseek-v4.1-flash and
+ *  deepseek/deepseek-flash all read digits from an image in a tool message; opencodego was over
+ *  its monthly quota, so unmeasured. `textOnly` is a session whose route does
  *  not take images: every image block becomes noImageLine instead, and nothing throws. An image
  *  block DSH marked `offloaded` is skipped: never read, never sent (7.8.12b "八" 4).
  *  `fileTools: false` is a session that cannot open files (fileLine). */

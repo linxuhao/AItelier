@@ -171,9 +171,10 @@ backend container mounts whole):
   id the last QR login was with, written by the bridge (0600, atomic rename) and handed to
   each resume as `expectUsername`. It is kept out of `data/` on purpose (the platform
   director's ruling 9): an old copy of `data/` put back - another account's login, from
-  before a QR login replaced it - cannot bring its own record with it, so the puppet finds
-  the mismatch. The id is plain text here (the puppet compares it as it is), which is why it
-  is not next to the ciphertext: a copy of `data/` alone carries no account name. Putting
+  before a QR login replaced it - cannot bring its own record with it, so the mismatch is
+  found (today by the bridge on login, once the fork's next round lands by the puppet; see
+  below). The id is plain text here (it is compared as it is), which is why it is not next
+  to the ciphertext: a copy of `data/` alone carries no account name. Putting
   back old copies of both directories is not caught (uid 1000 on this host, the accepted
   boundary).
 
@@ -184,13 +185,21 @@ container mounts these directories. Keep both out of backups and support bundles
 
 What the bridge does with it:
 
-- A resume whose saved login is another account than the recorded one: the puppet
-  compares before it connects, deletes the file under its writer lock and answers
-  `RESUME_MISMATCH`; the bridge stops the bot, sends nothing, and stays `idle`
-  (`resume_account_mismatch`, `resumable: false`) until a QR is asked for. With no account
-  recorded yet (the first start after the upgrade) nothing is compared. Should a resumed
-  login still report another account, the bridge does not take it either (same idle
-  reason; the file is left to the puppet).
+- A resume whose saved login is another account than the recorded one, in two stages:
+  - Today (the fork in this repository ignores `expectUsername`): the puppet logs in as
+    that other account. The bridge compares the logged-in user id with its record itself
+    and refuses it on login: it stops the bot, sends and relays nothing, and stays `idle`
+    (`resume_account_mismatch`, `resumable: false`) until a QR is asked for. It deletes
+    nothing - the file stays, so every restart resumes it again, refuses it again and
+    spends one of the fork's resume slots each time, until a QR login replaces it.
+  - Once the fork's next round lands: after WeChat accepts the saved login and before it
+    answers, the puppet compares the account with `expectUsername`; on a mismatch it stops
+    that account, deletes the one file this attempt read (under its writer lock) and
+    answers `RESUME_MISMATCH`. The bridge takes that the same way (same idle reason,
+    nothing sent), and the next start finds nothing to resume. The bridge's own check on
+    login stays.
+
+  With no account recorded yet (the first start after the upgrade) nothing is compared.
 - A resume WeChat refuses (`resume_rejected`: the puppet has deleted the file), a file the
   puppet cannot read (`resume_unreadable`: kept), one past the resume cap
   (`resume_throttled`; a mismatch counts toward the cap, `busy` does not) or none after all
@@ -219,7 +228,9 @@ What the bridge does with it:
 - One QR scan is lost if the process dies after the login was reported and before the
   puppet's first write (the next start finds nothing to resume, or an older file), or
   between the puppet's first write and the bridge's record of the new account (the next
-  start expects the previous account, and the puppet deletes the new file as a mismatch).
+  start expects the previous account: today the bridge refuses the new login on every start
+  and the file stays until a QR login; once the fork's next round lands, the puppet deletes
+  the new file as a mismatch).
 
 Deleting it: logging this device out on the phone ("退出 Linux 微信") ends the login on
 WeChat's side, and the puppet deletes the file at once. The off switch is

@@ -35,7 +35,8 @@
 # The off switch: WECHAT_BRIDGE_SAVE_LOGIN=0 mounts none of them and sets no variable, which
 # is the bridge as it was before 19.1 (the login in memory only, a restart means a new QR),
 # and deletes the saved login and the recorded account (data/account.v1, account.user and
-# any temporary files of theirs; only deleted, never read) - here, before the container
+# their temporary files - the fork's data/.account.v1.tmp.*, the bridge's
+# account.user.tmp-*; only deleted, never read) - here, before the container
 # starts, never from inside it. data/resumes (resume times, not secret) and the key stay, so
 # the resume cap still holds when it is turned on again. A local delete does not sign the
 # device out of WeChat: to end it there too, log this device out on the phone. No image
@@ -61,7 +62,7 @@ key="$HOME/.local/share/aitelier/wechat-bridge-key"
 account="$HOME/.local/share/aitelier/wechat-bridge-account"
 case "${WECHAT_BRIDGE_SAVE_LOGIN:-1}" in
   0)
-    rm -f "$state/data/account.v1" "$state"/data/account.v1.tmp-* \
+    rm -f "$state/data/account.v1" "$state"/data/.account.v1.tmp.* \
       "$account/account.user" "$account"/account.user.tmp-*
     set --
     ;;

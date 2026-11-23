@@ -125,8 +125,11 @@ const HOUR_MS = 3_600_000, DAY_MS = 24 * HOUR_MS;
 export const RESUME_LIMITS = Object.freeze({ waitMs: 150_000, retryMs: Object.freeze([30_000, 120_000, 600_000]),
   holdGroupMs: 120_000, countLogMs: HOUR_MS });
 /** The fork's error prefixes for a resume that did not resume, and the idle reason each
- *  leaves; none of them asks for a QR. RESUME_MISMATCH: the saved login was another account
- *  than the expectUsername it was given, and the fork has deleted it. RESUME_BUSY (another
+ *  leaves; none of them asks for a QR. RESUME_MISMATCH (the fork's next round; the fork in
+ *  this repository ignores expectUsername today): the saved login was another account than
+ *  the expectUsername it was given, and the fork has deleted that file. Until that round
+ *  lands the bridge's own check on login (attach) refuses such a login and the file stays.
+ *  RESUME_BUSY (another
  *  resume still running in the fork) is passing: retried, as is any other error. */
 const RESUME_ENDS = Object.freeze({ RESUME_REJECTED: 'resume_rejected', RESUME_UNREADABLE: 'resume_unreadable',
   RESUME_THROTTLED: 'resume_throttled', RESUME_NONE: 'boot', RESUME_MISMATCH: 'resume_account_mismatch' });
@@ -137,7 +140,9 @@ const SAVED_LOGIN_OFF = new Set(['not_configured', 'key', 'dir']);
 /** The account logged in with a QR (design 7.2.1, the platform director's ruling 9 and his
  *  notes 653-654), recorded by the bridge in its own directory (WECHAT_BRIDGE_ACCOUNT_DIR,
  *  run.sh), never in the fork's data/: a copy of data/ put back cannot bring an old record
- *  with it. Each resume hands it to the fork as expectUsername; the fork compares. */
+ *  with it. Each resume hands it to the fork as expectUsername, and the bridge compares a
+ *  resumed login's user id with it itself (today the only check: the fork in this repository
+ *  ignores expectUsername; its next round also compares and answers RESUME_MISMATCH). */
 export const ACCOUNT_FILE = 'account.user';
 const ACCOUNT_FILE_MAX = 4096;
 
@@ -444,10 +449,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   const saving = Boolean(bootStatus) && bootStatus.off === undefined;
   if (bootStatus && !saving) log(`saved login off (${SAVED_LOGIN_OFF.has(bootStatus.off) ? bootStatus.off : 'unknown'})`);
   // The account the last QR login was with, handed to each resume as expectUsername (none
-  // recorded, e.g. the first start after the upgrade: the fork compares nothing).
+  // recorded, e.g. the first start after the upgrade: nothing is compared).
   let recorded = saving ? savedLogin.readAccount() : undefined;
   // Not resumable until the next QR login: a resume here was another account
-  // (RESUME_MISMATCH), or a QR login's account could not be recorded (the record on disk may
+  // (RESUME_MISMATCH, or refused on login), or a QR login's account could not be recorded (the record on disk may
   // name another one, so the next resume would be refused).
   let refused = false;
   // After a QR login in this process: the fork's `writes` when its QR was asked for. The
@@ -618,9 +623,11 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     target.on('login', user => {
       if (!current()) return;
       const resumed = state.phase === 'resuming';
-      // Step 19.1: the fork compares a resume with expectUsername (RESUME_MISMATCH). Should a
-      // resumed login still come back as another account, it is not taken: idle, nothing
-      // relayed, its bot stopped (the file is the fork's to delete, never the bridge's).
+      // Step 19.1 (ruling 9): a resumed login of another account than the recorded one is not
+      // taken - idle, nothing relayed or sent, its bot stopped. The bridge deletes nothing:
+      // today (the fork ignores expectUsername) the file stays and every start resumes and
+      // refuses it again, spending a resume slot each time; once the fork's next round lands
+      // it answers RESUME_MISMATCH (the 'error' handler) and deletes the file itself.
       if (resumed && recorded !== undefined && user?.id !== recorded) {
         refused = true;
         return end('resume_account_mismatch');

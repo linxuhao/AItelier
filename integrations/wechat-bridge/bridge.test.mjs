@@ -1779,7 +1779,7 @@ test('saved login: an ended resume\'s bot changes nothing later - its login, err
   } finally { await s.bridge.close(); }
 });
 
-test('saved login: RESUME_MISMATCH (the fork found another account and deleted it) is idle resume_account_mismatch, not resumable, nothing sent, no retry, no QR', LIMIT, async () => {
+test('saved login: after the fork\'s next round, RESUME_MISMATCH (the fork found another account and deleted that file) is idle resume_account_mismatch, not resumable, nothing sent, no retry, no QR', LIMIT, async () => {
   const s = await resumed();
   try {
     await s.bridge.settled();
@@ -1803,7 +1803,7 @@ test('saved login: RESUME_MISMATCH (the fork found another account and deleted i
   } finally { await s.bridge.close(); }
 });
 
-test('saved login: a resumed login that still comes back as another account than expected is not taken (idle resume_account_mismatch, never logged)', LIMIT, async () => {
+test('saved login: today (the fork ignores expectUsername) a resumed login of another account than recorded is refused by the bridge on login (idle resume_account_mismatch, not resumable, nothing sent, never logged, the file left, the next start compares again)', LIMIT, async () => {
   const logs = [];
   const s = await resumed({ log: line => logs.push(line) });
   try {
@@ -1819,9 +1819,23 @@ test('saved login: a resumed login that still comes back as another account than
     await s.json('/rooms', { method: 'PUT', body: { owner_ref: 'wxid_owner', rooms: [] } });
     assert.deepEqual(await events(s), []);
     assert.ok(!logs.some(line => line.includes('wxid_other')), 'the account is never logged');
+    assert.deepEqual(bot.said, []);
+    assert.deepEqual(await s.json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'x' } }), [409, { error: 'not_logged_in' }]);
     await sleepMs(250);
     assert.equal(s.bots.length, 1);
+    assert.deepEqual([s.saved.present, s.saved.account, s.saved.recorded], [true, 'wxid_bot', []],
+      'the file and the record stay (the fake api has no delete)');
   } finally { await s.bridge.close(); }
+  // The next start resumes the same file, expecting the same account, and refuses it again.
+  const again = await resumed({ saved: s.saved });
+  try {
+    assert.deepEqual(again.bot().options, RESUME);
+    await again.bridge.settled();
+    again.bot().emit('login', { id: 'wxid_other' });
+    await again.bridge.settled();
+    const [, body] = await again.json('/status');
+    assert.deepEqual([body.phase, body.idle_reason, body.resumable], ['idle', 'resume_account_mismatch', false]);
+  } finally { await again.bridge.close(); }
 });
 
 test('saved login: after a mismatch, a QR login (once the fork has written its saved login) is resumable again, and a later local drop resumes it', LIMIT, async () => {
@@ -2173,7 +2187,8 @@ test('run.sh: the saved login\'s key (0600, read-only file mount), state (0700, 
   // nor variable, and the saved login and record deleted (never read); the resume times and
   // the key stay.
   const data = join(state, 'data');
-  for (const name of ['account.v1', 'account.v1.tmp-0011223344556677', 'resumes']) writeFileSync(join(data, name), 'x');
+  // The fork's own temporary file: .<name>.tmp.<pid>.<nanos> (0002-saved-login.patch, atomic_write).
+  for (const name of ['account.v1', '.account.v1.tmp.42.1700000000000000000', 'resumes']) writeFileSync(join(data, name), 'x');
   for (const name of ['account.user', 'account.user.tmp-aa']) writeFileSync(join(account, name), 'x');
   const off = run({ WECHAT_BRIDGE_SAVE_LOGIN: '0' });
   assert.deepEqual(after(off, '--volume'), [`${home}/.aitelier-secrets/wechat-bridge-token:/home/bridge/.aitelier-secrets/wechat-bridge-token:ro`]);

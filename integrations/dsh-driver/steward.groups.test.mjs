@@ -208,6 +208,24 @@ test('director 602 defect 4: the snapshot says 群名暂不可用 when the group
 });
 
 
+test('the carried sender name rides the relay only when the caller has one; naming nobody posts no sender_name key at all', async () => {
+  // design-steward (owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」): the name the
+  // channel carried for a group sender reaches State as `sender_name`, where it labels the member.
+  // Without it the body is the request it always was - the key is ABSENT, not empty, so the
+  // backend keeps the member's 成员X alias. The name and the refs here are invented for this test.
+  const host = recorder();
+  const ops = groupOps({ request: host.request, project: 'aitelier-home', me: 'drv' });
+  await ops.relay({ channel: 'wechat', groupRef: 'r1', senderRef: 'm', senderName: '阿蓝', messageRef: 'x', text: 'hi' });
+  await ops.relay({ channel: 'wechat', groupRef: 'r1', senderRef: 'm', messageRef: 'y', text: 'hi' });
+  const { request_key, ...named } = host.calls[0].body;
+  assert.match(request_key, /^group:wechat:[0-9a-f]{16}$/);
+  assert.deepEqual(named, { channel: 'wechat', group_ref: 'r1', sender_ref: 'm', channel_message_ref: 'x', body: 'hi',
+    sender_name: '阿蓝' });
+  assert.equal(Object.hasOwn(host.calls[1].body, 'sender_name'), false, 'a relay that names nobody sends no name');
+  assert.deepEqual(Object.keys(host.calls[1].body).sort(),
+    ['body', 'channel', 'channel_message_ref', 'group_ref', 'request_key', 'sender_ref']);
+});
+
 test('design/steward-group-media.md: relay carries kept only when true; the notice, the purge receipt and the expiry are the host\'s own requests', async () => {
   const host = recorder({ '/api/state/commands/record_group_media_purge':
     Object.assign(new Error('AItelier: HTTP 422 "purge_incomplete: kept rows are left; purge again"'), { status: 422 }) });

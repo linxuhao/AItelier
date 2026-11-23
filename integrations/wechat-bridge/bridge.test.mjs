@@ -81,12 +81,14 @@ function fakeBot({ known = ['wxid_owner'] } = {}) {
 /** A message shaped like the live puppet's: neo's payload carries `roomId` for a group
  *  message and nothing for a 1:1 one, and `room()` throws the TypeError Wechaty raises
  *  when the puppet answers no room payload (`this.roomRawPayload is not a function`) - a
- *  throwing fake here is the witness that the bridge never asks for a Room object. */
+ *  throwing fake here is the witness that the bridge never asks for a Room object.
+ *  `talkerExtras` are the contact's other fields as Wechaty answers them - a name is the
+ *  one the group path reads (a property on 1.20, a method on the older shapes). */
 function message({ id = 'm1', from = 'wxid_owner', text = 'hello', type = types.Message.Text, self = false,
-  roomId, contactType = types.Contact.Unknown, date = new Date('2026-11-18T10:00:00Z') } = {}) {
+  roomId, contactType = types.Contact.Unknown, date = new Date('2026-11-18T10:00:00Z'), talkerExtras = {} } = {}) {
   return { id, self: () => self, room: () => { throw new TypeError('this.roomRawPayload is not a function'); },
     type: () => type, text: () => text, date: () => date, payload: roomId ? { roomId } : {},
-    talker: () => ({ id: from, type: () => contactType }) };
+    talker: () => ({ id: from, type: () => contactType, ...talkerExtras }) };
 }
 
 const noBot = () => { throw new Error('no bot expected'); };
@@ -777,6 +779,32 @@ test('group: a bound room\'s text passes only when it calls the bot, without the
   assert.equal(body.events[0].room_ref, ROOM);
   assert.equal(body.events[0].sender_ref, 'wxid_m1');
   assert.equal(body.events[0].attachments, undefined, 'a text message carries no attachments');
+  await s.bridge.close();
+});
+
+test('group: a member\'s own name rides the group event as sender_name, beside the WeChat id; no name leaves it absent', async () => {
+  const s = await started();
+  const bot = await s.login();
+  await withRooms(s);
+  // Every name and id below is invented for this test.
+  // A name as Wechaty 1.20 answers it (a property) and as the older shapes do (a method): both
+  // are carried, trimmed, while the sender_ref (the member's WeChat id) rides beside it.
+  bot.emit('message', roomMessage({ id: 'n1', text: '@管家 周六干嘛', talkerExtras: { name: '  阿蓝  ' } }));
+  bot.emit('message', roomMessage({ id: 'n2', text: '@管家 又问', talkerExtras: { name: () => '阿青' } }));
+  // No name at all; the neo fork's own placeholder (rememberContact names a contact by its id);
+  // a blank one; and the talker being the room, whose name is not the poster's.
+  bot.emit('message', roomMessage({ id: 'n3', text: '@管家 三问' }));
+  bot.emit('message', roomMessage({ id: 'n4', text: '@管家 四问', talkerExtras: { name: 'wxid_m1' } }));
+  bot.emit('message', roomMessage({ id: 'n5', text: '@管家 五问', talkerExtras: { name: '   ' } }));
+  bot.emit('message', roomMessage({ id: 'n6', from: ROOM, text: '@管家 六问', talkerExtras: { name: '家庭群' } }));
+  const [, body] = await s.json('/events?after=0');
+  const events = Object.fromEntries(body.events.map(e => [e.message_ref, e]));
+  assert.deepEqual(body.events.map(e => e.type), Array(6).fill('group_message'));
+  assert.deepEqual([events.n1.sender_name, events.n2.sender_name], ['阿蓝', '阿青']);
+  assert.deepEqual([events.n1.sender_ref, events.n2.sender_ref], ['wxid_m1', 'wxid_m1']);
+  for (const ref of ['n3', 'n4', 'n5', 'n6'])
+    assert.equal(Object.hasOwn(events[ref], 'sender_name'), false,
+      `${ref}: no name was carried, so the field is ABSENT and the host's 成员X alias stands`);
   await s.bridge.close();
 });
 
@@ -2040,8 +2068,21 @@ test('media restart: an id removed from the store leaves neither its payload nor
       bot.emit('message', mediaMessage({ kind: 'file', id: 'rm-' + label, xml: XML.file(bytes.length), bytes }));
       ids.push((await s.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id);
     }
-    await until(() => s.bridge.storedIds().includes(ids[2]) && s.bridge.storeCount === 2);
-    assert.deepEqual(s.bridge.storedIds(), ids.slice(1), 'the oldest copy was evicted');
+    // archive() spools the three copies concurrently and the store indexes them in put-completion
+    // order, not media-id order. Measured at the first true predicate of a red run: storedIds
+    // [ids[2], ids[1]], storeCount 2, storeBytes 20, and only ids[1]/ids[2] files on disk (ids[0]'s
+    // two already gone); a gated run also saw the transient pair [ids[0], ids[2]] while ids[1]'s
+    // spool was still in flight. The kept pair and the eviction are deterministic, their array
+    // order is not. Wait for that pair and the evicted id's two files to be gone, then assert the
+    // same unordered pair.
+    const kept = () => s.bridge.storedIds().slice().sort();
+    const expected = ids.slice(1).sort();
+    await until(() => {
+      const now = kept();
+      return now.length === 2 && now[0] === expected[0] && now[1] === expected[1]
+        && !existsSync(join(dir, `${ids[0]}.bin`)) && !existsSync(join(dir, `${ids[0]}.json`));
+    });
+    assert.deepEqual(kept(), expected, 'the oldest copy was evicted');
     assert.deepEqual([existsSync(join(dir, `${ids[0]}.bin`)), existsSync(join(dir, `${ids[0]}.json`))], [false, false],
       'the evicted id left neither its payload nor its metadata');
     assert.deepEqual(readdirSync(dir).sort(), [`${ids[1]}.bin`, `${ids[1]}.json`, `${ids[2]}.bin`, `${ids[2]}.json`].sort(),

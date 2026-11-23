@@ -964,18 +964,30 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // adds to it, so the counts of what was really deleted are not lost to a lost answer.
   const unrecorded = new Map();
   const audienceOf = (channel, groupRef) => `group:${channel}:${groupRef}`;
+  // The skip report names the room, never a message body; a colon in a room ref stays part of it.
+  const roomOf = audience => {
+    const rest = String(audience).startsWith('group:') ? String(audience).slice(6) : '';
+    const cut = rest.indexOf(':');
+    return cut < 0 ? { channel: rest, group_ref: '' } : { channel: rest.slice(0, cut), group_ref: rest.slice(cut + 1) };
+  };
   const purgeSweep = async listed => {
     // Only a read that succeeded and is well-formed: a failed or partial read is never taken
     // for "every group is off".
     if (!Array.isArray(listed?.groups) || !Array.isArray(listed?.media_purges)) return;
     if (typeof media?.purgeKept !== 'function' || typeof media?.keptAudiences !== 'function') return;
-    // An on group is left alone unless it is listed as owing a purge (清空记录 while on).
     const on = new Set(listed.groups.filter(g => g?.media_keep === 'on').map(g => audienceOf(g.channel, g.group_ref)));
     const owed = new Map(listed.media_purges.filter(p => text(p?.channel) && text(p?.group_ref) && text(p?.epoch))
       .map(p => [audienceOf(p.channel, p.group_ref), p]));
-    const audiences = new Set([...(await media.keptAudiences()), ...owed.keys()]);
-    for (const audience of audiences) {
-      if (on.has(audience) && !owed.has(audience)) continue;
+    // The backend's purge debts are the only authority to delete kept rows: a room missing from
+    // this answer (or listed off) is NOT authority while the backend still advertises its rows
+    // as kept.
+    // Report every such room held back for want of a debt, so a later loss is attributable.
+    for (const audience of await media.keptAudiences()) {
+      if (owed.has(audience) || on.has(audience)) continue;
+      log('group_media_purge_skipped', { ...roomOf(audience), reason: 'no_state_debt' });
+    }
+    // A debt purges even while the switch is on (清空记录 while on); the receipt closes it.
+    for (const audience of owed.keys()) {
       let receipt;
       try { receipt = await media.purgeKept(audience); }
       catch (error) { log('group_media_purge_failed', { error: short(error) }); continue; }
@@ -1050,7 +1062,14 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     } catch (error) { log('group_media_pass_failed', { error: short(error) }); }
     finally { mediaPassing = false; }
   };
-  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments, asked }) => {
+  // `senderName` (the owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」): the name
+  // the channel carried for this sender, which the host records as the member's label so the
+  // group's recent/kept rows name them. The sender's WeChat id is `senderRef`, already there.
+  // Handed on only when the channel named someone (never a placeholder, never the id, never a
+  // name this side invents); absent, the backend keeps the 成员X alias - and it is not a log
+  // field: `seen` leaves it out.
+  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind,
+    attachments, asked, senderName }) => {
     const seen = { channel, group_ref: groupRef, sender_ref: senderRef, length: body.length };
     if (!groups || !text(groupRef)) return { accepted: false, reason: 'no_groups' };
     // design/steward-group-media.md item 5 (the owner's ruling of 2026-11-22): STORAGE is not
@@ -1073,7 +1092,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       result = groupBind
         ? await groups.bind({ channel, groupRef, senderRef, messageRef, prefix: groupBind.prefix, code: groupBind.code })
         : await groups.relay({ channel, groupRef, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}),
-          ...(attachments?.length ? { attachments } : {}), ...(mentioned ? {} : { kept: true }) });
+          ...(attachments?.length ? { attachments } : {}), ...(mentioned ? {} : { kept: true }),
+          ...(text(senderName) ? { senderName } : {}) });
     } catch (error) {
       log('group_inbound_failed', { ...seen, error: short(error) });
       return { accepted: false, reason: 'unavailable' };

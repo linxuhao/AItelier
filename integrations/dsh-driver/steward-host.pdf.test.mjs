@@ -496,7 +496,7 @@ function smokePdf(lines) {
 test('real subprocess: the real pdf_read.py under AITELIER_PDF_TEST_PYTHON passes its self-check and renders a PDF end to end', async (t) => {
   const python = process.env.AITELIER_PDF_TEST_PYTHON;
   if (!python) {
-    t.skip('AITELIER_PDF_TEST_PYTHON is not set: no python with pypdfium2 here (aitelier:latest has none until rebuilt); run this file under ctest-st.sh with the /tmp/pv venv');
+    t.skip('AITELIER_PDF_TEST_PYTHON is not set: name an interpreter that has pypdfium2 (an image built from this repository installs one at /usr/local/bin/python, requirements-pdf.txt; tests/integration/test_driver_node_suite_runs.py supplies one when it runs this tree)');
     return;
   }
   const b = bench();

@@ -874,11 +874,16 @@ export function groupOps({ request, toolRequest = request, project, me }) {
       request_key: `group-bind:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       code, mention_prefix: prefix, channel_message_ref: messageRef }, signal).then(result, refused),
     // design/steward-group-media.md section 3: `kept` - the message did not call the steward;
-    // the backend records it only while the group's media switch is on.
-    relay: ({ channel, groupRef, senderRef, messageRef, text, at, attachments, kept }, signal) => request('/api/state/commands/relay_group_message', {
+    // the backend records it only while the group's media switch is on. `senderName` (the
+    // owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」) is the name the channel
+    // carried for this sender, posted as `sender_name` so State labels the member by it - and
+    // only when the caller has one: a relay that names nobody carries NO `sender_name` key, so
+    // the backend keeps that member's 成员X alias instead of receiving an empty name.
+    relay: ({ channel, groupRef, senderRef, senderName, messageRef, text, at, attachments, kept }, signal) => request('/api/state/commands/relay_group_message', {
       request_key: `group:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}),
-      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}), ...(kept === true ? { kept: true } : {}) },
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}), ...(kept === true ? { kept: true } : {}),
+      ...(senderName ? { sender_name: senderName } : {}) },
     signal).then(result, refused),
     // design/steward-group-media.md section 2: a media-switch notice's check (a dry run: a fresh
     // key, nothing recorded), sent (after the channel took the line: one key per epoch, so a

@@ -1,5 +1,5 @@
 /** Step 24.2c (design-steward 7.8.12b "五", "六", "十", "十六" 插件): the steward's read_document -
- *  who may read which ref (covers, kept), the order of the checks, the per-call and per-turn page
+ *  who may read which ref (covers; a kept medium only in its own group's turn), the order of the checks, the per-call and per-turn page
  *  bounds (reserved before rendering, given back after), a route without images, the text-only
  *  page stop and the fence around the file's text. The host's reader is a fake here that keeps
  *  the host's contract (host.d.ts media.readDocument); the real reader is tested on the adapter
@@ -104,18 +104,20 @@ test('read_document: its parameters, and a refusal always carries a code of the 
   assert.deepEqual(Object.keys(w.tool.parameters), ['ref', 'pages', 'images', 'rows']);
   assert.equal(w.tool.parameters.ref.required, true);
   assert.deepEqual([w.tool.parameters.pages.type, w.tool.parameters.images.type], ['string', 'boolean']);
-  assert.deepEqual(CODES.sort(), ['broken', 'busy', 'encrypted', 'invalid_request', 'kept_not_readable', 'not_a_document',
+  assert.deepEqual(CODES.sort(), ['broken', 'busy', 'encrypted', 'invalid_request', 'not_a_document',
     'not_visible_in_this_turn', 'office_unavailable', 'page_out_of_range', 'pdf_reader_unavailable', 'timeout', 'too_many_pages', 'turn_page_budget',
     'unknown_ref', 'unsupported_security']);
   // The sentences 7.8.12b writes out, word for word.
   assert.equal(READ_DOCUMENT_REASONS.encrypted, '这个 PDF 要密码，管家打不开：请对方发一份不带密码的');
-  assert.equal(READ_DOCUMENT_REASONS.kept_not_readable, '这是群里没 @ 管家时发的文件，管家不读：请发文件的人重新发一次并 @ 管家');
+  // R1/R4 with the office step: a kept file is read in its own group's turns, and an office file
+  // is never kept (kept_mimes; office.test.mjs pins the library refusing it), so the description says both.
+  assert.match(w.tool.description, /a docx, pptx or xlsx sent without a mention is not kept\) is read in that group\'s later turns/);
   assert.equal(READ_DOCUMENT_REASONS.pdf_reader_unavailable, '本机读 PDF 的组件没装好，请业主看宿主日志');
   // A refusal is rendered as its JSON, nothing else.
   assert.deepEqual(blocks(w, { refused: 'busy', reason: 'r' }), [{ type: 'text', text: '{"refused":"busy","reason":"r"}' }]);
 });
 
-test('coverage matrix (G §8): owner reads its own and a group\'s @ ref, never a kept one; a group its own @ ref only; its own kept file is kept_not_readable', async () => {
+test('coverage matrix (G §8, owner rulings 2026-11-23 R1/R4): owner reads its own and a group\'s @ ref but never a kept medium; a group its own @ ref and its own kept medium; no other group\'s', async () => {
   const cases = [
     ['owner', OWNER_PDF, undefined],
     ['owner', GROUP_PDF, undefined], // R5: a group's @ file
@@ -125,9 +127,8 @@ test('coverage matrix (G §8): owner reads its own and a group\'s @ ref, never a
     ['r1', OWNER_PDF, 'not_visible_in_this_turn'],
     ['r1', OTHER_PDF, 'not_visible_in_this_turn'],
     ['r1', OTHER_KEPT, 'not_visible_in_this_turn'],
-    ['r1', KEPT_PDF, 'kept_not_readable'],
-    ['r1', KEPT_IMAGE, 'kept_not_readable'],
-    ['r2', OTHER_KEPT, 'kept_not_readable'],
+    ['r1', KEPT_PDF, undefined], // R1: the group's own kept file, read on a later question
+    ['r2', OTHER_KEPT, undefined],
     ['r2', GROUP_PDF, 'not_visible_in_this_turn'],
   ];
   for (const [who, r, expected] of cases) {
@@ -145,15 +146,18 @@ test('coverage matrix (G §8): owner reads its own and a group\'s @ ref, never a
       assert.equal(w.used(), 0, `${label}: no page image reserved`);
     }
   }
-  // The kept refusal asks for a resend with a mention.
-  assert.match((await world({ audience: 'r1' }).run({ ref: KEPT_IMAGE })).reason, /重新发一次并 @ 管家/);
+  // R1: the group's own kept picture is read as one image; the owner's turn still cannot see it.
+  const keptImage = world({ audience: 'r1' });
+  assert.equal((await keptImage.run({ ref: KEPT_IMAGE })).kind, 'image');
+  assert.equal(keptImage.reader.calls.length, 1, 'the kept picture was read');
+  assert.equal((await world().run({ ref: KEPT_IMAGE })).refused, 'not_visible_in_this_turn');
   // A turn whose audience cannot be read (no open turn record) covers nothing.
   const w = world();
   w.turns.current = undefined;
   assert.equal((await w.run({ ref: OWNER_PDF })).refused, 'not_visible_in_this_turn');
 });
 
-test('order of the checks: session, syntax, library, covers, kept, kind, page count, reader', async () => {
+test('order of the checks: session, syntax, library, covers, kind, page count, reader', async () => {
   // Only the root session may call; nothing else is looked at.
   const w = world();
   assert.deepEqual(await w.run({ ref: OWNER_PDF }, 'child'), { refused: 'not_available', reason: 'only in your own conversation' });
@@ -166,9 +170,9 @@ test('order of the checks: session, syntax, library, covers, kept, kind, page co
   }
   assert.deepEqual(w.resolved, [], 'a malformed call never reaches the library');
   assert.equal((await w.run({ ref: 'm_' + 'f'.repeat(16) })).refused, 'unknown_ref');
-  // covers before kept; kept before the kind; the kind before the page count.
+  // covers before the kind, the kind before the page count: r1's own kept row reaches the page check.
   assert.equal((await world({ audience: 'r2' }).run({ ref: KEPT_PDF, pages: '1-99' })).refused, 'not_visible_in_this_turn');
-  assert.equal((await world({ audience: 'r1' }).run({ ref: KEPT_PDF, pages: '1-99' })).refused, 'kept_not_readable');
+  assert.equal((await world({ audience: 'r1' }).run({ ref: KEPT_PDF, pages: '1-99' })).refused, 'too_many_pages');
   assert.equal((await w.run({ ref: VOICE, pages: '1-99' })).refused, 'not_a_document');
   assert.equal((await w.run({ ref: OWNER_PDF, pages: '1-99' })).refused, 'too_many_pages');
   assert.equal(w.reader.calls.length, 0);

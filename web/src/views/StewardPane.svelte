@@ -8,6 +8,7 @@
   import StewardProfile from './StewardProfile.svelte';
   import StewardSchedules from './StewardSchedules.svelte';
   import StewardChannels from './StewardChannels.svelte';
+  import StewardCapabilities from './StewardCapabilities.svelte';
   import StewardLists from './StewardLists.svelte';
   import StewardConnections from './StewardConnections.svelte';
   // The steward's pane is the ordinary conversation pane of its project, plus
@@ -56,8 +57,13 @@
     {:else if tab === 'questions'}<StewardQuestions {questions} {projects} {status} onanswer={answer} onanswered={onrefresh} />
     {:else if tab === 'schedules'}<StewardSchedules />
     {:else if tab === 'lists'}<StewardLists />
-    {:else if tab === 'channels'}<StewardChannels />
+    {:else if tab === 'channels'}<div class="channels-with-capabilities"><StewardChannels /><StewardCapabilities /></div>
     {:else if tab === 'connections'}<StewardConnections {focus} />
     {:else if tab === 'profile'}<StewardProfile />{/if}
   {/snippet}
 </DriverConversationPane>
+
+<style>
+  .channels-with-capabilities{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start;}
+  @media (max-width:900px){.channels-with-capabilities{grid-template-columns:1fr;}}
+</style>

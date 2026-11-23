@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { confirmStewardIdentity, deleteStewardConnection, listStewardConfirmations, listStewardConnections,
     probeStewardConnection, saveStewardConnection, setStewardConnectionSecret, setStewardConnectionTools,
-    setStewardOAuthClient, signOutStewardOAuth, startDshDriver, startStewardOAuth, stewardConnectionTools, stopDshDriver,
+    setStewardOAuthClient, setStewardOAuthScope, signOutStewardOAuth, startDshDriver, startStewardOAuth, stewardConnectionTools, stopDshDriver,
     type StewardConfirmation, type StewardConnection, type StewardConnectionInput, type StewardConnectionTool,
     type StewardConnections, type StewardToolChange } from '../lib/api';
   import { STEWARD_PROJECT_ID } from '../lib/steward';
@@ -17,7 +17,8 @@
   // restart. Descriptions and server texts come from someone else's server: plain text only.
   let data = $state<StewardConnections | null>(null);
   let error = $state(''), notice = $state(''), busy = $state('');
-  let editing = $state<(StewardConnectionInput & {isNew: boolean; secret: string; clientId: string; clientSecret: string}) | null>(null);
+  let editing = $state<(StewardConnectionInput & {isNew: boolean; secret: string; clientId: string; clientSecret: string;
+    scope: string; scopeWas: string}) | null>(null);
   // Step 24.1b: the confirmations of outward actions, with the text that went out.
   let confirmations = $state<StewardConfirmation[]>([]);
   let open = $state<string | null>(null);
@@ -35,21 +36,22 @@
   }
   function blank() {
     editing = {isNew: true, conn_id: '', label: '', url: '', auth_kind: 'none', header_name: 'Authorization',
-      visibility: 'private', enabled: false, secret: '', clientId: '', clientSecret: ''};
+      visibility: 'private', enabled: false, secret: '', clientId: '', clientSecret: '', scope: '', scopeWas: ''};
   }
   function edit(c: StewardConnection) {
     editing = {isNew: false, conn_id: c.conn_id, label: c.label, url: c.url, auth_kind: c.auth_kind,
       header_name: c.header_name ?? 'Authorization', visibility: c.visibility, enabled: c.enabled, secret: '',
-      clientId: '', clientSecret: ''};
+      clientId: '', clientSecret: '', scope: c.oauth_scope ?? '', scopeWas: c.oauth_scope ?? ''};
   }
   async function save() {
     if (!editing || busy) return;
     busy = 'save'; error = ''; notice = '';
-    const {isNew: _isNew, secret, clientId, clientSecret, ...input} = editing;
+    const {isNew: _isNew, secret, clientId, clientSecret, scope, scopeWas, ...input} = editing;
     try {
       await saveStewardConnection({...input, header_name: input.auth_kind === 'header' ? input.header_name : null});
       if (input.auth_kind === 'header' && secret) await setStewardConnectionSecret(input.conn_id, secret);
       if (input.auth_kind === 'oauth' && clientId) await setStewardOAuthClient(input.conn_id, clientId, clientSecret || null);
+      if (input.auth_kind === 'oauth' && scope.trim() !== scopeWas) await setStewardOAuthScope(input.conn_id, scope.trim() || null);
       editing = null; notice = t('steward.connSaved');
       await load();
     } catch (e) { failed(e); }
@@ -249,6 +251,7 @@
       {#if editing.auth_kind === 'oauth'}
         <label>{t('steward.connClientId')} <input type="text" autocomplete="off" bind:value={editing.clientId} data-oauth-client-id /></label>
         <label>{t('steward.connClientSecret')} <input type="password" autocomplete="off" bind:value={editing.clientSecret} /></label>
+        <label>{t('steward.connOAuthScope')} <input type="text" autocomplete="off" bind:value={editing.scope} data-oauth-scope /></label>
       {/if}
       <label>{t('steward.connVisibility')}
         <select bind:value={editing.visibility}>

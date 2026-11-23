@@ -41,7 +41,10 @@ the dying states ``X``/``x`` as dead, and a per-pid read that fails as dead wher
 answer). So the verdict does not depend on the runner reaping. A real leak is still caught.
 
 Never a skip: where ``node`` is missing or the pinned install is absent, the row FAILS,
-because the driver suite is then unmeasured and a skip would look like a pass.
+because the driver suite is then unmeasured and a skip would look like a pass. For the same
+reason the row hands the suite its own interpreter when the environment names none
+(``INTERPRETER_ENV``): two rows of the suite skip unless a python with pypdfium2 is named,
+and a silent skip would read as a pass.
 
 Meaningless outside the shipped image (``aitelier:latest``).
 """
@@ -54,6 +57,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 import warnings
 from pathlib import Path
@@ -80,6 +84,13 @@ TIMEOUT_S = 1800
 TAIL_LINES = 80
 # Variables a running DSH session sets; the suite must not inherit them.
 DROPPED_ENV = ("AITELIER_DSH_EXECUTION", "DSH_PERMISSION_MODE", "AITELIER_TODO_CWD")
+#: The two pypdfium2 rows of the driver suite (``runtime.read-document.test.mjs``,
+#: ``steward-host.pdf.test.mjs``) skip unless one of these names a python that has
+#: pypdfium2, and a skip reds this row (see "Never a skip" above). Nothing else in the
+#: repository supplies them, and the image's own python carries the dependency
+#: (``requirements-pdf.txt``), so this row supplies the interpreter it already runs on.
+#: A python without the module then FAILS the row by name instead of skipping silently.
+INTERPRETER_ENV = ("AITELIER_MEDIA_PYTHON", "AITELIER_PDF_TEST_PYTHON")
 EXECUTOR = "the shipped image aitelier:latest (node at /usr/local/bin/node)"
 FAIL_MARK = "\u2716"  # node's spec reporter marks a failed test with a heavy X
 INFO_MARK = "\u2139"  # and prints its summary lines with an info sign
@@ -126,6 +137,9 @@ def _dsh_version() -> str:
 def _run(argv: list[str], home: Path) -> tuple[int, str, float]:
     env = {key: value for key, value in os.environ.items() if key not in DROPPED_ENV}
     env["HOME"] = str(home)
+    for key in INTERPRETER_ENV:
+        if not env.get(key):
+            env[key] = sys.executable
     started = time.monotonic()
     proc = subprocess.Popen(
         argv,

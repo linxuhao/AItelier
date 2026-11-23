@@ -1170,7 +1170,8 @@ export interface StewardConnection {
   conn_id: string; label: string; url: string; auth_kind: 'none' | 'header' | 'oauth';
   header_name: string | null; visibility: StewardVisibility; enabled: boolean;
   generation: number; config_version: number; secret: 'set' | 'unset' | 'oauth_needs_consent';
-  auth_identity: string | null; identity_confirmed?: boolean; created_at: string; updated_at: string;
+  auth_identity: string | null; identity_confirmed?: boolean; oauth_scope?: string | null;
+  created_at: string; updated_at: string;
   last_probe_at: string | null; last_error: string | null; last_change: string; usable: boolean;
   tool_counts: {all: number; allowed: number; outward: number; changed: number; new: number};
 }
@@ -1210,6 +1211,18 @@ export function deleteStewardConnection(connId: string): Promise<unknown> {
 export function stewardConnectionTools(connId: string): Promise<StewardConnectionTools> {
   return _get('/api/steward/connections/' + encodeURIComponent(connId) + '/tools');
 }
+
+// The steward's basic-capabilities table: the backend decides each route from the live
+// deployment and the owner's stored connection ticks; the view only renders it.
+export type StewardCapabilityProvider = 'native' | 'mcp' | 'missing';
+export interface StewardCapability {
+  id: string; label: string; provider: StewardCapabilityProvider;
+  conn_id: string | null; tool: string | null; detail: string | null;
+}
+export interface StewardCapabilities { capabilities: StewardCapability[] }
+export function listStewardCapabilities(): Promise<StewardCapabilities> {
+  return _get('/api/steward/capabilities');
+}
 export function setStewardConnectionTools(connId: string, tools: StewardToolChange[]): Promise<StewardConnectionTools> {
   return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/tools', {tools});
 }
@@ -1230,6 +1243,9 @@ export interface StewardConfirmation {
 export function setStewardOAuthClient(connId: string, clientId: string | null, clientSecret: string | null): Promise<unknown> {
   return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/client',
     {client_id: clientId, client_secret: clientSecret});
+}
+export function setStewardOAuthScope(connId: string, scope: string | null): Promise<unknown> {
+  return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/scope', {scope});
 }
 export function startStewardOAuth(connId: string): Promise<{conn_id: string; authorize_url: string}> {
   return _post('/api/steward/connections/' + encodeURIComponent(connId) + '/oauth/start');

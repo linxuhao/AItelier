@@ -142,6 +142,12 @@ GROUP_LABEL_CHARS = 20
 # Step 24.2d (7.8.12c "九"): the most UTF-8 a make_document's text check carries (post_group_media).
 TEXT_CHECK_BYTES = 262144
 DEFAULT_GROUP_LABEL = "家庭群"
+# The name a CHANNEL carried for a group member (the owner's ruling of 2026-11-23,
+# 「让微信桥带上发送者昵称/微信id」: the group event's `sender_name`) becomes that member's
+# label. Bounded like the owner's own naming of a member (name_group_member: 1-20 characters)
+# and a group's name, so one name never makes a line of its own; member_name trims it, cuts a
+# longer one to this, and a blank answer is no name at all.
+MEMBER_NAME_CHARS = 20
 # The outbound kinds group_sends_per_hour counts - the one list send_refusal reads, so every
 # path that posts one of them is held to the same budget.
 GROUP_SEND_KINDS = ("confirmation", "confirmation_line", "media", "media_notice")
@@ -219,6 +225,19 @@ _EXEMPT_TERMS = frozenset({"aitelier", "aitelier-home"})
 
 def member_label(ordinal: int) -> str:
     return "成员" + (_STEMS[ordinal - 1] if 1 <= ordinal <= len(_STEMS) else str(ordinal))
+
+
+def member_name(carried) -> str | None:
+    """The name a channel carried for a group member (its group event's `sender_name`), or
+    None when it carried none: NFKC, whitespace (a newline in a nickname included) collapsed to
+    one space, trimmed, cut to MEMBER_NAME_CHARS characters. Anything that is not text, and
+    anything left blank, is None - a placeholder is not a name - so the member keeps the 成员X
+    alias `member_label` gives, exactly as before this field existed. Only the first 200
+    characters of a carried name are read, so an absurd one costs nothing."""
+    if not isinstance(carried, str):
+        return None
+    name = " ".join(unicodedata.normalize("NFKC", carried[:200]).split())
+    return name[:MEMBER_NAME_CHARS].strip() or None
 
 
 def normalise_group_code(text) -> str:
@@ -398,19 +417,31 @@ class StateGroups:
         return None
 
     @staticmethod
-    def _member(conn, channel, group_ref, sender_ref, role):
+    def _member(conn, channel, group_ref, sender_ref, role, name=None):
         """The sender's stable name in this group: 业主, the owner's dashboard label, or
-        成员甲.. by first appearance (the row is made on first sight)."""
+        成员甲.. by first appearance (the row is made on first sight).
+
+        `name` (the owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」) is the name
+        the channel carried for this sender (already through `member_name`): a member row
+        without a label takes it, and a row the BRIDGE named keeps up with it (a member who
+        renames themselves on WeChat reads by the new name next time they speak). A label the
+        OWNER gave (named_at set, `name_group_member`) is never overwritten by one - the
+        dashboard's naming stays the owner's. No name: the row is made and read exactly as
+        before, so an unnamed member keeps the 成员X alias byte for byte."""
         if role == "owner":
             return OWNER_LABEL
-        row = conn.execute("SELECT ordinal,label FROM state_group_members WHERE channel=? AND group_ref=? "
+        row = conn.execute("SELECT ordinal,label,named_at FROM state_group_members WHERE channel=? AND group_ref=? "
                            "AND sender_ref=?", (channel, group_ref, sender_ref)).fetchone()
         if row is None:
             ordinal = conn.execute("SELECT COALESCE(MAX(ordinal),0)+1 FROM state_group_members WHERE channel=? "
                                    "AND group_ref=?", (channel, group_ref)).fetchone()[0]
-            conn.execute("INSERT INTO state_group_members(channel,group_ref,sender_ref,ordinal) VALUES(?,?,?,?)",
-                         (channel, group_ref, sender_ref, ordinal))
-            return member_label(ordinal)
+            conn.execute("INSERT INTO state_group_members(channel,group_ref,sender_ref,ordinal,label) "
+                         "VALUES(?,?,?,?,?)", (channel, group_ref, sender_ref, ordinal, name))
+            return name or member_label(ordinal)
+        if name and row["named_at"] is None and row["label"] != name:
+            conn.execute("UPDATE state_group_members SET label=? WHERE channel=? AND group_ref=? AND sender_ref=?",
+                         (name, channel, group_ref, sender_ref))
+            return name
         return row["label"] or member_label(row["ordinal"])
 
     @staticmethod
@@ -852,7 +883,7 @@ class StateGroups:
         return out
 
     def relay_group_message(self, project_id, request_key, channel, group_ref, sender_ref, channel_message_ref, body,
-                            channel_at=None, attachments=None, kept=False):
+                            channel_at=None, attachments=None, kept=False, sender_name=None):
         """One @-message from the bound group: dated by the channel within the last
         fresh_minutes, deduplicated by its channel ref, stamped owner/member by code, held to
         the group's, the member's and the account's hourly bounds, stored. Answers
@@ -871,7 +902,16 @@ class StateGroups:
         is on (else media_keep_off, and no row), as ONE row of kind 'kept_media' (accepted 0)
         with the sender's member row: not a question - none of the hourly windows counts it, it
         decides no confirmation and yields no quota notice; a mention turn's `recent` lists it
-        for one day."""
+        for one day.
+
+        `sender_name` (the owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」) is the
+        name the channel carried for this sender - the bridge's `sender_name`, the member's
+        WeChat nickname. It becomes the member row's label (`member_name`: trimmed, one line,
+        at most MEMBER_NAME_CHARS) so `_label_of` makes the group's recent/kept rows and the
+        dashboard name the member by it, and a name the OWNER gave is never overwritten. No
+        name (None, blank, not text) changes nothing: the member keeps the 成员X alias. The
+        name is group-visible labelling only - it is never part of the row's body, a log line
+        or an answer."""
         if channel not in CHANNELS:
             raise StateGraphError("invalid_channel")
         _require_utf8("body", body, "invalid_body")
@@ -881,6 +921,7 @@ class StateGroups:
         if size > BODY_MAX_BYTES:
             raise StateGraphError(f"body_too_long: {size} bytes; at most {BODY_MAX_BYTES} bytes")
         refuse_credential_body(body)
+        carried = member_name(sender_name)
         files = media_types.normalise_attachments(attachments)
         if kept and not files:
             raise StateGraphError("invalid_request: a kept message carries its files")
@@ -930,7 +971,7 @@ class StateGroups:
             account = conn.execute("SELECT sender_ref FROM state_owner_channels WHERE channel=? AND revoked_at IS NULL",
                                    (channel,)).fetchone()
             role = "owner" if account is not None and account[0] == sender_ref else "member"
-            label = self._member(conn, channel, group_ref, sender_ref, role)
+            label = self._member(conn, channel, group_ref, sender_ref, role, carried)
             if kept:
                 keep("kept_media", role=role, text=body)
                 self._retain(conn, moment)

@@ -135,6 +135,127 @@ def apply_patch(patch: str, root: Path) -> None:
         target.write_text("".join(patched), encoding="utf-8")
 
 
+RUST_EPRINTLN = "eprintln!("
+DOWNLOAD_CALL = "cdn_client(account)?.download(&descriptor)"
+DOWNLOAD_HANDLER = re.compile(r"Operation::DownloadMedia\s*\{(?P<fields>[^}]*)\}\s*=>\s*\{")
+DOWNLOAD_FIELDS = {"file_id", "fallback_file_id", "aes_key", "quality", "expected_bytes"}
+# The fields the fix's design note documents for the one diagnostic line, and no others.
+DIAGNOSTIC_FIELDS = {"quality", "filetype", "downpicformat", "size_class", "file_id_len", "has_slash", "has_query"}
+
+
+def balanced_slice(text: str, opening: int) -> tuple[int, int]:
+    """The (start, end) of the (), {} or [] group whose opening character is at `opening`."""
+    closer = {"(": ")", "{": "}", "[": "]"}[text[opening]]
+    opener = text[opening]
+    depth = 0
+    index = opening
+    in_string = False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if char == "\\":
+                index += 2
+                continue
+            in_string = char != '"'
+        elif char == '"':
+            in_string = True
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return opening, index + 1
+        index += 1
+    raise AssertionError(f"unbalanced {opener!r} at offset {opening}")
+
+
+def rust_string_literal(text: str, start: int = 0) -> tuple[str, int]:
+    """The first "..." literal at or after start: its body and the index just past it."""
+    index = text.index('"', start) + 1
+    body: list[str] = []
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            body.append(text[index : index + 2])
+            index += 2
+            continue
+        if char == '"':
+            return "".join(body), index + 1
+        body.append(char)
+        index += 1
+    raise AssertionError("a string literal runs past the end of the call")
+
+
+def format_labels(template: str) -> list[str]:
+    """The `name=` labels a Rust format string writes, in order."""
+    return re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=", template)
+
+
+def format_placeholders(template: str) -> tuple[set[str], int]:
+    """The named fields a format string captures, and how many anonymous `{}` it has."""
+    names: set[str] = set()
+    anonymous = 0
+    index = 0
+    while index < len(template):
+        if template[index] != "{":
+            index += 1
+            continue
+        if template[index + 1 : index + 2] == "{":
+            index += 2
+            continue
+        closing = template.index("}", index)
+        field = template[index + 1 : closing].split(":", 1)[0]
+        if field:
+            names.add(field)
+        else:
+            anonymous += 1
+        index = closing + 1
+    return names, anonymous
+
+
+def split_arguments(text: str) -> list[str]:
+    """A Rust call's top-level comma-separated arguments."""
+    arguments: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in text:
+        if char in "({[":
+            depth += 1
+        elif char in ")}]":
+            depth -= 1
+        if char == "," and depth == 0:
+            arguments.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    arguments.append("".join(current).strip())
+    return [argument for argument in arguments if argument]
+
+
+def the_diagnostic_call(rust: str) -> str:
+    """The one eprintln! call the applied native source emits for a CDN attempt."""
+    assert rust.count(RUST_EPRINTLN) == 1, (
+        f"the applied native source has {rust.count(RUST_EPRINTLN)} eprintln! calls, the fix documents one"
+    )
+    call_at = rust.index(RUST_EPRINTLN)
+    _, end = balanced_slice(rust, call_at + len(RUST_EPRINTLN) - 1)
+    return rust[call_at:end]
+
+
+def download_media_handler(rust: str) -> str:
+    """The body of the `Operation::DownloadMedia` match arm that fetches the media."""
+    handlers = [
+        match
+        for match in DOWNLOAD_HANDLER.finditer(rust)
+        if {field.strip() for field in match["fields"].split(",") if field.strip()} == DOWNLOAD_FIELDS
+    ]
+    assert len(handlers) == 1, (
+        f"the applied native source has {len(handlers)} handlers destructuring an image download"
+    )
+    _, end = balanced_slice(rust, handlers[0].end() - 1)
+    return rust[handlers[0].end() : end]
+
+
 def test_the_pin_names_a_commit_and_the_snapshot_says_which(tmp_path: Path, pin: dict) -> None:
     upstream = pin["upstream"]
     assert upstream["repository"] == "https://github.com/wechaty/puppet-neo"
@@ -314,3 +435,112 @@ def test_the_image_overlays_exactly_the_fork_addon_and_its_dist(pin: dict) -> No
     assert "npm" not in final, "the final image carries npm"
     assert "cargo" not in final and "rust" not in final, "the final image carries a compiler"
     assert pin["upstream"]["commit"] in dockerfile
+
+
+def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(tmp_path: Path, pin: dict) -> None:
+    snapshot = tmp_path / "pin2"
+    for entry in pin["files"]:
+        copy = snapshot / entry["path"]
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes((SNAPSHOT / entry["path"]).read_bytes())
+
+    apply_patch((REPO / pin["patch"]["path"]).read_text(encoding="utf-8"), snapshot)
+
+    puppet = (snapshot / "src/puppet-neo.ts").read_text(encoding="utf-8")
+    native_ts = (snapshot / "src/native.ts").read_text(encoding="utf-8")
+    rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
+
+    # Ordered pair: cdnbigimgurl first, cdnmidimgurl second when present and different.
+    assert "const primaryId = attribute(image, 'cdnbigimgurl')" in puppet
+    assert "const secondaryId = attribute(image, 'cdnmidimgurl')" in puppet
+    assert "fallbackFileId: secondaryId" in puppet or "fallbackFileId: secondaryId }" in puppet
+
+    # Second id carried across the napi boundary.
+    assert "fallbackFileId?: string" in native_ts
+    assert "fallback_file_id: Option<String>" in rust
+
+    handler = download_media_handler(rust)
+
+    # Exactly one retry on the second id, and it is the id the retry's download uses: the
+    # descriptor is built from `file_id`, which only the retry reassigns, and the retry's
+    # `continue;` is the loop's only way back to the download that failed.
+    assert "let mut file_id = file_id;" in handler, "the first id is not the one the loop starts from"
+    assert handler.count(DOWNLOAD_CALL) == 1, (
+        f"the handler downloads {handler.count(DOWNLOAD_CALL)} times, the fix documents one attempt per turn"
+    )
+    assert handler.index(RUST_EPRINTLN) < handler.index(DOWNLOAD_CALL), "the diagnostic follows the download"
+    descriptor_open = handler.index("{", handler.index("let descriptor = MediaDescriptor {"))
+    _, descriptor_end = balanced_slice(handler, descriptor_open)
+    descriptor = handler[descriptor_open:descriptor_end]
+    assert "file_id: file_id.clone()," in descriptor, "the download is not made with the current file id"
+    assert "fallback_file_id" not in descriptor, "the download bypasses the id the retry assigns"
+
+    assert handler.count("let downloaded = loop {") == 1, "the retry is not one bounded loop"
+    loop_open = handler.index("{", handler.index("let downloaded = loop {"))
+    _, loop_end = balanced_slice(handler, loop_open)
+    loop_body = handler[loop_open:loop_end]
+    download_at = loop_body.index(DOWNLOAD_CALL)
+    succeeded_at = loop_body.index("Ok(downloaded) => break downloaded")
+    failed_at = loop_body.index("Err(err) =>")
+    assert download_at < succeeded_at < failed_at
+    # A second download happens only after the first one returned Err: the single `continue;`
+    # in the loop sits inside the Err arm, behind the guard.
+    assert loop_body.count("continue;") == 1, (
+        f"the loop has {loop_body.count('continue;')} back edges, the retry is not the only one"
+    )
+    err_open = loop_body.index("{", failed_at)
+    _, err_end = balanced_slice(loop_body, err_open)
+    err_arm = loop_body[err_open + 1 : err_end - 1]
+    assert err_arm.count("continue;") == 1, "the retry leaves the Err arm somewhere else"
+    assert "return Err(err);" in err_arm, "a refused attempt is not returned"
+
+    guard = re.search(
+        r"if\s+is_image\s*&&\s*!attempted_fallback\s*&&\s*fallback_file_id\.as_ref\(\)"
+        r"\.map\(\|other\|\s*other\s*!=\s*&file_id\)\.unwrap_or\(false\)\s*\{",
+        err_arm,
+    )
+    assert guard, "the retry is not one attempt on a distinct fallback id, for an image only"
+    guard_open = guard.end() - 1
+    _, guard_end = balanced_slice(err_arm, guard_open)
+    retry = err_arm[guard_open + 1 : guard_end - 1]
+    assert "attempted_fallback = true;" in retry, "the retry does not record that it ran"
+    assignments = re.findall(r"^[ \t]*file_id = (?P<rhs>[^;]+);[ \t]*$", retry, re.MULTILINE)
+    assert assignments == ["fallback_file_id.clone().unwrap()"], (
+        f"the retry reassigns file_id to {assignments}, so it does not download the second id"
+    )
+    assert retry.index("attempted_fallback = true;") < retry.index(assignments[0])
+    assert retry.rstrip().endswith("continue;"), "the retry does not go back for a second attempt"
+    assert err_arm[guard_end:].strip() == "return Err(err);", (
+        "the Err arm does more than retry once and otherwise return the error"
+    )
+
+    # One diagnostic line per attempt: it names the request fields and the id's shape,
+    # never an id, an AES key or a message byte.
+    diagnostic = the_diagnostic_call(rust)
+    template, template_end = rust_string_literal(diagnostic)
+    labels = format_labels(template)
+    assert len(labels) == len(set(labels)) == len(DIAGNOSTIC_FIELDS) and set(labels) == DIAGNOSTIC_FIELDS, (
+        f"the diagnostic writes {labels}, the fix documents {sorted(DIAGNOSTIC_FIELDS)} once each"
+    )
+    assert dict(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=\{([^{}]*)\}", template)) == {
+        "quality": "quality:?",
+        "filetype": "filetype",
+        "size_class": "size_class",
+        "file_id_len": "",
+        "has_slash": "shape_slash",
+        "has_query": "shape_query",
+    }, "the diagnostic does not format the documented values"
+    assert "downpicformat=1" in template, "the diagnostic does not pin the download format it asks for"
+    assert "file_id_len={}" in template, "the diagnostic does not measure the id's length"
+    placeholders, anonymous = format_placeholders(template)
+    assert anonymous == 1 and placeholders == {"quality", "filetype", "size_class", "shape_slash", "shape_query"}, (
+        f"the diagnostic formats {sorted(placeholders)} and {anonymous} anonymous values"
+    )
+    assert split_arguments(diagnostic[template_end : diagnostic.rindex(")")]) == ["file_id.len()"], (
+        "the diagnostic formats more than the id's length"
+    )
+    for forbidden in ("{file_id}", "{aes_key}", "{body}", "{bytes}", "aes_key", "body", "bytes"):
+        assert forbidden not in diagnostic, f"the diagnostic line carries {forbidden!r}"
+    # ...and the two booleans it reports are predicates over the id, not the id.
+    assert "let shape_slash = file_id.contains('/');" in handler
+    assert "let shape_query = file_id.contains('?');" in handler

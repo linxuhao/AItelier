@@ -1,25 +1,5 @@
-The fork of puppet-neo the bridge image ships, as one patch.
-
-Two concerns ride in it, and each file's hunks serve one of them:
-
-1. Incoming message types (native/src/lib.rs, src/native.ts, src/puppet-neo.ts,
-   test/ding-dong.test.ts). The addon carries a message's own WeChat type and raw
-   payload instead of dropping what is not text; the puppet answers what Wechaty asks
-   of it - the message type, the room and contact payloads, file/image/voice sends and
-   downloads, and the room member roster (`roomMemberList`, `roomMemberRawPayload`,
-   `roomMemberRawPayloadParser`) that Wechaty's `Room.ready()` awaits after
-   `roomPayload`, so a group message's Room loads instead of raising
-   `roomMemberList is not a function`.
-
-2. A refused media download keeps its cause (native/src/lib.rs, the hunks around
-   `failure_message` and the new `cause_chain`). "Neo could not download a WeChat
-   image" now ends in the sub-step that failed - the addon's own step, the crate's
-   reason, or the transport's message - and never in the CDN address.
-
-Every hunk applies to a blob pin.json pins, and upstream/ is the pristine snapshot.
-
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..650b659 100644
+index ec6c930..81b0494 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -9,14 +9,21 @@ use std::{
@@ -92,7 +72,7 @@ index ec6c930..650b659 100644
  #[derive(Default, Serialize)]
  struct SelfProfile {
      nickname: Option<String>,
-@@ -69,6 +114,45 @@ enum Operation {
+@@ -69,6 +114,46 @@ enum Operation {
      PollIncoming,
      Sync { scene: u32 },
      SendText { destination: String, text: String },
@@ -124,6 +104,7 @@ index ec6c930..650b659 100644
 +    /// profiles to fetch it with, and the plaintext size when the payload states one.
 +    DownloadMedia {
 +        file_id: String,
++        fallback_file_id: Option<String>,
 +        aes_key: String,
 +        quality: String,
 +        expected_bytes: Option<u32>,
@@ -138,7 +119,7 @@ index ec6c930..650b659 100644
      LookupSelf,
      Logout,
      Close,
-@@ -117,6 +201,107 @@ impl NeoSession {
+@@ -117,6 +202,109 @@ impl NeoSession {
          self.task(Operation::SendText { destination, text })
      }
  
@@ -212,9 +193,11 @@ index ec6c930..650b659 100644
 +        aes_key: String,
 +        quality: String,
 +        expected_bytes: Option<u32>,
++        fallback_file_id: Option<String>,
 +    ) -> AsyncTask<NeoTask> {
 +        self.task(Operation::DownloadMedia {
 +            file_id,
++            fallback_file_id,
 +            aes_key,
 +            quality,
 +            expected_bytes,
@@ -246,7 +229,7 @@ index ec6c930..650b659 100644
      #[napi]
      pub fn lookup_self(&self) -> AsyncTask<NeoTask> {
          self.task(Operation::LookupSelf)
-@@ -167,12 +352,30 @@ impl Task for NeoTask {
+@@ -167,12 +355,30 @@ impl Task for NeoTask {
              Operation::PollIncoming => "wait for incoming message notifications",
              Operation::Sync { .. } => "read a sync page",
              Operation::SendText { .. } => "prepare a text send",
@@ -278,7 +261,7 @@ index ec6c930..650b659 100644
      }
  
      fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-@@ -183,18 +386,53 @@ impl Task for NeoTask {
+@@ -183,18 +389,53 @@ impl Task for NeoTask {
  /// The error text TypeScript receives. When WeChat answered, it adds the service
  /// and its code, or why the account stopped. It never contains credentials or
  /// message content.
@@ -333,7 +316,7 @@ index ec6c930..650b659 100644
  fn options() -> NativeOptions {
      NativeOptions {
          timeout: Duration::from_secs(10),
-@@ -284,6 +522,184 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -284,6 +525,219 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
                  account.request_blocking(|request| request.send_text(&destination, &text, &send))
              }))
          }
@@ -421,6 +404,7 @@ index ec6c930..650b659 100644
 +        }
 +        Operation::DownloadMedia {
 +            file_id,
++            fallback_file_id,
 +            aes_key,
 +            quality,
 +            expected_bytes,
@@ -432,16 +416,50 @@ index ec6c930..650b659 100644
 +                "large_file" => MediaQuality::LargeFile,
 +                unknown => anyhow::bail!("Unknown media profile {unknown}"),
 +            };
-+            let descriptor = MediaDescriptor {
-+                file_id,
-+                aes_key: hex_bytes(&aes_key)?,
-+                quality,
-+                expected_bytes: expected_bytes.map(u64::from),
-+                expected_md5: None,
-+                strict_size: false,
-+                expires_at: None,
++            let size_class = match expected_bytes {
++                Some(n) if n > 1_048_576 => "large",
++                Some(n) if n > 0 => "small",
++                _ => "unknown",
 +            };
-+            let downloaded = cdn_client(account)?.download(&descriptor)?;
++            let filetype = match quality {
++                MediaQuality::Original => 1,
++                MediaQuality::File => 5,
++                MediaQuality::LargeFile => 7,
++            };
++            let is_image = quality == MediaQuality::Original;
++            let mut file_id = file_id;
++            let mut attempted_fallback = false;
++            let downloaded = loop {
++                let shape_slash = file_id.contains('/');
++                let shape_query = file_id.contains('?');
++                eprintln!(
++                    "neo cdn download: quality={quality:?} filetype={filetype} downpicformat=1 size_class={size_class} file_id_len={} has_slash={shape_slash} has_query={shape_query}",
++                    file_id.len()
++                );
++                let descriptor = MediaDescriptor {
++                    file_id: file_id.clone(),
++                    aes_key: hex_bytes(&aes_key)?,
++                    quality,
++                    expected_bytes: expected_bytes.map(u64::from),
++                    expected_md5: None,
++                    strict_size: false,
++                    expires_at: None,
++                };
++                match cdn_client(account)?.download(&descriptor) {
++                    Ok(downloaded) => break downloaded,
++                    Err(err) => {
++                        if is_image
++                            && !attempted_fallback
++                            && fallback_file_id.as_ref().map(|other| other != &file_id).unwrap_or(false)
++                        {
++                            attempted_fallback = true;
++                            file_id = fallback_file_id.clone().unwrap();
++                            continue;
++                        }
++                        return Err(err);
++                    }
++                }
++            };
 +            let bytes = STANDARD.encode(&downloaded.bytes);
 +            Ok(json!({
 +                "bytes": bytes,
@@ -518,7 +536,7 @@ index ec6c930..650b659 100644
          Operation::LookupSelf => lookup_self(session),
          Operation::Logout => {
              session.incoming = None;
-@@ -324,7 +740,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+@@ -324,7 +778,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
          .own_username;
      let cursor = session.received_cursor.clone();
      let batch = connection(session)?.sync(&cursor, scene)?;
@@ -527,7 +545,7 @@ index ec6c930..650b659 100644
      session.received_cursor = batch.cursor;
      Ok(json!({ "messages": messages, "continuation": batch.continuation }))
  }
-@@ -451,15 +867,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+@@ -451,15 +905,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      }
  }
  
@@ -678,7 +696,7 @@ index ec6c930..650b659 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
-@@ -558,7 +1107,7 @@ mod tests {
+@@ -558,7 +1145,7 @@ mod tests {
          );
          let error = result.unwrap_err();
          assert!(error.is::<SessionEnded>());
@@ -687,7 +705,7 @@ index ec6c930..650b659 100644
          assert_eq!(steps, ["attempt", "reconnect", "attempt", "renew"]);
      }
  
-@@ -611,7 +1160,7 @@ mod tests {
+@@ -611,7 +1198,7 @@ mod tests {
          let error = result.unwrap_err();
          assert!(!error.is::<SessionEnded>());
          assert_eq!(
@@ -696,7 +714,7 @@ index ec6c930..650b659 100644
              "Neo could not read a sync page: Sync service returned -1"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -619,7 +1168,7 @@ mod tests {
+@@ -619,7 +1206,7 @@ mod tests {
          let stopped = anyhow::Error::new(AccountInterrupted::Stopped).context("Account is stopped");
          let (result, steps) = scripted_recovery(vec![Err(stopped)], Ok(()));
          assert_eq!(
@@ -705,7 +723,7 @@ index ec6c930..650b659 100644
              "Neo could not read a sync page: Account stopped"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -632,7 +1181,7 @@ mod tests {
+@@ -632,7 +1219,7 @@ mod tests {
              Ok(()),
          );
          assert_eq!(
@@ -714,7 +732,7 @@ index ec6c930..650b659 100644
              "Neo could not read a sync page"
          );
          assert_eq!(steps, ["attempt", "reconnect", "attempt"]);
-@@ -742,6 +1291,162 @@ mod tests {
+@@ -742,6 +1329,162 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }
  
@@ -877,7 +895,7 @@ index ec6c930..650b659 100644
      #[test]
      fn closing_without_a_session_resets_state() {
          let mut session = Session {
-@@ -756,7 +1461,7 @@ mod tests {
+@@ -756,7 +1499,7 @@ mod tests {
  
      #[test]
      fn unhandled_sync_commands_are_skipped() {
@@ -886,7 +904,7 @@ index ec6c930..650b659 100644
              vec![wire::SyncCommand {
                  id: 9999,
                  payload: vec![42],
-@@ -765,4 +1470,35 @@ mod tests {
+@@ -765,4 +1508,35 @@ mod tests {
          );
          assert!(messages.is_empty());
      }
@@ -923,7 +941,7 @@ index ec6c930..650b659 100644
 +    }
  }
 diff --git a/src/native.ts b/src/native.ts
-index eea2d34..22d17ca 100644
+index eea2d34..74037d2 100644
 --- a/src/native.ts
 +++ b/src/native.ts
 @@ -22,6 +22,63 @@ export interface IncomingText {
@@ -1014,7 +1032,7 @@ index eea2d34..22d17ca 100644
 +   * carries (`cdnbigimgurl` for an image, `cdnattachurl` for a file), the payload's
 +   * 16-byte AES key as 32 hex characters, and which media profile to fetch it with.
 +   */
-+  downloadMedia(fileId: string, aesKey: string, quality: MediaProfile, expectedBytes?: number): Promise<DownloadedMedia>
++  downloadMedia(fileId: string, aesKey: string, quality: MediaProfile, expectedBytes?: number, fallbackFileId?: string): Promise<DownloadedMedia>
 +  /**
 +   * One voice note, which WeChat serves in pieces by the message's server id rather than
 +   * from the CDN: base64 SILK that adds up to the byte length the payload stated.
@@ -1038,7 +1056,7 @@ index eea2d34..22d17ca 100644
 +    sendFile: async (destination, fileName, bytes) => JSON.parse(await addon.sendFile(destination, fileName, bytes)),
 +    sendImage: async (destination, fileName, original, standard, thumbnail) => JSON.parse(await addon.sendImage(destination, fileName, original, standard, thumbnail)),
 +    encodeVoice: async (pcm) => JSON.parse(await addon.encodeVoice(pcm)),
-+    downloadMedia: async (fileId, aesKey, quality, expectedBytes) => JSON.parse(await addon.downloadMedia(fileId, aesKey, quality, expectedBytes)),
++    downloadMedia: async (fileId, aesKey, quality, expectedBytes, fallbackFileId) => JSON.parse(await addon.downloadMedia(fileId, aesKey, quality, expectedBytes, fallbackFileId)),
 +    downloadVoice: async (serverId, length) => JSON.parse(await addon.downloadVoice(serverId, length)),
 +    decodeVoice: async (silk) => JSON.parse(await addon.decodeVoice(silk)),
 +    encodeWav: async (wav) => JSON.parse(await addon.encodeWav(wav)),
@@ -1046,7 +1064,7 @@ index eea2d34..22d17ca 100644
      logout: async () => JSON.parse(await addon.logout()),
      close: async () => { await addon.close() },
 diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
-index 9da9e02..fe6dc4b 100644
+index 9da9e02..ffa0bd5 100644
 --- a/src/puppet-neo.ts
 +++ b/src/puppet-neo.ts
 @@ -1,11 +1,49 @@
@@ -1100,7 +1118,7 @@ index 9da9e02..fe6dc4b 100644
  function putRecent<T>(cache: Map<string, T>, id: string, value: T) {
    cache.delete(id)
    cache.set(id, value)
-@@ -15,6 +53,153 @@ function putRecent<T>(cache: Map<string, T>, id: string, value: T) {
+@@ -15,6 +53,158 @@ function putRecent<T>(cache: Map<string, T>, id: string, value: T) {
    }
  }
  
@@ -1178,6 +1196,8 @@ index 9da9e02..fe6dc4b 100644
 +export interface InboundMedia {
 +  /** `cdnbigimgurl` for an image, `cdnattachurl` for a file. */
 +  fileId: string
++  /** Ordered second candidate for an image (`cdnmidimgurl`), when present and different. */
++  fallbackFileId?: string
 +  /** The payload's AES key: 16 bytes as 32 lowercase hex characters. */
 +  aesKey: string
 +  /** Which of WeChat's media profiles fetches it. */
@@ -1191,7 +1211,9 @@ index 9da9e02..fe6dc4b 100644
 +/** The CDN descriptor an image message carries, or why it carries none. */
 +function imageMedia(content: string): InboundMedia {
 +  const image = openingTag(content, 'img')
-+  const fileId = attribute(image, 'cdnbigimgurl') || attribute(image, 'cdnmidimgurl')
++  const primaryId = attribute(image, 'cdnbigimgurl')
++  const secondaryId = attribute(image, 'cdnmidimgurl')
++  const fileId = primaryId || secondaryId
 +  const aesKey = attribute(image, 'aeskey').toLowerCase()
 +  if (!fileId || !/^[0-9a-f]{32}$/.test(aesKey)) {
 +    throw new Error("Neo image payload carries no encrypted picture on WeChat's CDN")
@@ -1199,6 +1221,7 @@ index 9da9e02..fe6dc4b 100644
 +  const size = Number(attribute(image, 'length'))
 +  return {
 +    fileId,
++    ...(secondaryId && secondaryId !== primaryId ? { fallbackFileId: secondaryId } : {}),
 +    aesKey,
 +    quality: 'original',
 +    ...(Number.isSafeInteger(size) && size > 0 ? { size } : {}),
@@ -1254,7 +1277,7 @@ index 9da9e02..fe6dc4b 100644
  function decodeQr(encoded: string) {
    const bytes = Buffer.from(encoded, 'base64')
    if (bytes.length < 24 || bytes.length > 1024 * 1024 ||
-@@ -39,7 +224,7 @@ export class PuppetNeo extends Puppet {
+@@ -39,7 +229,7 @@ export class PuppetNeo extends Puppet {
    private pendingSends = new Set<Promise<unknown>>()
    private readonly contacts = new Map<string, payloads.Contact>()
    private readonly rooms = new Map<string, true>()
@@ -1263,7 +1286,7 @@ index 9da9e02..fe6dc4b 100644
  
    constructor(options: PuppetOptions = {}) {
      super(options)
-@@ -125,14 +310,73 @@ export class PuppetNeo extends Puppet {
+@@ -125,14 +315,73 @@ export class PuppetNeo extends Puppet {
    override async contactRawPayload(id: string): Promise<payloads.Contact> {
      if (id === this.currentUserId) return this.selfContact(id)
      const contact = this.contacts.get(id)
@@ -1339,7 +1362,7 @@ index 9da9e02..fe6dc4b 100644
    override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
      if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
      const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
-@@ -150,6 +394,103 @@ export class PuppetNeo extends Puppet {
+@@ -150,6 +399,103 @@ export class PuppetNeo extends Puppet {
      }
    }
  
@@ -1396,7 +1419,7 @@ index 9da9e02..fe6dc4b 100644
 +  override async messageImage(messageId: string): Promise<FileBoxInterface> {
 +    const session = this.inboundSession('an image')
 +    const media = imageMedia(payloadText(this.inboundMessage(messageId, IMAGE_MESSAGE, 'an image')))
-+    const downloaded = await session.downloadMedia(media.fileId, media.aesKey, media.quality, media.size)
++    const downloaded = await session.downloadMedia(media.fileId, media.aesKey, media.quality, media.size, media.fallbackFileId)
 +    const bytes = Buffer.from(downloaded.bytes, 'base64')
 +    return FileBox.fromBuffer(bytes, `${messageId}.${imageExtension(bytes)}`)
 +  }
@@ -1443,7 +1466,7 @@ index 9da9e02..fe6dc4b 100644
    private async stopServing(): Promise<void> {
      this.abort?.abort()
      await this.run
-@@ -236,7 +577,16 @@ export class PuppetNeo extends Puppet {
+@@ -236,7 +582,16 @@ export class PuppetNeo extends Puppet {
        for (const item of page.messages) {
          if (this.messages.has(item.id)) continue
          this.rememberContact(item.talker)

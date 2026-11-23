@@ -1519,7 +1519,7 @@ test('media restart: an event cut while its copy is still fetching leaves nothin
     bot.emit('message', gated);
     const [, before] = await first.json('/events?after=0');
     const cut = before.events[0].attachments[0].media_id;
-    assert.equal(gated.fetched.count, 1, 'the copy fetch started');
+    assert.equal(await until(() => gated.fetched.count === 1).then(() => gated.fetched.count), 1, 'the copy fetch started');
     bot.emit('message', mediaMessage({ kind: 'image', id: 'after', bytes: Buffer.from('AFTER') }));
     const [, after] = await first.json('/events?after=0');
     const kept = after.events[0].attachments[0].media_id;

@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index 768d869..1bd7900 100644
+index 768d869..69fbe5d 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -15,8 +15,9 @@ use wechat_protocol::{
@@ -103,7 +103,33 @@ index 768d869..1bd7900 100644
              Ok(json!({ "accepted": reply.accepted }))
          }
          Operation::Close => {
-@@ -915,6 +953,77 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
+@@ -820,15 +858,20 @@ fn read_session<T>(
+     session: &mut Session,
+     operation: impl FnMut(&mut Session) -> Result<T>,
+ ) -> Result<T> {
++    // A renewal in this path rotates the credentials just like the resume's own
++    // does, so the rotated ones have to land where the next process will look.
++    let store = stored_login::Store::from_env().ok();
+     recover(
+         session,
+         operation,
+         |session| {
+-            session
+-                .account
+-                .as_ref()
+-                .context("No active session")?
+-                .renew_session_blocking(DEVICE_NAME)
++            let account = session.account.as_ref().context("No active session")?;
++            let renew = || account.renew_session_blocking(DEVICE_NAME);
++            let rotated = || account.export_account_state();
++            match &store {
++                Some(store) => stored_login::renew_and_persist(store, renew, rotated).map(|_| ()),
++                None => renew(),
++            }
+         },
+         // A new socket is needed after a failure and after a renewal, because a
+         // socket cannot adopt newer credentials.
+@@ -915,6 +958,84 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
      Ok(json!(profile))
  }
  
@@ -137,7 +163,9 @@ index 768d869..1bd7900 100644
 +        Err(off) => return Ok(json!({ "status": "none", "off": off.as_str() })),
 +    };
 +    let answer =
-+        stored_login::resume(&store, now_seconds()?.into(), |state| open_stored_login(state))?;
++        stored_login::resume(&store, now_seconds()?.into(), |state| {
++            open_stored_login(&store, state)
++        })?;
 +    let status = resume_status(&answer);
 +    let stored_login::Answer::Resumed { accepted, .. } = answer else {
 +        return Ok(json!({ "status": status }));
@@ -151,7 +179,10 @@ index 768d869..1bd7900 100644
 +/// document from another version is evidence, not garbage. Credentials WeChat
 +/// refuses are `Rejected`, which drops it, because the login in it is not good
 +/// any more.
-+fn open_stored_login(bytes: &[u8]) -> Result<stored_login::Opened<AcceptedAccount>> {
++fn open_stored_login(
++    store: &stored_login::Store,
++    bytes: &[u8],
++) -> Result<stored_login::Opened<AcceptedAccount>> {
 +    let Ok(state) = serde_json::from_slice::<AccountState>(bytes) else {
 +        return Ok(stored_login::Opened::Unreadable);
 +    };
@@ -162,16 +193,18 @@ index 768d869..1bd7900 100644
 +    };
 +    // The one request that decides it: WeChat either renews these credentials or
 +    // refuses them, and a refusal is the only answer that may delete the file.
-+    match client.renew_session_blocking(DEVICE_NAME) {
-+        Ok(()) => {}
++    // The rotated credentials are written by `renew_and_persist`, which is how
++    // this path saves them: because every renewal does, not on its own account.
++    let refreshed = match stored_login::renew_and_persist(
++        store,
++        || client.renew_session_blocking(DEVICE_NAME),
++        || client.export_account_state(),
++    ) {
++        Ok(refreshed) => refreshed,
 +        Err(error) if is_session_rejected(&error) => return Ok(stored_login::Opened::Rejected),
 +        Err(error) => return Err(error),
-+    }
-+    // A renewal rotates the credentials, so the account state this attempt
-+    // accepted is what the next process has to find on disk.
-+    let refreshed = client.export_account_state()?;
++    };
 +    let username = refreshed.own_username.clone();
-+    stored_login::record(&refreshed);
 +    Ok(stored_login::Opened::Accepted(AcceptedAccount {
 +        client,
 +        username,
@@ -181,7 +214,7 @@ index 768d869..1bd7900 100644
  fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      match send() {
          Ok(result)
-@@ -1572,3 +1681,1057 @@ mod tests {
+@@ -1572,3 +1693,1604 @@ mod tests {
          );
      }
  }
@@ -196,7 +229,10 @@ index 768d869..1bd7900 100644
 +// and a read that fails never deletes the file it could not read.
 +// ---------------------------------------------------------------------------
 +mod stored_login {
-+    #![allow(dead_code)] // not every answer this store can give has a caller yet.
++    // The surface here is wider than this build's callers: `dir`, `Miss::as_str`
++    // and `Allowance::as_str` are reached only from the tests at the bottom of
++    // this file. Everything else has a non-test caller in lib.rs.
++    #![allow(dead_code)]
 +
 +    use anyhow::{anyhow, Result};
 +    use base64::{engine::general_purpose::STANDARD, Engine};
@@ -208,7 +244,7 @@ index 768d869..1bd7900 100644
 +        os::unix::fs::{OpenOptionsExt, PermissionsExt},
 +        path::{Path, PathBuf},
 +        sync::atomic::{AtomicU64, Ordering},
-+        time::{SystemTime, UNIX_EPOCH},
++        time::{Duration, SystemTime, UNIX_EPOCH},
 +    };
 +
 +    /// Environment variable naming the directory the store lives in.
@@ -218,9 +254,11 @@ index 768d869..1bd7900 100644
 +
 +    /// The one envelope schema this build writes, and the only one it opens.
 +    const SCHEMA: &str = "puppet-neo/stored-login/1";
-+    /// The AAD binds a ciphertext to this schema, so a document whose schema
-+    /// line was edited (or a ciphertext moved into another purpose's slot)
-+    /// fails to open instead of decrypting.
++    /// The AAD binds every ciphertext to this store: the same key used for
++    /// another purpose (a different AAD) does not decrypt here, so a ciphertext
++    /// moved in from elsewhere fails instead of opening. An edited schema line is
++    /// not what the AAD catches - the equality check in `open` rejects it before
++    /// a key is used at all.
 +    const AAD: &[u8] = b"puppet-neo/stored-login/1";
 +    const STATE_FILE: &str = "account.v1";
 +    const RESUMES_FILE: &str = "resumes";
@@ -231,9 +269,16 @@ index 768d869..1bd7900 100644
 +    pub const RESUMES_PER_DAY: usize = 20;
 +    const HOUR: u64 = 3_600;
 +    const DAY: u64 = 86_400;
-+    /// The writer lock one resume at a time holds. It carries the holder's pid so
-+    /// a file a killed process left behind can be told from a live holder.
++    /// The writer lock one resume at a time holds. It carries the holder's pid
++    /// and the start time of the process that pid names, so a lock a killed
++    /// process left behind can be told from a live holder even when a restart
++    /// handed its pid to somebody else.
 +    const LOCK_FILE: &str = "resume.lock";
++    /// How long a lock file that names no holder may exist before it is judged
++    /// abandoned. A holder creates the file with `create_new` and only then writes
++    /// its identity, and those two steps are not atomic between processes, so the
++    /// gap in between must read as a live holder rather than as a crash's debris.
++    const LOCK_GRACE: Duration = Duration::from_secs(5);
 +
 +    /// This process's stored-login writes and failed writes. They are not
 +    /// persisted: a fresh process starts at zero, so the row describes the
@@ -294,15 +339,20 @@ index 768d869..1bd7900 100644
 +    #[derive(Debug, Clone)]
 +    pub struct Store {
 +        dir: PathBuf,
-+        key: [u8; KEY_LEN],
++        key_file: PathBuf,
 +    }
 +
 +    impl Store {
-+        /// Resolve the operator's two paths. Any of these answers off, and a
-+        /// store that is off is never read or written: neither variable set, a
-+        /// key that is not 32 bytes in an owner-only regular file, a state
-+        /// directory that is missing, is not a directory, or does not accept a
-+        /// file.
++        /// Resolve the operator's two paths. Any of these answers off, and a store
++        /// that is off is never read or written: neither variable set, no key file
++        /// at that path, a key file that is not an owner-only regular file, or a
++        /// state directory that is missing or is not a directory.
++        ///
++        /// Nothing here reads the key's bytes or writes into the state directory:
++        /// an lstat and a directory check decide. A key of the wrong length and a
++        /// directory that refuses a write are answered where they are used, from
++        /// the real error, so merely configuring or reporting a store never opens
++        /// the operator's secret file and never creates a file to find out.
 +        pub fn from_parts(
 +            state_dir: Option<OsString>,
 +            key_file: Option<OsString>,
@@ -314,9 +364,9 @@ index 768d869..1bd7900 100644
 +            if !dir.is_dir() {
 +                return Err(Off::Dir);
 +            }
-+            let key = read_key(&PathBuf::from(key_file))?;
-+            probe_writable(&dir).map_err(|_| Off::Dir)?;
-+            Ok(Store { dir, key })
++            let key_file = PathBuf::from(key_file);
++            check_key_file(&key_file)?;
++            Ok(Store { dir, key_file })
 +        }
 +
 +        pub fn from_env() -> std::result::Result<Store, Off> {
@@ -349,19 +399,33 @@ index 768d869..1bd7900 100644
 +            self.state_path().symlink_metadata().is_ok()
 +        }
 +
-+        /// Seal `plaintext` and put it in place atomically.
++        /// The key's bytes, read when a write or a read actually needs them. A
++        /// key that is gone, is no longer owner-only or is the wrong length is an
++        /// error here, never a reason the store is off: a status row and a resume
++        /// that finds nothing stored leave this file alone entirely.
++        fn key(&self) -> Result<[u8; KEY_LEN]> {
++            read_key(&self.key_file)
++        }
++
++        /// Seal `plaintext` and put it in place atomically. The key is read once
++        /// per write, so a key the operator replaced takes effect on the next
++        /// write and a key that cannot be used fails this write and nothing else.
 +        pub fn write(&self, plaintext: &[u8]) -> Result<()> {
-+            let envelope = seal(&self.key, plaintext)?;
++            let key = self.key()?;
++            let envelope = seal(&key, plaintext)?;
 +            atomic_write(&self.state_path(), &envelope)
 +        }
 +
 +        pub fn read(&self) -> std::result::Result<Vec<u8>, Miss> {
++            // The state file first: an attempt that finds nothing stored must not
++            // touch the operator's key file at all.
 +            let envelope = match std::fs::read(self.state_path()) {
 +                Ok(bytes) => bytes,
 +                Err(err) if err.kind() == ErrorKind::NotFound => return Err(Miss::Absent),
 +                Err(_) => return Err(Miss::Unreadable),
 +            };
-+            open(&self.key, &envelope).map_err(|_| Miss::Unreadable)
++            let key = self.key().map_err(|_| Miss::Unreadable)?;
++            open(&key, &envelope).map_err(|_| Miss::Unreadable)
 +        }
 +
 +        /// Remove the stored login. Idempotent: a file that is already gone is
@@ -433,12 +497,15 @@ index 768d869..1bd7900 100644
 +        None,
 +        /// A stored login is there and did not open. The file is kept.
 +        Unreadable,
-+        /// The counters refused this attempt. No envelope was read.
++        /// The counters refused this attempt: the bytes were read, but `open` -
++        /// and so every request to WeChat - never ran.
 +        Throttled,
-+        /// Another resume holds the writer lock. Nothing was read or counted.
++        /// Another resume holds the writer lock. Neither the envelope nor the
++        /// counters were read, so a race costs nothing and records nothing.
 +        Busy,
-+        /// WeChat accepted the stored login. `state` is the plaintext the store
-+        /// returned, which is the account state `open` accepted.
++        /// WeChat accepted the stored login. `state` is the plaintext this attempt
++        /// read, i.e. the credentials from before its own renewal rotated them;
++        /// the rotated ones are what that renewal wrote back to the store.
 +        Resumed { state: Vec<u8>, accepted: T },
 +    }
 +
@@ -449,12 +516,14 @@ index 768d869..1bd7900 100644
 +    }
 +
 +    impl Lock {
-+        /// Take the lock, or answer `None` when another resume holds it. The lock
-+        /// file is created with `create_new`, so two attempts cannot both win it;
-+        /// a holder whose pid is gone is what a killed process leaves behind and
-+        /// may be removed. The create is retried once after removing a stale file,
-+        /// and a second refusal means somebody else won that race - the same
-+        /// `busy`.
++        /// Take the lock, or answer `None` when somebody else holds it. The file
++        /// is created with `create_new`, so the create itself has exactly one
++        /// winner; the part that is not atomic is taking the lock away from a file
++        /// `abandoned` judged stale, and the comment on the removal says how wide
++        /// what is left of that window is.
++        ///
++        /// The create is retried once after removing a stale file, and a second
++        /// refusal means somebody else won that race - the same `busy`.
 +        fn take(store: &Store) -> Result<Option<Lock>> {
 +            let path = store.lock_path();
 +            for attempt in 0..2 {
@@ -466,7 +535,7 @@ index 768d869..1bd7900 100644
 +                {
 +                    Ok(mut file) => {
 +                        let written = (|| -> Result<()> {
-+                            file.write_all(format!("{}\n", std::process::id()).as_bytes())?;
++                            file.write_all(Holder::current().line().as_bytes())?;
 +                            file.sync_all()?;
 +                            Ok(())
 +                        })();
@@ -477,7 +546,28 @@ index 768d869..1bd7900 100644
 +                        return Ok(Some(Lock { path }));
 +                    }
 +                    Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-+                        if attempt == 1 || holder_running(&path) {
++                        if attempt == 1 {
++                            return Ok(None);
++                        }
++                        let Ok(judged) = std::fs::read(&path) else {
++                            return Ok(None);
++                        };
++                        if !abandoned(&path, &judged, SystemTime::now()) {
++                            return Ok(None);
++                        }
++                        // Read the file again immediately before unlinking it and
++                        // remove it only if it still holds the bytes that were
++                        // judged abandoned. What this closes is the whole span
++                        // from a `stat` to a full write of another process's
++                        // identity, during which the old check-and-unlink deleted a
++                        // lock another process had just created. What is left is
++                        // the gap between this read and the unlink: a create
++                        // landing inside it is still removed with the stale file,
++                        // and two resumes then renew at once. No POSIX call is an
++                        // atomic compare-and-unlink, so that gap cannot be closed
++                        // here; it is two syscalls wide, and the throttle counters
++                        // are what bound the damage when it is hit.
++                        if std::fs::read(&path).ok().as_deref() != Some(judged.as_slice()) {
 +                            return Ok(None);
 +                        }
 +                        let _ = std::fs::remove_file(&path);
@@ -495,37 +585,110 @@ index 768d869..1bd7900 100644
 +        }
 +    }
 +
-+    /// Is the process that wrote this lock still running? A file with no pid in it
-+    /// is the same as a pid that answers nothing: no holder lives there.
-+    fn holder_running(path: &Path) -> bool {
-+        let Ok(body) = std::fs::read_to_string(path) else {
-+            return false;
-+        };
-+        let Ok(pid) = body.trim().parse::<u32>() else {
-+            return false;
-+        };
-+        running(pid)
++    /// Who holds a lock. A pid is not an identity: a container restart hands the
++    /// same pid to a new process, and a lock a crash left behind would then read as
++    /// a live holder forever, i.e. `busy` for good.
++    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++    struct Holder {
++        pid: u32,
++        /// Field 22 of `/proc/<pid>/stat`: the process's start time in clock ticks
++        /// since boot, which separates this process from a later one that reused
++        /// its pid.
++        started: u64,
 +    }
 +
-+    /// Whether a pid names a live process. Linux gives every process a directory
-+    /// under `/proc`; where that is not mounted the answer is unknown, and an
-+    /// unknown holder counts as running, because taking the lock from a live
-+    /// resume is worse than answering `busy`.
-+    fn running(pid: u32) -> bool {
-+        if pid == std::process::id() {
-+            return true;
++    impl Holder {
++        /// This process, now.
++        fn current() -> Holder {
++            let pid = std::process::id();
++            Holder {
++                pid,
++                started: start_time(pid).unwrap_or(0),
++            }
 +        }
-+        match std::fs::metadata("/proc") {
-+            Ok(meta) if meta.is_dir() => Path::new(&format!("/proc/{pid}")).exists(),
-+            _ => true,
++
++        /// The lock file's contents: the identity, one line.
++        fn line(self) -> String {
++            format!("{} {}\n", self.pid, self.started)
++        }
++
++        /// Parse a lock file. `None` means it names no holder, which is what a
++        /// holder that created the file but has not written it yet leaves.
++        fn parse(body: &[u8]) -> Option<Holder> {
++            let text = std::str::from_utf8(body).ok()?;
++            let mut fields = text.split_whitespace();
++            let pid = fields.next()?.parse().ok()?;
++            let started = fields.next()?.parse().ok()?;
++            if fields.next().is_some() {
++                return None;
++            }
++            Some(Holder { pid, started })
++        }
++
++        /// Is the process this identity names still that process?
++        fn live(self) -> Liveness {
++            match start_time(self.pid) {
++                Some(started) if started == self.started => Liveness::Alive,
++                Some(_) => Liveness::Gone,
++                // No `/proc/<pid>`: either the process is gone, or `/proc` is not
++                // mounted here and the answer is unknown. Unknown counts as alive,
++                // because taking a lock from a live resume is worse than `busy`.
++                None if proc_mounted() => Liveness::Gone,
++                None => Liveness::Unknown,
++            }
 +        }
 +    }
 +
-+    /// Try the stored login. In this order: take the writer lock, count the
-+    /// attempt, read the store, and only then contact WeChat - `open` is the
-+    /// caller's one request. `busy` is the one answer that neither reads the
-+    /// envelope nor spends a throttle slot, so a second start racing the first
-+    /// costs nothing.
++    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++    enum Liveness {
++        Alive,
++        Gone,
++        Unknown,
++    }
++
++    /// Field 22 of `/proc/<pid>/stat`, in clock ticks since boot. Field 2 is the
++    /// command name in parentheses and may contain spaces, so the fields are
++    /// counted from the last `)`.
++    fn start_time(pid: u32) -> Option<u64> {
++        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
++        let stat = String::from_utf8_lossy(&stat);
++        let after = &stat[stat.rfind(')')? + 1..];
++        // `after` starts at field 3 (state), so field 22 is index 19.
++        after.split_whitespace().nth(22 - 3)?.parse().ok()
++    }
++
++    fn proc_mounted() -> bool {
++        std::fs::metadata("/proc")
++            .map(|meta| meta.is_dir())
++            .unwrap_or(false)
++    }
++
++    /// Is the lock file whose bytes are `bytes` abandoned? One that names a holder
++    /// is abandoned exactly when that holder is gone. One that names nobody is
++    /// abandoned only once it is older than `LOCK_GRACE`, because a holder creates
++    /// the file and then writes its identity, and the gap between them is not a
++    /// crash.
++    fn abandoned(path: &Path, bytes: &[u8], now: SystemTime) -> bool {
++        let Some(holder) = Holder::parse(bytes) else {
++            return match std::fs::metadata(path).and_then(|meta| meta.modified()) {
++                Ok(written) => now
++                    .duration_since(written)
++                    .map(|age| age >= LOCK_GRACE)
++                    .unwrap_or(false),
++                // No timestamp to judge by: treat it as a live holder.
++                Err(_) => false,
++            };
++        };
++        holder.live() == Liveness::Gone
++    }
++
++    /// Try the stored login. In this order: take the writer lock, read the store,
++    /// count the attempt, and only then contact WeChat - `open` is the caller's one
++    /// request. A file that is not there and a file that will not read answer `none`
++    /// and `unreadable` and spend no throttle slot, so an empty or broken store
++    /// cannot exhaust the counters and turn the next real resume into a refusal.
++    /// `busy` is the one answer that neither reads the envelope nor counts anything,
++    /// so a second start racing the first costs nothing.
 +    pub fn resume<T>(
 +        store: &Store,
 +        now: u64,
@@ -534,14 +697,16 @@ index 768d869..1bd7900 100644
 +        let Some(_lock) = Lock::take(store)? else {
 +            return Ok(Answer::Busy);
 +        };
-+        if store.allow_resume(now) == Allowance::Throttled {
-+            return Ok(Answer::Throttled);
-+        }
 +        let state = match store.read() {
 +            Ok(state) => state,
 +            Err(Miss::Absent) => return Ok(Answer::None),
 +            Err(Miss::Unreadable) => return Ok(Answer::Unreadable),
 +        };
++        // The slot is spent only here: a stored login exists, so a renewal is
++        // actually about to be attempted.
++        if store.allow_resume(now) == Allowance::Throttled {
++            return Ok(Answer::Throttled);
++        }
 +        match open(&state)? {
 +            Opened::Accepted(accepted) => Ok(Answer::Resumed { state, accepted }),
 +            Opened::Unreadable => Ok(Answer::Unreadable),
@@ -580,13 +745,28 @@ index 768d869..1bd7900 100644
 +        row
 +    }
 +
-+    /// Write an accepted account through the store, if the store is on. The login
-+    /// it follows already succeeded, so a store that is off or a write that fails
-+    /// is a counter, never a failed login.
-+    pub fn record(account: &impl serde::Serialize) {
-+        let Ok(store) = Store::from_env() else {
-+            return;
-+        };
++    /// Renew the account's credentials and write the rotated ones down. A renewal
++    /// mints new keys, so the login on disk stops being the current one the moment
++    /// it succeeds: a later resume would present keys WeChat already replaced, be
++    /// refused, and lose the file it read as a rejected login. That is why the
++    /// write is part of renewing here, and why every renewal goes through this
++    /// function - the resume's own and the recovery path's alike - instead of each
++    /// call site remembering to save afterwards.
++    pub fn renew_and_persist<S: serde::Serialize>(
++        store: &Store,
++        renew: impl FnOnce() -> Result<()>,
++        rotated: impl FnOnce() -> Result<S>,
++    ) -> Result<S> {
++        renew()?;
++        let minted = rotated()?;
++        record_into(store, &minted);
++        Ok(minted)
++    }
++
++    /// Write an accepted account through this store. The login it follows already
++    /// succeeded, so a store that is off or a write that fails is a counter, never
++    /// a failed login.
++    pub fn record_into(store: &Store, account: &impl serde::Serialize) {
 +        match serde_json::to_vec(account) {
 +            Ok(bytes) => {
 +                let _ = store.save(&bytes);
@@ -594,6 +774,14 @@ index 768d869..1bd7900 100644
 +            Err(_) => {
 +                WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
 +            }
++        }
++    }
++
++    /// `record_into` against the store this process is configured with, if any:
++    /// for the paths that hold an account but no store.
++    pub fn record(account: &impl serde::Serialize) {
++        if let Ok(store) = Store::from_env() {
++            record_into(&store, account);
 +        }
 +    }
 +
@@ -605,7 +793,11 @@ index 768d869..1bd7900 100644
 +        }
 +    }
 +
-+    fn read_key(path: &Path) -> std::result::Result<[u8; KEY_LEN], Off> {
++    /// The key file as the operator left it: it exists, it is a regular file, and
++    /// it has no permission bit for anybody else. Deciding this from
++    /// `symlink_metadata` is the point - this is all a store's configuration looks
++    /// at, so configuring or reporting a store never opens the operator's secret.
++    fn check_key_file(path: &Path) -> std::result::Result<(), Off> {
 +        let meta = std::fs::symlink_metadata(path).map_err(|_| Off::Key)?;
 +        if !meta.file_type().is_file() {
 +            return Err(Off::Key);
@@ -613,24 +805,25 @@ index 768d869..1bd7900 100644
 +        if meta.permissions().mode() & 0o077 != 0 {
 +            return Err(Off::Key);
 +        }
-+        let bytes = std::fs::read(path).map_err(|_| Off::Key)?;
++        Ok(())
++    }
++
++    /// The key's bytes, read once per use. The same checks as `check_key_file` run
++    /// again, because the file can be replaced between configuration and use, and
++    /// a wrong length is answered here: a status row may report a login while a
++    /// write against a 31-byte key fails and says why.
++    fn read_key(path: &Path) -> Result<[u8; KEY_LEN]> {
++        check_key_file(path).map_err(|_| anyhow!("the key file is not an owner-only regular file"))?;
++        let bytes = std::fs::read(path).map_err(|err| anyhow!("the key file cannot be read: {err}"))?;
 +        if bytes.len() != KEY_LEN {
-+            return Err(Off::Key);
++            return Err(anyhow!(
++                "the key file is {} bytes, not {KEY_LEN}",
++                bytes.len()
++            ));
 +        }
 +        let mut key = [0u8; KEY_LEN];
 +        key.copy_from_slice(&bytes);
 +        Ok(key)
-+    }
-+
-+    fn probe_writable(dir: &Path) -> std::io::Result<()> {
-+        let probe = dir.join(format!(".probe.{}.{}", std::process::id(), nanos()));
-+        let file = OpenOptions::new()
-+            .write(true)
-+            .create_new(true)
-+            .mode(0o600)
-+            .open(&probe)?;
-+        drop(file);
-+        std::fs::remove_file(&probe)
 +    }
 +
 +    fn read_counters(path: &Path) -> Result<Vec<u64>> {
@@ -688,11 +881,17 @@ index 768d869..1bd7900 100644
 +    }
 +
 +    fn seal(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
++        seal_aad(key, AAD, plaintext)
++    }
++
++    /// Seal under a given AAD. Only the tests pass anything but `AAD`, to build
++    /// the envelope a ciphertext from another purpose would be.
++    fn seal_aad(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
 +        use openssl::symm::{Cipher, Crypter, Mode};
 +        let mut nonce = [0u8; 12];
 +        openssl::rand::rand_bytes(&mut nonce)?;
 +        let mut crypter = Crypter::new(Cipher::aes_256_gcm(), Mode::Encrypt, key, Some(&nonce))?;
-+        crypter.aad_update(AAD)?;
++        crypter.aad_update(aad)?;
 +        let mut body = vec![0u8; plaintext.len() + 16];
 +        let mut written = crypter.update(plaintext, &mut body)?;
 +        written += crypter.finalize(&mut body[written..])?;
@@ -815,18 +1014,34 @@ index 768d869..1bd7900 100644
 +        }
 +
 +        #[test]
-+        fn a_key_that_is_not_32_bytes_answers_off_key() {
++        fn a_key_of_the_wrong_length_is_answered_where_it_is_used_not_where_it_is_configured() {
 +            let scratch = Scratch::new("short-key");
++            let store = scratch.store();
++            store.write(b"an accepted login").expect("write with a 32-byte key");
++            assert_eq!(
++                store.read().expect("read it back"),
++                b"an accepted login"
++            );
++            let on_disk = std::fs::read(store.state_path()).expect("the file is there");
 +            for (bytes, tag) in [
 +                (vec![7u8; KEY_LEN - 1], "31 bytes"),
 +                (vec![7u8; KEY_LEN + 1], "33 bytes"),
 +            ] {
 +                write_key(&scratch.key_file, &bytes);
-+                assert_eq!(scratch.configured().err(), Some(Off::Key), "{tag}");
++                // Configuration looks at the path's metadata, never at the bytes:
++                // a store whose key is the wrong length is still a store.
++                let store = scratch
++                    .configured()
++                    .expect("an owner-only regular key file configures a store");
++                assert!(
++                    store.write(b"another login").is_err(),
++                    "a write against a {tag} key succeeded"
++                );
++                assert_eq!(store.read().err(), Some(Miss::Unreadable), "{tag}");
 +                assert_eq!(
-+                    scratch.dir.join(STATE_FILE).exists(),
-+                    false,
-+                    "a store that is off writes nothing ({tag})"
++                    std::fs::read(store.state_path()).expect("the file is there"),
++                    on_disk,
++                    "a write that could not use the key changed the stored login ({tag})"
 +                );
 +            }
 +        }
@@ -1077,10 +1292,15 @@ index 768d869..1bd7900 100644
 +            let _counting = counting();
 +            let scratch = Scratch::new("stale");
 +            let store = scratch.store();
-+            // A pid no process has: what a holder that was killed leaves behind.
++            // A pid no process has, with the start time a killed holder wrote:
++            // what a crash leaves behind.
 +            let gone = u32::MAX - 1;
-+            std::fs::write(store.lock_path(), format!("{gone}\n")).expect("a stale lock file");
-+            assert!(!running(gone), "the test pid names a running process");
++            assert_eq!(
++                start_time(gone),
++                None,
++                "the test pid names a running process"
++            );
++            std::fs::write(store.lock_path(), format!("{gone} 1234\n")).expect("a stale lock file");
 +
 +            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
 +                .expect("a stale lock is not an error");
@@ -1089,6 +1309,366 @@ index 768d869..1bd7900 100644
 +                !store.lock_path().exists(),
 +                "the guard that took the stale lock left a file behind"
 +            );
++        }
++
++        #[test]
++        fn a_lock_naming_our_pid_with_another_start_time_is_stale_and_is_stolen() {
++            let _counting = counting();
++            let scratch = Scratch::new("pid-reuse");
++            let store = scratch.store();
++            let me = std::process::id();
++            let started = start_time(me).expect("this process has a start time in /proc");
++            // What a crash left behind in a container that restarted and handed the
++            // same pid to us: the pid is ours, the process is not.
++            std::fs::write(
++                store.lock_path(),
++                format!("{me} {}\n", started + 1),
++            )
++            .expect("a reused pid's lock");
++
++            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                .expect("a stale lock is not an error");
++            assert_eq!(
++                answer,
++                Answer::None,
++                "a lock a process whose pid we reused left behind answered busy for good"
++            );
++            assert!(
++                !store.lock_path().exists(),
++                "the reused-pid lock was not removed"
++            );
++
++            // And what this process actually writes is its identity, both halves.
++            let held = Lock::take(&store)
++                .expect("the writer lock opens")
++                .expect("nobody else holds it");
++            let body = std::fs::read(store.lock_path()).expect("the lock file");
++            assert_eq!(
++                Holder::parse(&body),
++                Some(Holder {
++                    pid: me,
++                    started
++                }),
++                "the lock file does not name the process holding it"
++            );
++            assert_eq!(
++                resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                    .expect("a busy answer is not an error"),
++                Answer::Busy,
++                "the lock this process holds did not read as live"
++            );
++            drop(held);
++        }
++
++        #[test]
++        fn a_fresh_empty_lock_answers_busy_and_only_an_old_one_is_stolen() {
++            let _counting = counting();
++            let scratch = Scratch::new("empty-lock");
++            let store = scratch.store();
++            // A holder creates the lock and then writes its identity, so a lock
++            // that is empty right now is a live holder in that gap, not debris.
++            std::fs::write(store.lock_path(), b"").expect("a lock its holder has not written yet");
++            let path = store.lock_path();
++            let now = SystemTime::now();
++            assert!(
++                !abandoned(&path, b"", now),
++                "a lock created a moment ago reads as abandoned"
++            );
++            assert!(
++                abandoned(&path, b"", now + LOCK_GRACE),
++                "a lock that has named nobody for the whole grace window is still not abandoned"
++            );
++
++            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                .expect("a busy answer is not an error");
++            assert_eq!(answer, Answer::Busy, "a fresh empty lock was stolen");
++            assert!(
++                store.lock_path().exists(),
++                "a fresh empty lock was removed by the attempt that found it"
++            );
++        }
++
++        #[test]
++        fn an_empty_store_answers_none_without_spending_a_resume_slot() {
++            let _counting = counting();
++            let scratch = Scratch::new("none-slots");
++            let store = scratch.store();
++            let now = seconds();
++            // Well past the hourly limit: if finding nothing stored spent a slot,
++            // one of these would answer `throttled` instead of `none`.
++            for attempt in 0..RESUMES_PER_HOUR * 2 {
++                assert_eq!(
++                    resume(&store, now, |_| Ok(Opened::Accepted(())))
++                        .expect("a none answer is not an error"),
++                    Answer::None,
++                    "attempt {attempt} against a store with no login"
++                );
++            }
++            assert!(
++                !store.resumes_path().exists(),
++                "an attempt that found nothing stored wrote a throttle counter"
++            );
++
++            // A login stored now still resumes: the empty answers took nothing.
++            let written = br#"{"schema":1,"own_username":"fixture-self"}"#.to_vec();
++            store.save(&written).expect("store the login");
++            let answer = resume(&store, now, |state| Ok(Opened::Accepted(state.to_vec())))
++                .expect("a resumed answer is not an error");
++            assert_eq!(
++                answer,
++                Answer::Resumed {
++                    state: written.clone(),
++                    accepted: written,
++                },
++                "the first real resume after the empty ones was refused"
++            );
++        }
++
++        #[test]
++        fn an_unreadable_store_answers_unreadable_without_spending_a_resume_slot() {
++            let _counting = counting();
++            let scratch = Scratch::new("unreadable-slots");
++            let store = scratch.store();
++            std::fs::write(store.state_path(), b"not an envelope").expect("a corrupt login");
++            let now = seconds();
++            for attempt in 0..RESUMES_PER_HOUR * 2 {
++                assert_eq!(
++                    resume(&store, now, |_| Ok(Opened::Accepted(())))
++                        .expect("an unreadable answer is not an error"),
++                    Answer::Unreadable,
++                    "attempt {attempt} against a corrupt store"
++                );
++            }
++            assert!(
++                !store.resumes_path().exists(),
++                "an attempt that could not read the store wrote a throttle counter"
++            );
++
++            let written = br#"{"schema":1,"own_username":"fixture-self"}"#.to_vec();
++            store.save(&written).expect("store a readable login");
++            let answer = resume(&store, now, |state| Ok(Opened::Accepted(state.to_vec())))
++                .expect("a resumed answer is not an error");
++            assert!(
++                matches!(answer, Answer::Resumed { .. }),
++                "the first readable resume after the corrupt ones was refused"
++            );
++        }
++
++        #[test]
++        fn a_recovery_path_renewal_leaves_the_rotated_credentials_on_disk() {
++            let _counting = counting();
++            let scratch = Scratch::new("renewal-saved");
++            let store = scratch.store();
++            store
++                .save(b"the credentials before the renewal")
++                .expect("store the login");
++            // What an account state looks like to the store: a document, which is
++            // what `record_into` serializes.
++            let rotated = json!({"schema": 1, "own_username": "fixture-self", "rotated": true});
++            let rotated_bytes = serde_json::to_vec(&rotated).expect("a document");
++
++            // What the recovery path does when WeChat rejects a read: renew, and
++            // write the credentials the renewal minted. Both halves are one call,
++            // so a renewal cannot happen without the write.
++            renew_and_persist(&store, || Ok(()), || Ok(rotated.clone()))
++                .expect("the renewal is saved");
++
++            assert_eq!(
++                store.read().expect("read the login back"),
++                rotated_bytes,
++                "the credentials the recovery renewal minted are not what is on disk"
++            );
++
++            // A resume straight after presents those bytes, not the stale ones.
++            let answer = resume(&store, seconds(), |state| Ok(Opened::Accepted(state.to_vec())))
++                .expect("a resumed answer is not an error");
++            assert_eq!(
++                answer,
++                Answer::Resumed {
++                    state: rotated_bytes.clone(),
++                    accepted: rotated_bytes,
++                },
++                "a resume after the renewal presented the pre-renewal credentials"
++            );
++
++            // A renewal that failed writes nothing: a refusal cannot leave
++            // credentials on disk that WeChat never minted.
++            let before = store.read().expect("read the login");
++            assert!(
++                renew_and_persist(&store, || Err(anyhow!("refused")), || {
++                    Ok(json!({"never": true}))
++                })
++                .is_err(),
++                "a failed renewal answered success"
++            );
++            assert_eq!(
++                store.read().expect("read the login"),
++                before,
++                "a failed renewal wrote credentials anyway"
++            );
++        }
++
++        #[test]
++        fn the_resumed_answer_carries_the_bytes_that_were_read_not_the_rotated_ones() {
++            let _counting = counting();
++            let scratch = Scratch::new("resume-answer-state");
++            let store = scratch.store();
++            let before = json!({"schema": 1, "own_username": "fixture-self", "token": "stale"});
++            let before_bytes = serde_json::to_vec(&before).expect("a document");
++            store.save(&before_bytes).expect("store the login");
++            let rotated = json!({"schema": 1, "own_username": "fixture-self", "token": "fresh"});
++            let rotated_bytes = serde_json::to_vec(&rotated).expect("a document");
++
++            // The opener renews and saves, exactly as `open_stored_login` does.
++            let answer = resume(&store, seconds(), |state| {
++                renew_and_persist(&store, || Ok(()), || Ok(rotated.clone()))?;
++                Ok(Opened::Accepted(state.to_vec()))
++            })
++            .expect("a resumed answer is not an error");
++            assert_eq!(
++                answer,
++                Answer::Resumed {
++                    state: before_bytes.clone(),
++                    accepted: before_bytes,
++                },
++                "the answer does not carry the bytes this attempt read"
++            );
++            assert_eq!(
++                store.read().expect("read the login"),
++                rotated_bytes,
++                "the renewal did not rotate what is on disk"
++            );
++        }
++
++        fn directory_entries(dir: &Path) -> Vec<String> {
++            let mut names: Vec<String> = std::fs::read_dir(dir)
++                .expect("the state directory is there")
++                .map(|entry| {
++                    entry
++                        .expect("a directory entry")
++                        .file_name()
++                        .to_string_lossy()
++                        .into_owned()
++                })
++                .collect();
++            names.sort();
++            names
++        }
++
++        #[test]
++        fn a_status_call_touches_neither_the_state_directory_nor_the_key_file() {
++            let _counting = counting();
++            let scratch = Scratch::new("status-quiet");
++            let store = scratch.store();
++            store.save(b"an accepted login").expect("store the login");
++            let entries = directory_entries(&scratch.dir);
++            let key = std::fs::read(&scratch.key_file).expect("the key file");
++
++            for _ in 0..3 {
++                let row = status_of(scratch.configured());
++                assert_eq!(row["present"], json!(true));
++                assert!(row.get("off").is_none());
++            }
++            assert_eq!(
++                directory_entries(&scratch.dir),
++                entries,
++                "a status call left a file in the state directory"
++            );
++            assert_eq!(
++                std::fs::read(&scratch.key_file).expect("the key file"),
++                key,
++                "a status call changed the key file"
++            );
++
++            // And it never opened the key: a key file this user cannot read still
++            // configures the store and still reports the login.
++            std::fs::set_permissions(&scratch.key_file, std::fs::Permissions::from_mode(0o000))
++                .expect("take away every permission on the key file");
++            if std::fs::read(&scratch.key_file).is_err() {
++                let row = status_of(scratch.configured());
++                assert_eq!(
++                    row["present"],
++                    json!(true),
++                    "a key this user cannot read lost the stored login: {row}"
++                );
++                assert!(
++                    row.get("off").is_none(),
++                    "a key this user cannot read turned a configured store off: {row}"
++                );
++            }
++            std::fs::set_permissions(&scratch.key_file, std::fs::Permissions::from_mode(0o600))
++                .expect("restore the key file");
++        }
++
++        #[test]
++        fn a_state_directory_that_refuses_writes_still_reports_and_reads() {
++            let _counting = counting();
++            let scratch = Scratch::new("read-only-dir");
++            let store = scratch.store();
++            store.save(b"an accepted login").expect("store the login");
++            std::fs::set_permissions(&scratch.dir, std::fs::Permissions::from_mode(0o500))
++                .expect("make the state directory read-only");
++            // The test's own probe, so a run as a user the mode does not stop says
++            // so instead of failing on an assertion about somebody else's kernel.
++            let refuses_writes =
++                std::fs::write(scratch.dir.join(".the-test-probes-a-write"), b"x").is_err();
++            // No probe file is created to find out whether the directory accepts a
++            // write: the store is configured and reads, and a write reports the
++            // real error when it happens.
++            let row = status_of(scratch.configured());
++            assert_eq!(
++                row["present"],
++                json!(true),
++                "a read-only state directory turned a configured store off: {row}"
++            );
++            assert!(
++                row.get("off").is_none(),
++                "a read-only state directory turned a configured store off: {row}"
++            );
++            assert_eq!(
++                store.read().expect("read the login"),
++                b"an accepted login",
++                "a read-only state directory lost the stored login"
++            );
++            if refuses_writes {
++                assert!(
++                    store.save(b"another login").is_err(),
++                    "a state directory that refuses writes accepted one"
++                );
++            }
++            std::fs::set_permissions(&scratch.dir, std::fs::Permissions::from_mode(0o700))
++                .expect("restore the state directory");
++        }
++
++        #[test]
++        fn the_helpers_the_dead_code_allowance_hides_are_the_three_it_names() {
++            let scratch = Scratch::new("dead-code");
++            let store = scratch.store();
++            assert_eq!(store.dir(), scratch.dir.as_path());
++            assert_eq!(Miss::Absent.as_str(), "none");
++            assert_eq!(Miss::Unreadable.as_str(), "unreadable");
++            assert_eq!(Allowance::Allowed.as_str(), "allowed");
++            assert_eq!(Allowance::Throttled.as_str(), "throttled");
++        }
++
++        #[test]
++        fn an_envelope_sealed_under_another_aad_does_not_open() {
++            let scratch = Scratch::new("aad");
++            let store = scratch.store();
++            store.write(b"an accepted login").expect("write the login");
++            let path = store.state_path();
++            let key = store.key().expect("the key");
++            // The same plaintext under the same key, sealed for another purpose:
++            // what a ciphertext moved in from elsewhere looks like.
++            let elsewhere = seal_aad(&key, b"puppet-neo/another-purpose/1", b"an accepted login")
++                .expect("seal it elsewhere");
++            std::fs::write(&path, elsewhere).expect("rewrite the envelope");
++            assert_eq!(
++                store.read().err(),
++                Some(Miss::Unreadable),
++                "an envelope bound to another AAD opened here"
++            );
++            assert!(path.exists(), "an unreadable login is kept, never deleted");
 +        }
 +
 +        #[test]

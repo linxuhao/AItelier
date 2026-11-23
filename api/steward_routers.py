@@ -630,7 +630,7 @@ class OAuthScope(BaseModel):
 
 @router.put("/connections/{conn_id}/oauth/scope", dependencies=[Depends(authz.require_writer)])
 def set_oauth_scope(conn_id: str, body: OAuthScope, service=Depends(get_service)):
-    """The scopes asked for at the next authorization; empty: what the server lists."""
+    """The scopes asked for at the next authorization; empty: the read-only ones the server lists."""
     _owner(service)
     return _connection_call(service.steward_connections.oauth_scope_set, conn_id, body.scope)
 

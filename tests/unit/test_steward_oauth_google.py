@@ -7,12 +7,16 @@ documents and answers show: `initialize` and `tools/list` answer 200 without a t
 `/.well-known/oauth-protected-resource/mcp/v1` and names `https://accounts.google.com/`
 (with a trailing '/') while that server's metadata says `https://accounts.google.com`;
 no dynamic registration (the owner's own client); `iss` on the callback; an id_token
-only for `openid`; a refresh answer without a new refresh token."""
+only for `openid`; a refresh answer without a new refresh token. Not Google's: the fake's
+metadata also names a registration endpoint (so "no registration was tried" can fail)."""
 from __future__ import annotations
 
 import base64
+import hashlib
+import ipaddress
 import json
 import socket
+import threading
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
@@ -36,6 +40,8 @@ DOCS = "https://docsmcp.googleapis.com/mcp/v1"
 GOOGLE = "https://accounts.google.com"
 TOKEN = "https://oauth2.googleapis.com/token"
 REVOKE = "https://oauth2.googleapis.com/revoke"
+REGISTER = GOOGLE + "/register"  # not Google's (see the module)
+OTHER = "https://login.other.example"
 USERINFO = "https://openidconnect.googleapis.com/v1/userinfo"
 BASE = "https://aitelier.example"
 SCOPE = "https://www.googleapis.com/auth/"
@@ -59,13 +65,15 @@ class FakeGoogle:
         self.account = "family.home@gmail.com"
         self.serial = 0
         self.mcp_status = 200
+        self.servers = [GOOGLE + "/"]
+        self.scopes = list(DRIVE_SCOPES)
 
     def authorize(self, url: str) -> tuple[str, str]:
         query = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
         self.serial += 1
         code = f"4/code-{self.serial}"
         self.codes[code] = {"client_id": query["client_id"], "scope": query["scope"].split(),
-                            "redirect_uri": query["redirect_uri"]}
+                            "redirect_uri": query["redirect_uri"], "challenge": query["code_challenge"]}
         return code, query["state"]
 
     def _issue(self, scopes, *, with_refresh=True):
@@ -94,15 +102,21 @@ class FakeGoogle:
                 "capabilities": {"tools": {"listChanged": False}}, "protocolVersion": "2025-06-18",
                 "serverInfo": {"name": "StatelessServer", "version": "ESF"}}})
         if url == "https://drivemcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1":
-            return httpx.Response(200, json={"authorization_servers": [GOOGLE + "/"], "bearer_methods_supported": ["header"],
-                                             "resource": DRIVE, "scopes_supported": DRIVE_SCOPES})
+            return httpx.Response(200, json={"authorization_servers": self.servers, "bearer_methods_supported": ["header"],
+                                             "resource": DRIVE, "scopes_supported": self.scopes})
         if url == GOOGLE + "/.well-known/oauth-authorization-server":
             return httpx.Response(200, json={
                 "issuer": GOOGLE, "authorization_endpoint": GOOGLE + "/o/oauth2/v2/auth", "token_endpoint": TOKEN,
-                "userinfo_endpoint": USERINFO, "revocation_endpoint": REVOKE,
+                "userinfo_endpoint": USERINFO, "revocation_endpoint": REVOKE, "registration_endpoint": REGISTER,
                 "code_challenge_methods_supported": ["plain", "S256"],
                 "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
                 "authorization_response_iss_parameter_supported": True})
+        if url == OTHER + "/.well-known/oauth-authorization-server":
+            return httpx.Response(200, json={
+                "issuer": OTHER, "authorization_endpoint": OTHER + "/authorize", "token_endpoint": OTHER + "/token",
+                "code_challenge_methods_supported": ["S256"]})
+        if url == REGISTER:
+            return httpx.Response(201, json={"client_id": "registered-1", "token_endpoint_auth_method": "none"})
         if url == TOKEN:
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             self.token_forms.append({**form, "_auth": request.headers.get("authorization")})
@@ -111,7 +125,9 @@ class FakeGoogle:
                 return httpx.Response(401, json={"error": "invalid_client"})
             if form["grant_type"] == "authorization_code":
                 bound = self.codes.pop(form["code"], None)
-                if bound is None or bound["redirect_uri"] != form["redirect_uri"]:
+                challenge = base64.urlsafe_b64encode(hashlib.sha256(form.get("code_verifier", "").encode()).digest()
+                                                     ).decode().rstrip("=")
+                if bound is None or bound["redirect_uri"] != form["redirect_uri"] or bound["challenge"] != challenge:
                     return httpx.Response(400, json={"error": "invalid_grant"})
                 return httpx.Response(200, json=self._issue(bound["scope"]))
             if form["grant_type"] == "refresh_token":
@@ -130,7 +146,7 @@ def google(world, monkeypatch):
     monkeypatch.setattr(steward_oauth, "transport_for", lambda address: httpx.MockTransport(fake.handle))
     for host, address in (("drivemcp.googleapis.com", "172.217.112.4"), ("docsmcp.googleapis.com", "172.217.112.4"),
                           ("accounts.google.com", "74.125.206.84"), ("oauth2.googleapis.com", "142.250.110.95"),
-                          ("openidconnect.googleapis.com", "172.217.112.4")):
+                          ("openidconnect.googleapis.com", "172.217.112.4"), ("login.other.example", "93.184.216.50")):
         monkeypatch.setitem(ADDRESSES, host, address)
     monkeypatch.setenv("AITELIER_PUBLIC_BASE_URL", BASE)
     return fake
@@ -161,11 +177,13 @@ def test_a_google_server_that_answers_without_a_token_is_discovered_at_its_well_
     assert query["client_id"] == CLIENT and query["redirect_uri"] == BASE + steward_oauth.CALLBACK_PATH
     assert query["code_challenge_method"] == "S256" and query["resource"] == DRIVE
     assert query["access_type"] == "offline" and query["prompt"] == "select_account consent"
-    # What the server lists, and openid email for the account the tokens are bound to.
-    assert query["scope"].split() == DRIVE_SCOPES + ["openid", "email"]
-    # The owner's own client: no registration was tried; the issuer is the one its metadata spells.
+    # Least privilege: of what the server lists only the read-only scope (not the full
+    # `drive`), and openid email for the account the tokens are bound to.
+    assert query["scope"].split() == [SCOPE + "drive.readonly", "openid", "email"]
+    # The owner's own client: the metadata names a registration endpoint, and it was not
+    # used; the issuer is the one its metadata spells.
     asked = [str(r.url) for r in google.requests]
-    assert not any("register" in u for u in asked)
+    assert REGISTER not in asked and any(u.startswith(GOOGLE + "/.well-known/") for u in asked)
     assert sc.read_secret("gdrive")["pending"]["issuer"] == GOOGLE
 
 
@@ -181,9 +199,34 @@ def test_the_owner_narrows_the_scopes_and_the_listing_shows_them(world, google):
     # Given already: not twice.
     service.oauth_scope_set("gdrive", f"openid {SCOPE}drive.readonly email")
     assert query_of(service.oauth_start("gdrive")["authorize_url"])["scope"] == f"openid {SCOPE}drive.readonly email"
-    # Cleared: what the server lists again.
+    # Cleared: the server's read-only scopes again.
     assert service.oauth_scope_set("gdrive", "")["oauth_scope"] is None
-    assert query_of(service.oauth_start("gdrive")["authorize_url"])["scope"].split()[:3] == DRIVE_SCOPES
+    assert query_of(service.oauth_start("gdrive")["authorize_url"])["scope"].split() == [
+        SCOPE + "drive.readonly", "openid", "email"]
+
+
+def test_a_server_that_lists_no_read_only_scope_waits_for_the_owners_choice(world, google):
+    drive_connection(world)
+    google.scopes = [SCOPE + "drive", SCOPE + "drive.file"]
+    service = world.owner.steward_connections
+    with pytest.raises(StateGraphError, match="oauth_scope_required"):
+        service.oauth_start("gdrive")
+    assert "pending" not in sc.read_secret("gdrive") and REGISTER not in [str(r.url) for r in google.requests]
+    assert next(c for c in listed(world)["connections"] if c["conn_id"] == "gdrive")["last_error"] == "oauth_scope_required"
+    google.scopes = []
+    with pytest.raises(StateGraphError, match="oauth_scope_required"):
+        service.oauth_start("gdrive")
+    # The owner chooses (the full scope, knowingly): asked as chosen.
+    service.oauth_scope_set("gdrive", SCOPE + "drive")
+    assert query_of(service.oauth_start("gdrive")["authorize_url"])["scope"] == f"{SCOPE}drive openid email"
+
+
+@pytest.mark.parametrize("scope,read_only", [(SCOPE + "drive.readonly", True), (SCOPE + "documents.readonly", True),
+                                             (SCOPE + "drive.metadata.readonly", True), ("Mail.Read", True),
+                                             (SCOPE + "drive", False), (SCOPE + "drive.file", False),
+                                             ("Mail.ReadWrite", False), ("mail", False), ("readonly.admin", False)])
+def test_what_counts_as_a_read_only_scope(scope, read_only):
+    assert steward_oauth.read_only_scope(scope) is read_only
 
 
 @pytest.mark.parametrize("scope", ['drive"x', "drive\\x", "aé", "x" * 1001, " ".join(["s"] * 31), ["s"]])
@@ -197,10 +240,13 @@ def test_scopes_are_the_owners_and_only_for_an_oauth_connection(world, google):
     add(world, conn_id="media", enabled=False)
     with pytest.raises(StateGraphError, match="secret_not_applicable"):
         world.owner.steward_connections.oauth_scope_set("media", "x")
+    # Even a scope in a header connection's file (never written by the dashboard) is not shown.
+    sc.write_secret("media", {"header_value": "v", "scope": "planted"})
     assert next(c for c in listed(world)["connections"] if c["conn_id"] == "media")["oauth_scope"] is None
     drive_connection(world)
-    with pytest.raises(StateGraphError):
+    with pytest.raises(StateGraphError, match="owner_session_required"):
         world.steward.steward_connections.oauth_scope_set("gdrive", "x")
+    assert steward_oauth.scope_of("gdrive") is None
 
 
 @pytest.mark.parametrize("status", [500, 403, 302])
@@ -326,3 +372,175 @@ def test_the_gateway_lists_and_calls_a_google_shaped_server_with_the_bearer(worl
     google.access.clear()
     assert "result" in call()
     assert fake.unauthorized == 1 and [f["grant_type"] for f in google.token_forms].count("refresh_token") == 1
+
+
+# --- one address judgment for the connection and every endpoint (review 696, M1) ---------------------
+
+TEREDO_LOOPBACK = "2001:0:4136:e378:8000:63bf:80ff:fffe"  # a Teredo address whose client is 127.0.0.1
+
+
+def test_this_interpreter_on_an_ipv4_mapped_loopback():
+    # What Python itself answers here (3.12.16 in the image): the judgment below does not
+    # rely on it - it unwraps the carried IPv4 address whatever the interpreter says.
+    mapped = ipaddress.ip_address("::ffff:127.0.0.1")
+    assert mapped.is_loopback is True and str(mapped.ipv4_mapped) == "127.0.0.1"
+    assert ipaddress.ip_address("2002:7f00:1::").is_loopback is False  # 6to4 of 127.0.0.1: not unwrapped by Python
+    assert str(ipaddress.ip_address(TEREDO_LOOPBACK).teredo[1]) == "127.0.0.1"
+
+
+@pytest.mark.parametrize("address", [
+    "::ffff:127.0.0.1", "::ffff:172.30.0.2", "2002:7f00:1::", "2002:ac1e:2::", TEREDO_LOOPBACK,
+    "169.254.169.254", "::ffff:169.254.169.254", "fe80::1", "224.0.0.251", "ff02::1", "127.0.0.2"])
+def test_an_address_that_is_or_carries_a_refused_one_is_refused_for_the_connection_and_every_endpoint(
+        world, google, monkeypatch, address):
+    monkeypatch.setitem(ADDRESSES, "tricky.example", address)
+    with pytest.raises(StateGraphError, match="reserved_endpoint"):
+        steward_oauth.judge_endpoint("https://tricky.example/token", DRIVE)
+    with pytest.raises(StateGraphError, match="reserved_endpoint"):
+        sc.checked_address("https://tricky.example/mcp")
+    with pytest.raises(StateGraphError, match="reserved_endpoint"):
+        add(world, conn_id="tricky", url="https://tricky.example/mcp", enabled=False)
+
+
+def test_a_token_endpoint_that_resolves_to_a_mapped_backend_address_is_never_connected_to(world, google, monkeypatch):
+    monkeypatch.setitem(ADDRESSES, "oauth2.googleapis.com", "::ffff:172.30.0.2")  # the backend, IPv4-mapped
+    drive_connection(world)
+    with pytest.raises(StateGraphError, match="reserved_endpoint"):
+        world.owner.steward_connections.oauth_start("gdrive")
+    assert "pending" not in sc.read_secret("gdrive")
+
+
+def test_a_private_address_is_an_endpoint_only_on_the_connections_own_host(world, google, monkeypatch):
+    monkeypatch.setitem(ADDRESSES, "lan.example", "10.0.0.5")
+    monkeypatch.setitem(ADDRESSES, "mailbox", "10.0.0.6")
+    with pytest.raises(StateGraphError, match="reserved_endpoint"):
+        steward_oauth.judge_endpoint("https://lan.example/token", DRIVE)
+    with pytest.raises(StateGraphError, match="reserved_endpoint"):
+        steward_oauth.judge_endpoint("https://lan.example/token", "http://mailbox:8080/mcp")
+    # The owner's own container or LAN service: its own endpoints, as the connection itself.
+    assert steward_oauth.judge_endpoint("http://mailbox:8080/token", "http://mailbox:8080/mcp") == "10.0.0.6"
+    assert sc.checked_address("http://mailbox:8080/mcp") == "10.0.0.6"
+
+
+# --- the owner's client belongs to one address and one issuer (review 696, M3) -----------------------
+
+def _sent_secret(google, url_prefix):
+    basic = "Basic " + base64.b64encode(f"{CLIENT}:{CLIENT_SECRET}".encode()).decode()
+    return [str(r.url) for r in google.requests if str(r.url).startswith(url_prefix)
+            and (r.headers.get("authorization") == basic or CLIENT_SECRET.encode() in r.content)]
+
+
+def test_the_owners_client_is_bound_to_its_first_issuer_and_dropped_for_another(world, google):
+    drive_connection(world)
+    authorize(world, google)
+    assert sc.read_secret("gdrive")["client"]["issuer"] == GOOGLE
+    # The resource now names another authorization server: refused, the client forgotten.
+    google.servers = [OTHER]
+    with pytest.raises(StateGraphError, match="oauth_client_mismatch"):
+        world.owner.steward_connections.oauth_start("gdrive")
+    assert "client" not in sc.read_secret("gdrive") and not _sent_secret(google, OTHER)
+    # Entered again, it is that issuer's (the next authorization binds it there).
+    world.owner.steward_connections.oauth_client_set("gdrive", CLIENT, CLIENT_SECRET)
+    query = query_of(world.owner.steward_connections.oauth_start("gdrive")["authorize_url"])
+    assert query["client_id"] == CLIENT and sc.read_secret("gdrive")["client"]["issuer"] == OTHER
+
+
+def test_a_new_address_drops_the_owners_client(world, google):
+    drive_connection(world)
+    authorize(world, google)
+    add(world, conn_id="gdrive", label="Google Drive", url=DOCS, auth_kind="oauth", visibility="private", enabled=False)
+    secret = sc.read_secret("gdrive")
+    assert "client" not in secret and "tokens" not in secret
+    # Before any authorization too; and one entered for another address is never used.
+    add(world, conn_id="gdrive2", label="Drive 2", url=DRIVE, auth_kind="oauth", visibility="private", enabled=False)
+    world.owner.steward_connections.oauth_client_set("gdrive2", CLIENT, CLIENT_SECRET)
+    add(world, conn_id="gdrive2", label="Drive 2", url=DOCS, auth_kind="oauth", visibility="private", enabled=False)
+    assert "client" not in sc.read_secret("gdrive2")
+    stale = {"client": {"client_id": CLIENT, "client_secret": CLIENT_SECRET, "auth_method": "client_secret_basic",
+                        "owner_supplied": True, "conn_url": DOCS}}
+    add(world, conn_id="gdrive3", label="Drive 3", url=DRIVE, auth_kind="oauth", visibility="private", enabled=False)
+    sc.write_secret("gdrive3", stale)
+    with pytest.raises(StateGraphError, match="oauth_client_mismatch"):
+        world.owner.steward_connections.oauth_start("gdrive3")
+    assert "client" not in sc.read_secret("gdrive3")
+
+
+def test_a_client_changed_after_the_start_is_not_sent_at_the_callback(world, google):
+    drive_connection(world)
+    url = world.owner.steward_connections.oauth_start("gdrive")["authorize_url"]
+    code, state = google.authorize(url)
+    world.owner.steward_connections.oauth_client_set("gdrive", CLIENT, CLIENT_SECRET)  # entered again: unbound
+    with pytest.raises(StateGraphError, match="oauth_client_mismatch"):
+        world.owner.steward_connections.oauth_complete(state, code, GOOGLE)
+    assert not google.token_forms
+
+
+def test_a_refresh_never_sends_a_client_of_another_issuer(world, google):
+    drive_connection(world)
+    authorize(world, google)
+    secret = sc.read_secret("gdrive")
+    secret["client"]["issuer"] = OTHER
+    secret["tokens"]["expires_at"] = steward_oauth._iso(datetime.now(timezone.utc) + timedelta(seconds=10))
+    sc.write_secret("gdrive", secret)
+    with pytest.raises(steward_oauth.RefreshRefused):
+        steward_oauth.ensure_token("gdrive", DRIVE)
+    assert [f["grant_type"] for f in google.token_forms] == ["authorization_code"]
+    assert steward_oauth.token_status("gdrive") == "oauth_needs_consent"
+    # Sign-out still revokes, without that client's credentials.
+    before = len(google.requests)
+    world.owner.steward_connections.oauth_sign_out("gdrive")
+    assert google.revoked and not _sent_secret(google, REVOKE) and len(google.requests) > before
+
+
+# --- the secret file, its lock, the bounded read (review 696, LOW) ---------------------------------
+
+def test_two_writes_of_one_secret_file_never_share_a_temporary_file(world, monkeypatch):
+    real, nested = sc.os.replace, []
+
+    def replace(source, target):
+        if not nested:
+            nested.append(source)
+            sc.write_secret("gdrive", {"n": 2})  # another writer between this one's write and rename
+        real(source, target)
+    monkeypatch.setattr(sc.os, "replace", replace)
+    sc.write_secret("gdrive", {"n": 1})
+    assert sc.read_secret("gdrive") == {"n": 1}
+    assert sorted(p.name for p in (world.tmp / "secrets").iterdir()) == ["gdrive.json"]
+
+
+@pytest.mark.parametrize("call", ["set_client", "client_for"])
+def test_the_client_is_read_and_written_under_the_connections_lock(world, google, call):
+    drive_connection(world)
+    done = threading.Event()
+
+    def run():
+        if call == "set_client":
+            steward_oauth.set_client("gdrive", "other", None, DRIVE)
+        else:
+            steward_oauth._client_for("gdrive", DRIVE, GOOGLE, {}, BASE)
+        done.set()
+    with steward_oauth._lock("gdrive"):
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        assert not done.wait(0.3), "went ahead while the connection's lock was held"
+    worker.join(5)
+    assert done.is_set()
+
+
+def test_an_answer_larger_than_the_bound_is_not_read_to_its_end(world, google, monkeypatch):
+    chunk, sent = b"x" * 65536, []
+
+    def endless():
+        for _ in range(4 * steward_oauth.RESPONSE_MAX // len(chunk)):
+            sent.append(1)
+            yield chunk
+    monkeypatch.setattr(steward_oauth, "transport_for",
+                        lambda address: httpx.MockTransport(lambda request: httpx.Response(200, content=endless())))
+    with pytest.raises(StateGraphError, match="oauth_response_too_large"):
+        steward_oauth._request("GET", TOKEN, DRIVE)
+    assert len(sent) <= steward_oauth.RESPONSE_MAX // len(chunk) + 2
+    # Within the bound: the body and status as sent.
+    monkeypatch.setattr(steward_oauth, "transport_for", lambda address: httpx.MockTransport(
+        lambda request: httpx.Response(201, json={"ok": True}, headers={"x-a": "1"})))
+    answer = steward_oauth._request("GET", TOKEN, DRIVE)
+    assert answer.status_code == 201 and answer.json() == {"ok": True} and answer.headers["x-a"] == "1"

@@ -137,8 +137,11 @@ def auth(world, monkeypatch):
 
 
 def oauth_connection(world, conn_id="mailpub", visibility="public"):
-    return add(world, conn_id=conn_id, label=conn_id.title(), url=MAIL, auth_kind="oauth", visibility=visibility,
-               enabled=False)
+    added = add(world, conn_id=conn_id, label=conn_id.title(), url=MAIL, auth_kind="oauth", visibility=visibility,
+                enabled=False)
+    # The server lists no read-only scope: the owner chooses (review 696 - never guessed for).
+    world.owner.steward_connections.oauth_scope_set(conn_id, "mail")
+    return added
 
 
 def authorize(world, auth, conn_id="mailpub", service=None):

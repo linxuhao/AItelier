@@ -707,11 +707,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       request = suppliedRequest ?? stateRequest(sendRequest,
         { log: { warn: line => ctx.logger.warn(line), info: line => ctx.logger.info(line) } });
       // Efforts from roles.json; AITELIER_DSH_ROOT_REASONING_EFFORT still overrides the
-      // director (an invalid value: max, as before the table).
+      // director (an invalid value: max, as before the table). Step 24.2c (7.8.12b "八" 4): the
+      // root role's image_retain (the steward's; LlmError and projectOffloadedImages come with
+      // `llm`), and whether the root may read files at all (the steward forbids `read`).
+      const rootEntry = roles[steward ? 'steward' : 'director'];
       installHostModel(ctx, llm, { request, project, session: env.AITELIER_DSH_SESSION,
-        rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles[steward ? 'steward' : 'director'].reasoning_effort),
+        rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? rootEntry.reasoning_effort),
         workerEffort: roles.worker.reasoning_effort,
-        retry: modelRetryOptions(env), routeInput });
+        retry: modelRetryOptions(env), routeInput, imageRetain: rootEntry.image_retain,
+        rootReadsFiles: !rootEntry.forbidden.includes('read') });
       // Resolve the existing mounted secret file into DSH's private credential
       // store, never into the environment inherited by test/build subprocesses.
       const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';

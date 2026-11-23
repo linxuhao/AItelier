@@ -272,6 +272,14 @@ const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
  *  was sent, so a notice spends no attempt on them. */
 const GROUP_SEND_REFUSED_BEFORE = Object.freeze({ 409: ['not_logged_in', 'room_not_bound'], 429: ['room_backstop'] });
 export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000, keptNameChars: 8 });
+/** Group media wake (2026-11-23 defect: the steward's group turn had no image block): how many
+ *  of this group's KEPT images one @-turn attaches as native blocks, most recent first. The
+ *  backend keeps twenty kept entries a day; four shows the steward the last few without turning
+ *  a wake into an image dump (every block costs request tokens), and a host that attaches none
+ *  leaves the wake's lines as ref-only metadata. Kept entries past the bound keep their line.
+ *  Sibling of GROUP_LIMITS, not a key in it: the backend's twenty and DSH's block budget are
+ *  separate rules, and GROUP_LIMITS is the pinned set of group *text* bounds. */
+export const GROUP_WAKE_IMAGE_LIMIT = 4;
 
 /** A group wake's `recent` within its bounds (design/steward-group-media.md section 7): the
  *  oldest entry that is NOT kept goes first while those exceed recentChars, so a busy
@@ -1017,7 +1025,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
           log('group_media_notice_waiting', { ...seen, reason: sent.refused });
         } else {
           // It may have started (a send_timeout among them): one attempt.
-          await groups.mediaNotice({ ...ask, phase: 'failed', attempts: Number.isInteger(owedNotice.attempts) ? owedNotice.attempts : 0 });
+          await groups.mediaNotice({ ...ask, phase: 'failed', attempts: Number.isInteger(owedNotice.attempts) ? owedNotice.attempts : 0,
+            reason: sent.failed });
           log('group_media_notice_failed', { ...seen, reason: sent.failed });
         }
       } catch (error) { log('group_media_notice_error', { ...seen, error: short(error) }); }

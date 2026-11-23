@@ -379,6 +379,22 @@ answered entries go, and past it still a kept entry's sender name longer than `k
 (long names, voice durations or several files to a message can pass 4000 characters).
 `withAttachmentLines` (`lib/media.mjs:140-148`) renders them as it does today.
 
+Measured defect (2026-11-23, iss-0d20ef5dd9a44cd0): a ref-only line is not enough. The group's
+kept image is stored and named by ref, but the wake's steered message is one text block, and the
+steward owns no image-capable connection tool - `media_call` truthfully answers 拿不到. The wake
+now grows where the host can attach the bytes. An optional `wakeMedia()` hook on directorHost
+(`host.d.ts`, implemented by the driver's adapter from its library and attachment store, reusing
+24.2b's `wakeMedia`/`mediaLine`) returns one line renderer and the ImageAttachmentRefs for a
+wake. The plugin gives it only the kept images of THIS wake's `list_group_recent` and the current
+@-message's own attachments - never the owner's or another group's refs - and appends one native
+image block per ref after the text block. Of the kept entries, the most recent
+`GROUP_WAKE_IMAGE_LIMIT = 4` images are attached (`lib/channels.mjs`: a sibling named constant,
+not a key of GROUP_LIMITS - twenty kept entries a day, but four blocks show the steward the last
+few without an image dump); the message's own images are not bounded that way. An attached line
+says 原图已附; an entry past the bound keeps its ref-only line with the media_call hint. A host
+without the hook, and a route that takes no images (the hook attaches nothing), keep the old
+wake byte for byte: one text block, ref-only lines.
+
 ### 8. `covers()`, narrowed
 
 `integrations/dsh-director/lib/media.mjs:115-119` becomes:
@@ -772,6 +788,11 @@ here:
    (group A's `recent` names the ref, group B's is empty) and by
    `integrations/dsh-director/test/media.test.mjs`'s test `a group wake's recent: a kept
    medium names its ref, a pair without attachments is untouched`.
+   **(2026-11-23, iss-0d20ef5dd9a44cd0: that ref-only wake was measured unusable - the group
+   turn has no image block and the steward has no image-capable connection. With a host that
+   attaches, the last four kept images and the @-message's own images become native blocks,
+   their lines say 原图已附, the rest keep the media_call hint; without the hook or on a
+   text-only route the wake stays one text block, as above.)**
 5. **An un-mentioned medium must not answer: implemented**
    (`integrations/dsh-director/lib/channels.mjs:858-905`). The wake is steered by
    `channels.setGroupWake` (`integrations/dsh-director/index.mjs:402-419`); `handleGroup`

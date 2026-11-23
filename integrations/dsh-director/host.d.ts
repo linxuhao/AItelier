@@ -408,6 +408,23 @@ export interface DirectorHost {
     purgeKept?(audience: string): Promise<{ rows_before: number; rows_after: number; files_unlinked: number; files_shared: number;
       bytes_freed: number }>;
   };
+  /** Step 23 group wake, 2026-11-23 defect iss-0d20ef5dd9a44cd0: an optional hook for the
+   *  images of a group @-turn. A host with a media library can implement it from its own
+   *  library and attachment store; without it the group wake is exactly today's one text
+   *  block with ref-only lines (the steward then reads a kept file with media_call when it can,
+   *  which a host with no image-capable connection cannot). The director calls it once per wake
+   *  and passes only the attachments of THIS wake's own `groups.recent({channel, groupRef})`
+   *  kept entries (the most recent GROUP_WAKE_IMAGE_LIMIT images, plus the current message's
+   *  own attachments) - never an owner's or another group's ref.
+   *  `line(attachment, {attach})` renders one attachment's wake line: with `attach` the host
+   *  reads and saves the bytes and the line ends 原图已附; without it, or when no image could
+   *  be saved, the line names the ref and the media_call hint. `images` are the resulting
+   *  ImageAttachmentRefs, one native image block each, appended after the wake's text block:
+   *  the wake attaches the images the host filled while the lines rendered, read after all
+   *  lines were awaited, so a host whose `images` getter answers a fresh copy still works.
+   *  Absent, or an empty `images`, adds no block. */
+  wakeMedia?(): Promise<{ line(attachment: object, options?: { attach?: boolean }): string | Promise<string>;
+    images: unknown[] }>;
   channels?: {
     /** Step 24.2: `attachments` - the files' metadata the plugin checked (each a kind and exactly
      *  one of a library ref or a refusal of the closed set; mime, size, durationMs), kept on the
@@ -481,7 +498,7 @@ export interface GroupsHost {
   relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string;
     attachments?: object[]; kept?: boolean }, signal?: AbortSignal): Promise<unknown>;
   mediaNotice?(a: { channel: string; groupRef: string; epoch: string; notice: 'on' | 'off'; phase: 'check' | 'sent' | 'failed';
-    channelDown?: boolean; attempts?: number }, signal?: AbortSignal): Promise<{ may_post: true; text: string } | { refused: string }
+    channelDown?: boolean; attempts?: number; reason?: string }, signal?: AbortSignal): Promise<{ may_post: true; text: string } | { refused: string }
       | { sent: true; state: string } | { attempts: number; state: string } | { superseded: true }>;
   recordPurge?(a: { channel: string; groupRef: string; epoch: string; receipt: { rows_before: number; rows_after: number;
     files_unlinked: number; files_shared: number; bytes_freed: number } }, signal?: AbortSignal): Promise<unknown>;

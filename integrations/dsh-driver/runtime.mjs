@@ -605,8 +605,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const readRouteInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
     undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
   // Step 24.2c (7.8.12b "九", 上线后常驻的检查): in the steward process every read is checked; a
-  // route that takes no images is logged and flagged on the dashboard status (the host error,
-  // which events() hands over: until then the flag waits in routeFlag). A director is unchecked.
+  // route that takes no images is logged and flagged on the dashboard status (its own slot,
+  // setRouteFlag, which events() hands over: until then the flag waits in routeFlag). A director
+  // is unchecked.
   let routeFlag, routeFlagSink = () => {};
   const routeInput = steward ? routeStandingCheck(readRouteInput, { log: line => routeLog(line),
     flag: text => { routeFlag = text; routeFlagSink(text); } }) : readRouteInput;
@@ -992,7 +993,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, isDisposed, memory, ownerMessageSent, ownerChannelLogin, groupSend }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, setRouteFlag, isDisposed, memory, ownerMessageSent, ownerChannelLogin, groupSend }) {
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
@@ -1053,10 +1054,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         ctx.logger.warn(message);
         await setHostError(message);
       };
-      // A restored connection puts the steward's route flag back instead of clearing it.
-      runtime.onConnectionRestored = () => routeFlag ? setHostError(routeFlag) : clearHostError();
+      runtime.onConnectionRestored = () => clearHostError();
       if (steward) {
-        routeFlagSink = text => void Promise.resolve(text ? setHostError(text) : clearHostError())
+        routeFlagSink = text => void Promise.resolve(setRouteFlag?.(text))
           .catch(error => ctx.logger.warn('route flag: ' + String(error?.message ?? error).slice(0, 300)));
         if (routeFlag) routeFlagSink(routeFlag);
       }

@@ -93,6 +93,10 @@ export interface DirectorApi {
   /** A host-side failure the status reports should carry (cleared with clearHostError). */
   setHostError(message: string): Promise<void>;
   clearHostError(): Promise<void>;
+  /** Step 24.2c (design-steward 7.8.12b "九"): the steward's route flag (管家路线不收图...), or
+   *  undefined to clear it. A slot of its own: the status carries it on its own line after the
+   *  host error, and setHostError/clearHostError never touch it. */
+  setRouteFlag(text: string | undefined): Promise<void>;
   isDisposed(): boolean;
   /** v1.2: the owner's memory store when config.memory is set (lib/memory/store.mjs), else
    *  undefined. A host records each owner/steward turn with memory.recordTurn(turnId,

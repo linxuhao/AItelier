@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). limits.call_body_bytes is the steward gateway's request body bound (api/steward_gateway.py MAX_BODY), which media_call checks its base64 against before calling. Office documents, archives and executables are deliberately absent (v1).",
+  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). limits.call_body_bytes is the steward gateway's request body bound (api/steward_gateway.py MAX_BODY), which media_call checks its base64 against before calling. The pdf_* limits are read_document's (design-steward 7.8.12b, part 6): pages per call with page images and text-only, page images per turn (an owner turn, a group turn), and characters per page and per call. Office documents, archives and executables are deliberately absent (v1).",
   "limits": {
     "image_bytes": 20971520,
     "file_bytes": 26214400,
@@ -11,7 +11,13 @@
     "inbound_per_channel_hour": 20,
     "retention_days": 30,
     "total_bytes": 5368709120,
-    "call_body_bytes": 41943040
+    "call_body_bytes": 41943040,
+    "pdf_pages_with_images": 4,
+    "pdf_pages_text_only": 30,
+    "pdf_turn_images_owner": 16,
+    "pdf_turn_images_group": 8,
+    "pdf_chars_page": 4000,
+    "pdf_chars_call": 8000
   },
   "types": [
     { "mime": "image/png", "kind": "image", "ext": "png", "signatures": [[{ "offset": 0, "hex": "89504e470d0a1a0a" }]] },

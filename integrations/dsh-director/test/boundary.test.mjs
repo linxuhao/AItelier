@@ -108,6 +108,7 @@ export const SHIPPED = [
   join('test', 'memory-search.test.mjs'),
   join('test', 'memory-vector.test.mjs'),
   join('test', 'memory-perf.test.mjs'),
+  join('test', 'read-document.test.mjs'),
   join('test', 'memory-grep-helper.test.mjs'),
   join('test', 'steward-tools.test.mjs'),
   join('test', 'channels.test.mjs'),

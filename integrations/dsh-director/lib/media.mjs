@@ -37,8 +37,8 @@
  *  Refs are `m_` + 16 random hex characters, never a hash (they say nothing about whether
  *  two files are the same). Each row carries its AUDIENCE: `owner`, `group:<channel>:
  *  <group_ref>` or (a director's subdirectory, 24.2b) `project:<project_id>`;
- *  `covers(turnAudience, row)` is the one rule media_call and send_media use (an owner
- *  turn covers every ref, a group turn only its own group's).
+ *  `covers(turnAudience, row)` is the one rule media_call, send_media and read_document use (an
+ *  owner turn covers every ref but a group's kept one, a group turn only its own group's).
  *
  *  Kept 30 days (cleanup(), daily while started) and at most limits.total_bytes in all,
  *  oldest first; refs still owed to a relay (`protect()`) are never cleaned. Logs carry a
@@ -148,11 +148,15 @@ export function audienceLabel(audience) {
 }
 /** Whether a turn of `audience` may use this row: an owner turn every ref, a group turn only
  *  its own group's (design-steward 7.8.12 "受众标签"), a director's project turn only its own
- *  project's rows (7.8.12a). Anything unreadable: no. */
+ *  project's rows (7.8.12a). Anything unreadable: no.
+ *  A row kept from a group without a mention (`kept: true`, the group-media switch's §8 R4) is
+ *  its own group's alone: an owner turn does not cover it (7.8.12b "十"). */
 export function covers(audience, row) {
-  if (audience?.kind === 'owner') return true;
   const label = audienceLabel(audience);
-  return label !== undefined && (label.startsWith('group:') || label.startsWith('project:')) && row?.audience === label;
+  const own = label !== undefined && (label.startsWith('group:') || label.startsWith('project:')) && row?.audience === label;
+  if (row?.kept === true) return own && label.startsWith('group:');
+  if (audience?.kind === 'owner') return true;
+  return own;
 }
 
 const KIND_NAMES = Object.freeze({ image: '图片', voice: '语音', file: '文件' });

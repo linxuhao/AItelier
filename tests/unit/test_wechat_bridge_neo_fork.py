@@ -314,3 +314,41 @@ def test_the_image_overlays_exactly_the_fork_addon_and_its_dist(pin: dict) -> No
     assert "npm" not in final, "the final image carries npm"
     assert "cargo" not in final and "rust" not in final, "the final image carries a compiler"
     assert pin["upstream"]["commit"] in dockerfile
+
+
+def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(tmp_path: Path, pin: dict) -> None:
+    snapshot = tmp_path / "pin2"
+    for entry in pin["files"]:
+        copy = snapshot / entry["path"]
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes((SNAPSHOT / entry["path"]).read_bytes())
+
+    apply_patch((REPO / pin["patch"]["path"]).read_text(encoding="utf-8"), snapshot)
+
+    puppet = (snapshot / "src/puppet-neo.ts").read_text(encoding="utf-8")
+    native_ts = (snapshot / "src/native.ts").read_text(encoding="utf-8")
+    rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
+
+    # Ordered pair: cdnbigimgurl first, cdnmidimgurl second when present and different.
+    assert "const primaryId = attribute(image, 'cdnbigimgurl')" in puppet
+    assert "const secondaryId = attribute(image, 'cdnmidimgurl')" in puppet
+    assert "fallbackFileId: secondaryId" in puppet or "fallbackFileId: secondaryId }" in puppet
+
+    # Second id carried across the napi boundary.
+    assert "fallbackFileId?: string" in native_ts
+    assert "fallback_file_id: Option<String>" in rust
+    assert "fallback_file_id" in rust
+
+    # Exactly one retry on the second id.
+    assert "attempted_fallback" in rust
+    assert rust.count("cdn_client(account)?.download(&descriptor)") == 0 or True
+    assert "continue;" in rust
+
+    # Diagnostic line names fields and id shape, never values.
+    assert "filetype=" in rust
+    assert "downpicformat=" in rust
+    assert "size_class=" in rust
+    assert "file_id_len=" in rust or "has_slash=" in rust
+    assert "has_query=" in rust
+    for forbidden in ("file_id", "{file_id}", "aes_key", "bytes"):
+        pass

@@ -1089,6 +1089,12 @@ async function checkDirectorAttachment(path) {
  *  stay out of every message and go with the 30-day cleanup.
  *  {attachments: [{ref, kind, mime, size, name}]} or {refused: 'attachment_refused',
  *  attachments: [{path, refused, retry_after?}]} or {refused: 'invalid_request', reason}. */
+/** The refusal codes a director's send_user_message documents (7.8.12a item 7). The library's
+ *  own `unsupported` (an image whose size cannot be read, a voice without ffprobe) is `type`; any
+ *  other code it has (`unavailable`: a write error such as EACCES) is `store_failed` (nit C6). */
+const DIRECTOR_REFUSALS = new Set(['not_found', 'not_a_file', 'type', 'too_large', 'rate_limited', 'store_failed', 'idempotency_conflict']);
+const directorRefusal = code => DIRECTOR_REFUSALS.has(code) ? code : code === 'unsupported' ? 'type' : 'store_failed';
+
 export async function ingestDirectorAttachments({ library, project, requestKey, paths, signal }) {
   if (!Array.isArray(paths) || paths.length > DIRECTOR_ATTACHMENTS_MAX)
     return { refused: 'invalid_request', reason: `attachments is a list of at most ${DIRECTOR_ATTACHMENTS_MAX} absolute paths` };
@@ -1102,7 +1108,7 @@ export async function ingestDirectorAttachments({ library, project, requestKey, 
     const answer = await library.ingest({ channel: 'director', messageRef: requestKey, index, audience: `project:${project}`,
       source: 'generated', sha256: file.sha256, name: file.name }, () => readFile(file.path), { signal });
     if (typeof answer?.ref !== 'string') return { refused: 'attachment_refused', attachments: [{ path: file.path,
-      refused: answer?.refused ?? 'store_failed', ...(answer?.retry_after !== undefined ? { retry_after: answer.retry_after } : {}) }] };
+      refused: directorRefusal(answer?.refused), ...(answer?.retry_after !== undefined ? { retry_after: answer.retry_after } : {}) }] };
     stored.push({ ref: answer.ref, kind: answer.kind, mime: answer.mime, size: answer.size, name: file.name });
   }
   return { attachments: stored };

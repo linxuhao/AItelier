@@ -371,6 +371,34 @@ test('24.2b director attachments: a write the disk cannot take is store_failed; 
   assert.match((await attach(library, 'k1', [files.shot])).attachments[0].ref, REF, 'not recorded: the same request goes through later');
 });
 
+test('24.2b director attachments: the library\'s own codes outside the documented set are mapped - unsupported is type, unavailable store_failed (nit C6)', async () => {
+  const { dir, library } = await rig();
+  // PNG magic bytes, but no header to read a size from: the library answers `unsupported`.
+  const unreadable = join(dir, 'unreadable.png');
+  await writeFile(unreadable, Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.alloc(8)]));
+  assert.deepEqual(await attach(library, 'k1', [unreadable]), { refused: 'attachment_refused', attachments: [{ path: unreadable, refused: 'type' }] });
+  const { files } = await rig();
+  const real = fs.writeFileSync;
+  mock.method(fs, 'writeFileSync', function (path, ...rest) {
+    if (String(path).includes('.incoming-')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    return real.call(this, path, ...rest);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await attach(library, 'k2', [files.shot]), { refused: 'attachment_refused', attachments: [{ path: files.shot, refused: 'store_failed' }] });
+  } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+});
+
+test('24.2b director attachments: a relative path is not_found even when it names a real file in the working directory (nit TQ-3)', async () => {
+  const { dir, library } = await rig();
+  const before = process.cwd();
+  process.chdir(dir);
+  try {
+    assert.deepEqual(await attach(library, 'k1', ['shot.png']), { refused: 'attachment_refused', attachments: [{ path: 'shot.png', refused: 'not_found' }] });
+  } finally { process.chdir(before); }
+  assert.deepEqual(library.rows, []);
+});
+
 test('24.2b send_user_message schema: only a director with a media library gets `attachments` and its one sentence', async () => {
   const { library } = await rig();
   const director = sendUserMessageTool({ steward: false, library });

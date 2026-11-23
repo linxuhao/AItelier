@@ -364,3 +364,30 @@ test('24.2b C1: send_media in an owner turn, then the turn\'s final text: two st
   assert.deepEqual(mine.map(m => [m.subject, m.body, Boolean(m.attachments)]), [['Image', '', true], ['Re: 画只猫', '画好了，一只橘猫。', false]]);
   assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), [], 'the text reply answers it');
 });
+
+test('24.2b F4: a captioned send_media answers the owner when the turn ends with no text; the final text, when there is one, still goes out', async () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const { ref } = await library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const conversation = [{ message_id: 'own-1', created_at: '2026-11-23T10:00:00Z', sender_kind: 'user', sender_driver_id: null,
+    subject: '画只猫', body: '画只猫', segments: [] }];
+  const request = async (path, body) => {
+    if (path === '/api/state/query/list_user_conversation') return { messages: conversation, next_cursor: null };
+    if (path !== '/api/state/commands/send_user_message') throw new Error(`unexpected ${path}`);
+    const id = `st-${conversation.length}`;
+    conversation.push({ message_id: id, created_at: `2026-11-23T10:00:0${conversation.length}Z`, sender_kind: 'driver',
+      sender_driver_id: 'drv-home', subject: body.subject, body: body.body, segments: [], reply_to_message_id: body.reply_to_message_id ?? null,
+      ...(body.attachments ? { attachments: body.attachments.map(id => ({ id, kind: 'image', mime: 'image/png', size: PNG.length, name: 'x.png' })) } : {}) });
+    return { result: { message_id: id } };
+  };
+  const ops = mediaOps({ request, library, gatewayFetch: async () => {}, owner: { request, project: 'aitelier-home', mirror: async () => ({ mirrored: false, reason: 'dashboard' }) } });
+  const base = { request, project: 'aitelier-home', me: 'drv-home' };
+  assert.equal((await ops.sendToOwner({ ref, caption: '   ', replyTo: 'own-1' })).message_id, 'st-1');
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), ['own-1'], 'a blank caption answers nothing');
+  assert.equal((await ops.sendToOwner({ ref, caption: '画好了，一只橘猫。', replyTo: 'own-1' })).message_id, 'st-2');
+  // The turn ended with no text: the captioned file is the answer (open threads, heldWork, idle_dormant).
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), [], 'the captioned file answers it');
+  // The turn ended WITH text: forwardFinalText still sends it (C1), the file does not swallow it.
+  const auto = await forwardFinalText({ ...base, text: '还要别的颜色吗？', input: 'own-1' });
+  assert.deepEqual(auto, { forwarded: true, reply_to: 'own-1', message_id: 'st-3' });
+  assert.deepEqual((await unansweredOwnerMessages({ ...base, mediaAnswers: false })).map(m => m.message_id), []);
+});

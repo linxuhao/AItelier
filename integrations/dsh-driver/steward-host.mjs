@@ -340,8 +340,11 @@ export async function acknowledgePrivateLetter({ request, project, me, deliveryI
 // ---- every owner message gets an answer (owner 2026-11-17: 管家需要事事有回应) ----
 
 /** The owner's messages after the steward's last message in its own conversation: the ones
- *  not answered yet, oldest first (the newest page; a reply answers what came before it). */
-export async function unansweredOwnerMessages({ request, project, me, signal }) {
+ *  not answered yet, oldest first (the newest page; a reply answers what came before it).
+ *  `mediaAnswers` (default true): a send_media message with a non-empty caption counts as a
+ *  reply, so a turn whose only answer is a captioned file leaves nothing open. forwardFinalText
+ *  passes false: the turn's final text still goes out after the file (C1). */
+export async function unansweredOwnerMessages({ request, project, me, signal, mediaAnswers = true }) {
   const listed = await request('/api/state/query/list_user_conversation', { project_id: project, limit: 30 }, signal);
   const newest = [...((listed.result ?? listed).messages ?? [])].sort(older).reverse();
   const unanswered = [];
@@ -349,9 +352,11 @@ export async function unansweredOwnerMessages({ request, project, me, signal }) 
     // A push is written by the host with no owner message in view: it answers nothing.
     if (isPush(m)) continue;
     // Step 24.2b (C1): a steward message carrying files is an owner turn's send_media
-    // (sendMediaToOwner; the steward's text replies never carry attachments). The file is not
-    // the turn's answer, so the turn's final words still go out as the reply.
-    if (m.sender_kind === 'driver' && m.sender_driver_id === me && Array.isArray(m.attachments) && m.attachments.length) continue;
+    // (sendMediaToOwner; the steward's text replies never carry attachments). For forwardFinalText
+    // the file is not the turn's answer, so the turn's final words still go out as the reply. For
+    // everyone else (F4) a captioned file is an answer; an uncaptioned one answers nothing.
+    if (m.sender_kind === 'driver' && m.sender_driver_id === me && Array.isArray(m.attachments) && m.attachments.length
+      && !(mediaAnswers && String(m.body ?? '').trim())) continue;
     if (m.sender_kind === 'driver' && m.sender_driver_id === me) break;
     if (m.sender_kind === 'user') unanswered.push(m);
   }
@@ -394,7 +399,7 @@ export const autoReplyBody = text => {
  *  retry after a lost answer is State's replay and a second, different text is refused
  *  (idempotency_conflict) instead of becoming a second reply. */
 export async function forwardFinalText({ request, project, me, text, input = '', signal }) {
-  const waiting = (await unansweredOwnerMessages({ request, project, me, signal }))
+  const waiting = (await unansweredOwnerMessages({ request, project, me, signal, mediaAnswers: false }))
     .filter(m => input.includes(m.message_id));
   if (!waiting.length) return { forwarded: false };
   // Checked after `waiting`: the reason means an owner was left without the reply.
@@ -1166,13 +1171,17 @@ const MEDIA_HINTS = Object.freeze({ image: '用 media_call 调 ocr_image 或 vis
  *  ([图片 m_…，image/jpeg，1.2 MB，原图已附]); any other file says how to read it - an image on a
  *  route without images ("；本路线不收图：用 media_call 调 ocr_image 或 vision_critique"), a voice
  *  (transcribe_audio), a file (ocr_pdf; a director's native file tools). A director's line also
- *  names the library file's absolute path (`path`, "；文件 /…"). A refused one is its refusal line. */
-export function mediaLine(attachment, { attached = false, imageRoute = false, path, director = false } = {}) {
+ *  names the library file's absolute path (`path`, "；文件 /…"). A refused one is its refusal line.
+ *  `declared`: the route is declared image-capable but this wake carries no native block (the
+ *  routes are not measured yet, measured:false): the line says 原图未附, not 本路线不收图, and a
+ *  director's line names read_image on that file. */
+export function mediaLine(attachment, { attached = false, imageRoute = false, declared = false, path, director = false } = {}) {
   const line = attachmentLine(attachment);
   if (!attachment?.ref) return line;
   const kind = attachment.kind;
+  const sees = imageRoute || declared;
   const note = attached ? '，原图已附'
-    : kind === 'image' ? `；${imageRoute ? '原图未附' : '本路线不收图'}：${MEDIA_HINTS.image}`
+    : kind === 'image' ? `；${sees ? '原图未附' : '本路线不收图'}：${sees && director && path ? '用 read_image 读该文件，或' : ''}${MEDIA_HINTS.image}`
       : kind === 'file' && director ? '；用原生文件工具读'
         : `；${MEDIA_HINTS[kind] ?? MEDIA_HINTS.file}`;
   return line.slice(0, -1) + note + (path ? `；文件 ${path}` : '') + ']';
@@ -1183,8 +1192,8 @@ export function mediaLine(attachment, { attached = false, imageRoute = false, pa
  *  holds is read and saved into DSH's attachment store (`attachments`, ctx.get('attachments')),
  *  and its ImageAttachmentRef joins `images` for notify. An image that could not be saved keeps
  *  its line with the media_call hint: an image is never dropped silently. `director`: the lines
- *  carry the library file's absolute path. */
-export function wakeMedia({ library, imageRoute = false, attachments, director = false, log = () => {} }) {
+ *  carry the library file's absolute path. `declared`: see mediaLine. */
+export function wakeMedia({ library, imageRoute = false, declared = false, attachments, director = false, log = () => {} }) {
   const images = [];
   const line = async attachment => {
     if (!attachment?.ref) return attachmentLine(attachment);
@@ -1199,7 +1208,7 @@ export function wakeMedia({ library, imageRoute = false, attachments, director =
         }
       } catch (error) { log(`image ${attachment.ref} not attached: ${String(error?.message ?? error).slice(0, 200)}`); }
     }
-    return mediaLine(attachment, { attached, imageRoute, director, path: director ? found?.path : undefined });
+    return mediaLine(attachment, { attached, imageRoute, declared, director, path: director ? found?.path : undefined });
   };
   return { line, images };
 }

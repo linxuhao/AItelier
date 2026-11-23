@@ -15,7 +15,7 @@
  *  different signature - and nothing imported this file's boot. The added names are
  *  SESSION_ENV, aitelierHost, attemptWorkState and stateRequest (the State retry policy,
  *  exported so its test can drive it). exports.test.mjs pins both lists. */
-import { installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, wakeTakesImages } from './model.mjs';
+import { declaresImage, installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, wakeTakesImages } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
@@ -1076,8 +1076,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           const dashboard = await ingestDashboardAttachments({ inbox: result.driver_inbox, library,
             audience: steward ? 'owner' : `project:${project}`, fetchUpload, ack: ackUpload, log: line => ctx.logger.warn(line) });
           // The same intersection resolveModel declares (a mixed route gets the placeholder lines).
-          const imageRoute = wakeTakesImages(await routeInput());
-          const media = wakeMedia({ library, imageRoute, attachments: attachmentStore(), director: !steward, log: line => ctx.logger.warn(line) });
+          const routes = await routeInput();
+          const media = wakeMedia({ library, imageRoute: wakeTakesImages(routes), declared: declaresImage(routes), attachments: attachmentStore(),
+            director: !steward, log: line => ctx.logger.warn(line) });
           shown = await withAttachmentLines(request, result, undefined, { dashboard, sources: steward, line: media.line });
           images = media.images;
         }

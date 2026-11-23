@@ -82,7 +82,8 @@ def new_upload_id() -> str:
 
 
 def valid_name(name) -> bool:
-    """The display name the client gave (`?name=`): 1-255 characters, no control character.
+    """The display name the client gave (the `X-AItelier-Upload-Name` header, percent-encoded
+    UTF-8, decoded by api/dsh_driver_routers.py): 1-255 characters, no control character.
     It names nothing on disk; the staged file is named by its upload_id."""
     return (isinstance(name, str) and 1 <= len(name) <= media_types.NAME_MAX
             and not any(ord(ch) < 32 or ord(ch) == 127 for ch in name))

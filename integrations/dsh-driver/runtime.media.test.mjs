@@ -143,6 +143,22 @@ test('wake lines: an image route attaches each image once (原图已附); a rout
   assert.deepEqual(broken.images, []);
 });
 
+test('24.2b F3: before the routes are measured (declared, no native blocks) an image line says 原图未附, and a director\'s names read_image', async () => {
+  const r = rig({ answers: { u_0000000000000001: { bytes: png() } } });
+  const result = { events: [], driver_inbox: [ownerMessage('m-1', [['u_0000000000000001', 'image', 'image/png', 70]])] };
+  const dashboard = await r.run(result.driver_inbox);
+  const [image] = dashboard.get('m-1');
+  const path = r.library.lookup(image.ref).path;
+  const attachments = { saveImage: async () => assert.fail('nothing is attached before the routes are measured') };
+  const director = wakeMedia({ library: r.library, imageRoute: false, declared: true, attachments, director: true });
+  assert.equal(await director.line(image), `[图片 ${image.ref}，image/png，${png().length} B；原图未附：用 read_image 读该文件，或用 media_call 调 ocr_image 或 vision_critique；文件 ${path}]`);
+  const steward = wakeMedia({ library: r.library, imageRoute: false, declared: true, attachments });
+  assert.equal(await steward.line(image), `[图片 ${image.ref}，image/png，${png().length} B；原图未附：用 media_call 调 ocr_image 或 vision_critique]`);
+  assert.deepEqual([...director.images, ...steward.images], []);
+  // A measured text-only route still says it takes no images.
+  assert.match(mediaLine(image, { declared: false }), /；本路线不收图：用 media_call 调 ocr_image 或 vision_critique\]$/);
+});
+
 test('the steward: a channel message\'s image (its source row) is attached on an image route too, merged with the dashboard\'s', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'media-steward-'));
   const library = createMediaLibrary({ root: dir, userId: 'owner' });
@@ -328,5 +344,6 @@ test('real pinned DSH, a table with no `_input` (measured: false): the wake imag
   const { message, text } = wakeOf(seen.seen);
   const [stored] = seen.seen.acks;
   assert.ok(typeof message.content === 'string', 'no image block');
-  assert.ok(text.includes(`[图片 ${stored.ref}，image/png，${png().length} B；本路线不收图：用 media_call 调 ocr_image 或 vision_critique；文件 `), text);
+  // F3: the route is still declared image-capable, so the line does not say it takes no images.
+  assert.ok(text.includes(`[图片 ${stored.ref}，image/png，${png().length} B；原图未附：用 read_image 读该文件，或用 media_call 调 ocr_image 或 vision_critique；文件 `), text);
 });

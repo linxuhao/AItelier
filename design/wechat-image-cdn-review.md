@@ -93,3 +93,30 @@ the figure itself is not measured here and is listed in §2 item 1.
 - The 2.9.0 crate copy was inspected only to confirm the image path exists in both;
   judgement of the diagnosis is against 2.2.0 as required.
 - No tests were run; none are needed for this review.
+
+## 6. Second pass on 51b060337f
+
+Previous §2 (sentences not measured):
+1. File download 107,089 bytes — still present (expectedly unmeasured; corrected doc still says issue's own figure).
+2. Host journal "0 matching lines" — corrected: now gives measured counts (1,837 user / 17,671 system lines; 18 `wechat` matches, all systemd scope-start records) and a retained file (977 bytes, sha256 `3dc0f2abb61e8ab2f84f36661a5721275ed3edfcf679e0cb258e401a4283a1bc`), which I verified matches.
+3. Channel retries — corrected: now labelled as inference.
+4. Lazy fetch ruled out — corrected: now labelled as inference and states the excerpt has no arrival line.
+5. `MEDIA_LIMITS` attribution — corrected: now `bridge.mjs:67` plus `lib/media.mjs:55`.
+6. Moving fetch to steward's read — corrected: now labelled as inference.
+7. One library write — corrected: now cites the write in `lib/media.mjs`, but misnames it `storeMedia` (see new errors below).
+8. Observations / undetermined items — corrected: now explicitly listed in §8.
+
+Previous §3 (factual errors):
+- Delay "3 min 27.09 s" — corrected to 206.96 s.
+- Span "92.26 s" — corrected to 93.26 s.
+- Pin attribution — corrected.
+- `MEDIA_LIMITS` attribution — corrected.
+- Journal "0 matching lines" — corrected with measured counts.
+
+New factual errors in the corrected text:
+- `bridge.mjs:727` is cited as logging `too_large`; line 727 logs a failed fetch (held/gone), while `too_large` is returned at `bridge.mjs:735` with no log line.
+- `integrations/dsh-director/lib/media.mjs` is cited as `storeMedia`; `storeMedia` lives in `integrations/dsh-director/lib/channels.mjs:711`, and `media.mjs` exposes `ingest` (`media.mjs:362`).
+
+Verdicts now:
+- c1: PASS — the measured delay after `logged in` is now correct (206.96 s), the span is correct (93.26 s), the pin and limit attributions are corrected, and the missing arrival line is stated as unmeasurable with the inference labelled. The required arrival-to-fetch delay remains unmeasurable from these bytes, which the diagnosis now says plainly.
+- c2: PASS — cost, bounds and observations are present; the two new citation errors above do not change the c2 content.

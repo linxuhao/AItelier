@@ -1,0 +1,399 @@
+{
+ "artifact": "ae28e3d5cb00ff5f5dc28bfe95fc9c38ee584647",
+ "measured_at_utc": "2026-11-23T01:56Z-02:20Z",
+ "shape": {
+  "why": "the shape aitelier/tools/run_tests/impl.py uses for a node project (impl.py:1183-1270 -> _run_node_cmd -> repository_executor.execute)",
+  "tree": "one `git archive HEAD` copy of ae28e3d5cb00ff5f5dc28bfe95fc9c38ee584647 shared by the seven arms, no .git, no node_modules at the start (the gate makes a fresh snapshot per project; the only cross-project dependency inside this tree was the slack suite's SDK fallback, which was re-measured on a pristine copy -- see pristine_tree_check)",
+  "fetch": "npm ci (lockfile present) / npm install with the operator network, uid 1000",
+  "install": "npm ci --offline / npm install --offline, --network none, uid 1000",
+  "test": "the project's own `npm test`, docker run --rm --init --network none --cpus 2 --memory 2g --pids-limit 512 -u 1000:1000",
+  "budget": "the gate's NODE_SCRIPT_TIMEOUT = 300 s applies to the test phase only (impl.py:800-801)",
+  "uid": "1000 (the backend process's own uid; core/repository_executor.py:896 passes os.getuid():os.getgid())"
+ },
+ "discovered": [
+  "integrations/dsh",
+  "integrations/dsh-channel-slack",
+  "integrations/dsh-channel-wechat",
+  "integrations/dsh-director",
+  "integrations/dsh-driver",
+  "integrations/wechat-bridge",
+  "web"
+ ],
+ "declared": [
+  "integrations/dsh",
+  "integrations/dsh-channel-slack",
+  "integrations/dsh-channel-wechat",
+  "integrations/dsh-director",
+  "integrations/dsh-driver",
+  "integrations/wechat-bridge",
+  "web"
+ ],
+ "absences": [],
+ "declared_equals_discovered": true,
+ "arms": [
+  {
+   "dir": "web",
+   "fetch_argv": [
+    "npm",
+    "ci"
+   ],
+   "fetch_rc": "0",
+   "fetch_seconds": 25,
+   "install_argv": [
+    "npm",
+    "ci",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 9,
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "exit": "0",
+   "seconds": 64,
+   "logs": {
+    "fetch": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/web.fetch.log",
+     "sha256": "b5d2234701bc0f19a346d6b781bd30941936b0a2ba9ef3ac2f798d989410ecb8",
+     "bytes": 775
+    },
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/web.install.log",
+     "sha256": "7beee5288336168da1ac74077e7ab498b2599f6d38bd1386807375ebda057f90",
+     "bytes": 562
+    },
+    "test": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/web.test.log",
+     "sha256": "ccac6011c67f2cc1a4a427250b11922a9cba5e2523a8646a76ee50b5eceb78a1",
+     "bytes": 7204
+    }
+   },
+   "summary_line": "67 passed (67); 701 passed (701)"
+  },
+  {
+   "dir": "integrations/dsh",
+   "fetch_argv": [],
+   "fetch_rc": "skipped",
+   "fetch_seconds": 0,
+   "install_argv": [
+    "npm",
+    "install",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 13,
+   "argv": [],
+   "exit": "no_test_script",
+   "seconds": 0,
+   "logs": {
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh.install.log",
+     "sha256": "22cd52d7ef7a48d1ac68dad40453a02c77a1fe1cb38180be1ed25517cd74b433",
+     "bytes": 64
+    }
+   }
+  },
+  {
+   "dir": "integrations/dsh-driver",
+   "fetch_argv": [
+    "npm",
+    "ci"
+   ],
+   "fetch_rc": "0",
+   "fetch_seconds": 60,
+   "install_argv": [
+    "npm",
+    "ci",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 49,
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "exit": "0",
+   "seconds": 209,
+   "logs": {
+    "fetch": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-driver.fetch.log",
+     "sha256": "26ced705f5c42ed719d392d03c87b968067f2db5f76391f48fefe469c3427af0",
+     "bytes": 1740
+    },
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-driver.install.log",
+     "sha256": "68216d44ed311e1eec973db5a46e44fb8a6ad7437ceb5aea74061b668beb8217",
+     "bytes": 1538
+    },
+    "test": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-driver.test.log",
+     "sha256": "923a978de65a5c3aa1df6911e3ddb00d83db1623cb34df8391326e6154a23a49",
+     "bytes": 102081
+    }
+   },
+   "summary_line": "tests=788 pass=788 fail=0 skipped=0 duration_ms=206774.182176"
+  },
+  {
+   "dir": "integrations/dsh-director",
+   "fetch_argv": [],
+   "fetch_rc": "skipped",
+   "fetch_seconds": 0,
+   "install_argv": [
+    "npm",
+    "install",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 1,
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "exit": "0",
+   "seconds": 106,
+   "logs": {
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-director.install.log",
+     "sha256": "c3bfb45d69503e998a3f303e787baad97b3556b3fe25219067068cef72c4a871",
+     "bytes": 64
+    },
+    "test": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-director.test.log",
+     "sha256": "0735ba37cd9f1134f9bf5b97780eceb306a99b7258f0c954cb9e112746daa3e5",
+     "bytes": 57193
+    }
+   },
+   "summary_line": "tests=464 pass=464 fail=0 skipped=0 duration_ms=103186.69914"
+  },
+  {
+   "dir": "integrations/dsh-channel-slack",
+   "fetch_argv": [],
+   "fetch_rc": "skipped",
+   "fetch_seconds": 0,
+   "install_argv": [
+    "npm",
+    "install",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 1,
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "exit": "0",
+   "seconds": 1,
+   "logs": {
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-channel-slack.install.log",
+     "sha256": "906e434bc618a8f7e764885d3dc091f757b8bf264e1a278bdb96557f3c52958d",
+     "bytes": 64
+    },
+    "test": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-channel-slack.test.log",
+     "sha256": "680e6d4accf72aa63e73107bcf94dbd075bc1045dbbeed8cd65a490b55e57078",
+     "bytes": 4609
+    }
+   },
+   "summary_line": "tests=26 pass=26 fail=0 skipped=0 duration_ms=919.486687"
+  },
+  {
+   "dir": "integrations/dsh-channel-wechat",
+   "fetch_argv": [],
+   "fetch_rc": "skipped",
+   "fetch_seconds": 0,
+   "install_argv": [
+    "npm",
+    "install",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 1,
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "exit": "0",
+   "seconds": 4,
+   "logs": {
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-channel-wechat.install.log",
+     "sha256": "e1bf25b45273fbce52cf4c4260e28c86a1a618b6f96415516ad6f63e9f344476",
+     "bytes": 64
+    },
+    "test": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-channel-wechat.test.log",
+     "sha256": "54e1bab48525fdd5978cdf238d8ea8976289b3cb4a36578eeae0367939763c4d",
+     "bytes": 3883
+    }
+   },
+   "summary_line": "tests=33 pass=33 fail=0 skipped=0 duration_ms=2883.568531"
+  },
+  {
+   "dir": "integrations/wechat-bridge",
+   "fetch_argv": [
+    "npm",
+    "ci"
+   ],
+   "fetch_rc": "0",
+   "fetch_seconds": 11,
+   "install_argv": [
+    "npm",
+    "ci",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 5,
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "exit": "0",
+   "seconds": 7,
+   "logs": {
+    "fetch": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_wechat-bridge.fetch.log",
+     "sha256": "05a12682ee84f9c61b2a9af24549c08e98f6c09d0338d11e06f7f9778327086d",
+     "bytes": 3851
+    },
+    "install": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_wechat-bridge.install.log",
+     "sha256": "3e8a9bf506988f94c74b3b3e9d047e77392f5912d2b5ecc0a1f272f52be43780",
+     "bytes": 3555
+    },
+    "test": {
+     "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_wechat-bridge.test.log",
+     "sha256": "4eeb489ebaa3f326c84d3e31c9603d46bf55a6dbd1ffe5bb97c8cee1a16e294d",
+     "bytes": 7453
+    }
+   },
+   "summary_line": "tests=72 pass=72 fail=0 skipped=0 duration_ms=5434.379652"
+  }
+ ],
+ "no_suite": [
+  {
+   "dir": "integrations/dsh",
+   "install_argv": [
+    "npm",
+    "install",
+    "--offline"
+   ],
+   "install_rc": "0",
+   "install_seconds": 13,
+   "measured": "package.json declares no test script; the gate runs its install and no suite"
+  }
+ ],
+ "over_budget": [],
+ "all_exit_zero": true,
+ "max_test_seconds": 209,
+ "teeth": {
+  "red": {
+   "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/teeth-red-1124.log",
+   "sha256": "de49b91964f80864737055bb0d40806e042955824b723911985edcf5518d1057",
+   "failed_nodeids": [
+    "tests/unit/test_node_projects_declaration_matches_this_repo.py::test_every_discovered_node_project_is_declared_or_a_measured_exception",
+    "tests/unit/test_node_projects_declaration_matches_this_repo.py::test_the_gate_would_park_only_on_the_measured_exceptions"
+   ],
+   "tail": "2 failed, 3 passed, 1 warning in 0.25s"
+  },
+  "green": {
+   "path": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/teeth-green-1124.log",
+   "sha256": "31f6cf55779050d57145091e3531ccd3d4396b49d3fee460fd533c8a60ce55d2",
+   "failed_nodeids": [],
+   "tail": "5 passed, 1 warning in 0.12s"
+  }
+ },
+ "pristine_tree_check": {
+  "dir": "integrations/dsh-channel-slack",
+  "why": "the only arm whose suite resolves a dependency from outside its own project directory; the gate gives every project a fresh snapshot, so this arm was re-run in a copy that never had integrations/dsh-driver/node_modules",
+  "argv": [
+   "npm",
+   "test"
+  ],
+  "exit": "0",
+  "seconds": 2,
+  "summary_line": "tests=26 pass=26 fail=0 skipped=0 duration_ms=767.725882",
+  "log": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/pristine-slack.test.log",
+  "sha256": "96238a851fa3c2e47e751b2821c8a602ee327818e8eeda99d28107ab9cf818ea",
+  "resolved_from": "the image's /opt/aitelier-dsh install (the test's own sdkInstall() roots, first one that carries the pinned @slack/socket-mode 3.1.1)"
+ },
+ "host_load": {
+  "start": "10.32",
+  "end": "10.03",
+  "director_samples_during_the_driver_arm": [
+   {
+    "load": "37.01",
+    "at": "2026-11-23T02:08:50Z"
+   },
+   {
+    "load": "20.52",
+    "at": "2026-11-23T02:10:22Z"
+   }
+  ],
+  "source": "the arm script's own tree.txt for start/end; the director's own /proc/loadavg reads for the two samples in the middle of the driver arm (this host carries other drivers' measurement containers, so every wall time here is an UPPER bound)"
+ },
+ "repeat_measurements": [
+  {
+   "dir": "integrations/dsh-driver",
+   "argv": [
+    "npm",
+    "test"
+   ],
+   "summary_line": "tests=788 pass=788 fail=0 skipped=0 duration_ms=245243.30875",
+   "log": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/test.log",
+   "sha256": "1d2773adbebf647cb3f0e40cab2c3b97bab96a75f7051540545ebd7b908446ff",
+   "shape_difference": "one standalone run 8 minutes before the seven-arm pass: fetch was `npm install` (76 s) where the pass used `npm ci` (60 s); same image, same uid 1000, same container flags, network none for the test",
+   "host_load": "13.26 at 02:02:54Z"
+  }
+ ],
+ "corrections": {
+  "previous_report": {
+   "path": "/home/linxuhao/.AItelier/director/work/nodegate-1123c/nodegate-declaration-1123c.json",
+   "sha256": "792de192773b445f3e328c9e557e254578e5c10a7d80c87acaa50ac5673cd4c5",
+   "attempt_id": "attempt-bbe29bf5a49d4edd91b7ca6b6c725f13",
+   "delivered_commit": "2da7d1dcc23cc20f9809ba3e4fdfcba701f14f68"
+  },
+  "arms_whose_verdict_changes": {
+   "integrations/dsh-driver": {
+    "previous_exit": 1,
+    "previous_seconds": 334,
+    "previous_log": "/home/linxuhao/.AItelier/director/reports/nodegate-1123c/dsh-driver.log",
+    "previous_log_sha256": "ad0cd32e01ca037d4c09a37439e151bf9a492faa1f4c8a21cc9f8a8ebab90dbf",
+    "corrected_exit": "0",
+    "corrected_seconds": 209,
+    "corrected_log": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-driver.test.log",
+    "corrected_log_sha256": "923a978de65a5c3aa1df6911e3ddb00d83db1623cb34df8391326e6154a23a49"
+   },
+   "integrations/dsh-director": {
+    "previous_exit": 1,
+    "previous_seconds": 163,
+    "previous_log": "/home/linxuhao/.AItelier/director/reports/nodegate-1123c/dsh-director.log",
+    "previous_log_sha256": "541df40f55d5a710f8fbb191990f9b00fe7a8c1e17ac16c9a855084646a9e6c8",
+    "corrected_exit": "0",
+    "corrected_seconds": 106,
+    "corrected_log": "/home/linxuhao/.AItelier/director/reports/nodegate-1124/integrations_dsh-director.test.log",
+    "corrected_log_sha256": "0735ba37cd9f1134f9bf5b97780eceb306a99b7258f0c954cb9e112746daa3e5"
+   }
+  },
+  "arms_whose_seconds_moved_without_changing_verdict": {
+   "web": {
+    "previous_seconds": 67,
+    "corrected_seconds": 64
+   },
+   "integrations/dsh": {
+    "previous_seconds": 8,
+    "corrected_seconds": 0
+   },
+   "integrations/dsh-channel-slack": {
+    "previous_seconds": 3,
+    "corrected_seconds": 1
+   },
+   "integrations/dsh-channel-wechat": {
+    "previous_seconds": 14,
+    "corrected_seconds": 4
+   }
+  },
+  "why": "The two arms that reported a failure and a wall time far above every other arm were measured with the process running as uid 0. The proof is in those arms' own logs: integrations/dsh-director/test/memory-vector.test.mjs test 9 (r30) fails with EISDIR on unlink '<vfile>.filter-blocked', and its fixture only creates that path as a DIRECTORY when process.getuid() === 0 (blockFilter: mkdirSync for root, chmod 0o400 otherwise). The suite branches on the uid, so a root arm measures a shape the gate never uses: core/repository_executor.py:896 runs every node command with --user os.getuid():os.getgid(), and the backend process is uid 1000."
+ }
+}

@@ -3,6 +3,7 @@
     "web",
     "integrations/dsh",
     "integrations/dsh-driver",
+    "integrations/dsh-channel-slack",
     "integrations/dsh-channel-wechat",
     "integrations/wechat-bridge"
   ]

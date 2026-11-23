@@ -4,9 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { apply, HELD_PER_SENDER, inject, isOwnerDm, loadSlack, name, readTokens, reconnectDelay, slackChannel, splitText, SLACK_TEXT_LIMIT } from '../index.mjs';
@@ -368,13 +368,44 @@ test('a socket that cannot start reports why, without the token, and does not cr
   await channel.stop();
 });
 
+/** The install that carries the pinned Slack SDK, and the paths inside it.
+ *
+ *  This plugin ships no SDK copy of its own (index.mjs:227-233): the DSH runtime installs
+ *  it and hands its entry to loadSlack. So the SDK is resolved from an install beside the
+ *  runtime, never from this test file's directory -- the node gate installs only the
+ *  measured project's dependencies, so the snapshot it builds for this directory has no
+ *  integrations/dsh-driver/node_modules at all. Three installs carry the same pin, in the
+ *  order they are looked for: a developer's own `npm ci` in the checkout (the development
+ *  fallback), the host install deploy/install_dsh_host.py creates, and the shipped image's
+ *  /opt/aitelier-dsh. The first one that HAS the SDK answers; none is red, naming every
+ *  place that was searched. */
+function sdkInstall() {
+  const roots = [
+    fileURLToPath(new URL('../../dsh-driver', import.meta.url)),
+    resolve(process.env.AITELIER_DSH_HOME ?? join(homedir(), '.local', 'share', 'aitelier-dsh')),
+    '/opt/aitelier-dsh',
+  ];
+  const root = roots.find(candidate => existsSync(join(candidate, 'node_modules', '@slack', 'socket-mode', 'package.json')));
+  if (!root) throw new Error(`no install carries the pinned Slack SDK; looked in ${roots.join(', ')}`);
+  return {
+    root,
+    // createRequire resolves a bare name from the directory of the file it is given, so the
+    // SDK's own package.json rather than the install's: the runtime install's top-level one
+    // is not readable by the container's user, and resolving from here reaches
+    // @slack/web-api as well.
+    resolveFrom: join(root, 'node_modules', '@slack', 'socket-mode', 'package.json'),
+    // The SDK's own source, where the state names and options this plugin relies on are written.
+    socketModeSource: join(root, 'node_modules', '@slack', 'socket-mode', 'dist', 'src', 'SocketModeClient.js'),
+  };
+}
+
 test('with the real SDK, a dropped socket whose reconnect Slack refuses does not reject into the process', async () => {
   // The reviewer's reproduction: with the SDK's own reconnect on, a 'close' schedules
   // start() with no catch, and invalid_auth from apps.connections.open escapes as an
   // unhandled rejection - which ends the steward's process.
-  const driver = fileURLToPath(new URL('../../dsh-driver/package.json', import.meta.url));
-  const slack = loadSlack(driver);
-  const { WebAPIPlatformError } = createRequire(driver)('@slack/web-api');
+  const { resolveFrom } = sdkInstall();
+  const slack = loadSlack(resolveFrom);
+  const { WebAPIPlatformError } = createRequire(resolveFrom)('@slack/web-api');
   let opens = 0;
   class Refused extends slack.SocketModeClient {
     constructor(options) {
@@ -437,19 +468,24 @@ test('apply with no token files: registers slack as disconnected, opens no socke
 });
 
 test('the pinned Slack SDK resolves from the DSH runtime install and has what this plugin uses', () => {
-  // The runtime install mirrors integrations/dsh-driver/package.json; in a checkout that
-  // is integrations/dsh-driver/node_modules (npm ci there). A missing install is red.
-  const driver = fileURLToPath(new URL('../../dsh-driver/package.json', import.meta.url));
-  const pinned = JSON.parse(readFileSync(driver, 'utf8')).dependencies;
+  // The manifest that pins the SDK is the runtime's, integrations/dsh-driver/package.json;
+  // the install that carries it is this checkout's own `npm ci` copy, a host install, or
+  // the image's runtime install (see sdkInstall). A missing install everywhere is red.
+  const manifest = fileURLToPath(new URL('../../dsh-driver/package.json', import.meta.url));
+  const pinned = JSON.parse(readFileSync(manifest, 'utf8')).dependencies;
   assert.equal(pinned['@slack/socket-mode'], '3.1.1');
   assert.equal(pinned['@slack/web-api'], '8.3.0');
-  const slack = loadSlack(driver);
+  const { root, resolveFrom, socketModeSource } = sdkInstall();
+  // The install that answers is that pin, not another Slack SDK that happens to be there.
+  assert.equal(JSON.parse(readFileSync(resolveFrom, 'utf8')).version, pinned['@slack/socket-mode']);
+  assert.equal(JSON.parse(readFileSync(join(root, 'node_modules', '@slack', 'web-api', 'package.json'), 'utf8')).version, pinned['@slack/web-api']);
+  const slack = loadSlack(resolveFrom);
   assert.equal(typeof slack.SocketModeClient, 'function');
   assert.equal(typeof slack.WebClient, 'function');
   assert.equal(slack.logLevel, 'warn');
   const socket = new slack.SocketModeClient({ appToken: 'xapp-test', logLevel: slack.logLevel });
   // The state events status() listens to are the SDK's own names.
-  const source = readFileSync(join(driver, '..', 'node_modules', '@slack', 'socket-mode', 'dist', 'src', 'SocketModeClient.js'), 'utf8');
+  const source = readFileSync(socketModeSource, 'utf8');
   for (const state of ['connected', 'disconnected']) assert.match(source, new RegExp(`= "${state}"`));
   // The option that turns the SDK's own reconnect off, by the name this plugin passes.
   assert.match(source, /autoReconnectEnabled = true,/);

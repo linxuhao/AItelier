@@ -173,7 +173,9 @@ def request_identity(request):
     token is 'cli_owner' (the owner's terminal, minted below), and a registered
     driver token is 'driver'.
     """
-    return _resolved(("identity", id(request)), lambda: _request_identity(request))
+    # The request is kept beside its identity, so its id cannot be reused by
+    # another request object while the block lives.
+    return _resolved(("identity", id(request)), lambda: (request, _request_identity(request)))[1]
 
 
 def _request_identity(request):

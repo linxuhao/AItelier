@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..768d869 100644
+index ec6c930..dc1fe26 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -9,14 +9,21 @@ use std::{
@@ -72,9 +72,29 @@ index ec6c930..768d869 100644
  #[derive(Default, Serialize)]
  struct SelfProfile {
      nickname: Option<String>,
-@@ -69,6 +114,46 @@ enum Operation {
+@@ -62,13 +107,66 @@ struct SelfProfile {
+     avatar: Option<String>,
+ }
+ 
++/// A contact WeChat answered for an exact username. A username it refused is
++/// absent from the answer array, never filled in with the id as a fake name.
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ContactProfile {
++    id: String,
++    nickname: Option<String>,
++    alias: Option<String>,
++    avatar: Option<String>,
++}
++
+ enum Operation {
+     StartLogin,
+     PollLogin,
+     Heartbeat,
      PollIncoming,
      Sync { scene: u32 },
++    /// Display names for exact usernames, one account request per username.
++    LookupContacts { usernames: Vec<String> },
      SendText { destination: String, text: String },
 +    /// A voice note: already-encoded SILK bytes and how long they play for.
 +    SendVoice {
@@ -119,7 +139,7 @@ index ec6c930..768d869 100644
      LookupSelf,
      Logout,
      Close,
-@@ -117,6 +202,109 @@ impl NeoSession {
+@@ -117,11 +215,119 @@ impl NeoSession {
          self.task(Operation::SendText { destination, text })
      }
  
@@ -229,7 +249,17 @@ index ec6c930..768d869 100644
      #[napi]
      pub fn lookup_self(&self) -> AsyncTask<NeoTask> {
          self.task(Operation::LookupSelf)
-@@ -167,12 +355,30 @@ impl Task for NeoTask {
+     }
+ 
++    #[napi]
++    pub fn lookup_contacts(&self, usernames: Vec<String>) -> AsyncTask<NeoTask> {
++        self.task(Operation::LookupContacts { usernames })
++    }
++
+     #[napi]
+     pub fn logout(&self) -> AsyncTask<NeoTask> {
+         self.task(Operation::Logout)
+@@ -167,12 +373,31 @@ impl Task for NeoTask {
              Operation::PollIncoming => "wait for incoming message notifications",
              Operation::Sync { .. } => "read a sync page",
              Operation::SendText { .. } => "prepare a text send",
@@ -245,6 +275,7 @@ index ec6c930..768d869 100644
 +            Operation::DecodeVoice { .. } => "decode a WeChat voice note",
 +            Operation::EncodeWav { .. } => "encode a WeChat voice note",
              Operation::LookupSelf => "look up the account profile",
++            Operation::LookupContacts { .. } => "look up contacts",
              Operation::Logout => "log out",
              Operation::Close => "close the session",
          };
@@ -261,7 +292,7 @@ index ec6c930..768d869 100644
      }
  
      fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-@@ -183,18 +389,53 @@ impl Task for NeoTask {
+@@ -183,18 +408,53 @@ impl Task for NeoTask {
  /// The error text TypeScript receives. When WeChat answered, it adds the service
  /// and its code, or why the account stopped. It never contains credentials or
  /// message content.
@@ -316,7 +347,7 @@ index ec6c930..768d869 100644
  fn options() -> NativeOptions {
      NativeOptions {
          timeout: Duration::from_secs(10),
-@@ -284,6 +525,251 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -284,7 +544,253 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
                  account.request_blocking(|request| request.send_text(&destination, &text, &send))
              }))
          }
@@ -566,9 +597,11 @@ index ec6c930..768d869 100644
 +            }))
 +        }
          Operation::LookupSelf => lookup_self(session),
++        Operation::LookupContacts { usernames } => lookup_contacts(session, &usernames),
          Operation::Logout => {
              session.incoming = None;
-@@ -324,7 +810,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+             let account = session.account.take().context("No active session")?;
+@@ -324,7 +830,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
          .own_username;
      let cursor = session.received_cursor.clone();
      let batch = connection(session)?.sync(&cursor, scene)?;
@@ -577,11 +610,41 @@ index ec6c930..768d869 100644
      session.received_cursor = batch.cursor;
      Ok(json!({ "messages": messages, "continuation": batch.continuation }))
  }
-@@ -451,15 +937,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+@@ -451,15 +957,178 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      }
  }
  
 -fn text_messages(commands: Vec<wire::SyncCommand>, username: &str) -> Vec<TextMessage> {
++/// Names for exact usernames. `lookup_contacts` accepts one or two identities per
++/// request (wechat-protocol 2.2.0 wire.rs:643-647); one at a time also keeps one
++/// refused member from losing the others. A fresh `request_blocking` per username
++/// matters: `AccountRequest::admit` allows one operation per context. A username
++/// WeChat will not answer has no `ContactRecord` (wire.rs:745-747), so no profile
++/// is emitted for it and the caller keeps its id-only fallback.
++fn lookup_contacts(session: &mut Session, usernames: &[String]) -> Result<Value> {
++    let account = session.account.as_ref().context("No active session")?;
++    let present = |value: Option<String>| value.filter(|text| !text.is_empty());
++    let mut profiles = Vec::new();
++    for username in usernames {
++        let lookup = account.request_blocking(|request| {
++            request.lookup_contacts(std::slice::from_ref(username))
++        })?;
++        if let Some(contact) = lookup
++            .contacts
++            .into_iter()
++            .find(|contact| &contact.username == username)
++        {
++            profiles.push(ContactProfile {
++                id: username.clone(),
++                nickname: present(contact.nickname),
++                alias: present(contact.alias),
++                avatar: present(contact.large_avatar_url).or(present(contact.small_avatar_url)),
++            });
++        }
++    }
++    Ok(json!(profiles))
++}
++
 +/// One CDN client for this account. The upload hosts come from the session; the bytes
 +/// then go straight to the CDN, not through the account's request queue.
 +fn cdn_client(account: &NativeClient) -> Result<CdnClient> {
@@ -728,7 +791,7 @@ index ec6c930..768d869 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
-@@ -558,7 +1177,7 @@ mod tests {
+@@ -558,7 +1227,7 @@ mod tests {
          );
          let error = result.unwrap_err();
          assert!(error.is::<SessionEnded>());
@@ -737,7 +800,7 @@ index ec6c930..768d869 100644
          assert_eq!(steps, ["attempt", "reconnect", "attempt", "renew"]);
      }
  
-@@ -611,7 +1230,7 @@ mod tests {
+@@ -611,7 +1280,7 @@ mod tests {
          let error = result.unwrap_err();
          assert!(!error.is::<SessionEnded>());
          assert_eq!(
@@ -746,7 +809,7 @@ index ec6c930..768d869 100644
              "Neo could not read a sync page: Sync service returned -1"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -619,7 +1238,7 @@ mod tests {
+@@ -619,7 +1288,7 @@ mod tests {
          let stopped = anyhow::Error::new(AccountInterrupted::Stopped).context("Account is stopped");
          let (result, steps) = scripted_recovery(vec![Err(stopped)], Ok(()));
          assert_eq!(
@@ -755,7 +818,7 @@ index ec6c930..768d869 100644
              "Neo could not read a sync page: Account stopped"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -632,7 +1251,7 @@ mod tests {
+@@ -632,7 +1301,7 @@ mod tests {
              Ok(()),
          );
          assert_eq!(
@@ -764,7 +827,7 @@ index ec6c930..768d869 100644
              "Neo could not read a sync page"
          );
          assert_eq!(steps, ["attempt", "reconnect", "attempt"]);
-@@ -742,6 +1361,162 @@ mod tests {
+@@ -742,6 +1411,162 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }
  
@@ -927,7 +990,7 @@ index ec6c930..768d869 100644
      #[test]
      fn closing_without_a_session_resets_state() {
          let mut session = Session {
-@@ -756,7 +1531,7 @@ mod tests {
+@@ -756,7 +1581,7 @@ mod tests {
  
      #[test]
      fn unhandled_sync_commands_are_skipped() {
@@ -936,7 +999,7 @@ index ec6c930..768d869 100644
              vec![wire::SyncCommand {
                  id: 9999,
                  payload: vec![42],
-@@ -765,4 +1540,35 @@ mod tests {
+@@ -765,4 +1590,35 @@ mod tests {
          );
          assert!(messages.is_empty());
      }
@@ -973,7 +1036,7 @@ index ec6c930..768d869 100644
 +    }
  }
 diff --git a/src/native.ts b/src/native.ts
-index eea2d34..74037d2 100644
+index eea2d34..65ac62e 100644
 --- a/src/native.ts
 +++ b/src/native.ts
 @@ -22,6 +22,63 @@ export interface IncomingText {
@@ -1040,7 +1103,7 @@ index eea2d34..74037d2 100644
  export interface Session {
    startLogin(): Promise<{ png: string }>
    pollLogin(): Promise<
-@@ -30,8 +87,38 @@ export interface Session {
+@@ -30,8 +87,40 @@ export interface Session {
    >
    heartbeat(): Promise<{ sync: boolean, intervalMs: number }>
    pollIncoming(): Promise<boolean>
@@ -1077,10 +1140,12 @@ index eea2d34..74037d2 100644
 +  decodeVoice(silk: string): Promise<{ wavBase64: string, durationMs: number }>
 +  /** That WAV back to one base64 SILK voice note, so an arriving note can be sent on. */
 +  encodeWav(wav: string): Promise<{ silkBase64: string, durationMs: number }>
++  /** Names WeChat has for these exact usernames: one entry per answered username. */
++  lookupContacts(usernames: string[]): Promise<Array<{ id: string, nickname: string | null, alias: string | null, avatar: string | null }>>
    lookupSelf(): Promise<SelfProfile>
    logout(): Promise<{ accepted: boolean }>
    close(): Promise<void>
-@@ -68,6 +155,14 @@ export function openNativeSession(): Session {
+@@ -68,6 +157,15 @@ export function openNativeSession(): Session {
      pollIncoming: async () => JSON.parse(await addon.pollIncoming()),
      sync: async (scene) => JSON.parse(await addon.sync(scene)),
      sendText: async (destination, text) => JSON.parse(await addon.sendText(destination, text)),
@@ -1092,11 +1157,12 @@ index eea2d34..74037d2 100644
 +    downloadVoice: async (serverId, length) => JSON.parse(await addon.downloadVoice(serverId, length)),
 +    decodeVoice: async (silk) => JSON.parse(await addon.decodeVoice(silk)),
 +    encodeWav: async (wav) => JSON.parse(await addon.encodeWav(wav)),
++    lookupContacts: async (usernames) => JSON.parse(await addon.lookupContacts(usernames)),
      lookupSelf: async () => JSON.parse(await addon.lookupSelf()),
      logout: async () => JSON.parse(await addon.logout()),
      close: async () => { await addon.close() },
 diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
-index 9da9e02..ffa0bd5 100644
+index 9da9e02..334b185 100644
 --- a/src/puppet-neo.ts
 +++ b/src/puppet-neo.ts
 @@ -1,11 +1,49 @@
@@ -1318,7 +1384,7 @@ index 9da9e02..ffa0bd5 100644
  
    constructor(options: PuppetOptions = {}) {
      super(options)
-@@ -125,14 +315,73 @@ export class PuppetNeo extends Puppet {
+@@ -125,14 +315,102 @@ export class PuppetNeo extends Puppet {
    override async contactRawPayload(id: string): Promise<payloads.Contact> {
      if (id === this.currentUserId) return this.selfContact(id)
      const contact = this.contacts.get(id)
@@ -1337,6 +1403,34 @@ index 9da9e02..ffa0bd5 100644
 +      phone: [],
 +      type: types.Contact.Individual,
 +      gender: types.ContactGender.Unknown,
++    }
++  }
++
++  /**
++   * Ask WeChat once for a group sender's display name, before Wechaty loads the
++   * talker of the message about to be emitted. `rememberContact` caches an
++   * unknown-type, id-named placeholder: it is also the marker that this id has
++   * not been resolved. A refusal or a nameless answer leaves that placeholder
++   * alone, so nothing is invented and a refused id is not asked about again on
++   * every message.
++   */
++  private async resolveRoomMemberName(session: Session, id: string): Promise<void> {
++    if (!id || id === this.currentUserId || id.endsWith('@chatroom')) return
++    const cached = this.contacts.get(id)
++    if (!cached || cached.type !== types.Contact.Unknown) return
++    try {
++      const [profile] = await session.lookupContacts([id])
++      const name = profile?.nickname?.trim() || profile?.alias?.trim()
++      if (!name || name === id) return
++      putRecent(this.contacts, id, {
++        ...cached,
++        name,
++        type: types.Contact.Individual,
++        ...(profile?.alias ? { weixin: profile.alias } : {}),
++        ...(profile?.avatar ? { avatar: profile.avatar } : {}),
++      })
++    } catch {
++      // No name from WeChat: the id-only payload stays, and the bridge omits sender_name.
 +    }
    }
  
@@ -1384,7 +1478,8 @@ index 9da9e02..ffa0bd5 100644
 +    roomId: string,
 +    contactId: string,
 +  ): Promise<payloads.RoomMember & { roomId: string }> {
-+    return { id: contactId, roomId, avatar: '', name: contactId }
++    const known = this.contacts.get(contactId)?.name
++    return { id: contactId, roomId, avatar: '', name: known && known !== contactId ? known : contactId }
 +  }
 +
 +  override async roomMemberRawPayloadParser(payload: payloads.RoomMember): Promise<payloads.RoomMember> {
@@ -1394,7 +1489,7 @@ index 9da9e02..ffa0bd5 100644
    override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
      if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
      const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
-@@ -150,6 +399,103 @@ export class PuppetNeo extends Puppet {
+@@ -150,6 +428,103 @@ export class PuppetNeo extends Puppet {
      }
    }
  
@@ -1498,11 +1593,14 @@ index 9da9e02..ffa0bd5 100644
    private async stopServing(): Promise<void> {
      this.abort?.abort()
      await this.run
-@@ -236,7 +582,16 @@ export class PuppetNeo extends Puppet {
+@@ -236,7 +611,19 @@ export class PuppetNeo extends Puppet {
        for (const item of page.messages) {
          if (this.messages.has(item.id)) continue
          this.rememberContact(item.talker)
 -        const text = { id: item.id, talkerId: item.talker, text: item.text, timestamp: item.timestamp, type: types.Message.Text }
++        // A group's talker is an id from the wire. Resolve it before `emit`:
++        // Wechaty reads talker().name() while loading the message.
++        if (item.room) await this.resolveRoomMemberName(session, item.talker)
 +        const text = {
 +          id: item.id,
 +          talkerId: item.talker,

@@ -104,6 +104,24 @@ def patch_hunks(patch: str) -> dict[str, list[tuple[int, int, list[str]]]]:
     return files
 
 
+def hunk_start(original: list[str], old_start: int, old_count: int, body: list[str], path: str) -> int:
+    """Where a hunk's own old-side lines really are in `original`.
+
+    A hunk header names a line in the tree the patch was cut against, and the pin's
+    second patch was cut against the first patch's result. The first patch has to be
+    able to grow - that is what a fork patch is for - and every line it adds above a
+    hunk moves that hunk down, so the header is then that many lines early. The image
+    build's `git apply` absorbs that by matching the hunk's own lines; this does the
+    same, and still fails when the old side is nowhere at or after where it should be.
+    """
+    expected = old_start - 1 if old_count else old_start
+    old = [entry[1:] for entry in body if entry[0] in " -"]
+    for start in range(expected, len(original) + 1):
+        if original[start : start + len(old)] == old:
+            return start
+    raise AssertionError(f"{path}: the hunk at line {old_start} matches nothing")
+
+
 def apply_patch(patch: str, root: Path) -> None:
     """Apply a unified diff to the files under root, or fail."""
     for path, hunks in patch_hunks(patch).items():
@@ -113,7 +131,7 @@ def apply_patch(patch: str, root: Path) -> None:
         patched: list[str] = []
         cursor = 0
         for old_start, old_count, body in hunks:
-            start = old_start - 1 if old_count else old_start
+            start = hunk_start(original, old_start, old_count, body, path)
             assert start >= cursor, f"{path}: hunks are out of order at line {old_start}"
             patched.extend(original[cursor:start])
             cursor = start
@@ -786,3 +804,97 @@ def test_the_file_branch_keeps_one_request_and_its_own_profile(tmp_path: Path, p
     assert loop_body.count(DOWNLOAD_CALL) == 1, "the file request leaves the one attempt loop"
 
 # placeholder
+
+
+def test_the_fork_resolves_a_group_senders_name_once_and_keeps_the_id_fallback(tmp_path: Path, pin: dict) -> None:
+    """A group message names its member: the addon looks the username up, and an id WeChat
+    refuses stays the id.
+
+    The wire names a group message's sender by username and nothing else, and the puppet
+    cached that username as if it were the name. The crate the addon already depends on
+    (wechat-protocol 2.2.0) can look any username up, so the addon exposes that lookup, the
+    puppet asks it before Wechaty loads the talker, and `roomMemberRawPayload` answers the
+    resolved name. A member WeChat will not answer keeps the id-only payload it had, which
+    the bridge already reads as "no name" and omits sender_name for.
+    """
+    snapshot = applied_snapshot(tmp_path, pin, "names")
+    rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
+    native_ts = (snapshot / "src/native.ts").read_text(encoding="utf-8")
+    puppet = (snapshot / "src/puppet-neo.ts").read_text(encoding="utf-8")
+
+    # The addon's operation exists, is reachable from napi, and is dispatched to the helper.
+    assert "    /// Display names for exact usernames, one account request per username.\n" in rust
+    assert "    LookupContacts { usernames: Vec<String> },\n" in rust
+    assert "pub fn lookup_contacts(&self, usernames: Vec<String>) -> AsyncTask<NeoTask> {" in rust
+    assert "Operation::LookupContacts { usernames } => lookup_contacts(session, &usernames)," in rust
+
+    # The helper is one account request per username (the crate admits one operation per
+    # request context), and it answers only the usernames WeChat sent a record for: the id is
+    # carried as the id, and a refused username emits no profile at all.
+    helper_start = rust.index(
+        "fn lookup_contacts(session: &mut Session, usernames: &[String]) -> Result<Value> {"
+    )
+    _, helper_end = balanced_slice(rust, rust.index("{", helper_start))
+    helper = rust[helper_start:helper_end]
+    assert "for username in usernames {" in helper
+    assert "request_blocking(|request| {" in helper
+    assert "request.lookup_contacts(std::slice::from_ref(username))" in helper
+    assert "ContactProfile {" in helper
+    assert "nickname: present(contact.nickname)" in helper
+    assert "alias: present(contact.alias)" in helper
+    assert "id: username.clone()" in helper
+    assert "Some(username" not in helper, "the helper fills in the id as a name"
+    assert "unwrap_or_else(|| username" not in helper, "the helper falls back to the id as a name"
+
+    # Across the napi boundary: the session method, and the wrapper that calls the addon.
+    assert "lookupContacts(usernames: string[]): Promise<Array<{ id: string, nickname: string | null, alias: string | null, avatar: string | null }>>" in native_ts
+    assert "lookupContacts: async (usernames) => JSON.parse(await addon.lookupContacts(usernames))," in native_ts
+
+    # The puppet asks once, for a contact it has cached as an unknown-type, id-named
+    # placeholder - that placeholder is also the marker that the id was not resolved yet.
+    assert "private rememberContact(id: string): void {" in puppet
+    assert "type: types.Contact.Unknown, gender: types.ContactGender.Unknown," in puppet
+    resolve_start = puppet.index(
+        "private async resolveRoomMemberName(session: Session, id: string): Promise<void> {"
+    )
+    _, resolve_end = balanced_slice(puppet, puppet.index("{", resolve_start))
+    resolve = puppet[resolve_start:resolve_end]
+    assert "const cached = this.contacts.get(id)" in resolve
+    assert "cached.type !== types.Contact.Unknown" in resolve
+    assert "await session.lookupContacts([id])" in resolve
+    assert "const name = profile?.nickname?.trim() || profile?.alias?.trim()" in resolve
+    assert "type: types.Contact.Individual," in resolve
+    assert "name," in resolve
+    # A refused or nameless answer changes nothing; a name equal to the id is no name.
+    assert "if (!name || name === id) return" in resolve
+    # ...and it runs for a group message's talker before `emit`, because Wechaty reads the
+    # talker's name while loading the message.
+    drain_start = puppet.index("private async drain(")
+    _, drain_end = balanced_slice(puppet, puppet.index("{", drain_start))
+    drain = puppet[drain_start:drain_end]
+    called = drain.index("await this.resolveRoomMemberName(session, item.talker)")
+    assert "if (item.room) await this.resolveRoomMemberName(session, item.talker)" in drain
+    assert drain.index("this.rememberContact(item.talker)") < called < drain.index("this.emit('message'"), (
+        "the lookup runs after the message was emitted, or not for a cached talker at all"
+    )
+
+    # The member payload answers the resolved name, and still answers the id when nothing
+    # was resolved: `known` is then absent, or still the id itself.
+    member_start = puppet.index("override async roomMemberRawPayload(")
+    # Its return type carries an object literal (`{ roomId: string }`), so the body is the
+    # brace after the type, not the first one after the method's name.
+    member_open = puppet.index("> {", member_start) + 2
+    _, member_end = balanced_slice(puppet, member_open)
+    member = puppet[member_start:member_end]
+    assert "const known = this.contacts.get(contactId)?.name" in member
+    assert "name: known && known !== contactId ? known : contactId" in member
+    assert "return { id: contactId, roomId, avatar: '', name: contactId }" not in puppet, (
+        "a room member is still answered with the id as its name, whatever was cached"
+    )
+    # The unresolved-contact payload itself is unchanged: it still names itself by id, which
+    # is what the bridge reads as no name and what the helper above takes as its marker.
+    contact_start = puppet.index("override async contactRawPayload(")
+    _, contact_end = balanced_slice(puppet, puppet.index("{", contact_start))
+    contact = puppet[contact_start:contact_end]
+    assert "name: id," in contact
+    assert "type: types.Contact.Individual," in contact

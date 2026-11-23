@@ -114,8 +114,8 @@ def test_a_driver_request_after_the_start_was_settled_opens_nothing(tmp_path, mo
     for this file, building that request's service asks nothing more of the database
     (the steward check used to open a connection on every such request)."""
     db = DBManager(str(tmp_path / "state.db"))
-    construct(db)
-    construct(db)
+    for _ in range(2):      # set up, then the file's sentinel reader
+        construct(db)
     monkeypatch.setattr(state_channels, "_START_SETTLED", {db.db_path})
     counted = Counted(monkeypatch)
     StateService(db, None, actor="driver:ada", project_read_trusted=True, driver_id="ada")

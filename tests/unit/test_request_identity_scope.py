@@ -53,8 +53,7 @@ def test_a_token_suspended_between_two_requests_stops_authorizing(world):
 
 def test_outside_a_block_nothing_is_kept(world):
     request = request_with(world.tokens["ada"])
-    assert authz.request_identity(request).driver_id == "ada"
-    assert authz.request_identity(request).driver_id == "ada"
+    assert [authz.request_identity(request).driver_id for _ in range(2)] == ["ada", "ada"]
     assert len(world.lookups) == 2, "outside identity_resolved_once every call resolves anew"
 
 

@@ -13,7 +13,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS, MEDIA_LIMITS, MEDIA_FETCH, MEDIA_SEND, mediaOf,
   sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError, RESUME_LIMITS, accountRecord, ACCOUNT_FILE,
-  RING_SIZE, GROUP_RING_SIZE, STRANGER_RING_SIZE, MEDIA_STORE_BYTES, MEDIA_STORE_DIR, groupMediaSenderProbe, isBase64Content } from './bridge.mjs';
+  RING_SIZE, GROUP_RING_SIZE, STRANGER_RING_SIZE, MEDIA_STORE_BYTES, MEDIA_STORE_DIR, groupMediaSenderProbe, isBase64Content,
+  memberIdOfContent } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
 const types = { Message: { Unknown: 0, Attachment: 1, Audio: 2, Emoticon: 5, Image: 6, Text: 7, Video: 15 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
@@ -946,7 +947,8 @@ const postFile = (s, query, bytes, token = TOKEN) => fetch(`http://${s.address.a
   .then(async r => [r.status, await r.json()]);
 
 // The group media sender probe (issue iss-57425aae7b3f4164): a read-only line that settles
-// whether the typed content names the poster. Every assertion below is on the rendered line.
+// whether the typed content names the poster, and which wire field named the sender the relay
+// records. Every assertion below is on the rendered line.
 const probeMessage = content => {
   const made = mediaMessage({ kind: 'image', roomId: ROOM, from: ROOM });
   if (content !== undefined) made.payload.content = b64(content);
@@ -970,13 +972,13 @@ test('group media sender probe: a wxid prefix renders its shape and a digest the
   const content = prefix + '<msg><img aeskey="SECRET" /></msg>';
   const hash = createHash('sha256').update(Buffer.from(prefix)).digest('hex').slice(0, 12);
   assert.deepEqual(probeLines(probeMessage(content)), [
-    `group media sender probe: type=6 senderIsRoom=true contentBytes=${Buffer.byteLength(content)} `
+    `group media sender probe: type=6 senderIsRoom=true senderSource=content-prefix contentBytes=${Buffer.byteLength(content)} `
     + `prefixBytes=${Buffer.byteLength(prefix)} prefixShape=wxid prefixHash=${hash} wxidTokens=1 chatroomTokens=0`,
   ]);
 });
 
 test('group media sender probe: missing, empty and non-base64 content all render empty', () => {
-  const line = 'group media sender probe: type=6 senderIsRoom=true contentBytes=0 prefixBytes=0 '
+  const line = 'group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes=0 prefixBytes=0 '
     + 'prefixShape=empty prefixHash=- wxidTokens=0 chatroomTokens=0';
   const nonBase64 = probeMessage();
   nonBase64.payload.content = '<< not base64! >>';
@@ -1008,7 +1010,7 @@ test('group media sender probe: the linear base64 validator agrees with the rege
 });
 
 test('group media sender probe: content shaped `<data>=<other>` is not base64 and prints contentBytes=0', () => {
-  const line = 'group media sender probe: type=6 senderIsRoom=true contentBytes=0 prefixBytes=0 '
+  const line = 'group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes=0 prefixBytes=0 '
     + 'prefixShape=empty prefixHash=- wxidTokens=0 chatroomTokens=0';
   const overAccepted = probeMessage();
   overAccepted.payload.content = 'AAAAAA=A';
@@ -1020,7 +1022,7 @@ test('group media sender probe: XML-first content has no prefix and an other sha
   const content = '<msg><img aeskey="SECRET" />wxid_member 123456@chatroom</msg>';
   const lines = probeLines(probeMessage(content));
   assert.deepEqual(lines, [
-    `group media sender probe: type=6 senderIsRoom=true contentBytes=${Buffer.byteLength(content)} `
+    `group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes=${Buffer.byteLength(content)} `
     + 'prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=1 chatroomTokens=1',
   ]);
   assert.ok(!['SECRET', 'wxid_member', '123456@chatroom'].some(secret => lines[0].includes(secret)), lines[0]);
@@ -1045,7 +1047,7 @@ test('group media sender probe: one line for a room-sent group medium, none for 
     ]);
     const probes = logs.filter(line => line.startsWith('group media sender probe:'));
     assert.equal(probes.length, 1, logs.join('\n'));
-    assert.equal(probes[0], 'group media sender probe: type=6 senderIsRoom=true contentBytes='
+    assert.equal(probes[0], 'group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes='
       + `${Buffer.byteLength(XML.image(5))} prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=0 chatroomTokens=0`);
     assert.ok(!logs.some(line => line.includes('PHOTO') || line.includes(ROOM)), logs.join('\n'));
   } finally { await s.bridge.close(); }
@@ -1069,7 +1071,7 @@ test('group media sender probe: a 5 MiB base64 medium is relayed and prints one 
     assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.sender_ref, e.attachments?.map(a => [a.kind, a.size])]),
       [['group_message', 'huge-media', ROOM, [['image', 5]]]]);
     const probes = logs.filter(line => line.startsWith('group media sender probe:'));
-    assert.deepEqual(probes, ['group media sender probe: type=6 senderIsRoom=true contentBytes=3750000 '
+    assert.deepEqual(probes, ['group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes=3750000 '
       + 'prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=0 chatroomTokens=0']);
     assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
     assert.ok(probes[0].length < 200 && !probes[0].includes(content), 'the line stays redacted');
@@ -1099,7 +1101,7 @@ test('group media sender probe: a one-shot talker, room id and content getter st
       [['group_message', 'one-shot', ROOM, [['image', 5]]]]);
     assert.deepEqual([talkerCalls, roomReads, contentReads], [1, 1, 1], 'each puppet accessor answered exactly once');
     assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')),
-      ['group media sender probe: type=6 senderIsRoom=true contentBytes=' + `${Buffer.byteLength(XML.image(5))} `
+      ['group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes=' + `${Buffer.byteLength(XML.image(5))} `
         + 'prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=0 chatroomTokens=0']);
     assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
   } finally { await s.bridge.close(); }
@@ -1121,9 +1123,125 @@ test('group media sender probe: a content getter whose one answer is undefined i
       [['group_message', 'absent-content', ROOM]]);
     assert.equal(contentReads, 1, 'the payload content was read once, absent or not');
     assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')),
-      ['group media sender probe: type=6 senderIsRoom=true contentBytes=0 '
+      ['group media sender probe: type=6 senderIsRoom=true senderSource=room contentBytes=0 '
         + 'prefixBytes=0 prefixShape=empty prefixHash=- wxidTokens=0 chatroomTokens=0']);
     assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
+  } finally { await s.bridge.close(); }
+});
+
+// A group medium whose talker is the room: the poster is named only by the member id the
+// payload content begins with (`<member>:\n<XML>`, the prefix a group text already carries).
+test('group media: a room talker with a member-id content prefix records that member id and the probe says content-prefix', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    const memberId = 'wxid_poster9';
+    const prefix = memberId + ':\n';
+    const content = prefix + XML.image(5);
+    const photo = mediaMessage({ kind: 'image', id: 'prefixed-media', roomId: ROOM, from: ROOM, xml: XML.image(5), bytes: Buffer.from('PHOTO') });
+    photo.payload.content = b64(content);
+    bot.emit('message', photo);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.room_ref, e.sender_ref, e.message_ref, e.text, e.asked]),
+      [['group_message', ROOM, memberId, 'prefixed-media', '', false]]);
+    // The wire's digest covers the member id and its two-character separator, exactly.
+    const hash = createHash('sha256').update(prefix).digest('hex').slice(0, 12);
+    assert.equal(hash, createHash('sha256').update(memberId + ':\n').digest('hex').slice(0, 12));
+    const probes = logs.filter(line => line.startsWith('group media sender probe:'));
+    assert.deepEqual(probes, [
+      `group media sender probe: type=6 senderIsRoom=true senderSource=content-prefix contentBytes=${Buffer.byteLength(content)} `
+      + `prefixBytes=${Buffer.byteLength(prefix)} prefixShape=wxid prefixHash=${hash} wxidTokens=1 chatroomTokens=0`,
+    ]);
+    assert.ok(!probes[0].includes(memberId) && !probes[0].includes(ROOM), 'the line names no id');
+    // The medium is still the room's to fetch: only the sender changed.
+    assert.equal((await fetchMedia(s, body.events[0].attachments[0].media_id))[0], 200);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: a group text message keeps the sender_ref it has today, and the prefix is not read for one', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    bot.emit('message', roomMessage({ id: 'text-member', text: '@管家 这个图上是什么' }));
+    // A text message whose talker is the room stays the room: only a medium is re-attributed.
+    bot.emit('message', roomMessage({ id: 'text-room', text: '@管家 hi', from: ROOM }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.room_ref, e.sender_ref, e.message_ref, e.text]),
+      [['group_message', ROOM, 'wxid_m1', 'text-member', '这个图上是什么'],
+        ['group_message', ROOM, ROOM, 'text-room', 'hi']]);
+    assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')), []);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: a 1:1 message keeps its sender_ref even when its content begins with a member id', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    const photo = mediaMessage({ kind: 'image', id: 'direct-prefixed', from: 'wxid_owner', xml: XML.image(5), bytes: Buffer.from('PHOTO') });
+    photo.payload.content = b64('wxid_poster9:\n' + XML.image(5));
+    bot.emit('message', photo);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.room_ref ?? null, e.sender_ref, e.message_ref]),
+      [['message', null, 'wxid_owner', 'direct-prefixed']]);
+    assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')), []);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: a room talker with no member-id prefix keeps the room and the probe says room', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    // XML-first content: the prefix is empty, so there is no member id to record.
+    bot.emit('message', mediaMessage({ kind: 'voice', id: 'unprefixed-voice', roomId: ROOM, from: ROOM, xml: XML.voice(3000) }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.room_ref, e.sender_ref, e.message_ref]),
+      [['group_message', ROOM, ROOM, 'unprefixed-voice']]);
+    assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')),
+      ['group media sender probe: type=2 senderIsRoom=true senderSource=room contentBytes='
+        + `${Buffer.byteLength(XML.voice(3000))} prefixBytes=0 prefixShape=other prefixHash=- `
+        + 'wxidTokens=0 chatroomTokens=0']);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: content that begins with a non-id token is not taken as a member id', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    const shapes = [
+      ['display-name', '张三:\n'],
+      ['spaced', 'not an id:\n'],
+      ['too-long', 'x'.repeat(33) + ':\n'],
+      ['room-shaped', '12345@chatroom:\n'],
+      ['no-separator', 'wxid_poster9 <msg/>'],
+    ];
+    for (const [shape, prefix] of shapes) {
+      const photo = mediaMessage({ kind: 'image', id: `not-id-${shape}`, roomId: ROOM, from: ROOM, xml: XML.image(5) });
+      photo.payload.content = b64(prefix + (prefix.includes('<') ? '' : XML.image(5)));
+      bot.emit('message', photo);
+    }
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, e.sender_ref]),
+      shapes.map(([shape]) => [`not-id-${shape}`, ROOM]));
+    const probes = logs.filter(line => line.startsWith('group media sender probe:'));
+    assert.equal(probes.length, shapes.length, logs.join('\n'));
+    assert.ok(probes.every(line => line.includes('senderSource=room')), probes.join('\n'));
+    // The same rule, read directly: accepted at its bounds, refused just outside them.
+    assert.equal(memberIdOfContent(b64('wxid_poster9:\n<msg/>')), 'wxid_poster9');
+    assert.equal(memberIdOfContent(b64('wxid_poster9:<msg/>')), 'wxid_poster9');
+    assert.equal(memberIdOfContent(b64('wxid_poster9\n<msg/>')), 'wxid_poster9');
+    assert.equal(memberIdOfContent(b64('a'.repeat(32) + ':\n<msg/>')), 'a'.repeat(32));
+    for (const content of ['张三:\n', 'not an id:\n', 'x'.repeat(33) + ':\n', '12345@chatroom:\n', ':\n', '', '<msg/>'])
+      assert.equal(memberIdOfContent(b64(content)), undefined, JSON.stringify(content));
+    assert.deepEqual([memberIdOfContent(undefined), memberIdOfContent('not base64!')], [undefined, undefined]);
   } finally { await s.bridge.close(); }
 });
 

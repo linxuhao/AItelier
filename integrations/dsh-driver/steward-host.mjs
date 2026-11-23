@@ -954,7 +954,7 @@ export function mediaOps({ request, library, gatewayFetch, owner }) {
 
 /** Step 24.2b (design-steward 7.8.12a "出站：管家的媒体也在面板上"): an owner turn's send_media
  *  file as ONE steward message - send_user_message with the library ref as its attachment (the
- *  backend checks it is in the steward's own subdirectory, audience owner), the caption as its
+ *  backend checks it is in the steward's own subdirectory, audience owner or a group), the caption as its
  *  body, replying to `replyTo` (the turn's owner message; none for a reminder's turn) - then the
  *  plugin's mirror with the file, as a text reply is mirrored: back to the channel that message
  *  came from, nowhere for a dashboard message, the default channel without one. The mirror is

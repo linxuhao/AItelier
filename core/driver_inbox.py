@@ -481,7 +481,8 @@ class DriverInbox:
         10 `m_` refs of the calling driver's OWN media library. Which subdirectory is read is
         decided by the token's driver, never by the request: a director's `d-<driver_id>/`,
         where the row's audience must be `project:<this project>`; the steward's memory user,
-        where it must be `owner` (and only in the steward's own project's conversation). The
+        where it must be `owner` or `group:...` (the owner may see every group's media; only in the
+        steward's own project's conversation). The
         row must be in that index and its file still there. One that is not - another
         director's ref, another project's, the steward's ref sent by a director, a director's
         sent by the steward, an unknown ref, a repeat - refuses the whole message
@@ -565,11 +566,20 @@ class DriverInbox:
         from core.state_steward import steward_project
         store = state_conversation_uploads.store_for(conn, self.driver_id)
         steward = store == STEWARD_MEMORY_USER
-        audience = "owner" if steward else "project:" + project_id
+
+        def for_this_reader(audience) -> bool:
+            # The steward writes only its owner's conversation, whose one reader is the owner,
+            # who may see every group's media too (an owner turn covers every ref, 7.8.12): an
+            # `owner` or a `group:` row of its own subdirectory (contracts C2). A director: its
+            # project's rows.
+            if steward:
+                return isinstance(audience, str) and (audience == "owner" or audience.startswith("group:"))
+            return audience == "project:" + project_id
+
         shown = []
         for ref in refs:
             found = media_library.lookup(store, ref)
-            if (found.status != media_library.FOUND or found.row.get("audience") != audience
+            if (found.status != media_library.FOUND or not for_this_reader(found.row.get("audience"))
                     or (steward and project_id != steward_project())
                     or any(item["id"] == ref for item in shown)):
                 raise StateGraphError("invalid_attachment: each attachment is an m_ ref of your own media "

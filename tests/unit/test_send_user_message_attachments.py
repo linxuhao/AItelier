@@ -5,7 +5,7 @@
 read comes from the TOKEN's driver, never the request:
 
 - a director: `d-<driver_id>/`, the row's audience `project:<this project>`, its file present;
-- the steward: its memory user's subdirectory, audience `owner`, in its own project only.
+- the steward: its memory user's subdirectory, audience `owner` or `group:...` (contracts C2), in its own project only.
 
 Anything else - another director's ref, another project's, the steward's ref sent by a director,
 an unknown ref, a director's ref sent by the steward - refuses the whole message
@@ -214,12 +214,23 @@ def test_the_steward_sending_a_director_ref_is_refused(world, client, media_root
     _no_row_after(world, client, world.tokens["steward"], [REF_A], project=HOME)
 
 
-def test_the_steward_ref_outside_the_owner_audience_or_its_project_is_refused(world, client, media_root):
-    shelve(media_root, STEWARD_MEMORY_USER, REF_A, IMAGE, "group:wechat:g1")
+def test_the_steward_ref_outside_its_project_or_its_audiences_is_refused(world, client, media_root):
+    shelve(media_root, STEWARD_MEMORY_USER, REF_A, IMAGE, "project:alpha")
     shelve(media_root, STEWARD_MEMORY_USER, REF_B, IMAGE + b"owner", "owner")
     _no_row_after(world, client, world.tokens["steward"], [REF_A], project=HOME)
     # Its owner ref in a director's project: nothing there could ever show it.
     _no_row_after(world, client, world.tokens["steward"], [REF_B], project="alpha")
+
+
+def test_the_steward_sends_its_owner_a_family_group_photo(world, client, media_root):
+    """Contracts C2: an owner turn covers every ref (the plugin lets send_media take a group's
+    photo), and the owner conversation's one reader may see every group's media - so the backend
+    takes a `group:` row of the steward's own subdirectory for its owner conversation, as 24.2's
+    channel send did."""
+    shelve(media_root, STEWARD_MEMORY_USER, REF_A, IMAGE, "group:wechat:fam1", source="in", channel="wechat")
+    r = say(client, world.tokens["steward"], [REF_A], project=HOME)
+    assert r.status_code == 200, r.text
+    assert json.loads(sent_rows(world)[0]["attachments_json"])[0]["id"] == REF_A
 
 
 def test_eleven_attachments_are_invalid_request(world, client, media_root):

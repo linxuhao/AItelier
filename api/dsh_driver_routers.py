@@ -12,7 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from api import authz
 from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
-from core import ai_router
+from core import ai_router, media_library
+from core import state_conversation_uploads as uploads
 from core.datadir import aitelier_home
 from core.dsh_driver import DshDrivers, completion_route, route_input, route_modalities
 from core.state_commands import ProjectPrivate, execute
@@ -149,6 +150,52 @@ def conversation(project_id: str, limit: int = Query(default=30, ge=1, le=200),
         raise HTTPException(404, str(exc)) from exc
     except StateGraphError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+UPLOAD_HEADER = "X-AItelier-Upload"
+
+
+@router.post("/{project_id}/conversation/uploads", dependencies=[Depends(authz.require_writer)])
+async def conversation_upload(project_id: str, request: Request,
+                              name: str = Query(min_length=1, max_length=255),
+                              service=Depends(get_service)):
+    """Step 24.2b (design-steward 7.8.12a "上传"): one file for the conversation, as the raw
+    request body (no multipart), staged until a message carries it and the hosts store it.
+
+    Who: the write gate and `require_writer` as for every write (a steward token is refused
+    by the gate: this is not one of its runtime endpoints), then the project-user check
+    `send_user_conversation_message` makes (`user_identity_required` for a driver token).
+    Cross-site: the custom `X-AItelier-Upload: 1` header forces a browser preflight, which
+    fails (no CORS middleware), and a present `Sec-Fetch-Site` other than `same-origin` is 403.
+    The kind and mime come from the first bytes (415 `type`), never from `Content-Type` or
+    the name; the kind's cap is enforced while the body arrives (413 `too_large`, nothing
+    left in staging); 20 uploads per project per hour counted from the table (429
+    `rate_limited`, `Retry-After`); staging total (507 `staging_full`). Answers
+    {upload_id, kind, mime, size, name}; the file is `<staging>/<upload_id>`, 0600."""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site != "same-origin":
+        raise HTTPException(403, "cross_site")
+    if request.headers.get(UPLOAD_HEADER) != "1":
+        raise HTTPException(400, "upload_header_required")
+    if not uploads.valid_name(name):
+        raise HTTPException(422, "invalid_name")
+    if not service.driver_inbox._project_user():
+        raise HTTPException(403, "user_identity_required")
+    directory = media_library.staging_dir()
+    upload_id = uploads.new_upload_id()
+    try:
+        base = await asyncio.to_thread(uploads.admit, service.store, project_id, directory)
+        entry, size, partial = await uploads.receive(request.stream(), directory, upload_id, base)
+        return await asyncio.to_thread(uploads.commit, service.store, project_id=project_id,
+                                       user=service.actor, upload_id=upload_id, entry=entry,
+                                       size=size, name=name, partial=partial, directory=directory)
+    except uploads.UploadRefused as exc:
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+        raise HTTPException(exc.status, exc.code, headers=headers) from exc
+    except ProjectPrivate as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 @router.post("/{project_id}/start", dependencies=[Depends(authz.require_writer)])

@@ -307,6 +307,152 @@ def unbind_channel(channel: Channel, service=Depends(get_service)):
     return service.channels.unbind(channel)
 
 
+# --- the basic-capabilities table (owner 2026-11-23) ------------------------------------------
+# The catalog is the owner's list of capabilities and the facts/tools to look for. It holds
+# no verdict: for each row the provider is resolved at request time, native fact first,
+# then an effective MCP tool, else missing. A row may carry both kinds of fact.
+CAPABILITIES = (
+    {"id": "vision", "label": "看图 (Vision)", "tool": None, "native_fact": "steward_image_route"},
+    {"id": "ocr", "label": "图片转文字 (OCR)", "tool": "ocr_image", "native_fact": None},
+    {"id": "pdf", "label": "读 PDF", "tool": "ocr_pdf", "native_fact": "pdf_reader"},
+    {"id": "office_read", "label": "读 Word/Excel/PPT", "tool": None, "native_fact": None},
+    {"id": "office_write", "label": "生成 Office 文档", "tool": None, "native_fact": None},
+    {"id": "transcribe", "label": "语音转文字", "tool": "transcribe_audio", "native_fact": None},
+    {"id": "tts", "label": "发语音条", "tool": "generate_speech", "native_fact": None},
+    {"id": "draw", "label": "画图", "tool": "generate_image", "native_fact": None},
+    {"id": "music", "label": "生成音乐", "tool": "generate_music", "native_fact": None},
+    {"id": "sfx", "label": "音效", "tool": "gen_sfx", "native_fact": None},
+    {"id": "video", "label": "视频", "tool": None, "native_fact": None},
+    {"id": "search", "label": "联网搜索", "tool": "web_search", "native_fact": None},
+    {"id": "fetch", "label": "读网页", "tool": "web_fetch", "native_fact": None},
+    {"id": "email", "label": "邮件", "tool": None, "native_fact": None},
+    {"id": "calendar", "label": "日历/提醒", "tool": None, "native_fact": None},
+    {"id": "cloud_files", "label": "网盘", "tool": None, "native_fact": None},
+    {"id": "memory", "label": "记忆与历史对话", "tool": None, "native_fact": None},
+    {"id": "code", "label": "计算/跑代码", "tool": None, "native_fact": None},
+    {"id": "translate", "label": "翻译", "tool": None, "native_fact": None},
+)
+
+
+def _routes():
+    """The live model-route table; a seam so a test can supply a real routes file."""
+    from core.model_routes import get_routes
+    return get_routes()
+
+
+def _roles():
+    """The cached roles table the completion endpoint routes by."""
+    from core.dsh_driver import _serving_roles
+    return _serving_roles()
+
+
+def _steward_row(service):
+    """The steward driver's own row, so a project's `model` override is honoured.
+
+    A deployment that has not provisioned the row still has the role's route; in that
+    case an empty override is used rather than inventing one.
+    """
+    import sqlite3
+    from core.dsh_driver import RESERVED_ROLES
+    project = next((pid for pid, role in RESERVED_ROLES.items() if role == "steward"), None)
+    row = None
+    if project:
+        try:
+            with service.store.db.get_connection() as conn:
+                found = conn.execute("SELECT * FROM dsh_drivers WHERE project_id=?", (project,)).fetchone()
+                row = dict(found) if found else None
+        except (AttributeError, OSError, sqlite3.Error):
+            row = None
+    return row or {"project_id": project, "session_id": None, "model": None}
+
+
+def _native_fact(name, service):
+    """One deployment fact, or None when it is not there.
+
+    `steward_image_route` uses the SAME reading as the driver's route-input surface:
+    `core.dsh_driver.route_input` on the steward's own row and roles (including the
+    per-project `model` override), so an image-capable director route cannot stand in
+    for a text-only steward route. `input_measured` is false until `_input` exists; in
+    that case the adapter keeps its legacy image behaviour, but we do not claim a
+    measured native capability from it. `pdf_reader` is the host-side reader the steward
+    driver is given: its script, its interpreter and pypdfium2 in that interpreter.
+    """
+    if name == "steward_image_route":
+        try:
+            from core import dsh_driver
+            row = _steward_row(service)
+            roles = _roles()
+            reading = dsh_driver.route_input(row, roles=roles, routes=_routes())
+            if reading.get("measured") is False:
+                return None
+            if all("image" in reading.get(key, []) for key in ("root", "child")):
+                root = dsh_driver.completion_route(row, row["session_id"], roles)
+                return f"steward route:{root}"
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError):
+            return None
+        return None
+    if name == "pdf_reader":
+        import importlib.util
+        import os
+        import sys
+        from pathlib import Path
+        try:
+            from core.dsh_driver import ROLES_FILE
+            python = os.environ.get("AITELIER_MEDIA_PYTHON") or sys.executable
+            if (ROLES_FILE.parent / "pdf_read.py").is_file() and Path(python).is_file() \
+                    and importlib.util.find_spec("pypdfium2") is not None:
+                return "pdf_read.py"
+        except (OSError, ValueError):
+            return None
+    return None
+
+
+def _listed_connections(service):
+    """The ONE State read behind every mcp row: the same effective tool set the
+    gateway serves, with each connection's `usable` verdict attached by storage."""
+    try:
+        return service.steward_connections.list_connections()
+    except StateGraphError:
+        return {"connections": []}
+
+
+def _mcp_tool(listed, tool_name):
+    """An effective tool on an enabled, usable stored connection, or None.
+
+    `list_connections` already excludes unticked tools, definitions changed after a
+    tick, lost name collisions and unusable connections. Its `raw_name` is the exact
+    tool name the owner ticked; it is reported with the connection that serves it.
+    """
+    for conn in listed.get("connections", []):
+        if not (conn.get("enabled") and conn.get("usable")):
+            continue
+        for tool in conn.get("tools", []):
+            if tool.get("raw_name") == tool_name:
+                return conn["conn_id"], tool["raw_name"]
+    return None
+
+
+@router.get("/capabilities", dependencies=[Depends(authz.require_reader)])
+def list_capabilities(service=Depends(get_service)):
+    """Each capability with the route resolved from live deployment and State facts.
+
+    A native fact wins; otherwise an effective MCP tool; otherwise `missing` names
+    nobody. The view renders these values; it does not decide them.
+    """
+    _owner(service)
+    listed = _listed_connections(service)
+    rows = []
+    for cap in CAPABILITIES:
+        fact = _native_fact(cap["native_fact"], service) if cap["native_fact"] else None
+        found = _mcp_tool(listed, cap["tool"]) if not fact and cap["tool"] else None
+        conn_id, tool = found or (None, None)
+        provider = "native" if fact else "mcp" if tool else "missing"
+        rows.append({"id": cap["id"], "label": cap["label"], "provider": provider,
+                     "conn_id": conn_id, "tool": tool,
+                     "detail": fact or (f"{conn_id}: {tool}" if tool else None)})
+    return {"capabilities": rows}
+
+
 @router.get("/message-sources", dependencies=[Depends(authz.require_reader)])
 def message_sources(ids: str = "", service=Depends(get_service)):
     """Which channel each of these messages came from or went to; an absent id came

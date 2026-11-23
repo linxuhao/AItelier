@@ -134,6 +134,25 @@ def test_route_input_child_side_follows_the_steward_route(tmp_path):
     assert route_input(steward, without, routes) == {"root": ["text", "image"], "child": ["text"]}
 
 
+def test_the_shipped_example_and_roles_json_give_the_steward_images_on_both_sides():
+    """Design-steward 7.8.12b "九": from the repo's model_routes.example.json (its `_input`
+    lists every candidate) and the committed roles.json, route_input for the steward gives
+    root and child both `image`, and no `measured: false`; the startup `unlisted` set is empty."""
+    from pathlib import Path
+    from core.model_routes import ModelRoutes
+    routes = ModelRoutes(Path(__file__).resolve().parents[2] / "model_routes.example.json")
+    assert routes.measures_input is True and routes.unlisted_input() == []
+    table = load_roles()
+    steward = {"project_id": STEWARD_PROJECT, "session_id": "root", "provider": "aitelier", "model": ""}
+    answer = route_input(steward, table, routes)
+    assert answer == {"root": ["text", "image"], "child": ["text", "image"]}
+    assert "measured" not in answer
+    # The steward's child side is its own route, not the worker route.
+    assert completion_route(steward, "child", table) == "steward"
+    director = dict(steward, project_id="alpha")
+    assert route_input(director, table, routes) == {"root": ["text", "image"], "child": ["text", "image"]}
+
+
 def test_a_table_without_a_steward_refuses_the_steward_and_nobody_else(monkeypatch):
     monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
     table = _table(steward=False)

@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { openaiMessages, installHostModel, modelRetryBudgetMs, rootReasoningEffort, retryableClass,
   RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER, routeInputCache, noImageLine, declaresImage, wakeTakesImages,
-  fileLine, REQUEST_IMAGE_MAX_BYTES } from './model.mjs';
+  fileLine, REQUEST_IMAGE_MAX_BYTES, routeStandingCheck, STEWARD_ROUTE_FLAG } from './model.mjs';
 import { loadRoles } from './roles.mjs';
 
 /** Step 24.2b: route-input answers for installHostModel. */
@@ -291,6 +291,47 @@ test('route-input is read at most once a minute, shared by concurrent callers; a
   assert.deepEqual(await fresh(), { root: ['text'], child: ['text'] }, 'never read: text-only');
   const odd = routeInputCache(async () => ({ root: 'image', child: null }));
   assert.deepEqual(await odd(), { root: ['text'], child: ['text'] }, 'a malformed answer takes no images');
+});
+
+test('24.2c standing route check: a text-only child or measured:false logs once (rate-limited) and flags; images again clear it', async () => {
+  let clock = 0, answer = { root: ['text', 'image'], child: ['text', 'image'] };
+  const logs = [], flags = [];
+  const read = async () => answer;
+  const checked = routeStandingCheck(read, { now: () => clock, log: line => logs.push(line), flag: text => flags.push(text) });
+  assert.equal(STEWARD_ROUTE_FLAG, '管家路线不收图');
+  assert.equal(await checked(), answer, 'the answer is passed on untouched');
+  assert.deepEqual([logs, flags], [[], []], 'a route that takes images: nothing');
+  // A text-only child (a text-only candidate added to the steward route).
+  answer = { root: ['text', 'image'], child: ['text'] };
+  assert.equal(await checked(), answer);
+  assert.deepEqual(flags, ['管家路线不收图（child text-only）']);
+  assert.equal(logs.length, 1); assert.match(logs[0], /^steward route takes no images \(child text-only\)/);
+  for (const at of [1, 1000, 599999]) { clock = at; await checked(); }
+  assert.equal(logs.length, 1, 'one line per reason within 10 min, however many steps read it');
+  assert.equal(flags.length, 1, 'the flag is written once, not per step');
+  clock = 600000; await checked();
+  assert.equal(logs.length, 2, 'the same reason is logged again after 10 min');
+  assert.equal(flags.length, 1);
+  // measured:false (the table has no _input): flagged, whatever the sides say.
+  answer = { root: ['text', 'image'], child: ['text', 'image'], measured: false };
+  await checked();
+  assert.match(logs[2], /\(measured:false\)/); assert.equal(flags.at(-1), '管家路线不收图（measured:false）');
+  answer = { root: ['text'], child: ['text'], measured: false };
+  await checked();
+  assert.match(logs[3], /\(measured:false, root text-only, child text-only\)/, 'a new reason is logged at once');
+  assert.equal(flags.at(-1), '管家路线不收图（measured:false, root text-only, child text-only）');
+  // Images again: the flag is cleared once, and a later text-only answer is logged at once.
+  answer = { root: ['text', 'image'], child: ['text', 'image'] };
+  await checked(); await checked();
+  assert.equal(flags.at(-1), undefined); assert.equal(flags.length, 4, 'cleared once');
+  assert.equal(logs.at(-1), 'steward route takes images again');
+  answer = { root: ['text'], child: ['text', 'image'] };
+  await checked();
+  assert.match(logs.at(-1), /\(root text-only\)/); assert.equal(flags.at(-1), '管家路线不收图（root text-only）');
+  // What routeInputCache answers when the backend never answered (text-only) is flagged too.
+  const flags2 = [];
+  await routeStandingCheck(routeInputCache(async () => { throw new Error('down'); }), { flag: text => flags2.push(text) })();
+  assert.deepEqual(flags2, ['管家路线不收图（root text-only, child text-only）']);
 });
 
 // The witness for the retry is a REAL loopback HTTP server reached through a

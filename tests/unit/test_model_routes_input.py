@@ -128,15 +128,24 @@ def test_only_a_table_with_an_input_table_measures_input(tmp_path):
 
 
 def test_the_shipped_example_carries_a_valid_input_table():
-    """The example a clean checkout runs on loads with its `_input`, and only
-    the measured vision judge takes images: `driver` and `worker` name
-    unmeasured candidates, so they are text-only."""
+    """The example a clean checkout runs on loads with its `_input`, which lists
+    every candidate of every route (design-steward 7.8.12b "九" 1: the startup
+    line's `unlisted` set is empty). The DSH routes - `driver`, `worker` and the
+    steward's - take images; a route naming an unmeasured candidate does not."""
     raw = json.loads((ROOT / "model_routes.example.json").read_text(encoding="utf-8"))
     assert isinstance(raw.get("_input"), dict) and raw["_input"]
+    assert "_input_routes" not in raw, "the input table holds for the whole table"
     t = ModelRoutes(ROOT / "model_routes.example.json")
-    assert t.accepts_image("vision") is True
-    assert t.accepts_image("driver") is False
-    assert t.accepts_image("worker") is False
+    assert t.unlisted_input() == []
+    assert "unlisted (text-only): none" in t.input_summary()
+    listed = {c for n in t.names() for c in t.resolve(n)}
+    assert set(raw["_input"]) == listed, "an `_input` entry no route names"
+    for route in ("vision", "driver", "worker", "steward"):
+        assert t.accepts_image(route) is True, route
+        assert all(t.input_for(c) == ["text", "image"] for c in t.resolve(route)), route
+    # Unmeasured candidates are listed as text, so their routes stay text-only.
+    for route in ("flash", "glm", "smart", "novel_alt"):
+        assert t.accepts_image(route) is False, route
 
 
 # ── the registry rewrites the whole document and keeps `_input` ──────────────

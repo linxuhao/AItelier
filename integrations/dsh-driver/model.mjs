@@ -91,6 +91,35 @@ export const declaresImage = routes => unmeasured(routes) || (takesImage(routes?
  *  never before the routes were measured. */
 export const wakeTakesImages = routes => !unmeasured(routes) && declaresImage(routes);
 
+/** The dashboard flag of the steward's standing route check (design-steward 7.8.12b "九"). */
+export const STEWARD_ROUTE_FLAG = '管家路线不收图';
+
+/** Step 24.2c (7.8.12b "九", 上线后常驻的检查): the steward process's route-input, checked on
+ *  every read (every pre-step read goes through it). An answer with `measured: false`, or a root
+ *  or child side without `image`, writes one log line - again only when the reason changes or
+ *  `everyMs` (10 min) has passed - and raises the dashboard flag through `flag(text)`; an answer
+ *  that takes images again clears it with `flag(undefined)`. The flag changes only on a change,
+ *  so a step writes nothing. The answer itself is passed on untouched. */
+export function routeStandingCheck(routeInput, { log = () => {}, flag = () => {}, now = Date.now, everyMs = 600000 } = {}) {
+  let logged, loggedAt = -Infinity, flagged;
+  return async function checkedRouteInput(signal) {
+    const routes = await routeInput(signal);
+    const reasons = [...(unmeasured(routes) ? ['measured:false'] : []),
+      ...(takesImage(routes?.root) ? [] : ['root text-only']), ...(takesImage(routes?.child) ? [] : ['child text-only'])];
+    const reason = reasons.join(', ');
+    if (reason && (reason !== logged || now() - loggedAt >= everyMs)) {
+      logged = reason; loggedAt = now();
+      log(`steward route takes no images (${reason}): photos and PDF pages reach it as text lines only`);
+    }
+    if (reason !== (flagged ?? '')) {
+      flagged = reason || undefined;
+      if (!reason) { logged = undefined; log('steward route takes images again'); }
+      flag(reason ? `${STEWARD_ROUTE_FLAG}（${reason}）` : undefined);
+    }
+    return routes;
+  };
+}
+
 /** The backend's `GET /api/dsh-drivers/{project}/route-input` ({root, child}), read at most once
  *  per `ttlMs` (60 s) and shared by every session of this process. `read(signal)` is the request.
  *  A read that fails answers the last good value, or text-only when there is none, and is tried

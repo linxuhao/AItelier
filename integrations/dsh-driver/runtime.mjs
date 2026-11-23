@@ -15,7 +15,7 @@
  *  different signature - and nothing imported this file's boot. The added names are
  *  SESSION_ENV, aitelierHost, attemptWorkState and stateRequest (the State retry policy,
  *  exported so its test can drive it). exports.test.mjs pins both lists. */
-import { declaresImage, installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, wakeTakesImages } from './model.mjs';
+import { declaresImage, installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, routeStandingCheck, wakeTakesImages } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
@@ -602,8 +602,14 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 24.2b (7.8.12a "路线能力"): which routes take images, read from the backend at most once
   // a minute (the model bridge asks on every step).
   let routeLog = () => {};
-  const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
+  const readRouteInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
     undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
+  // Step 24.2c (7.8.12b "九", 上线后常驻的检查): in the steward process every read is checked; a
+  // route that takes no images is logged and flagged on the dashboard status (the host error,
+  // which events() hands over: until then the flag waits in routeFlag). A director is unchecked.
+  let routeFlag, routeFlagSink = () => {};
+  const routeInput = steward ? routeStandingCheck(readRouteInput, { log: line => routeLog(line),
+    flag: text => { routeFlag = text; routeFlagSink(text); } }) : readRouteInput;
   // Step 24.2c (design-steward 7.8.12b "三", "七", "十一"): the steward's PDF reader - the host
   // venv's python (AITELIER_MEDIA_PYTHON, core/dsh_driver.py) running the plugin's pdf_read.py in
   // <state dir>/pdf-tmp; install() wipes that directory and starts the self-check.
@@ -1047,7 +1053,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         ctx.logger.warn(message);
         await setHostError(message);
       };
-      runtime.onConnectionRestored = () => clearHostError();
+      // A restored connection puts the steward's route flag back instead of clearing it.
+      runtime.onConnectionRestored = () => routeFlag ? setHostError(routeFlag) : clearHostError();
+      if (steward) {
+        routeFlagSink = text => void Promise.resolve(text ? setHostError(text) : clearHostError())
+          .catch(error => ctx.logger.warn('route flag: ' + String(error?.message ?? error).slice(0, 300)));
+        if (routeFlag) routeFlagSink(routeFlag);
+      }
       runtime.onEvent = async raw => {
         // The owner's memory requests are the runtime's, never a model turn: run them and
         // drop their events from what the steward is woken with.

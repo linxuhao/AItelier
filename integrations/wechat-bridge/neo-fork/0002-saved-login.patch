@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index 768d869..dedc34e 100644
+index 768d869..8928a05 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -15,8 +15,9 @@ use wechat_protocol::{
@@ -141,7 +141,7 @@ index 768d869..dedc34e 100644
          },
          // A new socket is needed after a failure and after a renewal, because a
          // socket cannot adopt newer credentials.
-@@ -915,6 +970,138 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
+@@ -915,6 +970,154 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
      Ok(json!(profile))
  }
  
@@ -180,6 +180,21 @@ index 768d869..dedc34e 100644
 +        None => true,
 +        Some(expected) => !resumed.is_empty() && expected == resumed,
 +    }
++}
++
++/// Does the account WeChat has just accepted belong to the one the caller expected?
++///
++/// `true` means it does not: the resume must not go on, so `stop` runs here, before this
++/// attempt can answer, and the answer is `mismatch`. `stop` is a parameter because the
++/// only account the product has is a live WeChat client, and this way a test with no
++/// client can witness the decision itself - the account is stopped, and only when the
++/// login belongs to somebody else.
++fn another_account(expect: Option<&str>, own_username: &str, stop: impl FnOnce()) -> bool {
++    if is_expected_account(expect, own_username) {
++        return false;
++    }
++    stop();
++    true
 +}
 +
 +/// Try the stored login instead of the QR path, for the account `expect` names.
@@ -265,13 +280,14 @@ index 768d869..dedc34e 100644
 +        Err(error) => return Err(error),
 +    };
 +    account.username = refreshed.own_username.clone();
-+    if !is_expected_account(expect, &account.username) {
++    if another_account(expect, &account.username, || {
 +        // The stored login belongs to another account, and WeChat has accepted it: a
 +        // session that is not the caller's is live, so it ends before this attempt
 +        // answers. A stop that fails leaves the same answer - the account must not be
 +        // resumed either way, and an error here would keep the other account's file on
 +        // disk, which is the round trip this answer exists to stop paying.
 +        let _ = account.client.stop();
++    }) {
 +        return Ok(stored_login::Opened::Mismatched);
 +    }
 +    Ok(stored_login::Opened::Accepted(account))
@@ -280,7 +296,7 @@ index 768d869..dedc34e 100644
  fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      match send() {
          Ok(result)
-@@ -1529,6 +1716,24 @@ mod tests {
+@@ -1529,6 +1732,24 @@ mod tests {
          assert!(run(&mut session, Operation::Logout).is_err());
      }
  
@@ -305,7 +321,7 @@ index 768d869..dedc34e 100644
      #[test]
      fn unhandled_sync_commands_are_skipped() {
          let messages = incoming_messages(
-@@ -1572,3 +1777,2055 @@ mod tests {
+@@ -1572,3 +1793,2097 @@ mod tests {
          );
      }
  }
@@ -2300,11 +2316,11 @@ index 768d869..dedc34e 100644
 +
 +#[cfg(test)]
 +mod resume_answer_tests {
-+    use super::{is_expected_account, resume_status, stored_login};
++    use super::{another_account, is_expected_account, resume_status, stored_login};
 +
 +    /// The bridge branches on these tokens, so each answer names exactly one of
 +    /// them and nothing else: `none`, `unreadable`, `throttled`, `busy`,
-+    /// `rejected`, `resumed`.
++    /// `rejected`, `mismatch`, `resumed`.
 +    #[test]
 +    fn every_resume_answer_is_one_of_the_closed_set() {
 +        assert_eq!(resume_status(&stored_login::Answer::<()>::None), "none");
@@ -2320,6 +2336,10 @@ index 768d869..dedc34e 100644
 +        assert_eq!(
 +            resume_status(&stored_login::Answer::<()>::Rejected),
 +            "rejected"
++        );
++        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Mismatch),
++            "mismatch"
 +        );
 +        assert_eq!(
 +            resume_status(&stored_login::Answer::<()>::Resumed {
@@ -2358,6 +2378,44 @@ index 768d869..dedc34e 100644
 +                accepted: (),
 +            }),
 +            "resumed"
++        );
++    }
++
++    /// The decision `renew_stored_login` makes, driven with the real predicate and no
++    /// client at all: a login that belongs to another account is refused, and the
++    /// account WeChat had accepted is stopped before this attempt can answer; a caller
++    /// that expects nobody is not refused and stops nobody; and the account the file
++    /// names, expected by its own name, is resumed.
++    #[test]
++    fn a_login_for_another_account_is_refused_and_its_account_stopped_before_the_answer() {
++        let stopped = std::cell::Cell::new(false);
++        assert!(
++            another_account(Some("wxid_expected"), "wxid_other", || stopped.set(true)),
++            "a login that belongs to another account was not refused"
++        );
++        assert!(
++            stopped.get(),
++            "another account was refused without stopping the session WeChat had opened"
++        );
++
++        let stopped = std::cell::Cell::new(false);
++        assert!(
++            !another_account(None, "wxid_other", || stopped.set(true)),
++            "a resume that expected nobody refused the account the file names"
++        );
++        assert!(
++            !stopped.get(),
++            "a resume that expected nobody stopped the account it had just opened"
++        );
++
++        let stopped = std::cell::Cell::new(false);
++        assert!(
++            !another_account(Some("wxid_other"), "wxid_other", || stopped.set(true)),
++            "the account the caller expected by name was refused"
++        );
++        assert!(
++            !stopped.get(),
++            "the account the caller expected by name was stopped"
 +        );
 +    }
 +}

@@ -77,6 +77,7 @@ export const SHIPPED = [
   join('lib', 'media-tools.mjs'),
   join('media-gc.mjs'),
   join('media-types.json'),
+  join('pdf_read.py'),
   join('lib', 'tool-discovery.mjs'),
   join('lib', 'memory', 'bm25.mjs'),
   join('lib', 'memory', 'git.mjs'),

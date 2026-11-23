@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from core import state_channels, state_groups, state_schema_setup
-from core.state_commands import ProjectPrivate, execute
+from core.state_commands import ProjectPrivate, _driver_defaults, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
 from tests.unit.test_steward_channels import (OWNER_HEADERS, bind, client, conversation, refused,  # noqa: F401
@@ -988,6 +988,17 @@ def notice(world, which, phase, room=ROOM, epoch=None, key=None, **extra):
                     "epoch": epoch, "notice": which, "phase": phase, **extra}, allow_write=True)
 
 
+def reason_notice(world, which, phase, reason, room=ROOM, epoch=None, key=None):
+    """Call the service directly with `reason`: the HTTP command model on this side of the
+    change does not declare it yet. `_driver_defaults` supplies project_id exactly as execute()
+    does; the older `notice` helper stays on the validated command path."""
+    epoch = epoch or switch(world, room)[1]
+    args = _driver_defaults(world.steward, "group_media_notice",
+                            {"request_key": key or f"gmn:{room}:{epoch}:{which}:{phase}:reason", "channel": "wechat",
+                             "group_ref": room, "epoch": epoch, "notice": which, "phase": phase, "reason": reason})
+    return world.steward.groups.group_media_notice(**args)
+
+
 def receipt(world, room=ROOM, epoch=None, key=None, **counts):
     epoch = epoch or switch(world, room)[1]
     body = {"rows_before": 0, "rows_after": 0, "files_unlinked": 0, "files_shared": 0, "bytes_freed": 0, **counts}
@@ -1149,6 +1160,29 @@ def test_r2_the_notice_check_sent_and_failed(world, monkeypatch):
                                                                    "group_ref": ROOM, "epoch": epoch, "notice": "on",
                                                                    "phase": "check"}, allow_write=True),
             "steward_role_required")
+
+
+def test_r2_a_failed_notice_names_its_send_reason_until_the_last_attempt(world):
+    bound_group(world)
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    epoch = switch(world)[1]
+    # While the switch is still owed, the row names the outcome of this send attempt.
+    assert reason_notice(world, "on", "failed", "send_failed", key="why-1", epoch=epoch) \
+        == {"attempts": 1, "state": "on_pending"}
+    assert switch(world)[0] == "on_pending" and switch(world)[3] == "send_failed"
+    # A code is at most 40 characters and never carries a control character (a log code, not prose).
+    long_reason = "room\n" + "x" * 60
+    assert reason_notice(world, "on", "failed", long_reason, key="why-2", epoch=epoch) \
+        == {"attempts": 2, "state": "on_pending"}
+    assert switch(world)[3] == "room_" + "x" * 35
+    # The last attempt keeps the long-standing note, whatever reason was supplied.
+    assert reason_notice(world, "on", "failed", "recipient_unknown", key="why-3", epoch=epoch) \
+        == {"attempts": 3, "state": "off"}
+    assert switch(world)[0] == "off" and switch(world)[3] == "notice_not_sent"
+    # A successful notice clears the note and the attempt count with the fresh epoch.
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    assert notice(world, "on", "sent")["state"] == "on"
+    assert switch(world)[2:4] == (0, None)
 
 
 def test_r2_the_sent_commit_retried_after_a_lost_answer_is_the_first_answer(world):

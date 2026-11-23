@@ -496,7 +496,7 @@ export interface GroupsHost {
   relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string;
     attachments?: object[]; kept?: boolean }, signal?: AbortSignal): Promise<unknown>;
   mediaNotice?(a: { channel: string; groupRef: string; epoch: string; notice: 'on' | 'off'; phase: 'check' | 'sent' | 'failed';
-    channelDown?: boolean; attempts?: number }, signal?: AbortSignal): Promise<{ may_post: true; text: string } | { refused: string }
+    channelDown?: boolean; attempts?: number; reason?: string }, signal?: AbortSignal): Promise<{ may_post: true; text: string } | { refused: string }
       | { sent: true; state: string } | { attempts: number; state: string } | { superseded: true }>;
   recordPurge?(a: { channel: string; groupRef: string; epoch: string; receipt: { rows_before: number; rows_after: number;
     files_unlinked: number; files_shared: number; bytes_freed: number } }, signal?: AbortSignal): Promise<unknown>;

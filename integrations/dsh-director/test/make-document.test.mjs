@@ -198,11 +198,11 @@ test('make_document in a group: the title and body pass the exit check first; wi
 });
 
 test('make_document in a group: the check reads the text as the file shows it - markup never splits a word past it (review S1)', async () => {
-  const w = world({ audience: R1, withheld: ['AItelier'] });
-  for (const body of ['我们的 AI**telier** 项目', '# AI*telier*', '| a |\n|---|\n| AI**telier** |', '- AI**telier**']) {
+  const w = world({ audience: R1, withheld: ['Moonshot'] });
+  for (const body of ['我们的 Moon**shot** 项目', '# Moon*shot*', '| a |\n|---|\n| Moon**shot** |', '- Moon**shot**']) {
     const refused = await w.make({ ...LETTER, body });
     assert.equal(refused.refused, 'withheld', body);
-    assert.match(w.calls.checks.at(-1).text, /AItelier/, body);
+    assert.match(w.calls.checks.at(-1).text, /Moonshot/, body);
   }
   assert.equal(w.calls.make.length, 0, 'the host never ran');
   assert.equal(w.turns.open().officeDocs, 0);

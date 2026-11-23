@@ -164,8 +164,8 @@ export function dataLine(data) {
 }
 
 /** A pdf's or docx's blocks as the made file shows them: one line a block (a list item with its
- *  mark, a table one line a row, its cells tab-separated), the markup gone - `AI**telier**` is
- *  "AItelier" here. */
+ *  mark, a table one line a row, its cells tab-separated), the markup gone - `Moon**shot**` is
+ *  "Moonshot" here. */
 export function shownText(blocks) {
   const runs = list => list.map(run => run.text).join('');
   return blocks.map(block => {

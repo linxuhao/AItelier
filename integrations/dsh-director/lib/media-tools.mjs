@@ -611,7 +611,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       const giveBack = answer => { record.officeDocs = Math.max(0, (record.officeDocs ?? 1) - 1); return answer; };
       if (turn.kind !== 'owner') {
         // A group's file is checked as a group reply is, before anything is made (7.8.12c "九").
-        // The body as written and as the file shows it (review S1: `AI**telier**` shows "AItelier").
+        // The body as written and as the file shows it (review S1: `Moon**shot**` shows "Moonshot").
         const text = format === 'xlsx' ? checkText({ title: args.title, sheet: content.sheet, rows: args.rows })
           : checkText({ title: args.title, body: args.body, blocks: content.blocks });
         // Unreachable within the limits above; kept so a check is never sent cut.

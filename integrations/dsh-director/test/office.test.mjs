@@ -206,9 +206,9 @@ test('titles and document names', () => {
 });
 
 test('the exit check reads a body as written and as shown: markup that splits a word is gone in the shown text (review S1)', () => {
-  const body = '# AI**telier** 报告\n- 第*一*条\n1. 乙\n| 名 | 值 |\n|---|---|\n| A**I** | te*lier* |\n---\n\\pagebreak\n-> 签名';
+  const body = '# Moon**shot** 报告\n- 第*一*条\n1. 乙\n| 名 | 值 |\n|---|---|\n| Mo**on** | sh*ot* |\n---\n\\pagebreak\n-> 签名';
   const { blocks } = parseBody(body);
-  assert.equal(shownText(blocks), 'AItelier 报告\n• 第一条\n1. 乙\n名\t值\nAI\ttelier\n\n\n签名');
+  assert.equal(shownText(blocks), 'Moonshot 报告\n• 第一条\n1. 乙\n名\t值\nMoon\tshot\n\n\n签名');
   assert.equal(checkText({ title: 't', body, blocks }), `t\n${body}\n${shownText(blocks)}`);
 });
 

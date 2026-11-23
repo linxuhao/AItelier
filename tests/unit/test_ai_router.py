@@ -820,6 +820,238 @@ class TestARefusedInjectedParameterIsDroppedByName:
             "an endpoint that never refused the key still gets it")
 
 
+# ── the four gaps a non-author review measured in that memory ──────────────
+# `TestARefusedInjectedParameterIsDroppedByName` above pins the drop itself.
+# What follows pins the MEMORY around it: where it runs, what counts as a
+# refusal, what a whole-envelope withdrawal is recorded as, and how many
+# refusals one endpoint's record can hold. Each class is one measured gap, and
+# each is RED on the bytes that introduced the memory.
+
+
+def _stub_transport(gw, *errors):
+    """Stub transport: raise each of `errors` in order, then answer 200.
+
+    Returns a COPY of every attempt's kwargs — the gateway mutates one dict in
+    place across attempts, so a reference would let a later attempt rewrite what
+    an earlier one actually sent.
+    """
+    seen = []
+
+    def _bounded(kwargs):
+        seen.append({k: (dict(v) if isinstance(v, dict) else v)
+                     for k, v in kwargs.items()})
+        if len(seen) <= len(errors):
+            raise errors[len(seen) - 1]
+        return _Resp()
+
+    class _Resp:
+        choices = [type("C", (), {"message": type("M", (), {
+            "content": "ok", "tool_calls": None})()})()]
+        usage = None
+
+    gw._completion_bounded = _bounded
+    gw._extract_usage = lambda r: {}
+    return seen
+
+
+def _recorded(gw, endpoint):
+    """The generation parameters `gw`'s record holds for `endpoint`.
+
+    Read the way `_apply_binding` reads it — as refused NAMES — rather than as
+    whatever container the implementation happens to keep them in, so the
+    witness fails on the missing name and never on the shape of the record.
+    """
+    record = gw._refused_params.get(endpoint, "")
+    if isinstance(record, str):
+        return {name.strip() for name in record.split(",") if name.strip()}
+    return set(record)
+
+
+class TestTheAnthropicBranchDoesNotResendARefusedKey:
+    """Gap (i): the remembered strip never ran on the anthropic branch.
+
+    `_apply_binding` returns early for `anthropic/*` endpoints — their own
+    dialect has no `extra_body`, so `thinking` / `reasoning_effort` are injected
+    as TOP-LEVEL parameters instead — and the strip sat after that return. The
+    drop-and-retry therefore survived only the turn it happened on: the next
+    turn rebuilt the refused key from the same branch and was refused again, for
+    the rest of the session, exactly the failure the memory exists to prevent.
+
+    The endpoint is a gateway-fronted Anthropic one: the recorded shape of a
+    refusal there is the pool endpoint's own wording ("Unrecognized request
+    argument supplied: …"), and `reasoning_effort` is what this branch injects
+    for a role that asked for thinking.
+    """
+
+    ENDPOINT = "anthropic/claude-sonnet-4-5"
+    REFUSAL = "Unrecognized request argument supplied: reasoning_effort"
+
+    def _gw(self):
+        return AIGateway(self.ENDPOINT, enable_thinking=True,
+                         thinking_effort="low")
+
+    def test_the_next_turn_does_not_resend_a_key_this_endpoint_refused(self):
+        gw = self._gw()
+        assert gw.active_model == self.ENDPOINT
+        seen = _stub_transport(gw, litellm.exceptions.BadRequestError(
+            self.REFUSAL, "m", "p"))
+        response = gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert response is not None, (
+            "the turn must not die on a parameter WE injected")
+        assert len(seen) == 2, "one drop, one retry"
+        assert seen[0].get("reasoning_effort") == "low", (
+            "the first attempt must really have carried the refused key, or "
+            "the rest of this test proves nothing")
+        assert "reasoning_effort" not in seen[1], (
+            "the retry must not carry the key the endpoint refused")
+
+        later = _stub_transport(gw)                  # turn 2, no refusal queued
+        gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "y"}]))
+        assert len(later) == 1, (
+            "turn 2 must not need a retry: this endpoint already refused the key")
+        assert not {"thinking", "reasoning_effort", "extra_body"} & set(later[0]), (
+            "gap (i): the anthropic branch rebuilt the refused key and returned "
+            f"before the remembered strip ran: {sorted(later[0])}")
+
+
+class TestOnlyARefusedArgumentIsAttributed:
+    """Gap (ii): attribution was a bare substring, so PROSE counted as refusal.
+
+    `if name in text` answers for any message that contains the name. The
+    recorded shape of the counter-example is a 400 about the MESSAGES that
+    happens to use the word:
+
+        messages.2: thinking blocks are not allowed when tools are present
+
+    Nothing in it refuses `thinking` as a parameter, but the key was dropped
+    anyway: the request stayed wrong in exactly the way the endpoint said, and
+    the reasoning role was silently degraded for the rest of the session on top
+    of it. A name is attributed only when the text marks it as an argument or
+    parameter — the shapes the existing witnesses record
+    ("Unrecognized request argument supplied: thinking" / "…: top_k" in
+    `TestARefusedInjectedParameterIsDroppedByName`) still are.
+    """
+
+    PROSE = ("messages.2: thinking blocks are not allowed when tools are "
+             "present")
+
+    def test_a_message_that_merely_mentions_the_key_is_not_a_refusal(self):
+        gw = AIGateway("deepseek/deepseek-v4-flash", enable_thinking=True,
+                       thinking_effort="low")
+        seen = _stub_transport(gw, litellm.exceptions.BadRequestError(
+            self.PROSE, "m", "p"))
+        with pytest.raises(litellm.exceptions.BadRequestError) as caught:
+            gw._complete_prebuilt(
+                gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert self.PROSE in str(caught.value), (
+            "the caller must SEE the error the endpoint actually raised")
+        assert len(seen) == 1, (
+            "not a refusal of our key: no drop, no retry, no silent degradation")
+        assert "thinking" in (seen[0].get("extra_body") or {}), (
+            "the reasoning switch must still be sent — the 400 was not about it")
+        assert gw._dropped_injected_param is None
+        assert gw._refused_params == {}, (
+            "and nothing is remembered, so later turns keep the key too")
+
+
+class TestAnEnvelopeWithdrawalNamesWhatWentWithIt:
+    """Gap (iii): a whole-envelope refusal was silent about what it took.
+
+    A 400 naming `extra_body` pops the envelope and every nested parameter with
+    it — `thinking`, `reasoning_effort` — and nothing said which ones went. The
+    invariants pinned here: the refusal is REMEMBERED as the envelope alone (no
+    nested key is recorded as individually refused, so a later request carrying
+    one of them is not stripped for a refusal that was never about it), and
+    exactly ONE `[ai_router]` line names the members that went with it, on the
+    same line as the refusal it belongs to.
+
+    A 400 naming a NESTED key still drops just that key and keeps the rest of
+    the envelope — that is pinned by
+    `TestARefusedInjectedParameterIsDroppedByName::test_exactly_the_named_key_goes`.
+    """
+
+    #: The recorded shape of the native-Anthropic refusal litellm produces when
+    #: `extra_body` is forwarded verbatim (see `_apply_binding`).
+    REFUSAL = "extra_body: Extra inputs are not permitted"
+
+    def test_the_envelope_alone_is_remembered_and_its_members_are_named(
+            self, capsys):
+        gw = AIGateway("deepseek/deepseek-v4-flash", enable_thinking=True,
+                       thinking_effort="low")
+        first = _stub_transport(gw, litellm.exceptions.BadRequestError(
+            self.REFUSAL, "m", "p"))
+        gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(first) == 2, "one drop, one retry"
+        assert set(first[0]["extra_body"]) == {"thinking", "reasoning_effort"}, (
+            "both injected members must really have been on the wire, or "
+            "'what went with it' is a claim about nothing")
+        assert "extra_body" not in first[1], "the envelope is withdrawn"
+        endpoint = gw.active_model
+        assert _recorded(gw, endpoint) == {"extra_body"}, (
+            "the record must be the ENVELOPE alone: a nested name recorded here "
+            "would strip a later request carrying only that key, for a refusal "
+            f"that was never about it ({gw._refused_params!r})")
+        lines = [ln for ln in capsys.readouterr().out.splitlines()
+                 if "rejected an injected generation parameter" in ln]
+        assert len(lines) == 1, (
+            f"exactly one line for the withdrawal, got {lines!r}")
+        assert "extra_body.thinking" in lines[0], (
+            "and it must name the member that went with the envelope")
+        assert "extra_body.reasoning_effort" in lines[0], (
+            "every member, not just the first one")
+
+        later = _stub_transport(gw)                  # turn 2, no refusal queued
+        gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "y"}]))
+        assert "extra_body" not in later[0], (
+            "the withdrawn envelope stays withdrawn on the next turn")
+
+
+class TestEveryRefusedKeyIsRememberedPerEndpoint:
+    """Gap (iv): one slot per endpoint, so a second refusal cost a second 400.
+
+    `_refused_params: dict[str, str]` held a single name per endpoint and the
+    writer overwrote it. An endpoint is sticky for a whole step, so it can
+    refuse TWO of the parameters `_apply_binding` injects: the first was
+    remembered, the second replaced it, and the first was re-injected on the
+    next turn — a 400 per turn for a refusal already known and already printed.
+    """
+
+    THINKING_OFF = "Unrecognized request argument supplied: thinking"
+    EFFORT_OFF = "Unrecognized request argument supplied: reasoning_effort"
+
+    def _turn(self, gw, *errors):
+        seen = _stub_transport(gw, *errors)
+        gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "x"}]))
+        return seen
+
+    def test_two_refusals_on_one_endpoint_are_both_remembered(self):
+        gw = AIGateway("deepseek/deepseek-v4-flash", enable_thinking=True,
+                       thinking_effort="low")
+        endpoint = gw.active_model
+        turn1 = self._turn(gw, litellm.exceptions.BadRequestError(
+            self.THINKING_OFF, "m", "p"))
+        assert len(turn1) == 2, "turn 1: one drop, one retry"
+        turn2 = self._turn(gw, litellm.exceptions.BadRequestError(
+            self.EFFORT_OFF, "m", "p"))
+        assert len(turn2) == 2, (
+            "turn 2: the second key is refused here and dropped too")
+        assert _recorded(gw, endpoint) == {"thinking", "reasoning_effort"}, (
+            "gap (iv): the second refusal REPLACED the first instead of "
+            f"joining it ({gw._refused_params!r})")
+
+        turn3 = self._turn(gw)                       # neither key is refused
+        assert len(turn3) == 1, (
+            "turn 3 must not pay another 400: both keys were already refused")
+        assert not {"extra_body", "thinking", "reasoning_effort"} & set(turn3[0]), (
+            "and it must carry neither of them, in no shape: "
+            f"{sorted(turn3[0])}")
+
+
 class TestFailoverNeverRevisitsADeadEndpoint:
     """A route may name one endpoint twice on purpose.
 

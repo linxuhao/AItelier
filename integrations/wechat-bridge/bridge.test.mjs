@@ -11,7 +11,8 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS, MEDIA_LIMITS, MEDIA_FETCH, MEDIA_SEND, mediaOf,
-  sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError, RESUME_LIMITS, accountRecord, ACCOUNT_FILE } from './bridge.mjs';
+  sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError, RESUME_LIMITS, accountRecord, ACCOUNT_FILE,
+  RING_SIZE, GROUP_RING_SIZE, STRANGER_RING_SIZE, MEDIA_STORE_BYTES, MEDIA_STORE_DIR } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
 const types = { Message: { Unknown: 0, Attachment: 1, Audio: 2, Emoticon: 5, Image: 6, Text: 7, Video: 15 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
@@ -1398,6 +1399,174 @@ test('media: an owner\'s held photo survives 600 strangers (half with files): st
     assert.equal(s.bridge.live, 1);
     const [status, bytes] = await fetchMedia(s, own.attachments[0].media_id);
     assert.deepEqual([status, bytes.toString()], [200, 'PHOTO']);
+  } finally { await s.bridge.close(); }
+});
+
+// --- described attachments across a restart -------------------------------------------------
+// Two consecutive createBridge calls over one state directory stand for two processes: each
+// gets its own bot and its own rings, and the second has no message a puppet could hand over.
+// The bounded store in that directory is the only thing that crosses the restart.
+const storedBridge = (dir, options = {}) => mediaBridge({ savedLogin: accountRecord(dir), ...options });
+
+test('media restart: the store bound is a named constant, not a default', () => {
+  assert.equal(MEDIA_STORE_BYTES, 64 * 1048576);
+  assert.equal((RING_SIZE + GROUP_RING_SIZE + STRANGER_RING_SIZE) * MEDIA_LIMITS.file, 18_750 * 1048576);
+  assert.ok(MEDIA_STORE_BYTES < RING_SIZE * MEDIA_LIMITS.file, 'one full ring cannot be copied');
+  assert.ok(2 * MEDIA_LIMITS.file < MEDIA_STORE_BYTES, 'two full files fit');
+});
+
+test('media restart: a described 1:1 attachment is served by the next bridge from disk; an unissued id is refused', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const payload = Buffer.from('%PDF-1.7 the owner attachment');
+  const first = await storedBridge(state);
+  let second, firstOpen = true;
+  try {
+    const bot = await first.login();
+    const file = mediaMessage({ kind: 'file', id: 'owner-pdf', xml: XML.file(payload.length), bytes: payload });
+    bot.emit('message', file);
+    const [, body] = await first.json('/events?after=0');
+    const mediaId = body.events[0].attachments[0].media_id;
+    await until(() => first.bridge.storeCount === 1);
+    assert.equal(first.bridge.storeBytes, payload.length, 'the stored bytes are the ones the message carried');
+    const dir = join(state, MEDIA_STORE_DIR);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    for (const name of readdirSync(dir)) assert.equal(statSync(join(dir, name)).mode & 0o777, 0o600);
+    await first.bridge.close();
+    firstOpen = false;
+
+    second = await storedBridge(state);
+    assert.equal(second.bridge.live, 0, 'the next process described no message');
+    assert.deepEqual(second.bridge.storedIds(), [mediaId]);
+    const [status, served, contentType] = await fetchMedia(second, mediaId);
+    assert.deepEqual([status, served.toString(), contentType], [200, payload.toString(), 'image/jpeg']);
+    const answer = await second.call('/media/' + mediaId);
+    assert.equal(answer.headers.get('content-length'), String(payload.length));
+    await answer.arrayBuffer();
+    assert.equal(file.fetched.count, 1, 'the two reads did not ask the puppet again');
+    const neverIssued = `${Number(mediaId.split('.')[0]) + 1000}.0`;
+    assert.deepEqual(await second.json('/media/' + neverIssued), [404, { error: 'not_found' }]);
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
+});
+
+test('media restart: the store stays inside its byte bound and a cut id is gone in the next process', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const first = await storedBridge(state, { mediaStoreBytes: 25 });
+  let second, firstOpen = true;
+  try {
+    const bot = await first.login();
+    const ids = [];
+    for (const label of ['AAA', 'BBB', 'CCC']) {
+      const bytes = Buffer.from(label.repeat(3) + '\n');
+      bot.emit('message', mediaMessage({ kind: 'file', id: 'file-' + label, xml: XML.file(bytes.length), bytes }));
+      ids.push((await first.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id);
+    }
+    await until(() => first.bridge.storedIds().includes(ids[2]) && first.bridge.storeCount === 2);
+    assert.equal(first.bridge.storeBytes, 20, 'two 10-byte payloads fit the 25-byte bound');
+    assert.ok(first.bridge.storeBytes <= 25, 'the bound is not exceeded');
+    assert.deepEqual(first.bridge.storedIds(), ids.slice(1), 'the oldest described payload was evicted');
+    await first.bridge.close();
+    firstOpen = false;
+
+    second = await storedBridge(state, { mediaStoreBytes: 25 });
+    assert.deepEqual(second.bridge.storedIds(), ids.slice(1));
+    assert.deepEqual(await second.json('/media/' + ids[0]), [404, { error: 'not_found' }]);
+    const [status, bytes] = await fetchMedia(second, ids[2]);
+    assert.deepEqual([status, bytes.toString()], [200, 'CCCCCCCCC\n']);
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
+});
+
+test('media restart: an id whose event left its ring is not served by the next process', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const first = await storedBridge(state, { ringSize: 2 });
+  let second, firstOpen = true;
+  try {
+    const bot = await first.login();
+    const ids = [];
+    for (const label of ['ONE', 'TWO', 'THREE']) {
+      bot.emit('message', mediaMessage({ kind: 'image', id: 'img-' + label, bytes: Buffer.from(label) }));
+      ids.push((await first.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id);
+    }
+    await until(() => first.bridge.storeCount === 2 && !first.bridge.storedIds().includes(ids[0]));
+    assert.deepEqual(await first.json('/media/' + ids[0]), [404, { error: 'not_found' }]);
+    await first.bridge.close();
+    firstOpen = false;
+
+    second = await storedBridge(state);
+    assert.deepEqual(await second.json('/media/' + ids[0]), [404, { error: 'not_found' }]);
+    const [status, bytes] = await fetchMedia(second, ids[2]);
+    assert.deepEqual([status, bytes.toString()], [200, 'THREE']);
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
+});
+
+test('media restart: an event cut while its copy is still fetching leaves nothing stored', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const first = await storedBridge(state, { ringSize: 1 });
+  let second, firstOpen = true;
+  try {
+    const bot = await first.login();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const gated = mediaMessage({ kind: 'image', id: 'gated', gate, bytes: Buffer.from('GATED') });
+    bot.emit('message', gated);
+    const [, before] = await first.json('/events?after=0');
+    const cut = before.events[0].attachments[0].media_id;
+    assert.equal(gated.fetched.count, 1, 'the copy fetch started');
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'after', bytes: Buffer.from('AFTER') }));
+    const [, after] = await first.json('/events?after=0');
+    const kept = after.events[0].attachments[0].media_id;
+    release();
+    await until(() => first.bridge.storedIds().includes(kept));
+    assert.deepEqual(first.bridge.storedIds(), [kept], 'the cut id was not stored after its fetch landed');
+    await first.bridge.close();
+    firstOpen = false;
+
+    second = await storedBridge(state);
+    assert.deepEqual(await second.json('/media/' + cut), [404, { error: 'not_found' }]);
+    const [status, bytes] = await fetchMedia(second, kept);
+    assert.deepEqual([status, bytes.toString()], [200, 'AFTER']);
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
+});
+
+test('media restart: a stranger\'s description stores no bytes', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const s = await storedBridge(state, { known: ['wxid_owner', 'wxid_x'] });
+  try {
+    const bot = await s.login();
+    await withRooms(s, [], 'wxid_owner');
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'stranger', from: 'wxid_x', xml: XML.file(10), bytes: Buffer.from('SECRET') }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events[0].attachments[0], { kind: 'file', name: '报告 & 附录.pdf', size: 10, gone: true });
+    assert.equal(s.bridge.storeCount, 0);
+    assert.deepEqual(readdirSync(join(state, MEDIA_STORE_DIR)), []);
+  } finally { await s.bridge.close(); }
+});
+
+test('media restart: an attachment whose bytes cross the bound is not stored', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const s = await storedBridge(state, { mediaLimits: { ...MEDIA_LIMITS, image: 5 } });
+  try {
+    const bot = await s.login();
+    const huge = mediaMessage({ kind: 'image', id: 'huge', bytes: Buffer.alloc(10) });
+    bot.emit('message', huge);
+    await until(() => huge.fetched.count === 1);
+    const [, body] = await s.json('/events?after=0');
+    const mediaId = body.events[0].attachments[0].media_id;
+    assert.ok(mediaId, 'a description with a media_id was issued');
+    assert.equal(s.bridge.storeCount, 0, 'the over-bound bytes were not kept');
+    assert.deepEqual(readdirSync(join(state, MEDIA_STORE_DIR)), []);
+    assert.deepEqual((await fetchMedia(s, mediaId)).slice(0, 1), [413], 'the live refusal is unchanged');
   } finally { await s.bridge.close(); }
 });
 

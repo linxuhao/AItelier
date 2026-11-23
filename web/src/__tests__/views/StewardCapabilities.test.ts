@@ -122,6 +122,15 @@ describe('the capabilities table speaks the chosen language', () => {
     expect(copied).toEqual([]);
   });
 
+  it('the calendar row names the calendar alone (owner 2026-11-23: reminders are the steward\'s own)', () => {
+    const want: Record<string, string> = {en: 'Calendar', 'zh-CN': '日历', 'zh-TW': '行事曆', ja: 'カレンダー',
+      ko: '캘린더', fr: 'Agenda', de: 'Kalender', es: 'Calendario'};
+    for (const lang of LANGS) {
+      langStore.set(lang);
+      expect(t('steward.cap.calendar'), lang).toBe(want[lang]);
+    }
+  });
+
   it('headers, aria-label, names and routes come from the i18n keys in en and zh-CN', async () => {
     api.listStewardCapabilities.mockResolvedValue(payload({vision: {label: '看图 (Vision)'}}));
     const view = render(StewardCapabilitiesView);
@@ -140,7 +149,7 @@ describe('the capabilities table speaks the chosen language', () => {
     expect(label(view.container, 'vision')).toBe('看图');
     expect(label(view.container, 'transcribe')).toBe('语音转文字');
     expect(label(view.container, 'tts')).toBe('发语音条');
-    expect(route(view.container, 'vision')).toBe('内置 — model_routes:visionprobe');
+    expect(route(view.container, 'vision')).toBe('自带 — model_routes:visionprobe');
     expect(route(view.container, 'transcribe')).toBe('MCP 工具：agentmedia / transcribe_audio');
     expect(route(view.container, 'tts')).toBe('缺失（无提供方式）');
   });

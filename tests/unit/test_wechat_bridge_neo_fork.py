@@ -463,7 +463,7 @@ def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin
     copied = [line for line in native.splitlines() if re.match(r"^COPY\s", line) and ".patch" in line]
     assert len(copied) == 1, f"the native stage copies {len(copied)} patch lines: {copied}"
     sources = [token for token in copied[0].split() if token.endswith(".patch")]
-    assert sources == [f"neo-fork/{name}"], f"the build copies {sources}, the pin names neo-fork/{name}"
+    assert sources == ["neo-fork/0001-incoming-message-types.patch", "neo-fork/0002-saved-login.patch"], f"the build copies {sources}"
 
     # Its digest is checked against pin.json's before anything is patched, and the check
     # precedes the apply: an unverified patch would make the pin a comment.

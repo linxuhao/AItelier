@@ -2040,8 +2040,21 @@ test('media restart: an id removed from the store leaves neither its payload nor
       bot.emit('message', mediaMessage({ kind: 'file', id: 'rm-' + label, xml: XML.file(bytes.length), bytes }));
       ids.push((await s.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id);
     }
-    await until(() => s.bridge.storedIds().includes(ids[2]) && s.bridge.storeCount === 2);
-    assert.deepEqual(s.bridge.storedIds(), ids.slice(1), 'the oldest copy was evicted');
+    // archive() spools the three copies concurrently and the store indexes them in put-completion
+    // order, not media-id order. Measured at the first true predicate of a red run: storedIds
+    // [ids[2], ids[1]], storeCount 2, storeBytes 20, and only ids[1]/ids[2] files on disk (ids[0]'s
+    // two already gone); a gated run also saw the transient pair [ids[0], ids[2]] while ids[1]'s
+    // spool was still in flight. The kept pair and the eviction are deterministic, their array
+    // order is not. Wait for that pair and the evicted id's two files to be gone, then assert the
+    // same unordered pair.
+    const kept = () => s.bridge.storedIds().slice().sort();
+    const expected = ids.slice(1).sort();
+    await until(() => {
+      const now = kept();
+      return now.length === 2 && now[0] === expected[0] && now[1] === expected[1]
+        && !existsSync(join(dir, `${ids[0]}.bin`)) && !existsSync(join(dir, `${ids[0]}.json`));
+    });
+    assert.deepEqual(kept(), expected, 'the oldest copy was evicted');
     assert.deepEqual([existsSync(join(dir, `${ids[0]}.bin`)), existsSync(join(dir, `${ids[0]}.json`))], [false, false],
       'the evicted id left neither its payload nor its metadata');
     assert.deepEqual(readdirSync(dir).sort(), [`${ids[1]}.bin`, `${ids[1]}.json`, `${ids[2]}.bin`, `${ids[2]}.json`].sort(),

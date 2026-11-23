@@ -475,10 +475,87 @@ def _is_request_shaped(exc: BaseException) -> bool:
             or getattr(exc, "status_code", None) == 400)
 
 
+#: How these endpoints mark the token that follows as the ARGUMENT they refuse.
+#: Attribution is a MARKED-SLOT test, never a substring one: a 400 whose prose
+#: merely contains the name is not a refusal of it, and answering it as one
+#: drops a key the request was never wrong about (see
+#: `_named_injected_param`).
+_REFUSAL_MARKER = (
+    r"(?:unexpected|unrecognized|unrecognised|unsupported|unknown|invalid"
+    r"|extra|illegal)"
+)
+
+_INJECTED_NAME_ALT = "|".join(re.escape(n) for n in _INJECTED_GENERATION_PARAMS)
+
+#: Marker FIRST, then the argument: "Unrecognized request argument supplied:
+#: thinking", "Unexpected keyword argument 'thinking'". `:`/`=` is what
+#: separates the clause from the slot, and `[^.;:]` keeps the search inside ONE
+#: clause, so a marker in one sentence cannot claim a token in the next.
+_MARKER_THEN_ARG = re.compile(
+    r"\b" + _REFUSAL_MARKER + r"\b[^.;:]{0,60}?[:=]\s*[\"'`\[]?"
+    r"(?:extra_body\.)?(?P<name>" + _INJECTED_NAME_ALT + r")\b",
+    re.IGNORECASE)
+
+#: Marker FIRST, the argument right behind it with no separators at all:
+#: "unknown field chat_template_kwargs", "unsupported parameter thinking". The
+#: noun between them is required, which is what keeps this from matching a
+#: sentence that merely mentions the key after an unrelated "invalid".
+_MARKER_SPACE_ARG = re.compile(
+    r"\b" + _REFUSAL_MARKER + r"\s+(?:request\s+)?"
+    r"(?:arguments?|parameters?|fields?|keywords?|keys?|options?|properties"
+    r"|inputs?)s?\s*[\"'`\[]?(?:extra_body\.)?(?P<name>"
+    + _INJECTED_NAME_ALT + r")\b",
+    re.IGNORECASE)
+
+#: Argument FIRST, then the refusal about it: "extra_body: Extra inputs are not
+#: permitted" (native Anthropic, see `_apply_binding`), "thinking: Unexpected
+#: value 'adaptive'". The marker has to sit in the slot right after the name —
+#: passed an `is`/`are`/article at most — so prose that keeps talking after the
+#: name ("thinking blocks are not allowed when tools are present") does not
+#: qualify.
+_ARG_THEN_MARKER = re.compile(
+    r"\b(?:extra_body\.)?(?P<name>" + _INJECTED_NAME_ALT + r")\b"
+    r"\s*[:=]?\s*(?:is|are|was|were)?\s*(?:an?\s+)?" + _REFUSAL_MARKER,
+    re.IGNORECASE)
+
+#: OpenAI-shaped error bodies carry the offending argument in their own `param`
+#: field: {"error": {"message": ..., "param": "thinking", "code": ...}}.
+_PARAM_FIELD_NAMED = re.compile(
+    r"[\"']?\bparam(?:eter)?[\"']?\s*[:=]\s*[\"']?(?:extra_body\.)?"
+    r"(?P<name>" + _INJECTED_NAME_ALT + r")\b",
+    re.IGNORECASE)
+
+
 def _named_injected_param(text: str) -> str | None:
-    """The first generation parameter WE injected that `text` names, if any."""
+    """The first generation parameter WE injected that `text` REFUSES, if any.
+
+    The refusal has to name the key as an ARGUMENT or PARAMETER — one of the
+    shapes above — because the mere presence of the token says nothing
+    about the request being wrong about it. Both directions are recorded in this
+    module and in the field:
+
+        Unrecognized request argument supplied: thinking      (a refusal)
+        extra_body: Extra inputs are not permitted            (a refusal)
+        messages.2: thinking blocks are not allowed when
+        tools are present                                     (NOT one)
+
+    The last one was the measured defect: `thinking` was dropped, the reasoning
+    role degraded for the rest of the session, and the error it was actually
+    complaining about — the MESSAGES — survived untouched, because a bare
+    substring answers for any text that contains the name.
+
+    Order still decides a NESTED key before the envelope it lives in
+    (`_INJECTED_GENERATION_PARAMS`), so a message naming `extra_body.thinking`
+    drops just that key and keeps the envelope's other members.
+    """
+    text = text or ""
+    named: set[str] = set()
+    for pattern in (_MARKER_THEN_ARG, _MARKER_SPACE_ARG, _ARG_THEN_MARKER,
+                    _PARAM_FIELD_NAMED):
+        for match in pattern.finditer(text):
+            named.add(match.group("name").lower())
     for name in _INJECTED_GENERATION_PARAMS:
-        if name in text:
+        if name in named:
             return name
     return None
 
@@ -491,7 +568,12 @@ def _drop_injected_param(kwargs: dict, name: str) -> str:
     nothing to fix and the caller must raise instead of retrying blind.
 
     `extra_body` is popped as a whole only when it EMPTIES, so dropping one
-    nested key (the common case) keeps the rest of the envelope.
+    nested key (the common case) keeps the rest of the envelope. An
+    ENVELOPE-naming refusal pops it outright, and the description then names
+    every nested parameter that went with it: the refusal was about the
+    envelope, so it says nothing about those members, and a withdrawal that
+    silently took them along is exactly the kind of degradation this module
+    prints about elsewhere (see `_drop_refused_param`).
     """
     dropped: list[str] = []
     if name != "extra_body":
@@ -505,9 +587,33 @@ def _drop_injected_param(kwargs: dict, name: str) -> str:
             if not extra_body:
                 kwargs.pop("extra_body", None)
     elif "extra_body" in kwargs:
-        kwargs.pop("extra_body", None)
+        envelope = kwargs.pop("extra_body", None)
         dropped.append("extra_body")
+        if isinstance(envelope, dict):
+            dropped.extend(f"extra_body.{member}" for member in envelope)
     return ", ".join(dropped)
+
+
+def _refused_names(record: str) -> tuple[str, ...]:
+    """The generation parameters one endpoint's refusal RECORD holds.
+
+    The record is one string per endpoint (`AIGateway._refused_params`), the
+    refused names comma-joined in refusal order: an endpoint is sticky for a
+    whole step, so it can refuse more than one of the parameters
+    `_apply_binding` injects (a pool endpoint answered "Unrecognized request
+    argument … thinking" on one turn and the same about `reasoning_effort` on a
+    later one). Every one of them has to be stripped from later requests, or
+    each refusal is re-learned at the price of another 400.
+    """
+    return tuple(part.strip() for part in (record or "").split(",") if part.strip())
+
+
+def _record_refused(record: str, name: str) -> str:
+    """`record` with `name` added, refusal order kept, idempotent."""
+    names = list(_refused_names(record))
+    if name not in names:
+        names.append(name)
+    return ", ".join(names)
 
 
 def resolve_agent_model(model_name: str) -> str:
@@ -885,6 +991,11 @@ class AIGateway:
         # with `Unexpected end of JSON input` (the SSE body truncated by the
         # 400). Keyed by `active_model`, so a failover onto an endpoint that
         # never refused anything still gets the key.
+        #
+        # The value is that endpoint's refused names, comma-joined — ALL of
+        # them, not the first one: an endpoint is sticky for the whole step, so
+        # a second refusal there would otherwise cost a second 400 every time
+        # the session reached it again. Read it through `_refused_names`.
         self._refused_params: dict[str, str] = {}
         self._burst_hits = 0
         # Start at the first candidate whose usage window is not already known
@@ -1469,12 +1580,18 @@ class AIGateway:
             return ""
         self._dropped_injected_param = name
         # Remember WHICH endpoint refused it, so the next turn's `_apply_binding`
-        # does not put the key back and spend the whole session on 400s.
-        self._refused_params[self.active_model or ""] = name
+        # does not put the key back and spend the whole session on 400s. Added
+        # to that endpoint's record, never replacing it: a second refused key is
+        # a second thing this endpoint will refuse forever.
+        endpoint = self.active_model or ""
+        self._refused_params[endpoint] = _record_refused(
+            self._refused_params.get(endpoint, ""), name)
         # Loud and once, on the same channel as the other degradations: a step
         # that suddenly thinks (or stops declaring an effort) has to be
         # explainable from the log, and `active_model` is the endpoint that
-        # refused it.
+        # refused it. An envelope refusal expands into its members in this same
+        # line (`dropped` names them): one withdrawal, one line, everything it
+        # took with it.
         print(f"[ai_router] {self.active_model} rejected an injected "
               f"generation parameter ({type(exc).__name__}); dropped "
               f"{dropped} and retrying once: {str(exc)[:160]}", flush=True)
@@ -1942,7 +2059,13 @@ class AIGateway:
                     kwargs["thinking"] = {"type": "adaptive"}
             else:
                 kwargs["thinking"] = {"type": "disabled"}
-            return kwargs
+            # The remembered-strip runs on THIS exit too — see
+            # `_without_refused_params`. Returning here without it was the
+            # measured gap: an anthropic endpoint refused an injected key with a
+            # 400, the drop-and-retry survived that turn, and the very next turn
+            # rebuilt the key from this branch and was refused again, for the
+            # rest of the session.
+            return self._without_refused_params(kwargs)
 
         # A disabled-thinking failover away from 5.5 restores the configured
         # sampling value that its previous binding could not accept.
@@ -2015,14 +2138,28 @@ class AIGateway:
                 if not _rejects_thinking_disabled(self.active_model or ""):
                     extra_body["thinking"] = {"type": "disabled"}
                 kwargs["extra_body"] = extra_body
-        # Never re-inject a key THIS endpoint already refused: the two branches
-        # above rebuild these keys on every turn, so remembering the refusal is
-        # what keeps the rest of the session alive instead of dying one turn
-        # after the drop-and-retry succeeded. Silent on purpose — the refusal
-        # itself was already printed, once, when it happened.
-        refused = self._refused_params.get(self.active_model or "")
-        if refused:
-            _drop_injected_param(kwargs, refused)
+        return self._without_refused_params(kwargs)
+
+    def _without_refused_params(self, kwargs: dict) -> dict:
+        """Strip the generation parameters THIS endpoint already refused.
+
+        Called on BOTH exits of `_apply_binding`, including the native-Anthropic
+        one that has a dialect of its own and returns early. The two branches
+        above rebuild these keys on every turn of the session, so remembering
+        the refusal is what keeps the rest of it alive instead of dying one turn
+        after the drop-and-retry succeeded — and that has to hold for the keys
+        injected OUTSIDE `extra_body` too (`thinking` /
+        `reasoning_effort` as top-level parameters), which only the anthropic
+        branch sends.
+
+        Silent on purpose — the refusal itself was already printed, once, when
+        it happened. Per endpoint, so a failover onto an endpoint that never
+        refused anything still gets the key. Every remembered name is stripped,
+        and an `extra_body` in the record withdraws the whole envelope.
+        """
+        endpoint = self.active_model or ""
+        for name in _refused_names(self._refused_params.get(endpoint, "")):
+            _drop_injected_param(kwargs, name)
         return kwargs
 
     def _build_kwargs(self, messages: list[dict], **extra) -> dict:

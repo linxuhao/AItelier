@@ -490,6 +490,24 @@ def check_url(url: str) -> tuple[str, str, int]:
     return parts.scheme, host, port or (443 if parts.scheme == "https" else 80)
 
 
+# Step 24.3 (design-steward 7.8.13): the steward's own browser keeps its login state, and a
+# click or a typed word in it can act for the owner. A connection to it is private, whoever
+# writes the change (dashboard or an approved proposal), so a group turn never reaches it.
+PRIVATE_ONLY_HOSTS = ("steward-pwmcp",)
+
+
+def private_only(url) -> bool:
+    try:
+        return (urlsplit(url).hostname or "") in PRIVATE_ONLY_HOSTS
+    except (TypeError, ValueError):
+        return False
+
+
+def check_visibility(url, visibility) -> None:
+    if visibility == "public" and private_only(url):
+        raise StateGraphError("private_only: the steward's own browser is never public")
+
+
 def reserved_addresses(resolver=None) -> set[str]:
     resolver = resolver or RESOLVER
     reserved = set(HOST_LITERALS) | set(host_addresses()) | route_gateways()
@@ -737,6 +755,7 @@ class StateStewardConnections:
         else:
             header_name = None
         checked_address(url, require=False)
+        check_visibility(url, visibility)
         moment = _iso(_utcnow())
         dropped = None
         with self.store.transaction(write=True) as conn:

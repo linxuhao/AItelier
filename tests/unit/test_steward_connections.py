@@ -229,6 +229,20 @@ def test_the_stewards_own_browser_is_not_reserved(world):
     assert add(world, conn_id="browser", url="http://steward-pwmcp:8921/mcp", visibility="private")["conn_id"] == "browser"
 
 
+def test_the_stewards_own_browser_is_never_public(world):
+    # Design 7.8.13: added public, made public later, or a public connection moved onto it.
+    with pytest.raises(StateGraphError, match="private_only"):
+        add(world, conn_id="browser", url="http://steward-pwmcp:8921/mcp", visibility="public")
+    add(world, conn_id="browser", url="http://steward-pwmcp:8921/mcp", visibility="private")
+    with pytest.raises(StateGraphError, match="private_only"):
+        add(world, conn_id="browser", url="http://steward-pwmcp:8921/mcp", visibility="public")
+    add(world, conn_id="media", visibility="public")
+    with pytest.raises(StateGraphError, match="private_only"):
+        add(world, conn_id="media", url="http://STEWARD-PWMCP:8921/mcp", visibility="public")
+    assert {c["conn_id"]: c["visibility"] for c in listed(world)["connections"]} == {
+        "browser": "private", "media": "public"}
+
+
 def test_discovery_stores_canonical_definitions_and_prefills(world):
     add(world)
     discover(world)

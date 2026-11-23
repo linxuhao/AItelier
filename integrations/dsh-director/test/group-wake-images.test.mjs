@@ -24,8 +24,9 @@ const at = n => `2026-11-23T10:0${n}:00+00:00`;
 /** One wake world: a real director library behind a fake host hook, and a real ownerChannels
  *  handle whose group inbound path calls the plugin's setGroupWake callback. `attach: false` is
  *  a hook on a text-only route (it renders lines but attaches nothing); `hook: false` is a host
- *  that provides no hook at all - both must keep the wake's single text block. */
-function world({ recent = [], attach = true, hook = true } = {}) {
+ *  that provides no hook at all - both must keep the wake's single text block. `copyImages` is a
+ *  host whose `images` getter answers a fresh copy of what its `line()` filled so far. */
+function world({ recent = [], attach = true, hook = true, copyImages = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'group-wake-images-'));
   const library = createMediaLibrary({ root: dir, userId: 'owner' });
   const saved = [], steered = [], recentReads = [];
@@ -47,7 +48,7 @@ function world({ recent = [], attach = true, hook = true } = {}) {
     },
     ...(hook ? { wakeMedia: async () => {
       const images = [];
-      return { images, line: async (item, { attach: mayAttach = true } = {}) => {
+      const media = { line: async (item, { attach: mayAttach = true } = {}) => {
         const row = library.lookup(item?.ref);
         const name = { image: '图片', voice: '语音' }[item?.kind] ?? '文件';
         const meta = `${item?.mime ?? ''}${Number.isInteger(item?.size) ? '，' + item.size + ' B' : ''}`;
@@ -58,6 +59,9 @@ function world({ recent = [], attach = true, hook = true } = {}) {
         images.push({ attachmentId: `att-${images.length + 1}`, mediaType: row.mime });
         return `[图片 ${item.ref}${meta ? '，' + meta : ''}，原图已附]`;
       } };
+      if (copyImages) Object.defineProperty(media, 'images', { get: () => images.slice() });
+      else media.images = images;
+      return media;
     } } : {}),
   };
   const channels = createOwnerChannels({ host: host.channels, groups,
@@ -166,4 +170,22 @@ test('c2: bound+1 kept images attach only the newest `bound`, the rest keep thei
   const shownLines = lines(message).recent.map(entry => entry.attachments[0]);
   assert.ok(shownLines[0].includes(recent[0].attachments[0].ref) && shownLines[0].includes('media_call') && !shownLines[0].includes('原图已附'));
   for (const line of shownLines.slice(1)) assert.match(line, /原图已附/);
+});
+
+test('c1: a host whose images getter answers a fresh copy still wakes with every image its lines filled', async t => {
+  const recent = [];
+  const w = world({ recent, copyImages: true });
+  t.after(w.stop);
+  const kept = await w.store('group:wechat:r1', 'copy-kept');
+  const mine = await w.store('group:wechat:r1', 'copy-mine');
+  recent.push(keptEntry(kept, 1));
+  await w.wake({ attachments: [{ kind: 'image', ref: mine, mime: 'image/png', size: 33 }] });
+  const message = w.steeredWake();
+  // The host saved two images while rendering; the wake must carry both, not the empty
+  // copy an early read of `media.images` would have seen.
+  assert.deepEqual(message.content.map(block => block.type), ['text', 'image', 'image']);
+  const shown = lines(message);
+  assert.match(shown.recent[0].attachments[0], /原图已附/);
+  assert.match(shown.messages[0].attachments[0], /原图已附/);
+  assert.deepEqual(w.saved.map(item => item.ref).sort(), [kept, mine].sort());
 });

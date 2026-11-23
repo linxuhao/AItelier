@@ -6,7 +6,7 @@ import json
 import re
 import time
 from uuid import uuid4
-from core import state_conversation_uploads
+from core import media_types, state_conversation_uploads
 from core.driver_questions import CONVERSATION, all_questions, conversation_rows, open_question_count
 from core.drivers import CLI_OWNER_ACTOR, recipient_presence_block, touch_driver
 from core.message_body_guard import refuse_credential_body
@@ -84,6 +84,17 @@ def citation_fields(row):
     if "withdraws_json" in row.keys() and row["withdraws_json"]:
         fields["withdraws"] = json.loads(row["withdraws_json"])
     return fields
+
+
+def _conversation_attachments(own, sourced):
+    """`{"attachments": [...]}` for one conversation row, or {} when it has none: the
+    message row's own attachments_json, else the channel source row's
+    (core.media_types.from_source_attachments: ref -> id, a refused one kept)."""
+    if own is not None:
+        return {"attachments": json.loads(own)}
+    if sourced is not None:
+        return {"attachments": media_types.from_source_attachments(json.loads(sourced))}
+    return {}
 
 
 def encode_conversation_cursor(created_at, message_id):
@@ -624,7 +635,7 @@ class DriverInbox:
 
     def send_user_conversation_message(self, request_key, project_id, body, subject=None,
                                        reply_to_message_id=None, target_driver_id=None, answers=None,
-                                       _written=None):
+                                       attachments=None, _written=None):
         """Record one message from the project's USER to its driver.
 
         The mirror of `send_user_message`, and equally PRESENTATION: this writes
@@ -645,6 +656,14 @@ class DriverInbox:
         project, a missing block, a block that is not a question, or a repeated
         ref refuses the whole reply with nothing stored. The cited messages are
         not modified; the link lives on this reply's row.
+
+        `attachments` (step 24.2b, design-steward 7.8.12a "消息带附件") names at most 10 of
+        the dashboard's uploads (`u_` upload_ids). In the write transaction each must be an
+        upload of THIS project by THIS user that is still staged and carried by no message;
+        one that is not refuses the whole message invalid_attachment with nothing written.
+        The row keeps them as attachments_json [{id, kind, mime, size, name}] and each upload
+        becomes `attached` to the message, pending for every delivery target. With
+        attachments the body may be empty (it never had to be non-empty).
 
         Idempotent per (actor, request_key), like every write here.
 
@@ -667,11 +686,14 @@ class DriverInbox:
         if self.owner_text_guard is not None:
             self.owner_text_guard(subject, body)
         answers = self._answers(answers)
-        # The answers are appended only when there are some, so the payload of
-        # every request written before they existed still replays byte-identically.
+        attachments = self._upload_ids(attachments)
+        # The answers and the attachments are appended only when there are some, so the
+        # payload of every request written before they existed still replays byte-identically.
         payload = [subject, body, project_id, reply_to_message_id, target_driver_id]
         if answers:
             payload.append(answers)
+        if attachments:
+            payload.append({"attachments": attachments})
         payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send_user_conversation", request_key, payload)
@@ -680,8 +702,12 @@ class DriverInbox:
             self.store._project(conn, project_id)
             if answers:
                 self._resolve_answers(conn, project_id, answers)
+            shown = state_conversation_uploads.claim(conn, project_id, self.actor, attachments)
             mid, created, deliveries = self.write_user_half(conn, project_id, subject, body, reply_to_message_id,
-                                                            target_driver_id, answers)
+                                                            target_driver_id, answers, attachments=shown)
+            if attachments:
+                state_conversation_uploads.attach(conn, attachments, mid,
+                                                  [d["target_driver_id"] for d in deliveries])
             if _written is not None:
                 _written(conn, mid)
             result = self._record(conn, "send_user_conversation", request_key, payload,
@@ -692,14 +718,29 @@ class DriverInbox:
         notify(self.store.db.db_path)
         return result
 
+    @staticmethod
+    def _upload_ids(attachments):
+        """The upload_ids a user's message names: a list of at most
+        media_types.ATTACHMENTS_MAX strings, [] for none; anything else is invalid_request.
+        Whether each names a usable upload is judged in the write transaction
+        (state_conversation_uploads.claim)."""
+        if attachments is None:
+            return []
+        if (not isinstance(attachments, list) or len(attachments) > media_types.ATTACHMENTS_MAX
+                or any(type(upload_id) is not str for upload_id in attachments)):
+            raise StateGraphError("invalid_request")
+        return list(attachments)
+
     def write_user_half(self, conn, project_id, subject, body, reply_to_message_id=None, target_driver_id=None,
-                        answers=None, target_driver_ids=None):
+                        answers=None, target_driver_ids=None, attachments=None):
         """The user's message row and the deliveries that wake its driver(s), on the
         caller's write connection; (message_id, created_at, deliveries). The one
         writer of the user's half: the dashboard's message above, a message the
         owner sent from a chat channel (core.state_channels) and an owner's channel
         answer to a pushed question (core.state_owner_questions, which names its
-        recipients in `target_driver_ids`) land identically. With answers it also writes
+        recipients in `target_driver_ids`) land identically. `attachments` (the dashboard's,
+        already in the message shape) are stored as attachments_json; without them the row is
+        written exactly as before. With answers it also writes
         the steward's question event ('answered') on that connection; the caller's
         write transaction (core.state_graph.transaction) notifies the State waiters
         once it has committed an event row, so this writer never notifies itself -
@@ -728,10 +769,11 @@ class DriverInbox:
         mid, created = str(uuid4()), now()
         conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
                      "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,channel,"
-                     "answers_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     "answers_json,attachments_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                      (mid, parent["thread_id"] if parent else mid, None, project_id, "note",
                       "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user",
-                      json.dumps(answers) if answers else None))
+                      json.dumps(answers) if answers else None,
+                      json.dumps(attachments) if attachments else None))
         if answers:
             from core.state_owner_questions import question_changed
             question_changed(self.store, conn, project_id, "answered")
@@ -773,9 +815,17 @@ class DriverInbox:
             self.store._project(conn, project_id)
             rows = [dict(r) for r in conn.execute(
                 "SELECT message_id,thread_id,sender_driver_id,project_id,subject,body,refs_json,"
-                "reply_to_message_id,created_at,audience,segments_json,answers_json,withdraws_json FROM driver_inbox_messages "
-                f"WHERE project_id=? AND {CONVERSATION} {bound} "
+                "reply_to_message_id,created_at,audience,segments_json,answers_json,withdraws_json,attachments_json "
+                f"FROM driver_inbox_messages WHERE project_id=? AND {CONVERSATION} {bound} "
                 "ORDER BY created_at DESC, message_id DESC LIMIT ?", (*params, limit + 1))]
+            # A message relayed from a chat channel keeps its files on its inbound source row
+            # (core.state_channels, 24.2), not on the message row: read them for the page's
+            # rows that carry none of their own.
+            bare = [row["message_id"] for row in rows[:limit] if row["attachments_json"] is None]
+            sourced = {r["message_id"]: r["attachments_json"] for r in conn.execute(
+                "SELECT message_id,attachments_json FROM state_message_sources WHERE direction='in' "
+                f"AND attachments_json IS NOT NULL AND message_id IN ({','.join('?' * len(bare))})",
+                bare)} if bare else {}
             total = conn.execute("SELECT COUNT(*) FROM driver_inbox_messages "
                                  f"WHERE project_id=? AND {CONVERSATION}", (project_id,)).fetchone()[0]
             marker = self._read_marker(conn, project_id)
@@ -803,6 +853,9 @@ class DriverInbox:
                 # Present only when the reply cites a question; a row written
                 # before answers existed has no key, never an empty list.
                 **citation,
+                # Step 24.2b (7.8.12a "显示"): the message row's attachments, else its channel
+                # source row's in the same shape; no key for a message without files.
+                **_conversation_attachments(row["attachments_json"], sourced.get(row["message_id"])),
                 "created_at": row["created_at"]})
         next_cursor = (encode_conversation_cursor(page[-1]["created_at"], page[-1]["message_id"])
                        if more else None)
@@ -1060,13 +1113,18 @@ class DriverInbox:
             # COUNT(*) over the same WHERE clause, never a page fetched into Python:
             # the answer must not cost the caller the whole backlog.
             matched_total=conn.execute("SELECT COUNT(*) FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE "+where, bound).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.created_at,CASE WHEN m.channel='user' AND m.sender_driver_id IS NULL THEN 'user' ELSE 'driver' END AS sender_kind,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.attachments_json,m.created_at,CASE WHEN m.channel='user' AND m.sender_driver_id IS NULL THEN 'user' ELSE 'driver' END AS sender_kind,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)
             # The storage columns are not payload: the citation part above is the
             # only shape a reader sees them in.
             del row["segments_json"], row["answers_json"], row["withdraws_json"]
+            # Step 24.2b (7.8.12a "宿主怎么知道有附件"): the message row's attachments, under
+            # `attachments` only when it has some, so a row without keeps today's exact keys.
+            stored = row.pop("attachments_json")
+            if stored is not None:
+                row["attachments"] = json.loads(stored)
             for key in ("source_channel", "channel_at"):
                 if row[key] is None:
                     del row[key]

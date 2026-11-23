@@ -18,12 +18,14 @@ PRIVATE (core.state_privacy): a row names the project, the user and the file's n
 from __future__ import annotations
 
 import errno
+import json
 import math
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
 from core import media_types
+from core.state_graph import StateGraphError
 
 TABLE = "state_conversation_uploads"
 STATES = ("staged", "attached", "stored", "refused", "expired")
@@ -223,3 +225,34 @@ def commit(store, *, project_id: str, user: str, upload_id: str, entry: dict, si
         _drop(final)
         raise
     return {"upload_id": upload_id, "kind": entry["kind"], "mime": entry["mime"], "size": size, "name": name}
+
+
+# --- A message carries uploads (step 24.2b P4, 7.8.12a "消息带附件") ---------------------------
+
+
+def claim(conn, project_id: str, user: str, upload_ids) -> list[dict]:
+    """The message-row attachments of `upload_ids`, checked on the message's own write
+    connection: each is an upload of THIS project by THIS user, still `staged` and used by no
+    message (a repeat inside the one message is a second use). One that is not refuses the
+    whole message invalid_attachment, before anything is written."""
+    shown = []
+    for upload_id in upload_ids:
+        row = conn.execute(f"SELECT project_id,user,kind,mime,size,name,state,message_id FROM {TABLE} "
+                           "WHERE upload_id=?", (upload_id,)).fetchone()
+        if (row is None or row["project_id"] != project_id or row["user"] != user
+                or row["state"] != "staged" or row["message_id"] is not None
+                or any(item["id"] == upload_id for item in shown)):
+            raise StateGraphError("invalid_attachment: each attachment is an upload of yours in this project "
+                                  "that no message carries yet")
+        shown.append(media_types.message_attachment(upload_id, row["kind"], row["mime"], row["size"], row["name"]))
+    return shown
+
+
+def attach(conn, upload_ids, message_id: str, targets) -> None:
+    """The uploads now belong to `message_id`; every delivery target still has to store them
+    (`pending_json`, emptied by the hosts' acks)."""
+    pending = json.dumps(sorted(set(targets)))
+    for upload_id in upload_ids:
+        conn.execute(f"UPDATE {TABLE} SET state='attached', message_id=?, pending_json=? "
+                     "WHERE upload_id=? AND state='staged' AND message_id IS NULL",
+                     (message_id, pending, upload_id))

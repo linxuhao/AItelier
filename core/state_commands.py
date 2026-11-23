@@ -450,6 +450,10 @@ class SendUserConversationMessage(Project):
         "is closed for the user's rail; the answered message itself is not changed. A ref to "
         "anything else (another project, a missing block, an info block) or a repeated ref "
         "refuses the whole reply."))
+    attachments: list[str] = Field(default_factory=list, max_length=10, description=(
+        "Optional: up to 10 upload_ids from the conversation upload route, each an upload of "
+        "yours in this project that no message carries yet; one that is not refuses the whole "
+        "message (invalid_attachment). With attachments the body may be empty."))
 
 
 class ListUserConversation(Project):

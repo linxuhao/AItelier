@@ -44,6 +44,7 @@ STEWARD_SCHEDULE = "sch-canary"
 CHANNEL_MESSAGE = "message-source-canary"
 STEWARD_CONNECTION = "canaryconn"
 STEWARD_CONFIRMATION = "KCNRY"
+CONVERSATION_UPLOAD = "u_0000000000c0ffee"
 
 
 def canary(table: str) -> str:
@@ -327,8 +328,8 @@ def _plan():
         # user and its file name).
         "state_conversation_uploads": (
             ("INSERT INTO state_conversation_uploads(upload_id,project_id,user,kind,mime,size,name,state,"
-             "created_at) VALUES('u_0000000000c0ffee',?,?,'image','image/png',1,?,'staged',?)"),
-            (OPEN, c("state_conversation_uploads"), c("state_conversation_uploads"), now)),
+             "created_at) VALUES(?,?,?,'image','image/png',1,?,'staged',?)"),
+            (CONVERSATION_UPLOAD, OPEN, c("state_conversation_uploads"), c("state_conversation_uploads"), now)),
     }
 
 

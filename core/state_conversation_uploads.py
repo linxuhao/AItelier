@@ -129,7 +129,9 @@ def retry_after(conn, project_id: str, at: datetime | None = None) -> int | None
 def admit(store, project_id: str, directory) -> int:
     """Before a byte is read: the project exists (StateNotFound), its hourly count is not used
     up (429 rate_limited) and staging is not already full (507 staging_full). Answers the
-    staging total, which the body is then counted against."""
+    staging total, which the body is then counted against. Uploads past their staging days
+    are swept first (`sweep`), so their bytes no longer count."""
+    sweep(store, directory)
     with store.transaction() as conn:
         store._project(conn, project_id)
         wait = retry_after(conn, project_id)
@@ -256,3 +258,165 @@ def attach(conn, upload_ids, message_id: str, targets) -> None:
         conn.execute(f"UPDATE {TABLE} SET state='attached', message_id=?, pending_json=? "
                      "WHERE upload_id=? AND state='staged' AND message_id IS NULL",
                      (message_id, pending, upload_id))
+
+
+# --- The hosts take the bytes and acknowledge (step 24.2b P5, 7.8.12a "宿主入库") -------------
+#
+# Each delivery target's host opens the staged bytes with its driver token
+# (`GET /api/dsh-drivers/{project_id}/uploads/{upload_id}`, api/dsh_driver_routers.py), stores
+# them in its OWN library subdirectory and acknowledges with `ack_conversation_upload`. The
+# backend records the subdirectory from the token's driver, never from the host: the steward's
+# is its memory user (core.dsh_driver.STEWARD_MEMORY_USER), a director's `d-<driver_id>`. The
+# first ack's store and ref (or refusal) are the ones shown; the staged file is removed once
+# every target has acknowledged, or after STAGING_DAYS when somebody never came (refused gone).
+
+STAGING_DAYS = timedelta(days=7)
+NOT_FOUND = "unknown_upload"
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def store_for(conn, driver_id: str) -> str:
+    """The library subdirectory a driver's host writes: the steward's memory user, else
+    `d-<driver_id>` (read from the driver's registered role, never from a request)."""
+    from core.dsh_driver import STEWARD_MEMORY_USER
+    row = conn.execute("SELECT capabilities_json FROM drivers WHERE driver_id=?", (driver_id,)).fetchone()
+    try:
+        capabilities = json.loads(row[0]) if row is not None and row[0] else {}
+    except ValueError:
+        capabilities = {}
+    if isinstance(capabilities, dict) and capabilities.get("role") == "steward":
+        return STEWARD_MEMORY_USER
+    return "d-" + driver_id
+
+
+def _is_target(conn, message_id: str, driver_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM driver_inbox_deliveries WHERE message_id=? AND target_driver_id=?",
+                        (message_id, driver_id)).fetchone() is not None
+
+
+def _for_target(conn, project_id: str, upload_id, driver_id):
+    """The upload row when `driver_id` is a delivery target of the message carrying this
+    project's upload; else None. Unknown id, another project, an upload no message carries and
+    a driver that is not a target all read the same."""
+    if not driver_id or not isinstance(upload_id, str) or not media_types.UPLOAD_ID.fullmatch(upload_id):
+        return None
+    row = conn.execute(f"SELECT * FROM {TABLE} WHERE upload_id=?", (upload_id,)).fetchone()
+    if (row is None or row["project_id"] != project_id or row["message_id"] is None
+            or not _is_target(conn, row["message_id"], driver_id)):
+        return None
+    return row
+
+
+def _mark_refused(conn, message_id: str, upload_id: str, refused: str) -> None:
+    """The message row shows the refusal on that attachment (the panel and the wake write the
+    refusal line from it)."""
+    stored = conn.execute("SELECT attachments_json FROM driver_inbox_messages WHERE message_id=?",
+                          (message_id,)).fetchone()
+    if stored is None or stored[0] is None:
+        return
+    items = json.loads(stored[0])
+    for item in items:
+        if item.get("id") == upload_id:
+            item["refused"] = refused
+    conn.execute("UPDATE driver_inbox_messages SET attachments_json=? WHERE message_id=?",
+                 (json.dumps(items), message_id))
+
+
+def sweep(store, directory, at: datetime | None = None) -> list[str]:
+    """Uploads older than STAGING_DAYS whose staged file somebody still waits for: an upload no
+    message took becomes `expired`; one attached to a message that no target acknowledged
+    becomes refused `gone` (the message shows it); a stored or refused one just stops waiting.
+    Their staged files are removed after the commit. Run lazily by the upload route, the hosts'
+    fetch and the ack, so no background task is needed. Answers the upload_ids swept."""
+    cutoff = stamp((at or _now()) - STAGING_DAYS)
+    waiting = (f"SELECT upload_id,state,message_id FROM {TABLE} WHERE created_at<? AND "
+               "(state IN ('staged','attached') OR (pending_json IS NOT NULL AND pending_json!='[]'))")
+    with store.transaction() as conn:
+        if conn.execute(waiting + " LIMIT 1", (cutoff,)).fetchone() is None:
+            return []
+    with store.transaction(write=True) as conn:
+        rows = conn.execute(waiting, (cutoff,)).fetchall()
+        for row in rows:
+            if row["state"] == "staged":
+                conn.execute(f"UPDATE {TABLE} SET state='expired', pending_json=NULL WHERE upload_id=?",
+                             (row["upload_id"],))
+            elif row["state"] == "attached":
+                conn.execute(f"UPDATE {TABLE} SET state='refused', refused='gone', pending_json='[]' "
+                             "WHERE upload_id=?", (row["upload_id"],))
+                _mark_refused(conn, row["message_id"], row["upload_id"], "gone")
+            else:
+                conn.execute(f"UPDATE {TABLE} SET pending_json='[]' WHERE upload_id=?", (row["upload_id"],))
+    for row in rows:
+        _drop(os.path.join(os.fspath(directory), row["upload_id"]))
+    return [row["upload_id"] for row in rows]
+
+
+def open_for_target(store, project_id: str, upload_id, driver_id, directory):
+    """The hosts' fetch: (open binary handle, mime, size) of a staged upload for a delivery
+    target of the message carrying it. LookupError(NOT_FOUND) for anyone else - the same answer
+    as an unknown id - and FileNotFoundError("gone") for a target once the file is removed
+    (every target acknowledged, or swept). The file is opened before this returns, so a removal
+    racing the response cannot cut it short."""
+    sweep(store, directory)
+    with store.transaction() as conn:
+        row = _for_target(conn, project_id, upload_id, driver_id)
+    if row is None:
+        raise LookupError(NOT_FOUND)
+    path = os.path.join(os.fspath(directory), row["upload_id"])
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise FileNotFoundError("gone") from exc
+    handle = os.fdopen(fd, "rb")
+    return handle, row["mime"], os.fstat(handle.fileno()).st_size
+
+
+class ConversationUploads:
+    """`ack_conversation_upload` for the driver this service authenticated (the one action
+    handler of this table, bound per service by core.state_commands._handlers)."""
+
+    def __init__(self, store, driver_id):
+        self.store, self.driver_id = store, driver_id
+
+    def ack_conversation_upload(self, project_id, upload_id, ref=None, refused=None):
+        """A delivery target's host stored the upload (`ref`, an m_ ref in its own library) or
+        refused it (`refused`, the library's code). The store is the token's driver's
+        subdirectory (store_for). The first ack decides what is shown (state stored with
+        store and ref, or refused - then the message shows the refusal); later acks only stop
+        waiting for their target. Once no target is waiting the staged file is removed. A
+        repeated ack changes nothing. A driver that is not a target of the message carrying
+        this project's upload gets the same unknown_upload as an unknown id."""
+        if not self.driver_id:
+            raise StateGraphError("driver_identity_required: only a delivery target's host acknowledges an upload")
+        from core.media_library import staging_dir
+        from core.state_graph import StateNotFound
+        directory = staging_dir()
+        sweep(self.store, directory)
+        with self.store.transaction(write=True) as conn:
+            row = _for_target(conn, project_id, upload_id, self.driver_id)
+            if row is None:
+                raise StateNotFound(NOT_FOUND)
+            pending = json.loads(row["pending_json"] or "[]")
+            state, store, kept_ref, kept_refused = row["state"], row["store"], row["ref"], row["refused"]
+            if self.driver_id in pending:
+                pending.remove(self.driver_id)
+                if state == "attached":
+                    if ref is not None:
+                        state, store, kept_ref = "stored", store_for(conn, self.driver_id), ref
+                    else:
+                        state, kept_refused = "refused", refused
+                        _mark_refused(conn, row["message_id"], upload_id, refused)
+                conn.execute(f"UPDATE {TABLE} SET state=?, store=?, ref=?, refused=?, pending_json=? "
+                             "WHERE upload_id=?",
+                             (state, store, kept_ref, kept_refused, json.dumps(pending), upload_id))
+        if not pending:
+            _drop(os.path.join(os.fspath(directory), upload_id))
+        out = {"upload_id": upload_id, "project_id": project_id, "state": state, "waiting": len(pending)}
+        if kept_ref is not None:
+            out.update(store=store, ref=kept_ref)
+        if kept_refused is not None:
+            out["refused"] = kept_refused
+        return out

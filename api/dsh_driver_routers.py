@@ -198,6 +198,35 @@ async def conversation_upload(project_id: str, request: Request,
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.get("/{project_id}/uploads/{upload_id}", dependencies=[Depends(authz.require_reader)])
+async def staged_upload(project_id: str, upload_id: str, service=Depends(get_service)):
+    """Step 24.2b (design-steward 7.8.12a "宿主入库"): a host takes the staged bytes of one
+    dashboard upload with its driver token, streamed, before storing them in its own library
+    and acknowledging (`ack_conversation_upload`).
+
+    Only a driver that is a delivery target of the message carrying this project's upload gets
+    the bytes; anyone else - and an unknown id, another project's upload or one no message
+    carries - gets the same 404. A target whose file was already removed (every target
+    acknowledged, or nobody came for 7 days) gets 410 `gone`."""
+    from fastapi.responses import StreamingResponse
+    try:
+        handle, mime, size = await asyncio.to_thread(
+            uploads.open_for_target, service.store, project_id, upload_id,
+            getattr(service, "driver_id", None), media_library.staging_dir())
+    except LookupError as exc:
+        raise HTTPException(404, uploads.NOT_FOUND) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(410, "gone") from exc
+
+    def chunks():
+        with handle:
+            while data := handle.read(1024 * 1024):
+                yield data
+
+    return StreamingResponse(chunks(), media_type=mime, headers={
+        "Content-Length": str(size), "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+
+
 @router.post("/{project_id}/start", dependencies=[Depends(authz.require_writer)])
 async def start(project_id: str, body: Start, request: Request, runtime=Depends(manager)):
     try:

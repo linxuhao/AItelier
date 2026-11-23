@@ -40,6 +40,7 @@ import re
 import secrets as _secrets
 import socket
 import sqlite3
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -349,12 +350,19 @@ def write_secret(conn_id: str, value: dict) -> None:
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     target = _secret_path(conn_id)
-    temporary = target.with_suffix(".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        handle.write(json.dumps(value))
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, target)
+    # A temporary file of this write alone (0600 from the start), renamed over the target:
+    # two writers never share one, and a reader sees the old file or the new one.
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=f".{conn_id}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(value))
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def delete_secret(conn_id: str) -> None:
@@ -400,6 +408,14 @@ def _revoke_quietly(conn_id: str, secret: dict | None) -> None:
         steward_oauth.revoke(conn_id, tokens.get("conn_url") or "", secret)
     except Exception:  # noqa: BLE001 - best effort; the tokens are deleted anyway
         pass
+
+
+def _oauth_scope(row) -> str | None:
+    """The scopes the owner set for an oauth connection (the dashboard shows them)."""
+    if row["auth_kind"] != "oauth":
+        return None
+    from core import steward_oauth
+    return steward_oauth.scope_of(row["conn_id"])
 
 
 def secret_status(row) -> str:
@@ -526,6 +542,31 @@ def reserved_addresses(resolver=None) -> set[str]:
     return reserved
 
 
+def preferred_address(found) -> str:
+    """The judged address to connect to: an IPv4 one first (the backend's docker networks
+    have no IPv6 route, while public names such as accounts.google.com also resolve to
+    IPv6 addresses), then the lowest, so the choice is stable."""
+    return min(found, key=lambda address: (ipaddress.ip_address(address).version, address))
+
+
+def address_refused(address: str, reserved, *, private_ok: bool) -> bool:
+    """THE judgment of one resolved address the backend would connect to for a connection
+    (the connection's own address, and every OAuth endpoint): refused when the address -
+    or an IPv4 address it carries (IPv4-mapped, 6to4, Teredo) - is reserved (the backend,
+    dev_mcp, zvec-grep, the host itself), loopback, unspecified, link-local (the cloud
+    metadata address among them) or multicast; and, unless `private_ok`, anything not
+    globally routable (private, shared, documentation, ...)."""
+    if address in reserved:
+        return True
+    ip = ipaddress.ip_address(address)
+    judged = [ip]
+    if ip.version == 6:
+        judged += [carried for carried in (ip.ipv4_mapped, ip.sixtofour) if carried is not None]
+        judged += list(ip.teredo or ())
+    return any(str(one) in reserved or one.is_loopback or one.is_unspecified or one.is_link_local or one.is_multicast
+               or (not private_ok and not one.is_global) for one in judged)
+
+
 def checked_address(url: str, resolver=None, *, require=True) -> str | None:
     """Resolve the connection's host and refuse it (`reserved_endpoint`) when any of its
     addresses is the backend, dev_mcp, zvec-grep or the host itself - on any port, by
@@ -540,12 +581,10 @@ def checked_address(url: str, resolver=None, *, require=True) -> str | None:
             raise ProbeFailed("unresolvable_host")
         return None
     reserved = reserved_addresses(resolver)
-    for address in found:
-        ip = ipaddress.ip_address(address)
-        if address in reserved or ip.is_loopback or ip.is_unspecified or (
-                getattr(ip, "ipv4_mapped", None) and (str(ip.ipv4_mapped) in reserved or ip.ipv4_mapped.is_loopback)):
-            raise StateGraphError("reserved_endpoint")
-    return sorted(found)[0]
+    # The owner names the connection: a container or LAN service is private by nature.
+    if any(address_refused(address, reserved, private_ok=True) for address in found):
+        raise StateGraphError("reserved_endpoint")
+    return preferred_address(found)
 
 
 # ---------------------------------------------------------------- the effective set
@@ -821,7 +860,8 @@ class StateStewardConnections:
         if dropped is not None:
             from core import steward_oauth
             _revoke_quietly(conn_id, dropped[0])
-            steward_oauth.drop_tokens(conn_id)
+            # The tokens and the client were for the old address (and its issuer).
+            steward_oauth.drop_tokens(conn_id, client=True)
             with self.store.transaction() as conn:
                 result = self._public(conn, self._row(conn, conn_id))
         tools_changed()
@@ -853,8 +893,26 @@ class StateStewardConnections:
             if value is not None and (not isinstance(value, str) or len(value) > limit
                                       or any(ord(c) < 33 or ord(c) == 127 for c in value)):
                 raise StateGraphError("invalid_secret")
-        steward_oauth.set_client(conn_id, client_id or None, client_secret or None)
+        steward_oauth.set_client(conn_id, client_id or None, client_secret or None, row["url"])
         return {"conn_id": conn_id, "client": "set" if client_id else "unset"}
+
+    def oauth_scope_set(self, conn_id, scope=None):
+        """The scopes the owner asks for at the next authorization (Google: e.g. only
+        `drive.readonly`); empty: the read-only scopes the server lists (none: the next
+        authorization is refused until the owner chooses). Never changes current tokens."""
+        from core import steward_oauth
+        self._owner()
+        with self.store.transaction() as conn:
+            row = self._row(conn, conn_id)
+        if row["auth_kind"] != "oauth":
+            raise StateGraphError("secret_not_applicable: not an oauth connection")
+        words = (scope or "").split() if isinstance(scope, str) else None
+        if (words is None and scope is not None) or (words is not None and (
+                len(scope) > 1000 or len(words) > 30
+                or any(any(ord(c) < 33 or ord(c) > 126 or c in '"\\' for c in w) for w in words))):
+            raise StateGraphError("invalid_scope: space-separated scope names")
+        steward_oauth.set_scope(conn_id, " ".join(dict.fromkeys(words or [])) or None)
+        return {"conn_id": conn_id, "oauth_scope": steward_oauth.scope_of(conn_id)}
 
     def oauth_start(self, conn_id):
         """The authorization URL the owner's browser goes to (state bound to this session)."""
@@ -1121,6 +1179,7 @@ class StateStewardConnections:
                 "header_name": row["header_name"], "visibility": row["visibility"], "enabled": bool(row["enabled"]),
                 "generation": row["generation"], "config_version": row["config_version"],
                 "secret": secret_status(row), "auth_identity": row["auth_identity"],
+                "oauth_scope": _oauth_scope(row),
                 "identity_confirmed": bool(row["identity_confirmed"]),
                 "created_at": row["created_at"], "updated_at": row["updated_at"],
                 "last_probe_at": row["last_probe_at"], "last_error": row["last_error"],

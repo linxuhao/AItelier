@@ -19,7 +19,7 @@ const api = vi.hoisted(() => ({
   stewardConnectionTools: vi.fn(), setStewardConnectionTools: vi.fn(), setStewardConnectionSecret: vi.fn(),
   probeStewardConnection: vi.fn(), startDshDriver: vi.fn(), stopDshDriver: vi.fn(),
   listStewardConfirmations: vi.fn(), startStewardOAuth: vi.fn(), confirmStewardIdentity: vi.fn(),
-  signOutStewardOAuth: vi.fn(), setStewardOAuthClient: vi.fn(),
+  signOutStewardOAuth: vi.fn(), setStewardOAuthClient: vi.fn(), setStewardOAuthScope: vi.fn(),
 }));
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
 import type { StewardConnectionTools, StewardConnections } from '../../lib/api';
@@ -190,6 +190,29 @@ describe('an oauth connection', () => {
     expect([...select.options].map(o => o.value)).toEqual(['none', 'header', 'oauth']);
     await fireEvent.change(select, {target: {value: 'oauth'}});
     await waitFor(() => expect(form.querySelector('[data-oauth-client-id]')).not.toBeNull());
+  });
+
+  it('shows the owner\'s OAuth scopes and saves them only when changed', async () => {
+    const scope = 'https://www.googleapis.com/auth/drive.readonly';
+    api.listStewardConnections.mockResolvedValue(oauthConn({oauth_scope: scope}));
+    api.saveStewardConnection.mockResolvedValue({});
+    api.setStewardOAuthScope.mockResolvedValue({});
+    const view = render(StewardConnectionsView, {props: {focus: 'mailpub'}});
+    await waitFor(() => expect(view.container.querySelector('[data-oauth-scope]')).not.toBeNull());
+    const form = view.container.querySelector('[data-conn-form]') as HTMLFormElement;
+    const input = form.querySelector('[data-oauth-scope]') as HTMLInputElement;
+    expect(input.value).toBe(scope);
+    await fireEvent.submit(form);
+    await waitFor(() => expect(api.saveStewardConnection).toHaveBeenCalled());
+    expect(api.setStewardOAuthScope).not.toHaveBeenCalled();
+    await waitFor(() => expect(view.container.querySelector('[data-oauth-scope]')).toBeNull());
+    view.unmount();
+    const again = render(StewardConnectionsView, {props: {focus: 'mailpub'}});
+    await waitFor(() => expect(again.container.querySelector('[data-oauth-scope]')).not.toBeNull());
+    const field = again.container.querySelector('[data-oauth-scope]') as HTMLInputElement;
+    await fireEvent.input(field, {target: {value: ' '}});
+    await fireEvent.submit(again.container.querySelector('[data-conn-form]') as HTMLFormElement);
+    await waitFor(() => expect(api.setStewardOAuthScope).toHaveBeenCalledWith('mailpub', null));
   });
 
   it('lists the confirmations with the text that went out, as plain text', async () => {

@@ -7,12 +7,22 @@ the owner on the dashboard, never by the steward:
   protected-resource metadata (RFC 9728), which names the authorization server, whose
   metadata (RFC 8414 / OIDC discovery) names the endpoints. Every address comes from
   someone else's server and is judged here: `https://`, or `http://` only to the very
-  host the connection already names; never a reserved address (the backend, dev_mcp,
-  zvec-grep, the host itself - core.state_steward_connections), and the address judged
-  is the one connected to. The metadata's `issuer` must be the server asked; the
-  resource must be on the connection's origin; S256 PKCE must be supported.
-- CLIENT: the owner's own client_id (and secret), or one dynamic registration
-  (RFC 7591), kept in the connection's secret file.
+  host the connection already names; never a refused address (one judgment for the
+  connection's own address and every endpoint, core.state_steward_connections
+  `address_refused`: the backend, dev_mcp, zvec-grep, the host itself, loopback,
+  link-local, multicast - also when carried in an IPv4-mapped, 6to4 or Teredo address -
+  and a private one only on the connection's own host), and the address judged is the
+  one connected to. The metadata's `issuer` must be the server asked (a trailing
+  '/' aside); the resource must be on the connection's origin; S256 PKCE must be
+  supported. A server that answers without a token (Google's Workspace servers) is
+  read at the well-known protected-resource address instead of a 401's header.
+- CLIENT: the owner's own client_id (and secret) - entered for the connection's address
+  and bound to the issuer of its first authorization; another address or issuer drops it
+  (the owner enters it again) - or one dynamic registration (RFC 7591) at that issuer,
+  kept in the connection's secret file. A client is used only with its own issuer.
+- SCOPE: the owner's (dashboard), else least privilege: the read-only scopes the server
+  lists; a server that lists none is refused until the owner chooses. Google's with
+  `openid email` added, for the identity.
 - AUTHORIZE: `start` makes a `state` (bound to the owner session that asked, single
   use, 10 minutes) and a PKCE S256 verifier, and answers the authorization URL (with
   `resource`, RFC 8707, and `prompt=login` - Google: `select_account consent` - so a
@@ -36,7 +46,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import ipaddress
 import json
 import logging
 import os
@@ -130,23 +139,32 @@ def judge_endpoint(url: str, conn_url: str) -> str:
     if not found:
         raise OAuthError("oauth_endpoint_refused: unresolvable host")
     reserved = sc.reserved_addresses()
-    for address in found:
-        ip = ipaddress.ip_address(address)
-        if address in reserved or ip.is_loopback or ip.is_unspecified:
-            raise OAuthError("oauth_endpoint_refused: reserved_endpoint")
-    return sorted(found)[0]
+    # A private address only on the host the connection itself names (judged as the
+    # connection's own address); every other endpoint is a public one.
+    private_ok = host == conn.hostname
+    if any(sc.address_refused(address, reserved, private_ok=private_ok) for address in found):
+        raise OAuthError("oauth_endpoint_refused: reserved_endpoint")
+    return sc.preferred_address(found)
 
 
 def _request(method: str, url: str, conn_url: str, **kwargs) -> httpx.Response:
     address = judge_endpoint(url, conn_url)
+    body = bytearray()
     try:
         with httpx.Client(transport=transport_for(address), follow_redirects=False, timeout=TIMEOUT) as client:
-            response = client.request(method, url, **kwargs)
+            with client.stream(method, url, **kwargs) as response:
+                # Read no further than RESPONSE_MAX (decoded): a larger answer is refused
+                # before the rest of it arrives.
+                for chunk in response.iter_bytes():
+                    body += chunk
+                    if len(body) > RESPONSE_MAX:
+                        raise OAuthError("oauth_response_too_large")
     except httpx.HTTPError as exc:
         raise OAuthError(f"oauth_unreachable: {type(exc).__name__}") from None
-    if len(response.content) > RESPONSE_MAX:
-        raise OAuthError("oauth_response_too_large")
-    return response
+    # The body as read (already decoded): the headers that described the wire form go.
+    headers = [(k, v) for k, v in response.headers.multi_items()
+               if k.lower() not in ("content-encoding", "content-length", "transfer-encoding")]
+    return httpx.Response(response.status_code, headers=headers, content=bytes(body), request=response.request)
 
 
 def _json(response: httpx.Response, code: str) -> dict:
@@ -208,9 +226,14 @@ def discover(conn_url: str) -> dict:
     """{resource, issuer, scope, metadata} for one connection address (see the module)."""
     challenge = _request("POST", conn_url, conn_url, json=INITIALIZE,
                          headers={"Accept": "application/json, text/event-stream"})
-    if challenge.status_code != 401:
+    if challenge.status_code == 401:
+        params = parse_www_authenticate(challenge.headers.get("www-authenticate", ""))
+    elif 200 <= challenge.status_code < 300:
+        # A server that answers `initialize` without a token (Google's Workspace servers
+        # want one only for the calls): its metadata is at the well-known address.
+        params = {}
+    else:
         raise OAuthError(f"oauth_discovery_failed: the server answered {challenge.status_code}, not 401")
-    params = parse_www_authenticate(challenge.headers.get("www-authenticate", ""))
     candidates = [params["resource_metadata"]] if params.get("resource_metadata") else _well_known(
         conn_url, "oauth-protected-resource")
     prm = None
@@ -227,10 +250,17 @@ def discover(conn_url: str) -> dict:
     servers = prm.get("authorization_servers")
     if not isinstance(servers, list) or not servers or not isinstance(servers[0], str):
         raise OAuthError("oauth_discovery_failed: no authorization server")
-    issuer = servers[0]
-    metadata = authorization_server(issuer, conn_url)
+    metadata = authorization_server(servers[0], conn_url)
     scope = params.get("scope") or " ".join(s for s in (prm.get("scopes_supported") or []) if isinstance(s, str))
-    return {"resource": resource, "issuer": issuer, "scope": scope, "metadata": metadata}
+    # The issuer as the server's own metadata spells it (the `iss` the callback carries).
+    return {"resource": resource, "issuer": metadata["issuer"], "scope": scope, "metadata": metadata}
+
+
+def _same_issuer(named, issuer: str) -> bool:
+    """The metadata's issuer is the one asked; a trailing '/' alone does not differ
+    (Google's resources name `https://accounts.google.com/`, its metadata
+    `https://accounts.google.com`)."""
+    return isinstance(named, str) and named.rstrip("/") == issuer.rstrip("/")
 
 
 def authorization_server(issuer: str, conn_url: str) -> dict:
@@ -246,7 +276,7 @@ def authorization_server(issuer: str, conn_url: str) -> dict:
         if response.status_code != 200:
             continue
         metadata = _json(response, "oauth_discovery_failed")
-        if metadata.get("issuer") != issuer:
+        if not _same_issuer(metadata.get("issuer"), issuer):
             # Another issuer's document (an origin-root one for a path issuer): try the next.
             mismatch = True
             continue
@@ -279,22 +309,86 @@ def _secret(conn_id: str) -> dict:
     return sc.read_secret(conn_id) or {}
 
 
-def set_client(conn_id: str, client_id: str | None, client_secret: str | None) -> None:
-    """The owner's own registered client (Google); empty clears it (dynamic registration then)."""
-    secret = _secret(conn_id)
-    if client_id:
-        secret["client"] = {"client_id": client_id, **({"client_secret": client_secret} if client_secret else {}),
-                            "auth_method": "client_secret_basic" if client_secret else "none", "owner_supplied": True}
-    else:
-        secret.pop("client", None)
-    sc.write_secret(conn_id, secret)
+def set_client(conn_id: str, client_id: str | None, client_secret: str | None, conn_url: str) -> None:
+    """The owner's own registered client (Google) for the connection's address `conn_url`
+    (bound to an issuer at its first authorization); empty clears it (dynamic
+    registration then)."""
+    with _lock(conn_id):
+        secret = _secret(conn_id)
+        if client_id:
+            secret["client"] = {"client_id": client_id, **({"client_secret": client_secret} if client_secret else {}),
+                                "auth_method": "client_secret_basic" if client_secret else "none",
+                                "owner_supplied": True, "conn_url": conn_url}
+        else:
+            secret.pop("client", None)
+        sc.write_secret(conn_id, secret)
+
+
+def set_scope(conn_id: str, scope: str | None) -> None:
+    """The scopes the owner asks for (space-separated); empty: the read-only ones the server lists."""
+    with _lock(conn_id):
+        secret = _secret(conn_id)
+        if scope:
+            secret["scope"] = scope
+        else:
+            secret.pop("scope", None)
+        sc.write_secret(conn_id, secret)
+
+
+def scope_of(conn_id: str) -> str | None:
+    """The owner's scopes for this connection, if any (not a secret: shown on the dashboard)."""
+    scope = _secret(conn_id).get("scope")
+    return scope if isinstance(scope, str) and scope else None
+
+
+GOOGLE_ISSUER_HOST = "accounts.google.com"
+# Google issues an id_token with the account's email only for these; without them the
+# bound identity is unknown and the connection can never be enabled (7.8.6).
+IDENTITY_SCOPES = ("openid", "email")
+
+
+def read_only_scope(scope: str) -> bool:
+    """A scope that names read access alone: `.../drive.readonly`, `documents.readonly`,
+    `Mail.Read` (not `Mail.ReadWrite`)."""
+    last = scope.rsplit("/", 1)[-1].lower()
+    return last.endswith("readonly") or last.endswith(".read")
+
+
+def requested_scope(conn_id: str, issuer: str, listed: str) -> str:
+    """The scope of an authorization request: the owner's (dashboard); else least
+    privilege - the read-only scopes the server listed. A server that lists none is not
+    guessed for: the owner chooses. For Google with `openid email` added."""
+    words = (scope_of(conn_id) or "").split()
+    if not words:
+        words = [w for w in (listed or "").split() if read_only_scope(w)]
+        if not words:
+            raise OAuthError("oauth_scope_required: the server lists no read-only scope - choose the scopes "
+                             "on the dashboard")
+    if urlsplit(issuer).hostname == GOOGLE_ISSUER_HOST:
+        words += [w for w in IDENTITY_SCOPES if w not in words]
+    return " ".join(dict.fromkeys(words))
 
 
 def _client_for(conn_id: str, conn_url: str, issuer: str, metadata: dict, redirect: str) -> dict:
-    secret = _secret(conn_id)
-    client = secret.get("client")
-    if isinstance(client, dict) and client.get("client_id") and (client.get("owner_supplied") or client.get("issuer") == issuer):
-        return client
+    """The client of an authorization at `issuer`. The owner's: only for the address it was
+    entered for and the issuer it was first used with (bound now if new) - another one
+    drops it, and the owner enters it again. Else the one registered at this issuer, else
+    a new registration."""
+    with _lock(conn_id):
+        secret = _secret(conn_id)
+        client = secret.get("client")
+        if isinstance(client, dict) and client.get("owner_supplied"):
+            if client.get("conn_url") != conn_url or client.get("issuer", issuer) != issuer:
+                secret.pop("client")
+                sc.write_secret(conn_id, secret)
+                raise OAuthError("oauth_client_mismatch: the client was entered for another address or issuer - "
+                                 "enter it again")
+            if client.get("issuer") != issuer:
+                client["issuer"] = issuer
+                sc.write_secret(conn_id, secret)
+            return client
+        if isinstance(client, dict) and client.get("client_id") and client.get("issuer") == issuer:
+            return client
     endpoint = metadata.get("registration_endpoint")
     if not endpoint:
         raise OAuthError("oauth_client_required: the server has no dynamic registration - enter a client_id")
@@ -311,10 +405,19 @@ def _client_for(conn_id: str, conn_url: str, issuer: str, metadata: dict, redire
                                                                          if answer.get("client_secret") else "none")}
     if isinstance(answer.get("client_secret"), str):
         client["client_secret"] = answer["client_secret"]
-    secret = _secret(conn_id)
-    secret["client"] = client
-    sc.write_secret(conn_id, secret)
+    with _lock(conn_id):
+        secret = _secret(conn_id)
+        if (secret.get("client") or {}).get("owner_supplied"):
+            raise OAuthError("oauth_client_changed: the owner entered a client meanwhile - start again")
+        secret["client"] = client
+        sc.write_secret(conn_id, secret)
     return client
+
+
+def _client_of(secret: dict, issuer) -> dict:
+    """The connection's client if it belongs to `issuer`; else none (no credentials sent)."""
+    client = secret.get("client")
+    return client if isinstance(client, dict) and client.get("issuer") == issuer else {"client_id": ""}
 
 
 def _client_auth(client: dict, form: dict) -> dict:
@@ -347,6 +450,7 @@ def start(row, actor: str) -> dict:
         raise OAuthError(f"oauth_unreachable: {exc.code}") from None
     found = discover(row["url"])
     metadata = found["metadata"]
+    scope = requested_scope(row["conn_id"], found["issuer"], found["scope"])
     client = _client_for(row["conn_id"], row["url"], found["issuer"], metadata, redirect)
     verifier, challenge = _pkce()
     state = f"{row['conn_id']}.{_secrets.token_urlsafe(32)}"
@@ -360,10 +464,8 @@ def start(row, actor: str) -> dict:
         sc.write_secret(row["conn_id"], secret)
     query = {"response_type": "code", "client_id": client["client_id"], "redirect_uri": redirect,
              "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
-             "resource": found["resource"]}
-    if found["scope"]:
-        query["scope"] = found["scope"]
-    if urlsplit(found["issuer"]).hostname == "accounts.google.com":
+             "resource": found["resource"], "scope": scope}
+    if urlsplit(found["issuer"]).hostname == GOOGLE_ISSUER_HOST:
         query.update(prompt="select_account consent", access_type="offline")
     else:
         query["prompt"] = "login"
@@ -454,6 +556,10 @@ def complete(row, pending: dict, code: str, iss: str | None) -> dict:
     client = secret.get("client") or {}
     if not client.get("client_id"):
         raise OAuthError("oauth_client_required")
+    if client.get("issuer") != issuer or (client.get("owner_supplied") and client.get("conn_url") != row["url"]):
+        # Another client than the one the authorization started with: its secret is
+        # never sent to this issuer.
+        raise OAuthError("oauth_client_mismatch: the client changed since the authorization started - start again")
     form = {"grant_type": "authorization_code", "code": code, "redirect_uri": pending["redirect_uri"],
             "code_verifier": pending["verifier"], "resource": pending["resource"]}
     headers = _client_auth(client, form)
@@ -507,12 +613,14 @@ def ensure_token(conn_id: str, conn_url: str, *, stale: str | None = None, store
             return tokens["access_token"]
         if not due and stale is None:
             return tokens["access_token"]
-        if not tokens.get("refresh_token"):
+        client = secret.get("client")
+        if not tokens.get("refresh_token") or not isinstance(client, dict) or client.get("issuer") != tokens.get("issuer"):
+            # No refresh token, or the client is not the one these tokens were issued to.
             _refused(conn_id, secret, store)
         form = {"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]}
         if tokens.get("resource"):
             form["resource"] = tokens["resource"]
-        headers = _client_auth(secret.get("client") or {"client_id": ""}, form)
+        headers = _client_auth(client, form)
         response = _request("POST", tokens["token_endpoint"], conn_url, data=form, headers=headers)
         if response.status_code in (400, 401):
             _refused(conn_id, secret, store)
@@ -573,7 +681,7 @@ def revoke(conn_id: str, conn_url: str, secret: dict | None = None) -> bool:
         if not tokens.get(kind):
             continue
         form = {"token": tokens[kind], "token_type_hint": kind}
-        headers = _client_auth(secret.get("client") or {"client_id": ""}, form)
+        headers = _client_auth(_client_of(secret, tokens.get("issuer")), form)
         try:
             response = _request("POST", endpoint, conn_url, data=form, headers=headers)
             done = done or response.status_code == 200
@@ -582,10 +690,11 @@ def revoke(conn_id: str, conn_url: str, secret: dict | None = None) -> bool:
     return done
 
 
-def drop_tokens(conn_id: str) -> None:
-    """Forget the tokens (and a pending authorization); the client registration stays."""
+def drop_tokens(conn_id: str, *, client: bool = False) -> None:
+    """Forget the tokens (and a pending authorization); the client registration stays
+    unless `client` (the connection's address changed: the owner enters it again)."""
     with _lock(conn_id):
         secret = _secret(conn_id)
-        for key in ("tokens", "pending", "needs_consent", "consent_noticed"):
+        for key in ("tokens", "pending", "needs_consent", "consent_noticed") + (("client",) if client else ()):
             secret.pop(key, None)
         sc.write_secret(conn_id, secret)

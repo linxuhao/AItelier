@@ -249,7 +249,7 @@ const readDocumentOutput = Object.freeze({ schema: { type: 'json' }, render: (_a
 
 /** @param media host.media: {resolve(ref), read(ref), fetch({connId, url, audience}), postGroup?({turn, kind, caption}),
  *    sendToOwner?({ref, caption?, replyTo?}), readDocument?(ref, {pages, images, maxPages}, signal), takesImages?(signal)}
- *  @param catalog the StewardCatalog (this turn's names, the requester, outward marks).
+ *  @param catalog the StewardCatalog (this turn's names, the requester, outward marks, markExternal).
  *  @param turns the GroupTurns (audience() and open(): the open turn's record holds its page-image count).
  *  @param channels the owner channels handle (canSendFile, sendFile: a group's files), or undefined.
  *  @param limits the media-types limits (read_document's pdf_* ones). */
@@ -427,6 +427,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         const attachment = pages[0]?.attachment;
         refund(reserved - (attachment ? 1 : 0));
         if (!attachment) return refuseRead('broken');
+        catalog.markExternal();
         return { ref, kind: 'image', page_count: 1, images: 1, attachments: [attachment], text: `[图片 ${ref}，${row.mime}]` };
       }
       // Text only: stop at a whole page once the per-call characters are reached.
@@ -448,6 +449,10 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         ? { first: lastShown + 1, pages: spec(lastShown + 1, Math.min(answer.page_count, lastShown + cap)) } : undefined;
       const text = documentText({ ref, pageCount: answer.page_count, pages: shown,
         mode: render ? 'images' : wantImages ? 'no_route' : 'text', charsPage: limits.pdf_chars_page, next });
+      // A file's text and page images are outside content, as a connection tool's result is (7.8.8,
+      // review PRIV-1): the turn is marked before they are released, so an egress tool and the
+      // steward's own writes are held to the same rule afterwards. A refusal read nothing: no mark.
+      catalog.markExternal();
       return { ref, kind: 'pdf', page_count: answer.page_count, ...(shown.length ? { pages: spec(shown[0].n, lastShown) } : {}),
         images: attachments.length, ...(next ? { next_pages: next.pages } : {}), attachments, text };
     },

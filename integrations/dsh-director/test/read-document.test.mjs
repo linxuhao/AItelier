@@ -10,6 +10,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GroupTurns, GROUP_SOURCE } from '../lib/group-turns.mjs';
+import { StewardCatalog } from '../lib/catalog.mjs';
 import { GROUP_LIMITS } from '../lib/channels.mjs';
 import { registerMediaTools, READ_DOCUMENT_REASONS } from '../lib/media-tools.mjs';
 import { MEDIA_LIMITS } from '../lib/media.mjs';
@@ -83,13 +84,16 @@ function world({ audience = 'owner', reader = fakeReader(), takesImages = async 
   const media = { resolve: async r => { resolved.push(r); return ROWS.get(r); }, read: async () => undefined,
     ...(noReader ? {} : { readDocument: reader.readDocument }), ...(takesImages ? { takesImages } : {}) };
   const tools = new Map();
+  // A real catalog: read_document marks the turn external (7.8.8, review PRIV-1).
+  const catalog = new StewardCatalog({ host: {}, stateDir: mkdtempSync(join(tmpdir(), 'read-doc-catalog-')), rootSession: 'root',
+    audience: () => turns.audience(), registryNames: () => [] });
   registerMediaTools({ tools: { register: tool => tools.set(tool.name, tool) } }, { ctx: {}, defineTool: t => t,
-    jsonOutput: {}, HarnessError: Error, media, catalog: { rootSession: 'root', catalog: () => new Set(), outward: () => false },
+    jsonOutput: {}, HarnessError: Error, media, catalog,
     turns, channels: undefined, ledger: {}, ...(limits ? { limits: { ...MEDIA_LIMITS, ...limits } } : {}) });
   const tool = tools.get('read_document');
   const run = (args, session = 'root') => tool.execute(args, { agent: { session: { id: session } }, callId: 'c' + ++ids, token: 'k' + ids,
     signal: AbortSignal.timeout(5000) });
-  return { run, tool, turns, reader, resolved, used: () => turns.open()?.pdfImages ?? 0,
+  return { run, tool, turns, reader, resolved, catalog, used: () => turns.open()?.pdfImages ?? 0,
     nextTurn: (who = audience) => turns.split([who === 'owner' ? ownerMessage() : groupMessage(who)], 1, 't' + ++ids) };
 }
 const blocks = (w, value) => w.tool.output.render({}, value);
@@ -398,4 +402,34 @@ test('text only: stops at a whole page at the per-call characters and names next
     assert.equal(capped.pages, '1-2');
     assert.match(capped.text, /\n\[第 1 页 文字截断：余 1,000 字\]\n/);
   } finally { DOCS.set(SHORT_PDF, ['一', '']); }
+});
+
+test('PRIV-1: a PDF or image read marks the turn external before its result is released (7.8.8) - an egress connection tool and the steward\'s own writes are then refused; a refusal or an unread image marks nothing', async () => {
+  const WEB_FETCH = 'mcp__sw__web__web_fetch';
+  const exec = name => ({ name, agent: { session: { id: 'root' } } });
+  const withEgressTool = w => {
+    w.catalog.cache = { connections: [{ conn_id: 'web', visibility: 'private', usable: true, tools: [{ name: WEB_FETCH }] }],
+      effective_tools: [WEB_FETCH] };
+    return w;
+  };
+  const w = withEgressTool(world());
+  assert.equal(w.catalog.refusal(exec(WEB_FETCH)), undefined, 'before: the egress tool is callable');
+  assert.equal((await w.run({ ref: 'm_ffffffffffffffff' })).refused, 'unknown_ref');
+  assert.equal((await w.run({ ref: KEPT_PDF })).refused, 'not_visible_in_this_turn');
+  assert.equal(w.catalog.externalSeen, false, 'a refusal read nothing');
+  // A group member's PDF the owner asks about: its text may carry instructions.
+  const value = await w.run({ ref: GROUP_PDF });
+  assert.equal(value.kind, 'pdf', JSON.stringify(value));
+  assert.equal(w.catalog.externalSeen, true);
+  assert.match(w.catalog.refusal(exec(WEB_FETCH)), /^external_content_seen: mcp__sw__web__web_fetch sends/);
+  assert.match(w.catalog.refusal(exec('memory_note')), /^external_content_seen: memory_note needs a message from a person/);
+  const text = withEgressTool(world());
+  assert.equal((await text.run({ ref: OWNER_PDF, images: false })).kind, 'pdf');
+  assert.equal(text.catalog.externalSeen, true, 'text only marks too');
+  const image = world();
+  assert.equal((await image.run({ ref: PHOTO })).kind, 'image');
+  assert.equal(image.catalog.externalSeen, true, 'an image ref read as an image marks');
+  const textOnly = world({ takesImages: async () => false });
+  assert.deepEqual((await textOnly.run({ ref: PHOTO })).images, 0);
+  assert.equal(textOnly.catalog.externalSeen, false, 'an image a text-only route cannot see was not read');
 });

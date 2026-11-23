@@ -131,6 +131,8 @@ test('request_wechat_qr asks the WeChat channel for a login and answers only {re
   // The model is told where the QR is (the dashboard) and that it never goes over chat.
   assert.match(tool.description, /ONLY on the dashboard's Channels tab/);
   assert.match(tool.description, /never send, describe or promise a QR over chat/);
+  // Step 19.1: the bridge's refusal while it resumes the saved login is named, with what to do.
+  assert.match(tool.description, /resuming \(the bridge is resuming the saved login without a QR: wait a minute and check again\)/);
   // The steward is presented it (roles.json), and its prompt says the same.
   const roles = JSON.parse(readFileSync(new URL('../roles.json', import.meta.url), 'utf8'));
   assert.ok(roles.steward.presented.includes('request_wechat_qr'));

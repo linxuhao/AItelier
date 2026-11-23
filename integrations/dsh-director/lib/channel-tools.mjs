@@ -9,7 +9,8 @@ const DESCRIPTION = 'Ask the WeChat bridge for a new login QR code, when your ow
   + 'to you: never send, describe or promise a QR over chat. Answers {requested: true} (tell your owner '
   + 'to open the dashboard\'s Channels tab and scan it with the WeChat account to connect, within about '
   + '2 minutes) or {refused}: qr_waiting (a QR is already on the dashboard: scan that one), '
-  + 'already_logged_in (WeChat is connected), login_starting (one is on its way), rate_limited with '
+  + 'already_logged_in (WeChat is connected), login_starting (one is on its way), resuming (the bridge '
+  + 'is resuming the saved login without a QR: wait a minute and check again), rate_limited with '
   + 'retry_after_s (try again after that), not_registered / not_configured / bridge_unreachable / '
   + 'not_supported (WeChat is not set up or its bridge is not running or too old: say so). Call it '
   + 'once per request of your owner; never in a loop.';

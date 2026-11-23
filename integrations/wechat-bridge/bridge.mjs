@@ -368,7 +368,12 @@ const count = value => {
  *  only when the payload carries its XML and that says appmsg type 6 and quotes nothing: a
  *  quoted reply (49/57), or a 49 whose XML cannot be read, is never let in. Sizes and the file name are what WeChat's
  *  XML reports (not trusted: GET /media/:media_id counts the real bytes). */
-export function mediaOf(message, types, limits = MEDIA_LIMITS) {
+/** `rawContent` defaults to the message's own payload content; callers that already read it
+ *  (the group relay reads it once for both `mediaOf` and the sender probe) pass that value so
+ *  a puppet whose accessor answers only once is read once. The sentinel, rather than an
+ *  `undefined` default, keeps an explicitly passed absent content from causing a second read. */
+const CONTENT_UNSET = Symbol('content not supplied');
+export function mediaOf(message, types, limits = MEDIA_LIMITS, rawContent = CONTENT_UNSET) {
   const type = message.type();
   const kinds = [['image', types.Message?.Image, 3], ['voice', types.Message?.Audio, 34], ['file', types.Message?.Attachment, 49]];
   const payload = message.payload ?? {};
@@ -378,7 +383,7 @@ export function mediaOf(message, types, limits = MEDIA_LIMITS) {
   if (!found) return undefined;
   const [kind, , raw] = found;
   if (payload.messageType !== undefined && payload.messageType !== raw) return undefined;
-  const xml = contentXml(payload.content);
+  const xml = contentXml(rawContent === CONTENT_UNSET ? message?.payload?.content : rawContent);
   if (kind === 'file' && (xml === undefined || /<refermsg[\s>]/.test(xml)
     || element(xml.slice(xml.indexOf('<appmsg')), 'type') !== '6')) return undefined;
   const described = { kind };
@@ -518,17 +523,38 @@ export function groupBindAttempt(text) {
   return GROUP_CODE.test(code) && prefix.length > 1 ? { prefix, code } : undefined;
 }
 
+/** The old base64 regex (`^(?:[A-Za-z0-9+/]{4})*(?:..==|...=)?$`) recursed once per four
+ *  characters and threw RangeError past about 4,473,912 characters, dropping the whole
+ *  message. This accepts exactly the same strings in one linear pass and without copying:
+ *  a multiple of four, `[A-Za-z0-9+/]` throughout, and `=` only as a trailing run of at most
+ *  two. No regex scans the (possibly huge) encoded input. */
+function isBase64Content(value) {
+  if (typeof value !== 'string' || value.length % 4 !== 0) return false;
+  const length = value.length;
+  let padding = 0;
+  if (length && value.charCodeAt(length - 1) === 0x3d) padding = 1;
+  if (length > 1 && value.charCodeAt(length - 2) === 0x3d) padding = 2;
+  // With length a multiple of four, padding 1 leaves three data characters and padding 2
+  // leaves two: exactly the `{3}=` / `{2}==` forms the regex accepted (plus the empty string).
+  for (let i = 0; i < length - padding; i++) {
+    const code = value.charCodeAt(i);
+    if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39)
+      || code === 0x2b || code === 0x2f)) return false;
+  }
+  return true;
+}
+
 /** One redacted line for a group medium whose talker is the room: does its payload content
  *  begin with the poster's wxid the way a group text's does? Only counts, a shape and a
- *  truncated digest are logged - never the content or base64, a member id or a room id. */
-const BASE64_CONTENT = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-export function groupMediaSenderProbe(message, log = () => {}) {
-  const payload = message?.payload ?? {};
+ *  truncated digest are logged - never the content or base64, a member id or a room id.
+ *  `senderRef`, `roomRef` and `content` come from the relay, which read each of them once;
+ *  the probe itself reads no payload field and never asks for the content, the room id or the
+ *  talker, because the relay hands those in. */
+export function groupMediaSenderProbe(message, log = () => {}, { senderRef, roomRef, content } = {}) {
   const value = message?.type?.();
   const type = Number.isFinite(value) ? value : 0;
-  const senderIsRoom = Boolean(payload.roomId && message?.talker?.()?.id === payload.roomId);
-  const content = typeof payload.content === 'string' && BASE64_CONTENT.test(payload.content) ? payload.content : undefined;
-  const bytes = content ? Buffer.from(content, 'base64') : Buffer.alloc(0);
+  const senderIsRoom = Boolean(roomRef && senderRef === roomRef);
+  const bytes = isBase64Content(content) ? Buffer.from(content, 'base64') : Buffer.alloc(0);
   // The bytes before the XML are the text path's prefix; its digest covers all of them,
   // while the shape reads only the token before the first ':' or newline inside them.
   const at = bytes.indexOf(0x3c);
@@ -895,10 +921,13 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     const senderRef = message.talker()?.id;
     if (!roomRef || !senderRef) return false;
     const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id), ...(at ? { at } : {}) };
+    // One read of the raw content for the whole message: the description and the probe get
+    // this very value, so a puppet accessor that answers once still delivers its medium.
+    const content = message.payload?.content;
     const media = rooms.has(roomRef) && message.type() !== types.Message.Text
-      ? mediaOf(message, types, mediaLimits) : undefined;
+      ? mediaOf(message, types, mediaLimits, content) : undefined;
     if (media) {
-      if (senderRef === roomRef) groupMediaSenderProbe(message, log);
+      if (senderRef === roomRef) groupMediaSenderProbe(message, log, { senderRef, roomRef, content });
       // The 1:1 path's own shape, unchanged: a description only - nothing is fetched until
       // GET /media/:media_id asks - and one over its bound has no media_id. The group ring
       // shares the one `seq`, so '<seq>.<index>' is unique across the rings.

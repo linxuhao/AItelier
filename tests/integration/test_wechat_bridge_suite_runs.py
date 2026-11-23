@@ -4,11 +4,12 @@ What it runs: one ``node --test`` invocation from the repository root, and nothi
 Its argv is ``[<node>, "--test", "integrations/wechat-bridge/bridge.test.mjs"]`` -- the file
 named explicitly, with the path the package's own npm script uses (``package.json``'s
 ``test`` script), so the suite is run exactly the way its author runs it. The floor is
-``\u2139 tests 116`` / ``\u2139 pass 116`` / ``\u2139 fail 0``, measured in the shipped image on
-2026-11-23 with the group media sender probe and its four witnesses (node v24.22.3, pytest
-wall clock 17.8 s). The earlier floor, 112, was the same suite before that probe; the one
-before that, 110, was before the send-refusal log lines and their two witnesses were added;
-the one before that, 68, was before the bridge's media store and its group media path grew it.
+``\u2139 tests 118`` / ``\u2139 pass 118`` / ``\u2139 fail 0``, measured in the shipped image on
+2026-11-23 with the repaired group media sender probe and its six witnesses (node v24.22.3,
+pytest wall clock 12.4 s). The earlier floor, 116, was the same suite with the probe and its
+original four witnesses; the one before that, 112, was before that probe; the one before
+that, 110, was before the send-refusal log lines and their two witnesses were added; the one
+before that, 68, was before the bridge's media store and its group media path grew it.
 
 The counts are floors, not guesses: a run that prints fewer ``tests`` or fewer ``pass``
 than the numbers above has silently dropped cases, and this row goes RED and says so.
@@ -96,8 +97,8 @@ class Suite:
 BRIDGE = Suite(
     name="wechat-bridge",
     file="integrations/wechat-bridge/bridge.test.mjs",
-    expected_tests=116,
-    expected_pass=116,
+    expected_tests=118,
+    expected_pass=118,
 )
 
 

@@ -954,7 +954,8 @@ const probeMessage = content => {
 };
 const probeLines = message => {
   const lines = [];
-  groupMediaSenderProbe(message, line => lines.push(line));
+  groupMediaSenderProbe(message, line => lines.push(line),
+    { senderRef: message.talker?.()?.id, roomRef: message.payload?.roomId, content: message.payload?.content });
   return lines;
 };
 
@@ -1009,6 +1010,60 @@ test('group media sender probe: one line for a room-sent group medium, none for 
     assert.equal(probes[0], 'group media sender probe: type=6 senderIsRoom=true contentBytes='
       + `${Buffer.byteLength(XML.image(5))} prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=0 chatroomTokens=0`);
     assert.ok(!logs.some(line => line.includes('PHOTO') || line.includes(ROOM)), logs.join('\n'));
+  } finally { await s.bridge.close(); }
+});
+
+test('group media sender probe: a 5 MiB base64 medium is relayed and prints one 3,750,000-byte line', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    // 3,750,000 ASCII bytes of XML (mostly padding after the real element) base64 to
+    // 5,000,000 characters - past the old regex's ~4,473,912-character RangeError boundary,
+    // where the relay's catch dropped the whole event.
+    const decoded = 3_750_000;
+    const xml = XML.image(5) + 'A'.repeat(decoded - Buffer.byteLength(XML.image(5)));
+    const content = b64(xml);
+    assert.equal(content.length, 5_000_000);
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'huge-media', roomId: ROOM, from: ROOM, xml, bytes: Buffer.from('PHOTO') }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.sender_ref, e.attachments?.map(a => [a.kind, a.size])]),
+      [['group_message', 'huge-media', ROOM, [['image', 5]]]]);
+    const probes = logs.filter(line => line.startsWith('group media sender probe:'));
+    assert.deepEqual(probes, ['group media sender probe: type=6 senderIsRoom=true contentBytes=3750000 '
+      + 'prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=0 chatroomTokens=0']);
+    assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
+    assert.ok(probes[0].length < 200 && !probes[0].includes(content), 'the line stays redacted');
+  } finally { await s.bridge.close(); }
+});
+
+test('group media sender probe: a one-shot talker, room id and content getter still emit the medium and the line', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    const medium = mediaMessage({ kind: 'image', id: 'one-shot', roomId: ROOM, from: ROOM, xml: XML.image(5), bytes: Buffer.from('PHOTO') });
+    let talkerCalls = 0, roomReads = 0, contentReads = 0;
+    const content = medium.payload.content, roomId = medium.payload.roomId;
+    Object.defineProperty(medium.payload, 'content', { configurable: true,
+      get() { if (++contentReads > 1) throw new Error('payload.content answered already'); return content; } });
+    Object.defineProperty(medium.payload, 'roomId', { configurable: true,
+      get() { if (++roomReads > 1) throw new Error('payload.roomId answered already'); return roomId; } });
+    medium.talker = () => {
+      if (++talkerCalls > 1) throw new Error('talker answered already');
+      return { id: ROOM, type: () => types.Contact.Unknown };
+    };
+    bot.emit('message', medium);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.sender_ref, e.attachments?.map(a => [a.kind, a.size])]),
+      [['group_message', 'one-shot', ROOM, [['image', 5]]]]);
+    assert.deepEqual([talkerCalls, roomReads, contentReads], [1, 1, 1], 'each puppet accessor answered exactly once');
+    assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')),
+      ['group media sender probe: type=6 senderIsRoom=true contentBytes=' + `${Buffer.byteLength(XML.image(5))} `
+        + 'prefixBytes=0 prefixShape=other prefixHash=- wxidTokens=0 chatroomTokens=0']);
+    assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
   } finally { await s.bridge.close(); }
 });
 

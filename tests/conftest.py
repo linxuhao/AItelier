@@ -102,17 +102,34 @@ def _release_instance_lock():
         _sched._instance_lock_fh = None
 
 
+@pytest.fixture(scope="session")
+def _state_templates(tmp_path_factory):
+    from tests.support.state_template import TemplateCache
+    return TemplateCache(tmp_path_factory.mktemp("state-templates"))
+
+
 @pytest.fixture
-def db_manager(tmp_path):
+def state_db_copy(_state_templates):
+    """`state_db_copy(recipe, dest)`: this test's own copy of a schema template.
+
+    Recipes are in tests/support/state_template.py. The copy is a private file;
+    run the fixture's constructors on it as before (cheap on an existing schema).
+    """
+    return _state_templates.copy
+
+
+@pytest.fixture
+def db_manager(tmp_path, state_db_copy):
     """Provides an isolated SQLite database for testing."""
-    db_file = tmp_path / "test.db"
-    return DBManager(str(db_file))
+    from tests.support.state_template import dbm
+    return DBManager(state_db_copy(dbm, tmp_path / "test.db"))
 
 
 @pytest.fixture(name="client")
-def client_fixture(tmp_path):
+def client_fixture(tmp_path, state_db_copy):
     """FastAPI TestClient with DB and workspace dependency overrides."""
-    test_db = DBManager(str(tmp_path / "test.db"))
+    from tests.support.state_template import dbm
+    test_db = DBManager(state_db_copy(dbm, tmp_path / "test.db"))
     test_ws = WorkspaceManager(str(tmp_path / "ws"))
 
     app.dependency_overrides[get_db_manager] = lambda: test_db

@@ -18,6 +18,7 @@ from core.state_graph import StateConflict, StateGraphError, StateGraphStore
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
 from core.run_graph_view import RunGraphUnavailable, pinned_run_graph
+from tests.support import state_template
 
 
 def node(k, deps=None):
@@ -26,9 +27,9 @@ def node(k, deps=None):
 
 
 @pytest.fixture
-def live(tmp_path, monkeypatch):
+def live(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
-    db = DBManager(str(tmp_path / "host.db"))
+    db = DBManager(state_db_copy(state_template.dbm_state, tmp_path / "host.db"))
     ws = WorkspaceManager(str(tmp_path / "ws"), str(tmp_path / "projects"))
     sf = SkillFlow(str(tmp_path / "sf.db"))
     sf.register_graph(PipelineGraph(name="fixture", begin="work", steps=[StepNode(id="work")]))

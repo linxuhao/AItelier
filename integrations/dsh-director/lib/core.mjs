@@ -622,6 +622,9 @@ export function awaitingFinish(plan) {
   return !plan.batch && Array.isArray(plan.remaining) && plan.remaining.length === 0 && plan.finish_reported !== true;
 }
 
+/** How many work-item reads settledAttempts keeps in flight at once (see there). */
+export const SETTLED_READS_AT_ONCE = 4;
+
 /** The plan attempt ids whose work item the host says has SETTLED.
  *
  *  One `workSettled(id)` for every plan a view could show - one that still has
@@ -630,13 +633,28 @@ export function awaitingFinish(plan) {
  *  FAILS CLOSED: a call that throws (host unreachable, an unknown id) or answers
  *  anything but true leaves that attempt OUT of the set, so its plan keeps
  *  blocking. This set only ever shrinks the blocking list by what the host said. */
-export async function settledAttempts(plans, workSettled, signal) {
+export async function settledAttempts(plans, workSettled, signal, { concurrency = SETTLED_READS_AT_ONCE } = {}) {
   const settled = new Set();
+  // At most `concurrency` host reads in flight: a director with dozens of plans used to fire
+  // one read per plan at once, which filled the backend's shared request threads for a
+  // minute and timed out its own startup reads (2026-11-22, a restart loop every ~100 s).
+  let running = 0;
+  const waiting = [];
+  const limited = id => new Promise((resolve, reject) => {
+    const start = () => {
+      running += 1;
+      Promise.resolve().then(() => workSettled(id, signal)).then(resolve, reject).finally(() => {
+        running -= 1;
+        waiting.shift()?.();
+      });
+    };
+    if (running < concurrency) start(); else waiting.push(start);
+  });
   // A batch sub-plan is named `<attempt>~<stage>-<key>`, which the host has never heard
   // of: it settles with the attempt its `batch` names, read once per attempt.
   const reads = new Map();
   const attemptRead = id => {
-    if (!reads.has(id)) reads.set(id, workSettled(id, signal));
+    if (!reads.has(id)) reads.set(id, limited(id));
     return reads.get(id);
   };
   await Promise.all(plans.filter(plan => plan.remaining?.length || awaitingFinish(plan)).map(async plan => {

@@ -87,6 +87,7 @@ from core.drivers import DriverRegistry
 from core.dsh_driver import DshDrivers
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.support import state_template
 
 # The numbers this file is about, named so every measured figure is quotable.
 LOOP_TICK_SECONDS = 0.005        # the counter coroutine's period
@@ -97,7 +98,7 @@ MIN_CONTENDED_TICKS = 5          # tail floor; a stamp on the loop measures exac
 
 
 @pytest.fixture
-def runtime(tmp_path):
+def runtime(tmp_path, state_db_copy):
     """The production shape: real State storage, real identity registry, sleeping child.
 
     Nothing here is a stand-in for the thing under test: `update`, `_provision`,
@@ -105,7 +106,7 @@ def runtime(tmp_path):
     ones. The only substitution is the child process (a `sleep`), which the
     lifecycle paths do not care about - they stamp the row either way.
     """
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     service = StateService(db, actor="fixture", project_read_trusted=True)
     service.store.create_project("alpha", "Alpha")
     registry = DriverRegistry(db, "dsh-lifecycle-stamp-pepper-" * 3)

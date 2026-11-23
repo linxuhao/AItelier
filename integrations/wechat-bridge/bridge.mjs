@@ -20,7 +20,12 @@
  *  by main.mjs, so the tests never load the real puppet. `renderQr` (qr-svg.mjs, also
  *  handed in) draws the login QR as an SVG for the dashboard. */
 import { createServer } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createReadStream, rmSync } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 
 // Loopback by default: the token is the only lock, so the socket must not be
 // reachable from another machine. Inside its container the bridge has to listen on
@@ -51,6 +56,43 @@ export const MAX_WAIT_SECONDS = 25;
 // WeChat cuts long texts in the client; splitting here keeps each part whole.
 export const SEND_CHUNK = 1500;
 const MAX_BODY_BYTES = 64 * 1024;
+const MiB = 1024 * 1024;
+/** Step 24.2 (design-steward 7.8.12 "微信"): the media bounds. A 1:1 image, voice or file
+ *  whose size WeChat reports above its bound (image 20 MiB, file 25 MiB, the voice's SILK
+ *  source 2 MiB) is described `too_large` and never fetched; what GET /media/:media_id
+ *  actually receives is counted and cut at the same bound (image, file) or, for a voice the
+ *  puppet hands over as WAV, at 2 min 5 s of audio by the WAV header's byte rate (at most
+ *  voiceWavMax; voiceWavUnknown when the header says no rate). POST /send-file takes at most
+ *  sendBody bytes - its own limit; POST /send keeps its 64 KiB. */
+export const MEDIA_LIMITS = Object.freeze({ image: 20 * MiB, file: 25 * MiB, voiceSource: 2 * MiB, voiceMs: 125_000,
+  voiceWavMax: 12 * MiB, voiceWavUnknown: 6 * MiB, sendBody: 25 * MiB });
+const WAV_HEADER_SLACK = 4096;
+/** GET /media/:media_id's own deadlines, the host's (design 7.8.12 "入库的时限"): the puppet must
+ *  hand over a first byte within firstByteMs and the whole file within totalMs, or the fetch is
+ *  abandoned (the lock released, the partial deleted) and answered 503; so is one whose client
+ *  went away. A failure that is not a recognised refusal is transient (503), until a media_id has
+ *  failed `attempts` times: then it is gone (410), so one file never holds the owner's later
+ *  messages forever. */
+export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
+/** A puppet error that says this message will never be handed over (neo's refusal of a peer it
+ *  has not observed, an expired or unknown message; the fork's "payload is no longer cached",
+ *  its refusal of a message of another WeChat type, and its refusals of a payload that can
+ *  never be fetched: an app message "not a file", one that "carries no encrypted" picture or
+ *  attachment, a voice that "states no byte length"): 410 gone at once.
+ *  `createBridge({isGone})` replaces it should the fork name its refusals otherwise. */
+export const isGoneError = error =>
+  /observed peer|expired|not found|no longer cached|from a WeChat message of type|not a file|carries no encrypted|states no byte length/i.test(String(error?.message ?? error));
+/** The FileBox name decides what the fork sends (its messageSendFile): `.silk`/`.sil`/`.slk`/`.amr`
+ *  a voice bar (the length in ms is the name's leading number), one of these an image, anything
+ *  else a file attachment. */
+export const IMAGE_EXTENSIONS = Object.freeze(['jpg', 'jpeg', 'png', 'gif', 'webp']);
+const VOICE_EXTENSIONS = ['silk', 'sil', 'slk', 'amr'];
+/** What the fork can send as a voice bar or an image bubble, nothing else (it transcodes
+ *  nothing): a voice bar is SILK its encodeVoice made from 16 kHz mono 16-bit PCM of at most
+ *  voiceMaxMs; an image bubble is a real JPEG of at most imageMaxBytes (the crate's small tier).
+ *  Anything else goes as a file attachment. */
+export const MEDIA_SEND = Object.freeze({ voiceSampleRate: 16_000, voiceMaxMs: 60_000, imageMaxBytes: 64 * 1024 });
+const MEDIA_KINDS = ['image', 'voice', 'file'];
 /** POST /login's bounds: at least minGapMs between two accepted requests, at most perHour
  *  in any hour and perDay in any 24 hours (counted in this process's memory: a restart starts
  *  `idle` and asks for nothing by itself; the director's ownerChannels.login keeps the same
@@ -82,6 +124,14 @@ export function bindHost(value, inContainer) {
 const digest = value => createHash('sha256').update(String(value)).digest();
 // An error as one log line (never a QR: neither neo nor Wechaty puts one in an error).
 const short = error => String(error?.message ?? error?.data ?? error).slice(0, 200);
+/** `promise`, or a rejection with the signal's reason as soon as it aborts (the promise is left to settle). */
+const raced = (promise, signal) => new Promise((resolve, reject) => {
+  if (signal.aborted) return reject(signal.reason);
+  const stop = () => reject(signal.reason);
+  signal.addEventListener('abort', stop, { once: true });
+  Promise.resolve(promise).then(value => { signal.removeEventListener('abort', stop); resolve(value); },
+    error => { signal.removeEventListener('abort', stop); reject(error); });
+});
 
 /** The room a message was posted in, or undefined for a 1:1 message: the message payload's
  *  own `roomId`, the field Wechaty's `message.room()` reads before it loads a Room. Never
@@ -89,14 +139,154 @@ const short = error => String(error?.message ?? error?.data ?? error).slice(0, 2
  *  asks the puppet for a room payload it cannot supply. (The send path still loads one.) */
 const roomOf = message => message.payload?.roomId || undefined;
 
+// The raw message content the fork carries (base64 of WeChat's XML), as text, or undefined.
+const contentXml = content => {
+  if (typeof content !== 'string' || !content) return undefined;
+  const text = Buffer.from(content, 'base64').toString('utf8');
+  const start = text.indexOf('<');
+  return start < 0 ? undefined : text.slice(start);
+};
+const xmlText = value => value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&').trim();
+const attribute = (xml, tag, name) => {
+  const attributes = new RegExp(`<${tag}\\b([^>]*)>`).exec(xml)?.[1];
+  return attributes && new RegExp(`\\b${name}\\s*=\\s*"([^"]*)"`).exec(attributes)?.[1];
+};
+const element = (xml, tag) => {
+  const value = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(xml)?.[1];
+  return value === undefined ? undefined : xmlText(value);
+};
+const count = value => {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+};
+
+/** Step 24.2: what a 1:1 non-text message carries, as a description - {kind, mime?, name?,
+ *  size?, too_large?} - or undefined when it is not one of the kinds 24.2 takes (design
+ *  7.8.12 "收的白名单与引用回复"): an image (WeChat type 3), a voice (34) or a file (49 with
+ *  appmsg type 6). Wechaty's type decides; the fork's raw `messageType`, when the payload has
+ *  one, must agree (a 49 the fork files as Unknown is taken by its raw type). A file is let in
+ *  only when the payload carries its XML and that says appmsg type 6 and quotes nothing: a
+ *  quoted reply (49/57), or a 49 whose XML cannot be read, is never let in. Sizes and the file name are what WeChat's
+ *  XML reports (not trusted: GET /media/:media_id counts the real bytes). */
+export function mediaOf(message, types, limits = MEDIA_LIMITS) {
+  const type = message.type();
+  const kinds = [['image', types.Message?.Image, 3], ['voice', types.Message?.Audio, 34], ['file', types.Message?.Attachment, 49]];
+  const payload = message.payload ?? {};
+  let found = kinds.find(([, value]) => value !== undefined && value === type);
+  // The fork's patch files WeChat's 49 under Unknown: its raw type and the XML checks below decide.
+  if (!found && types.Message?.Unknown !== undefined && type === types.Message.Unknown && payload.messageType === 49) found = kinds[2];
+  if (!found) return undefined;
+  const [kind, , raw] = found;
+  if (payload.messageType !== undefined && payload.messageType !== raw) return undefined;
+  const xml = contentXml(payload.content);
+  if (kind === 'file' && (xml === undefined || /<refermsg[\s>]/.test(xml)
+    || element(xml.slice(xml.indexOf('<appmsg')), 'type') !== '6')) return undefined;
+  const described = { kind };
+  let size;
+  if (xml !== undefined) {
+    if (kind === 'image') size = count(attribute(xml, 'img', 'hdlength')) ?? count(attribute(xml, 'img', 'length'));
+    if (kind === 'voice') size = count(attribute(xml, 'voicemsg', 'length'));
+    if (kind === 'file') {
+      size = count(element(xml, 'totallen'));
+      const name = element(xml, 'title');
+      if (name) described.name = name.slice(0, 255);
+    }
+  }
+  // GET /media/:media_id hands a voice over as the puppet decoded it: WAV.
+  if (kind === 'voice') described.mime = 'audio/wav';
+  if (size !== undefined) described.size = size;
+  const bound = kind === 'voice' ? limits.voiceSource : limits[kind];
+  if (size !== undefined && size > bound) described.too_large = true;
+  return described;
+}
+
+/** The byte rate a WAV header names (RIFF/WAVE, its `fmt ` chunk), or undefined. */
+export function wavByteRate(head) {
+  if (head.length < 12 || head.toString('latin1', 0, 4) !== 'RIFF' || head.toString('latin1', 8, 12) !== 'WAVE') return undefined;
+  for (let at = 12; at + 8 <= head.length;) {
+    const id = head.toString('latin1', at, at + 4), size = head.readUInt32LE(at + 4);
+    if (id === 'fmt ') {
+      if (at + 20 > head.length) return undefined;
+      const rate = head.readUInt32LE(at + 16);
+      return rate >= 1000 && rate <= 1_536_000 ? rate : undefined;
+    }
+    at += 8 + size + (size & 1);
+  }
+  return undefined;
+}
+
+/** How many bytes of WAV a voice may be: 2 min 5 s at the header's byte rate, plus the header. */
+export function wavByteCap(head, limits = MEDIA_LIMITS) {
+  const rate = wavByteRate(head);
+  return rate ? Math.min(limits.voiceWavMax, WAV_HEADER_SLACK + Math.ceil(rate * limits.voiceMs / 1000)) : limits.voiceWavUnknown;
+}
+
+/** An arriving voice's length: the fork names its WAV `<durationMs>ms.wav`, so the name says it;
+ *  a name that does not falls back to the WAV header's byte rate (`head`, `size` bytes in all). */
+export function inboundVoiceMs(name, head, size) {
+  const named = /^(\d{1,9})ms\.wav$/i.exec(String(name ?? ''));
+  if (named && Number(named[1]) > 0) return Number(named[1]);
+  const rate = wavByteRate(head);
+  return rate ? Math.round(Math.max(0, size - 44) * 1000 / rate) : undefined;
+}
+
+/** The PCM a voice bar is encoded from: the data chunk of a RIFF/WAVE file that is PCM, mono,
+ *  16 kHz, 16-bit and at most `limits.voiceMaxMs` long; undefined for anything else, which then
+ *  goes as a file (nothing is resampled here, and the fork's encoder takes only that). */
+export function voicePcm(bytes, limits = MEDIA_SEND) {
+  if (bytes.length < 44 || bytes.toString('latin1', 0, 4) !== 'RIFF' || bytes.toString('latin1', 8, 12) !== 'WAVE') return undefined;
+  let format, data;
+  for (let at = 12; at + 8 <= bytes.length;) {
+    const id = bytes.toString('latin1', at, at + 4), size = bytes.readUInt32LE(at + 4), end = at + 8 + size;
+    if (end > bytes.length) return undefined;
+    if (id === 'fmt ' && !format) format = bytes.subarray(at + 8, end);
+    if (id === 'data' && !data) data = bytes.subarray(at + 8, end);
+    at = end + (size & 1);
+  }
+  if (!format || format.length < 16 || !data || !data.length || data.length % 2) return undefined;
+  if (format.readUInt16LE(0) !== 1 || format.readUInt16LE(2) !== 1 || format.readUInt32LE(4) !== limits.voiceSampleRate
+    || format.readUInt16LE(14) !== 16) return undefined;
+  return data.length * 1000 / (limits.voiceSampleRate * 2) > limits.voiceMaxMs ? undefined : data;
+}
+
+/** Whether `bytes` can go as an image bubble: a real JPEG (FF D8 FF) of at most imageMaxBytes. */
+export const isBubbleJpeg = (bytes, limits = MEDIA_SEND) =>
+  bytes.length >= 3 && bytes.length <= limits.imageMaxBytes && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+
+const cleanName = name => String(name ?? '').replace(/[\\/\u0000-\u001f\u007f]/g, '_').trim().slice(-120);
+const splitName = name => {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? [name.slice(0, dot), name.slice(dot + 1).toLowerCase()] : [name, ''];
+};
+/** How to send one file, in order until one goes, each step with what it goes out as. An image
+ *  that is a bubble JPEG first as an image (under its own .jpg/.jpeg name, else `<stem>.jpg`); a
+ *  voice whose bytes are voice-bar PCM (`voicePcm`) first as a voice bar (`pcm`: the bridge
+ *  encodes it and names the SILK `<durationMs>.silk` only then); then, and for everything else
+ *  at once, the same bytes as a file under their own name, with `.bin` added when that name
+ *  would make the fork send it as an image or a voice bar. */
+export function sendPlan({ kind, name, bytes }, limits = MEDIA_SEND) {
+  const clean = cleanName(name) || kind;
+  const [stem, extension] = splitName(clean);
+  // The extension as the fork's carrier() reads it (all after the last dot, the whole name when
+  // it has none), so '.png', 'png' or 'silk' never reach its image or voice carrier as a file.
+  const forkExtension = clean.slice(clean.lastIndexOf('.') + 1).toLowerCase();
+  const asFile = { as: 'file', name: IMAGE_EXTENSIONS.includes(forkExtension) || VOICE_EXTENSIONS.includes(forkExtension) ? `${clean}.bin` : clean };
+  if (kind === 'image' && isBubbleJpeg(bytes, limits))
+    return [{ as: 'image', name: extension === 'jpg' || extension === 'jpeg' ? clean : `${stem}.jpg` }, asFile];
+  const pcm = kind === 'voice' ? voicePcm(bytes, limits) : undefined;
+  return pcm ? [{ as: 'voice', pcm }, asFile] : [asFile];
+}
+
 /** Whether this WeChat message is one the owner could have written to the bot:
- *  a 1:1 text from someone else. Rooms, the account's own messages (also those it
+ *  a 1:1 text from someone else - or, step 24.2, a 1:1 image, voice or file (`mediaOf`).
+ *  Rooms, the account's own messages (also those it
  *  sends from the phone) and official accounts are never relayed. Neo files a peer it
  *  heard from as contact type Unknown and one it has not seen as Individual, so official
  *  accounts are recognised by WeChat's `gh_` id prefix as well as by type. */
-export function isOwnerCandidate(message, types) {
+export function isOwnerCandidate(message, types, limits = MEDIA_LIMITS) {
   if (message.self() || roomOf(message)) return false;
-  if (message.type() !== types.Message.Text) return false;
+  if (message.type() !== types.Message.Text && !mediaOf(message, types, limits)) return false;
   const talker = message.talker();
   if (!talker?.id || talker.id.startsWith('gh_')) return false;
   return talker.type() !== types.Contact.Official;
@@ -132,11 +322,19 @@ export function groupBindAttempt(text) {
 export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
   log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS,
   groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
-  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, fetchLimits = MEDIA_FETCH, isGone = isGoneError,
+  mediaSend = MEDIA_SEND }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
   const ring = [], groupRing = [], strangerRing = [];
+  /** Step 24.2 (design 7.8.12 "活消息存在哪"): media_id ('<seq>.<index>') -> {message, index,
+   *  kind, generation} for each fetchable attachment of an event in a ring. An entry goes in
+   *  just before its event is pushed and leaves when that event is cut off a ring's head
+   *  (`push`), so it never outlives its event; a restart empties both. */
+  const live = new Map();
+  let fetching = false;
   // Step 23: the host's whitelist (PUT /rooms), in memory only - a restart starts empty and
   // the host sets it again: the bound account and each bound room with its @ prefix.
   let ownerRef, rooms = new Map();
@@ -278,7 +476,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
 
   const push = (target, size, event) => {
     target.push({ seq: ++seq, ...event });
-    if (target.length > size) target.splice(0, target.length - size);
+    if (target.length <= size) return;
+    for (const dropped of target.splice(0, target.length - size))
+      for (const attachment of dropped.attachments ?? []) if (attachment.media_id) live.delete(attachment.media_id);
   };
 
   /** A group message (step 23): the account's own and non-text ones are dropped; a bound
@@ -311,12 +511,26 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       if (roomRef) {
         if (!relayGroup(message, roomRef, at)) return;
       } else {
-        if (!isOwnerCandidate(message, types)) return;
+        if (!isOwnerCandidate(message, types, mediaLimits)) return;
+        const media = message.type() === types.Message.Text ? undefined : mediaOf(message, types, mediaLimits);
         const event = { type: 'message', sender_ref: message.talker().id, message_ref: String(message.id),
-          text: message.text(), ...(at ? { at } : {}) };
+          text: media ? '' : message.text(), ...(at ? { at } : {}) };
         // Once the host named the bound account, anyone else's 1:1 message is a stranger's: it
         // cannot crowd the owner's out of the main ring.
-        if (ownerRef && event.sender_ref !== ownerRef) push(strangerRing, strangerRingSize, event);
+        const stranger = Boolean(ownerRef && event.sender_ref !== ownerRef);
+        if (media) {
+          // Step 24.2: a description only - nothing is fetched until GET /media/:media_id asks.
+          // A stranger's buffer holds no live message (gone); one over its bound has no media_id.
+          const { too_large: tooLarge, ...described } = media;
+          if (stranger) event.attachments = [{ ...described, gone: true }];
+          else if (tooLarge) event.attachments = [{ ...described, too_large: true }];
+          else {
+            const mediaId = `${seq + 1}.0`;
+            live.set(mediaId, { message, index: 0, kind: media.kind, generation });
+            event.attachments = [{ media_id: mediaId, ...described }];
+          }
+        }
+        if (stranger) push(strangerRing, strangerRingSize, event);
         else push(ring, ringSize, event);
       }
       const pending = waiters;
@@ -370,6 +584,14 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   /** POST /send {room, text} (step 23): only a bound room; one queue for every group, at least
    *  sendGapMs between two sends, at most backstopPerHour per room and hour (429 past it). */
   function sendGroup(room, text) {
+    return groupSend(room, async target => {
+      const sent = await target.say(text);
+      return [200, { ref: sent?.id ?? null }];
+    });
+  }
+
+  /** One send into bound room `room` through the group queue: `act(room handle)` answers it. */
+  function groupSend(room, act) {
     if (!rooms.has(room)) return Promise.resolve([409, { error: 'room_not_bound' }]);
     const run = sendQueue.then(async () => {
       if (!state.logged_in || !bot) return [409, { error: 'not_logged_in' }];
@@ -381,12 +603,182 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       if (wait > 0) await sleep(wait);
       lastGroupSend = now().getTime();
       recent.push(lastGroupSend);
-      const sent = await bot.Room.load(room).say(text);
-      return [200, { ref: sent?.id ?? null }];
+      return act(bot.Room.load(room));
     });
     sendQueue = run.catch(() => {});
     return run;
   }
+
+  /** The FileBox of one live attachment, through the fork (the platform director's interface):
+   *  a voice by `puppet.messageVoice(id)` when the puppet has it (WAV), else every kind by
+   *  Wechaty's `message.toFileBox()` (`puppet.messageFile(id)`); an image by
+   *  `message.toImage().hd()` (`puppet.messageImage(id, HD)`). */
+  const fetchBox = async ({ message, kind }) => {
+    if (kind === 'voice' && typeof bot.puppet?.messageVoice === 'function') return bot.puppet.messageVoice(message.id);
+    if (kind === 'image' && typeof message.toImage === 'function') return message.toImage().hd();
+    return message.toFileBox();
+  };
+
+  /** A local (tmpfs) failure: never the media's fault, so never counted against it. */
+  const local = error => Object.assign(error instanceof Error ? error : new Error(String(error)), { local: true });
+
+  /** The live attachment's bytes into `file` (tmpfs), counted as they come: {size, mime,
+   *  durationMs?} or {too_large} at the kind's bound (a voice: 2 min 5 s of WAV by its header's
+   *  rate; its length from the fork's `<durationMs>ms.wav` name, else that rate). `signal`
+   *  abandons it at once (the source destroyed); `firstByte` is called with each chunk. The
+   *  file is opened before the puppet is asked; the caller deletes it. */
+  const spool = async (entry, file, signal, firstByte) => {
+    const { kind } = entry;
+    let handle, source;
+    try { handle = await open(file, 'wx', 0o600); } catch (error) { throw local(error); }
+    try {
+      const box = await raced(fetchBox(entry), signal);
+      source = typeof box?.toStream === 'function' ? await raced(box.toStream(), signal)
+        : typeof box?.toBuffer === 'function' ? [await raced(box.toBuffer(), signal)] : undefined;
+      if (!source) throw new Error('the puppet gave no file');
+      const chunks = source[Symbol.asyncIterator]?.() ?? source[Symbol.iterator]();
+      let size = 0, head = Buffer.alloc(0), cap = kind === 'voice' ? undefined : mediaLimits[kind];
+      for (;;) {
+        const { value, done } = await raced(chunks.next(), signal);
+        if (done) break;
+        firstByte();
+        const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        size += bytes.length;
+        if (cap === undefined) {
+          head = Buffer.concat([head, bytes]).subarray(0, 4096);
+          if (head.length >= 512) cap = wavByteCap(head, mediaLimits);
+        }
+        if (size > (cap ?? mediaLimits.voiceWavMax)) return { too_large: true };
+        try { await handle.write(bytes); } catch (error) { throw local(error); }
+      }
+      if (cap === undefined && size > wavByteCap(head, mediaLimits)) return { too_large: true };
+      if (kind !== 'voice') return { size, mime: box.mediaType };
+      return { size, mime: 'audio/wav', durationMs: inboundVoiceMs(box.name, head, size) };
+    } finally {
+      await handle.close().catch(error => log('media file not closed: ' + short(error)));
+      // Leaving early (the cut, a deadline, the client gone) stops the source.
+      source?.destroy?.();
+    }
+  };
+
+  /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out (a
+   *  voice with its length in `x-voice-duration-ms` when known). 404:
+   *  not live (never was, or its event left the ring); 410 gone: another login's message, a
+   *  refusal `isGone` recognises, or one that failed fetchLimits.attempts times; 503: another
+   *  fetch is running (busy, one at a time), or this one failed, ran out of time or lost its
+   *  client (unavailable, transient); 413 too_large: more bytes than its bound. The bytes sit in
+   *  tmpfs only while this answer runs. */
+  async function serveMedia(mediaId, response) {
+    const entry = live.get(mediaId);
+    if (!entry) return reply(response, 404, { error: 'not_found' });
+    if (entry.generation !== generation || !bot || entry.gone) return reply(response, 410, { error: 'gone' });
+    if (fetching) return reply(response, 503, { error: 'busy' });
+    fetching = true;
+    const file = join(tmpDir, `wechat-media-${randomBytes(8).toString('hex')}`);
+    // The file is deleted and the next fetch let in before the client can have the whole
+    // answer: before a refusal is written, and as the last byte is read out of tmpfs.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      try { rmSync(file, { force: true }); } catch (error) { log('media file not deleted: ' + short(error)); }
+      fetching = false;
+    };
+    const abandon = new AbortController();
+    const timeout = what => () => abandon.abort(new Error(`media fetch timed out: ${what}`));
+    const firstTimer = setTimeout(timeout(`no first byte in ${fetchLimits.firstByteMs} ms`), fetchLimits.firstByteMs);
+    const totalTimer = setTimeout(timeout(`not whole in ${fetchLimits.totalMs} ms`), fetchLimits.totalMs);
+    const left = () => { if (!response.writableFinished) abandon.abort(new Error('the client went away')); };
+    response.on('close', left);
+    try {
+      let spooled;
+      try { spooled = await spool(entry, file, abandon.signal, () => clearTimeout(firstTimer)); }
+      catch (error) {
+        release();
+        let status = 503;
+        if (!error?.local && (isGone(error) || (entry.failures = (entry.failures ?? 0) + 1) >= fetchLimits.attempts)) {
+          entry.gone = true;
+          status = 410;
+        }
+        log(`media ${entry.kind} not fetched (${status === 410 ? 'gone' : 'held'}): ${short(error)}`);
+        if (response.destroyed) return;
+        return reply(response, status, { error: status === 410 ? 'gone' : 'unavailable' });
+      } finally {
+        clearTimeout(firstTimer);
+        clearTimeout(totalTimer);
+        response.off('close', left);
+      }
+      if (spooled.too_large) { release(); return reply(response, 413, { error: 'too_large' }); }
+      response.writeHead(200, { 'content-type': typeof spooled.mime === 'string' && spooled.mime ? spooled.mime : 'application/octet-stream',
+        'content-length': String(spooled.size), 'cache-control': 'no-store',
+        ...(spooled.durationMs === undefined ? {} : { 'x-voice-duration-ms': String(spooled.durationMs) }) });
+      if (!spooled.size) { release(); return response.end(); }
+      // The client has the whole answer once it has content-length bytes, which may be before
+      // the read stream reaches its end: release as the last byte is read.
+      const stream = createReadStream(file);
+      let read = 0;
+      stream.on('data', chunk => { read += chunk.length; if (read >= spooled.size) release(); });
+      try { await pipeline(stream, response); }
+      catch (error) { log('media answer cut: ' + short(error)); }
+    } finally { release(); }
+  }
+
+  /** The FileBox of one voice bar: `pcm` through the fork's encoder - the live session's
+   *  encodeVoice(pcmBase64) -> {voice, durationMs} (base64 SILK) - named `<durationMs>.silk`, the
+   *  name the fork's messageSendFile reads the length from. Throws when there is no encoder, it
+   *  refuses, or its note is not one of at most voiceMaxMs: the caller then sends a file. */
+  async function voiceBox(pcm) {
+    const session = bot?.puppet?.session;
+    if (typeof session?.encodeVoice !== 'function') throw new Error('the puppet has no voice encoder');
+    const note = await session.encodeVoice(pcm.toString('base64'));
+    const durationMs = note?.durationMs;
+    if (typeof note?.voice !== 'string' || !note.voice || !Number.isSafeInteger(durationMs) || durationMs <= 0
+      || durationMs > mediaSend.voiceMaxMs) throw new Error('the voice encoder gave no note a voice bar can carry');
+    return makeFileBox(Buffer.from(note.voice, 'base64'), `${durationMs}.silk`);
+  }
+
+  /** Sends `bytes` by each step of `plan` (sendPlan) in turn until one goes (a voice bar or an
+   *  image refused or failed goes again as a file): [200, {ref, sent_as}]. A peer neo no longer
+   *  knows is recipient_unknown; a send whose outcome the fork calls uncertain may have gone, so
+   *  it is a failed send and nothing is sent again. */
+  async function deliverFile(say, bytes, plan) {
+    let failure;
+    for (const [i, step] of plan.entries()) {
+      try {
+        const box = step.as === 'voice' ? await voiceBox(step.pcm) : makeFileBox(bytes, step.name);
+        const sent = await say(box);
+        return [200, { ref: sent?.id ?? null, sent_as: step.as }];
+      } catch (error) {
+        if (/observed peer/.test(String(error?.message))) return [409, { error: 'recipient_unknown' }];
+        if (/outcome is uncertain/.test(String(error?.message))) throw error;
+        failure = error;
+        if (i + 1 < plan.length) log(`sending as ${step.as} failed (${short(error)}); sending it as ${plan[i + 1].as}`);
+      }
+    }
+    throw failure;
+  }
+
+  async function sendFile({ to, room }, bytes, plan) {
+    if (room) return groupSend(room, target => deliverFile(box => target.say(box), bytes, plan));
+    if (!state.logged_in || !bot) return [409, { error: 'not_logged_in' }];
+    const contact = await bot.Contact.find({ id: to });
+    if (!contact) return [409, { error: 'recipient_unknown' }];
+    return deliverFile(box => contact.say(box), bytes, plan);
+  }
+
+  const readBytes = (request, limit) => new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    request.on('data', chunk => {
+      if (size > limit) return;
+      size += chunk.length;
+      // The rest of an oversized body is read and dropped, so the 413 reaches the client.
+      if (size > limit) { chunks.length = 0; reject(Object.assign(new Error('body_too_large'), { status: 413 })); return; }
+      chunks.push(chunk);
+    });
+    request.on('end', () => { if (size <= limit) resolve(Buffer.concat(chunks)); });
+    request.on('error', reject);
+  });
 
   const reply = (response, status, body) => {
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -435,6 +827,24 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         if (!Number.isFinite(cursor) || !Number.isFinite(wait) || wait < 0) return reply(response, 400, { error: 'bad_request' });
         return reply(response, 200, await events(cursor, Math.min(wait, maxWaitSeconds), response));
       }
+      const mediaPath = /^\/media\/([^/]+)$/.exec(url.pathname);
+      // A media_id is '<seq>.<index>', as the bridge made it; anything else is not one.
+      if (request.method === 'GET' && mediaPath) return /^\d+\.\d+$/.test(mediaPath[1])
+        ? await serveMedia(mediaPath[1], response) : reply(response, 404, { error: 'not_found' });
+      if (request.method === 'POST' && url.pathname === '/send-file') {
+        // Step 24.2: ?to= (the bound owner) or ?room= (a bound group), kind, mime, name; the body
+        // is the file's bytes, at most mediaLimits.sendBody.
+        const bytes = await readBytes(request, mediaLimits.sendBody);
+        const query = url.searchParams;
+        const to = query.get('to') ?? '', room = query.get('room') ?? '', kind = query.get('kind') ?? '';
+        const mime = query.get('mime') ?? '', name = query.get('name') ?? '';
+        const plan = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
+          ? sendPlan({ kind, name, bytes }, mediaSend) : undefined;
+        if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return reply(response, 400, { error: 'bad_request' });
+        if (typeof makeFileBox !== 'function') return reply(response, 501, { error: 'not_supported' });
+        const [status, result] = await sendFile({ to, room }, bytes, plan);
+        return reply(response, status, result);
+      }
       if (request.method === 'POST' && url.pathname === '/login') {
         const [status, result] = requestLogin();
         return reply(response, status, result);
@@ -476,6 +886,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     state,
     /** Long polls waiting now (each holds a timer until it is answered or closed). */
     get waiting() { return waiters.size; },
+    /** Live attachments (step 24.2): never more than the ring events that carry a media_id. */
+    get live() { return live.size; },
     /** Settles once every bot start/stop asked for so far has run. */
     settled: async () => { while (tasks.size) await Promise.allSettled([...tasks]); },
     listen: (port = DEFAULT_PORT, host = HOST) => new Promise((resolve, reject) => {

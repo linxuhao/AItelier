@@ -1,9 +1,25 @@
 """Run the driver's own node test suite from pytest and fail the gate if it is red.
 
-What it runs: exactly ``node --test --test-concurrency=1`` (argv
-``[<node>, "--test", "--test-concurrency=1"]``) with the working directory set to
+What it runs: exactly ``node --test --test-concurrency=2`` (argv
+``[<node>, "--test", "--test-concurrency=2"]``) with the working directory set to
 ``integrations/dsh-driver``. That is the driver suite's full ``node --test`` discovery,
-and nothing else is run.
+and nothing else is run. The discovery includes ``plugin-boundary.test.mjs``, which
+imports every test file of ``integrations/dsh-director``, so this row runs the director
+suite too (there is no separate director row).
+
+Concurrency 2 runs two test files at a time. At node's default, a 2-CPU container gets
+concurrency 1 and the suite took 338 s; at 2 three runs of this row in a 2-CPU container
+took 163 s, 166 s and 221 s (host load 5-16) and all three were green, 693/693
+(measured 2026-11-22, before the rebase onto main; at ``0685a65908`` the suite was 725
+tests and one run took 199 s at host load 12-23; at ``5638facc0c`` it is 773 tests and
+one run took 219 s at host load 15-35).
+
+This row is marked ``slow``, so the recommended fast command in ``tests/README.md``
+(``-m "... and not slow"``) runs no driver and no director javascript at all: this row
+is the only runner of both suites. It stays ``slow`` because every measured run above
+took longer than 160 s, most over three minutes. Run it on its own with
+``python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py``
+(plain ``pytest`` and ``-m slow`` select it too).
 
 Why: nothing else executes this suite. The pytest-side guard
 ``tests/unit/test_driver_suite_lists_its_files.py`` reads the suite's file list and its
@@ -47,7 +63,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DRIVER = ROOT / "integrations" / "dsh-driver"
 DSH_PACKAGE = Path("/opt/aitelier-dsh/node_modules/@deepseek-ai/dsh/package.json")
-NODE_ARGS = ["--test", "--test-concurrency=1"]
+NODE_ARGS = ["--test", "--test-concurrency=2"]
 #: How long the suite may run before this row calls it UNMEASURED.
 #:
 #: This machine measured the suite ALONE in 314.22 s, and in 462 s in an earlier run
@@ -149,6 +165,7 @@ def _run(argv: list[str], home: Path) -> tuple[int, str, float]:
     return proc.returncode, output or "", time.monotonic() - started
 
 
+@pytest.mark.slow
 def test_driver_node_suite_passes_under_node_test(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:

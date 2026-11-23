@@ -11,13 +11,15 @@ from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
+from tests.support import state_template
 
 CRIT = [{"id": "c1", "kind": "test", "description": "works"}]
 
 
 @pytest.fixture
-def svc(tmp_path):
-    s = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="alice@example.test",
+def svc(tmp_path, state_db_copy):
+    s = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / "state.sqlite")),
+                     actor="alice@example.test",
                      project_read_trusted=True)
     s.create_project("p", "P")
     s.create_project("q", "Q")

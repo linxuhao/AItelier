@@ -15,7 +15,8 @@ import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from '.
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode, EXTERNAL_CONTENT_LINE,
-  humanInput, catalogOps, relayAnswer, OwnerQuestionsTimer, PUSH_SUBJECT, RECEIPT_SUBJECT, RELAY_REFUSALS,
+  humanInput, catalogOps, relayAnswer, OwnerQuestionsTimer, OWNER_QUESTIONS_WAIT_MS, OWNER_QUESTIONS_FOLLOW_UP_MS, OWNER_QUESTION_EVENTS,
+  PUSH_SUBJECT, RECEIPT_SUBJECT, RELAY_REFUSALS,
   openThreads as openThreadsOf, confirmOps, requesterOf, stateRefusal } from './steward-host.mjs';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
@@ -55,6 +56,8 @@ test('presented_only: the steward has exactly its presented tools; everything el
     'schedule_list', 'schedule_set', 'schedule_delete', 'relay_answer'],
     'the adapter adds only the owner message, the letter reply, the reminders and the answer relay');
   assert.ok(table.steward.presented.includes('grep_chat_history'), 'the steward recovers exact words after compaction too');
+  assert.ok(readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8').includes('grep_chat_history(pattern) searches your own complete conversation log'),
+    'steward.md tells the steward what grep_chat_history searches');
   // The inbox reader is the steward's own and nobody else's.
   assert.ok(table.steward.presented.includes('portfolio_inbox'), 'roles.json presents the inbox reader to the steward');
   assert.equal(refusal(steward, exec('portfolio_inbox')), undefined);
@@ -1741,6 +1744,179 @@ test('step 22: the push clock awaits each mirror in order, hands back unmirrored
   assert.equal(armed, 60000);
   started.close();
   assert.equal(await started.tick(), undefined, 'closed: no look');
+});
+
+/** A fake clock for the push clock's interval and one-shot timers, and a backend that keeps
+ *  sync_owner_questions' WAIT rule: a question is due once open WAIT, and one sync pushes every
+ *  due question in one message. The timer under test is the real OwnerQuestionsTimer. */
+function pushWorld({ mirrorMs = 0 } = {}) {
+  let now = 0, ids = 0;
+  const timers = new Map(), questions = [], pushes = [], mirrored = [], syncs = [];
+  const add = (fn, ms, every) => { const t = { id: ++ids, at: now + ms, fn, every, unref() {} }; timers.set(t.id, t); return t; };
+  const clock = {
+    setTimer: (fn, ms) => add(fn, ms, ms), setOnce: (fn, ms) => add(fn, ms),
+    clearTimer: t => { if (t) timers.delete(t.id); }, clearOnce: t => { if (t) timers.delete(t.id); },
+  };
+  const flush = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
+  const world = {
+    get now() { return now; }, questions, pushes, mirrored, syncs, polls: 0,
+    pendingFollowUps: () => [...timers.values()].filter(t => !t.every).length,
+    ask(id) { questions.push({ id, created: now, pushed: false }); },
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        const next = [...timers.values()].filter(t => t.at <= end).sort((a, b) => a.at - b.at || a.id - b.id)[0];
+        if (!next) break;
+        now = next.at;
+        if (next.every) { next.at += next.every; world.polls++; } else timers.delete(next.id);
+        next.fn();
+        await flush();
+      }
+      now = end; await flush();
+    },
+    request: async path => {
+      assert.equal(path, '/api/state/commands/sync_owner_questions');
+      syncs.push(now);
+      const due = questions.filter(q => !q.pushed && q.created <= now - OWNER_QUESTIONS_WAIT_MS);
+      due.forEach(q => { q.pushed = true; });
+      if (!due.length) return { result: { default_channel: 'wechat', messages: [], unmirrored: [] } };
+      pushes.push({ at: now, ids: due.map(q => q.id) });
+      return { result: { default_channel: 'wechat', messages: [{ message_id: 'm' + pushes.length, body: due.map(q => q.id).join(',') }], unmirrored: [] } };
+    },
+    mirror: async (id, body) => {
+      if (mirrorMs) await new Promise(resolve => add(resolve, mirrorMs));
+      mirrored.push({ id, body, at: now });
+    },
+  };
+  world.timer = new OwnerQuestionsTimer({ request: world.request, mirror: world.mirror, ...clock });
+  return world;
+}
+
+test('step 22: the push clock\'s wait is the backend\'s WAIT (30 s), and the follow-up comes just after it', () => {
+  const source = readFileSync(new URL('../../core/state_owner_questions.py', import.meta.url), 'utf8');
+  assert.equal(Number(source.match(/^WAIT = timedelta\(seconds=(\d+)\)/m)?.[1]) * 1000, OWNER_QUESTIONS_WAIT_MS);
+  assert.equal(OWNER_QUESTIONS_WAIT_MS, 30000);
+  assert.ok(OWNER_QUESTIONS_FOLLOW_UP_MS > OWNER_QUESTIONS_WAIT_MS && OWNER_QUESTIONS_FOLLOW_UP_MS <= OWNER_QUESTIONS_WAIT_MS + 5000);
+  assert.deepEqual([...OWNER_QUESTION_EVENTS], ['owner_question_changed']);
+});
+
+test('step 22: a question event gets its push mirrored within WAIT and a small margin, with no poll in between', async () => {
+  const w = pushWorld();
+  w.timer.start();
+  await w.advance(10000);
+  w.ask('q1');
+  w.timer.changed({ asked: true });
+  await w.advance(1);
+  assert.deepEqual(w.mirrored, [], 'held for WAIT by the backend: the look at once pushes nothing');
+  await w.advance(OWNER_QUESTIONS_FOLLOW_UP_MS);
+  assert.equal(w.polls, 0, 'no 60 s poll happened in between');
+  assert.deepEqual(w.mirrored.map(m => m.body), ['q1']);
+  const latency = w.mirrored[0].at - 10000;
+  assert.ok(latency >= OWNER_QUESTIONS_WAIT_MS && latency <= OWNER_QUESTIONS_WAIT_MS + 3000, `latency ${latency} ms`);
+  assert.deepEqual(w.syncs, [10000, 10000 + OWNER_QUESTIONS_FOLLOW_UP_MS], 'one look on the event, one just after WAIT');
+  assert.equal(w.pendingFollowUps(), 0);
+  w.timer.close();
+});
+
+test('step 22: a burst of three questions from one asker is one push; the follow-up is moved, never doubled', async () => {
+  const w = pushWorld();
+  w.timer.start();
+  await w.advance(5000);
+  for (const id of ['q1', 'q2', 'q3']) {
+    w.ask(id);
+    w.timer.changed({ asked: true });
+    assert.equal(w.pendingFollowUps(), 1, 'never more than one pending follow-up');
+    await w.advance(5000);
+  }
+  // The last ask was at 15 s: its follow-up at 15 s + FOLLOW_UP, before the 60 s poll.
+  await w.advance(15000 + OWNER_QUESTIONS_FOLLOW_UP_MS - w.now);
+  assert.equal(w.polls, 0);
+  assert.deepEqual(w.pushes, [{ at: 15000 + OWNER_QUESTIONS_FOLLOW_UP_MS, ids: ['q1', 'q2', 'q3'] }]);
+  assert.deepEqual(w.mirrored.map(m => m.body), ['q1,q2,q3']);
+  assert.equal(w.syncs.length, 4, 'three looks on the events, one follow-up');
+  // An event that asked nothing (withdrawn, answered) looks now and arms nothing.
+  w.timer.changed({ asked: false });
+  assert.equal(w.pendingFollowUps(), 0);
+  await w.advance(1);
+  assert.equal(w.syncs.length, 5);
+  w.timer.close();
+});
+
+test('step 22: with no event the 60 s poll still pushes; close clears the pending follow-up', async () => {
+  const w = pushWorld();
+  w.timer.start();
+  await w.advance(5000);
+  w.ask('q1');
+  await w.advance(55000);
+  assert.equal(w.polls, 1);
+  assert.deepEqual(w.pushes, [{ at: 60000, ids: ['q1'] }]);
+  assert.deepEqual(w.mirrored.map(m => m.body), ['q1']);
+  w.ask('q2');
+  w.timer.changed({ asked: true });
+  await w.advance(1);
+  assert.equal(w.pendingFollowUps(), 1);
+  const looks = w.syncs.length;
+  w.timer.close();
+  assert.equal(w.pendingFollowUps(), 0, 'close clears the follow-up');
+  await w.advance(120000);
+  assert.equal(w.syncs.length, looks, 'closed: no look, neither follow-up nor poll');
+  assert.equal(await w.timer.changed({ asked: true }), undefined);
+  assert.equal(w.pendingFollowUps(), 0, 'closed: nothing armed');
+});
+
+test('step 22: a look still running is the follow-up\'s answer only once it ends: then it looks again', async () => {
+  // The poll at 60 s starts a look whose mirror takes 10 s. q1, asked at 31 s, comes due at
+  // 61 s - after that look began - and its follow-up fires at 63 s, mid-look.
+  const w = pushWorld({ mirrorMs: 10000 });
+  w.timer.start();
+  await w.advance(29000);
+  w.ask('q0');           // due at 59 s: the 60 s poll pushes it and its mirror runs until 70 s
+  await w.advance(2000);
+  w.ask('q1');
+  w.timer.changed({ asked: true });
+  await w.advance(1);
+  assert.equal(w.syncs.length, 1);
+  await w.advance(29000);  // 60 s: the poll's look
+  assert.deepEqual(w.pushes.map(p => p.ids), [['q0']]);
+  await w.advance(OWNER_QUESTIONS_FOLLOW_UP_MS + 31000 - w.now); // the follow-up fires mid-mirror, at 63 s
+  assert.equal(w.syncs.length, 2, 'it waits out the running look instead of taking it as its own');
+  await w.advance(70000 - w.now);
+  assert.deepEqual(w.pushes.map(p => p.ids), [['q0'], ['q1']], 'then looks again and pushes the question that came due');
+  assert.equal(w.pushes[1].at, 70000);
+  await w.advance(10000);
+  assert.deepEqual(w.mirrored.map(m => m.body), ['q0', 'q1']);
+  w.timer.close();
+});
+
+test('step 22: close while the follow-up waits out a running look: no look after that look ends', async () => {
+  // As above: the follow-up fires at 63 s, mid-mirror, and waits for the look that ends at 70 s.
+  // close() cannot clear it any more (it already fired); only tick()'s closed guard stops it.
+  const w = pushWorld({ mirrorMs: 10000 });
+  w.timer.start();
+  await w.advance(29000);
+  w.ask('q0');
+  await w.advance(2000);
+  w.ask('q1');
+  w.timer.changed({ asked: true });
+  await w.advance(1);
+  await w.advance(60000 - w.now); // 60 s: the poll's look pushes q0; its mirror runs until 70 s
+  assert.deepEqual(w.pushes.map(p => p.ids), [['q0']]);
+  await w.advance(OWNER_QUESTIONS_FOLLOW_UP_MS + 31000 - w.now); // 63 s: the follow-up has fired
+  assert.equal(w.timer.followUp, undefined, 'the follow-up already fired: close() has nothing to clear');
+  assert.equal(w.syncs.length, 2);
+  w.timer.close();
+  await w.advance(130000 - w.now);
+  assert.equal(w.syncs.length, 2, 'closed: the waiting follow-up does not look once the running look ends');
+  assert.deepEqual(w.pushes.map(p => p.ids), [['q0']]);
+});
+
+test('step 22: the runtime looks on owner_question_changed in code - the event is quiet, no model turn', () => {
+  const source = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
+  const at = source.indexOf('runtime.onEvent = async raw => {');
+  const body = source.slice(at, source.indexOf('const inbox = result.events', at));
+  assert.match(body, /\.filter\(e => OWNER_QUESTION_EVENTS\.has\(e\.event_type\)\)/);
+  assert.match(body, /questionsTimer\?\.changed\(\{ asked: questionEvents\.some\(e => e\.payload\?\.change === 'asked'\) \}\)/);
+  assert.match(body, /const quiet = steward \? new Set\(\[[^\]]*\.\.\.OWNER_QUESTION_EVENTS\]\)/);
 });
 
 test('step 22: the snapshot layer 2 lists the pushed questions still waiting, from data', async () => {

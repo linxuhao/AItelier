@@ -445,8 +445,10 @@ class DriverInbox:
         """Record one message from the calling driver to the project's user.
 
         PRESENTATION, never authority: this writes one message row with NO
-        delivery (no driver is addressed) and touches nothing else. It is not
-        evidence, it answers no checkpoint, and it cannot change a node.
+        delivery (no driver is addressed) and touches nothing else - save, for a
+        message with a question block, the steward's push signal
+        (core.state_owner_questions.question_changed, an event naming no text). It
+        is not evidence, it answers no checkpoint, and it cannot change a node.
 
         Idempotent per (actor, request_key): the same payload returns the same
         durable message identity, a different one under the same key is refused
@@ -505,9 +507,17 @@ class DriverInbox:
                          (mid, parent["thread_id"] if parent else mid, self.driver_id, project_id, "note",
                           "transient", subject, body, json.dumps(refs), reply_to_message_id, created, "user",
                           json.dumps(segments) if segments else None))
-            return self._record(conn, "send_user", request_key, payload,
-                                {"message_id": mid, "project_id": project_id,
-                                 "sender_driver_id": self.driver_id, "created_at": created})
+            asked = any(isinstance(s, dict) and s.get("kind") == "question" for s in segments or [])
+            if asked:
+                from core.state_owner_questions import question_changed
+                question_changed(self.store, conn, project_id, "asked")
+            result = self._record(conn, "send_user", request_key, payload,
+                                  {"message_id": mid, "project_id": project_id,
+                                   "sender_driver_id": self.driver_id, "created_at": created})
+        if asked:
+            from core.state_changes import notify
+            notify(self.store.db.db_path)
+        return result
 
     def withdraw_user_question(self, request_key, project_id, message_id, segment_id, reason):
         """Withdraw one of the calling driver's OWN open questions, as a record.
@@ -573,9 +583,14 @@ class DriverInbox:
                          (mid, asked["thread_id"] or message_id, self.driver_id, project_id, "note", "transient",
                           "Question withdrawn", body, json.dumps({}), None, created, "user",
                           json.dumps([{"message_id": message_id, "segment_id": segment_id, "reason": reason}])))
-            return self._record(conn, "withdraw_user_question", request_key, payload,
-                                {"withdrawn": True, "project_id": project_id, "message_id": message_id,
-                                 "segment_id": segment_id, "withdrawal_message_id": mid, "created_at": created})
+            from core.state_owner_questions import question_changed
+            question_changed(self.store, conn, project_id, "withdrawn")
+            result = self._record(conn, "withdraw_user_question", request_key, payload,
+                                  {"withdrawn": True, "project_id": project_id, "message_id": message_id,
+                                   "segment_id": segment_id, "withdrawal_message_id": mid, "created_at": created})
+        from core.state_changes import notify
+        notify(self.store.db.db_path)
+        return result
 
     def _project_user(self) -> bool:
         """Whether THIS session is the project's user — the writer of the user's half.
@@ -677,7 +692,11 @@ class DriverInbox:
         writer of the user's half: the dashboard's message above, a message the
         owner sent from a chat channel (core.state_channels) and an owner's channel
         answer to a pushed question (core.state_owner_questions, which names its
-        recipients in `target_driver_ids`) land identically."""
+        recipients in `target_driver_ids`) land identically. With answers it also writes
+        the steward's question event ('answered') on that connection; the caller's
+        write transaction (core.state_graph.transaction) notifies the State waiters
+        once it has committed an event row, so this writer never notifies itself -
+        a notify before the commit would wake a waiter that reads nothing."""
         parent = None
         if reply_to_message_id is not None:
             parent = self._conversation_message(conn, project_id, reply_to_message_id)
@@ -706,6 +725,9 @@ class DriverInbox:
                      (mid, parent["thread_id"] if parent else mid, None, project_id, "note",
                       "transient", subject, body, "{}", reply_to_message_id, created, "driver", "user",
                       json.dumps(answers) if answers else None))
+        if answers:
+            from core.state_owner_questions import question_changed
+            question_changed(self.store, conn, project_id, "answered")
         deliveries = []
         for target in targets:
             seq = conn.execute("SELECT COALESCE(MAX(seq),0)+1 FROM driver_inbox_deliveries "
@@ -966,6 +988,17 @@ class DriverInbox:
         Every row carries the message's `created_at` (UTC, when the backend wrote
         it): the time a reader compares its own clock with.
 
+        Every row also carries `sender_kind`, the same discriminator the
+        conversation read (`list_user_conversation`) projects: 'user' for a
+        message the project's user wrote - the one writer of that half,
+        `write_user_half` (the dashboard, a chat channel's relay, a channel
+        answer to a pushed question), whose rows are `channel='user'` with no
+        sender driver - and 'driver' for everything else in an inbox: a driver's
+        or director's letter, a steward's or host's message, a system notice. A
+        wake built from these rows (wait_for_state_change's `driver_inbox`) is
+        how a host tells the owner's own words from a letter, so the key is on
+        every row, never only on some.
+
         The page is the OLDEST `limit` deliveries above `after` (the ascending
         forward keyset a waiting driver polls with) unless `newest` is true, which
         answers the NEWEST `limit` deliveries instead, newest first. `newest` is
@@ -1020,7 +1053,7 @@ class DriverInbox:
             # COUNT(*) over the same WHERE clause, never a page fetched into Python:
             # the answer must not cost the caller the whole backlog.
             matched_total=conn.execute("SELECT COUNT(*) FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) WHERE "+where, bound).fetchone()[0]
-            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.created_at,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
+            rows=[dict(r) for r in conn.execute("SELECT d.*,m.thread_id,m.sender_driver_id,m.project_id,m.kind,m.delivery_mode,m.subject,m.body,m.refs_json,m.segments_json,m.answers_json,m.withdraws_json,m.created_at,CASE WHEN m.channel='user' AND m.sender_driver_id IS NULL THEN 'user' ELSE 'driver' END AS sender_kind,s.channel AS source_channel,s.channel_at FROM driver_inbox_deliveries d JOIN driver_inbox_messages m USING(message_id) LEFT JOIN state_message_sources s ON s.message_id=m.message_id AND s.direction='in' WHERE "+where+" ORDER BY d.seq"+(" DESC" if newest else "")+" LIMIT ?", (*bound,limit+1))]
         page=rows[:limit]
         for row in page:
             citation=citation_fields(row)

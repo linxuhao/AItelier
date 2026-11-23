@@ -10,6 +10,7 @@ from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError, StateConflict
 from core.state_service import StateService
+from tests.support import state_template
 
 ARTIFACT = 'a' * 64
 
@@ -19,9 +20,9 @@ def invoke(service, action, **args):
 
 
 @pytest.fixture
-def ready(tmp_path, monkeypatch):
+def ready(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setenv('AITELIER_HOME', str(tmp_path / 'home'))
-    db = StateDatabase(str(tmp_path / 'state.sqlite'))
+    db = StateDatabase(state_db_copy(state_template.state, tmp_path / 'state.sqlite'))
     service = StateService(db, actor='authenticated-shared-actor', project_read_trusted=True)
     invoke(service, 'create_project', project_id='p', title='Attribution test')
     invoke(service, 'add_nodes', project_id='p', nodes=[{

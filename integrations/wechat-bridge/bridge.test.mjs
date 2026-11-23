@@ -4,15 +4,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, chmodSync } from 'node:fs';
+import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS } from './bridge.mjs';
+import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS, MEDIA_LIMITS, MEDIA_FETCH, MEDIA_SEND, mediaOf,
+  sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
-const types = { Message: { Text: 7, Image: 6 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
+const types = { Message: { Unknown: 0, Attachment: 1, Audio: 2, Emoticon: 5, Image: 6, Text: 7, Video: 15 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
   ScanStatus: { Cancel: 1, Waiting: 2, Scanned: 3, Confirmed: 4, Timeout: 5 } };
 const TOKEN = 'test-token-123';
 const HOUR = 3_600_000;
@@ -34,11 +36,37 @@ function fakeBot({ known = ['wxid_owner'] } = {}) {
   bot.startError = undefined;
   bot.start = async () => { bot.calls.push('start'); if (bot.startError) throw bot.startError; };
   bot.stop = async () => { bot.calls.push('stop'); };
+  // Step 24.2: a FileBox said to a contact or a room goes to the puppet's messageSendFile, as
+  // Wechaty's say() does; `refuse(name)` true makes the fork refuse that FileBox (the error it
+  // throws, `refusal`, is the fork's own rejection unless a test sets another).
+  bot.files = [];
+  bot.refuse = () => false;
+  bot.refusal = 'WeChat rejected the media send';
+  // The fork's live session: encodeVoice(pcmBase64) -> {voice (base64 SILK), durationMs}, as
+  // the delivered addon answers (16 kHz mono 16-bit: 32 bytes a millisecond). `encodeError`
+  // makes it refuse; `encoded` records the PCM it was given.
+  bot.encoded = [];
+  bot.encodeError = undefined;
+  bot.puppet = {
+    session: {
+      encodeVoice: async pcm => {
+        bot.encoded.push(pcm);
+        if (bot.encodeError) throw bot.encodeError;
+        return { voice: Buffer.from('SILK:' + pcm).toString('base64'), durationMs: Buffer.from(pcm, 'base64').length / 32 };
+      },
+    },
+    messageSendFile: async (to, box) => {
+      if (bot.refuse(box.name)) throw new Error(bot.refusal);
+      bot.files.push({ to, name: box.name, bytes: box.bytes });
+      return 'file-out-' + bot.files.length;
+    },
+  };
   bot.Contact = {
     find: async ({ id }) => known.includes(id) ? {
       id,
       say: async text => {
         if (bot.sayError) throw bot.sayError;
+        if (typeof text !== 'string') return { id: await bot.puppet.messageSendFile(id, text) };
         bot.said.push({ to: id, text });
         return { id: 'out-' + bot.said.length };
       },
@@ -201,7 +229,9 @@ test('only 1:1 text messages from another contact become events', async () => {
     const bot = await login();
     bot.emit('message', message({ id: 'room', roomId: 'r@chatroom' }));
     bot.emit('message', message({ id: 'self', self: true }));
-    bot.emit('message', message({ id: 'image', type: types.Message.Image }));
+    bot.emit('message', message({ id: 'video', type: types.Message.Video }));
+    bot.emit('message', message({ id: 'sticker', type: types.Message.Emoticon }));
+    bot.emit('message', message({ id: 'app', type: types.Message.Unknown }));
     bot.emit('message', message({ id: 'official-type', from: 'wxid_x', contactType: types.Contact.Official }));
     bot.emit('message', message({ id: 'official-id', from: 'gh_abcdef' }));
     bot.emit('message', message({ id: 'owner', text: '同意 proposal p-1' }));
@@ -813,4 +843,636 @@ test('group: a message whose room() throws still reaches the ring, because the p
     assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
     assert.equal(s.bridge.state.phase, 'logged_in');
   } finally { await s.bridge.close(); }
+});
+
+// --- step 24.2: media (design-steward 7.8.12 "微信") -----------------------------------------
+// The fork as the platform director gave its interface: messageFile / messageImage / messageVoice
+// hand a FileBox over (a voice as WAV); messageSendFile(conversationId, fileBox) sends one, the
+// kind taken from the FileBox name. These fakes stand in for it.
+const b64 = text => Buffer.from(text, 'utf8').toString('base64');
+const XML = {
+  image: (hd = 1000) => `<?xml version="1.0"?><msg><img aeskey="k" length="900" hdlength="${hd}" md5="x"></img></msg>`,
+  voice: (length = 3000) => `<msg><voicemsg endflag="1" length="${length}" voicelength="2300" /></msg>`,
+  file: (total = 5000, name = '报告 &amp; 附录.pdf', type = 6) => `<msg><appmsg appid="" sdkver="0"><title>${name}</title><des></des>`
+    + `<type>${type}</type><appattach><totallen>${total}</totallen><fileext>pdf</fileext></appattach></appmsg></msg>`,
+  quote: () => '<msg><appmsg appid="" sdkver="0"><title>好的</title><type>57</type><refermsg><type>1</type>'
+    + '<content>同意 proposal p-1</content></refermsg></appmsg></msg>',
+};
+const KIND_TYPE = { image: [types.Message.Image, 3], voice: [types.Message.Audio, 34], file: [types.Message.Attachment, 49] };
+/** A PCM WAV header naming `rate` bytes a second (`channels` x `bits`), then `dataBytes` of
+ *  zeros; wav(32000, n) is 16 kHz mono 16-bit, the shape the fork's voice bar takes. */
+const wav = (rate, dataBytes, { channels = 1, bits = 16 } = {}) => {
+  const head = Buffer.alloc(44), align = channels * bits / 8;
+  head.write('RIFF', 0, 'latin1'); head.writeUInt32LE(36 + dataBytes, 4); head.write('WAVE', 8, 'latin1');
+  head.write('fmt ', 12, 'latin1'); head.writeUInt32LE(16, 16); head.writeUInt16LE(1, 20); head.writeUInt16LE(channels, 22);
+  head.writeUInt32LE(rate / align, 24); head.writeUInt32LE(rate, 28); head.writeUInt16LE(align, 32); head.writeUInt16LE(bits, 34);
+  head.write('data', 36, 'latin1'); head.writeUInt32LE(dataBytes, 40);
+  return Buffer.concat([head, Buffer.alloc(dataBytes)]);
+};
+/** A JPEG's first bytes (FF D8 FF E0) padded to `size` bytes. */
+const jpeg = size => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(size - 4, 7)]);
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+/** A 1:1 (or `roomId`) media message: its payload as the fork carries it, and the FileBox its
+ *  fetch hands over (`bytes` in `chunk`-sized parts; `gate` holds the stream until resolved;
+ *  `fail` makes the first `fails` fetches throw it; `hang` makes them never answer; `stall`
+ *  makes the stream stop after its first part, never ending). `fetches` counts the fetches;
+ *  `destroyed` counts the streams the bridge stopped. */
+function mediaMessage({ kind, id = 'p1', from = 'wxid_owner', xml, raw, bytes = Buffer.from('JPEGDATA'), chunk = 4096,
+  gate, fail, fails = Infinity, hang, stall, roomId, name = 'x.jpg', type } = {}) {
+  const [wechatyType, wechatType] = KIND_TYPE[kind] ?? [type, raw];
+  const fetched = { count: 0, via: [], destroyed: 0 };
+  const box = () => ({ name, mediaType: kind === 'voice' ? 'audio/wav' : 'image/jpeg', toStream: async () => {
+    if (gate) await gate;
+    const parts = [];
+    for (let i = 0; i < bytes.length; i += chunk) parts.push(bytes.subarray(i, i + chunk));
+    const stream = stall ? new Readable({ read() { if (parts.length) this.push(parts.shift()); parts.length = 0; } }) : Readable.from(parts);
+    stream.on('close', () => { fetched.destroyed++; });
+    return stream;
+  } });
+  const fetch = via => async () => {
+    fetched.count++; fetched.via.push(via);
+    if (hang && fetched.count <= fails) return new Promise(() => {});
+    if (fail && fetched.count <= fails) throw new Error(fail);
+    return box();
+  };
+  const base = message({ id, from, text: '', type: type ?? wechatyType, roomId });
+  return Object.assign(base, { fetched, payload: { ...base.payload, messageType: raw ?? wechatType, ...(xml ? { content: b64(xml) } : {}) },
+    toFileBox: fetch('messageFile'), toImage: () => ({ hd: fetch('messageImage') }) });
+}
+const makeFileBox = (bytes, name) => ({ name, bytes: Buffer.from(bytes) });
+const mediaBridge = async (options = {}) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'wechat-bridge-media-'));
+  const s = await started({ tmpDir: tmp, makeFileBox, ...options });
+  return { ...s, tmp, tmpEmpty: () => readdirSync(tmp).length === 0 };
+};
+const fetchMedia = async (s, mediaId, token = TOKEN) => {
+  const r = await s.call('/media/' + mediaId, { token });
+  return [r.status, Buffer.from(await r.arrayBuffer()), r.headers.get('content-type'), r.headers.get('x-voice-duration-ms')];
+};
+const postFile = (s, query, bytes, token = TOKEN) => fetch(`http://${s.address.address}:${s.address.port}/send-file?${new URLSearchParams(query)}`, {
+  method: 'POST', body: bytes, headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/octet-stream' } })
+  .then(async r => [r.status, await r.json()]);
+
+test('media: the bounds are code constants', () => {
+  assert.deepEqual({ ...MEDIA_LIMITS }, { image: 20 * 1048576, file: 25 * 1048576, voiceSource: 2 * 1048576, voiceMs: 125000,
+    voiceWavMax: 12 * 1048576, voiceWavUnknown: 6 * 1048576, sendBody: 25 * 1048576 });
+  assert.equal(Object.isFrozen(MEDIA_LIMITS), true);
+});
+
+test('media: 1:1 images, voices and files become events with descriptions only; nothing is fetched on arrival', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const image = mediaMessage({ kind: 'image', id: 'i1', xml: XML.image(1234) });
+    const voice = mediaMessage({ kind: 'voice', id: 'v1', xml: XML.voice(3000) });
+    const file = mediaMessage({ kind: 'file', id: 'f1', xml: XML.file(5000) });
+    const bare = mediaMessage({ kind: 'image', id: 'i2' }); // a payload without XML: no size, no name
+    for (const m of [image, voice, file, bare]) bot.emit('message', m);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, e.text, e.attachments]), [
+      ['i1', '', [{ media_id: `${body.events[0].seq}.0`, kind: 'image', size: 1234 }]],
+      ['v1', '', [{ media_id: `${body.events[1].seq}.0`, kind: 'voice', mime: 'audio/wav', size: 3000 }]],
+      ['f1', '', [{ media_id: `${body.events[2].seq}.0`, kind: 'file', name: '报告 & 附录.pdf', size: 5000 }]],
+      ['i2', '', [{ media_id: `${body.events[3].seq}.0`, kind: 'image' }]],
+    ]);
+    assert.deepEqual([image, voice, file, bare].map(m => m.fetched.count), [0, 0, 0, 0], 'no fetch before GET /media');
+    assert.ok(s.tmpEmpty(), 'tmpfs is empty');
+    assert.equal(s.bridge.live, 4);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: over the size WeChat reports, a description is too_large and has no media_id', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'i', xml: XML.image(20 * 1048576 + 1) }));
+    bot.emit('message', mediaMessage({ kind: 'voice', id: 'v', xml: XML.voice(2 * 1048576 + 1) }));
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'f', xml: XML.file(25 * 1048576 + 1) }));
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'ok', xml: XML.file(25 * 1048576) }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, e.attachments[0].too_large ?? false, 'media_id' in e.attachments[0]]),
+      [['i', true, false], ['v', true, false], ['f', true, false], ['ok', false, true]]);
+    assert.equal(s.bridge.live, 1);
+    assert.equal((await fetchMedia(s, `${body.events[0].seq}.0`))[0], 404, 'a too_large one is not live');
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a file the fork types Unknown is taken by its raw 49 and the appmsg XML; a 49 whose XML cannot be read is dropped', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const unknownFile = mediaMessage({ type: types.Message.Unknown, raw: 49, id: 'unknown-49-file', xml: XML.file(10), bytes: Buffer.from('%PDF') });
+    bot.emit('message', unknownFile);
+    bot.emit('message', mediaMessage({ type: types.Message.Unknown, raw: 49, id: 'unknown-49-bare' }));
+    bot.emit('message', mediaMessage({ type: types.Message.Unknown, raw: 49, id: 'unknown-49-link', xml: XML.file(10, 'a link', 5) }));
+    bot.emit('message', mediaMessage({ type: types.Message.Attachment, raw: 49, id: 'no-content' }));
+    const notXml = mediaMessage({ type: types.Message.Attachment, raw: 49, id: 'not-xml' });
+    notXml.payload.content = b64('compressed appmsg, no markup');
+    bot.emit('message', notXml);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, e.attachments]), [
+      ['unknown-49-file', [{ media_id: `${body.events[0].seq}.0`, kind: 'file', name: '报告 & 附录.pdf', size: 10 }]]]);
+    const [status, bytes] = await fetchMedia(s, body.events[0].attachments[0].media_id);
+    assert.deepEqual([status, bytes.toString()], [200, '%PDF']);
+    assert.deepEqual(unknownFile.fetched.via, ['messageFile']);
+    assert.equal(mediaOf(mediaMessage({ type: types.Message.Attachment, raw: 49 }), types), undefined, 'no XML: not let in');
+  } finally { await s.bridge.close(); }
+});
+
+test('media: quoted replies (49/57), other app messages, videos and stickers are still dropped', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    bot.emit('message', mediaMessage({ type: types.Message.Unknown, raw: 49, id: 'quote-unknown', xml: XML.quote() }));
+    bot.emit('message', mediaMessage({ type: types.Message.Attachment, raw: 49, id: 'quote-as-file', xml: XML.quote() }));
+    bot.emit('message', mediaMessage({ type: types.Message.Attachment, raw: 57, id: 'type-57' }));
+    bot.emit('message', mediaMessage({ type: types.Message.Attachment, raw: 49, id: 'link', xml: XML.file(10, 'a link', 5) }));
+    bot.emit('message', mediaMessage({ type: types.Message.Attachment, raw: 49, id: 'file-quoting',
+      xml: XML.file(10).replace('</appmsg>', '<refermsg><content>同意</content></refermsg></appmsg>') }));
+    bot.emit('message', mediaMessage({ type: types.Message.Image, raw: 47, id: 'sticker-as-image' }));
+    bot.emit('message', mediaMessage({ type: types.Message.Video, raw: 43, id: 'video' }));
+    bot.emit('message', mediaMessage({ type: types.Message.Emoticon, raw: 47, id: 'sticker' }));
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'real-file', xml: XML.file(10) }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => e.message_ref), ['real-file']);
+    assert.equal(mediaOf(mediaMessage({ type: types.Message.Unknown, raw: 57 }), types), undefined);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a group\'s non-text messages are dropped, bound room or not', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    for (const kind of ['image', 'voice', 'file'])
+      for (const roomId of [ROOM, 'r9@chatroom'])
+        bot.emit('message', mediaMessage({ kind, id: `${kind}-${roomId}`, roomId, xml: kind === 'file' ? XML.file(10) : undefined }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events, []);
+    assert.equal(s.bridge.live, 0);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: GET /media fetches on demand, may be repeated, answers the same bytes and leaves tmpfs empty', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const bytes = Buffer.from('a jpeg, or so it says '.repeat(1000));
+    const image = mediaMessage({ kind: 'image', id: 'i1', bytes, chunk: 1000 });
+    const file = mediaMessage({ kind: 'file', id: 'f1', xml: XML.file(10), bytes: Buffer.from('%PDF-1.7') });
+    bot.emit('message', image);
+    bot.emit('message', file);
+    const [, body] = await s.json('/events?after=0');
+    const [imageId, fileId] = body.events.map(e => e.attachments[0].media_id);
+    assert.equal((await fetchMedia(s, imageId, null))[0], 401, 'the same token');
+    assert.equal(image.fetched.count, 0);
+    const first = await fetchMedia(s, imageId);
+    const second = await fetchMedia(s, imageId);
+    assert.deepEqual([first[0], second[0]], [200, 200]);
+    assert.ok(first[1].equals(bytes) && second[1].equals(bytes), 'both fetches answer the same bytes');
+    assert.equal(first[2], 'image/jpeg');
+    assert.deepEqual(image.fetched.via, ['messageImage', 'messageImage']);
+    const [status, got] = await fetchMedia(s, fileId);
+    assert.equal(status, 200);
+    assert.equal(got.toString(), '%PDF-1.7');
+    assert.deepEqual(file.fetched.via, ['messageFile']);
+    assert.ok(s.tmpEmpty(), 'nothing left in tmpfs');
+    assert.equal((await fetchMedia(s, '999.0'))[0], 404);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: more bytes than the bound are cut: 413 too_large, the source stopped, no partial left', async () => {
+  const s = await mediaBridge({ mediaLimits: { ...MEDIA_LIMITS, image: 10_000, file: 20_000 } });
+  try {
+    const bot = await s.login();
+    // Reported small, really large: the report is not trusted.
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'big', xml: XML.image(100), bytes: Buffer.alloc(50_000), chunk: 1000 }));
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'edge', bytes: Buffer.alloc(10_000), chunk: 1000 }));
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'file', xml: XML.file(10), bytes: Buffer.alloc(20_001), chunk: 1000 }));
+    const [, body] = await s.json('/events?after=0');
+    const ids = body.events.map(e => e.attachments[0].media_id);
+    assert.deepEqual((await fetchMedia(s, ids[0])).slice(0, 1), [413]);
+    assert.ok(s.tmpEmpty(), 'the partial is deleted');
+    const [edgeStatus, edge] = await fetchMedia(s, ids[1]);
+    assert.deepEqual([edgeStatus, edge.length], [200, 10_000], 'exactly the bound passes');
+    assert.equal((await fetchMedia(s, ids[2]))[0], 413);
+    assert.ok(s.tmpEmpty());
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a voice comes as WAV from messageVoice, held to 2 min 5 s by its header\'s rate, its length from the fork\'s name', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const voices = new Map();
+    // The fork names the WAV '<durationMs>ms.wav' (here the 'short' one; the rest keep their id).
+    bot.puppet.messageVoice = async id => {
+      const bytes = voices.get(id);
+      return { name: id === 'short' ? '59990ms.wav' : id + '.wav', toStream: async () => Readable.from([bytes.subarray(0, 100), bytes.subarray(100)]) };
+    };
+    // 2000 B/s: 125 s is 250000 bytes of audio (plus the header's slack).
+    voices.set('short', wav(2000, 2000 * 60));
+    voices.set('long', wav(2000, 2000 * 130));
+    voices.set('not-wav', Buffer.alloc(6 * 1048576 + 1));
+    for (const id of voices.keys()) bot.emit('message', mediaMessage({ kind: 'voice', id, xml: XML.voice(1000) }));
+    const [, body] = await s.json('/events?after=0');
+    const ids = body.events.map(e => e.attachments[0].media_id);
+    const [status, bytes, type, durationMs] = await fetchMedia(s, ids[0]);
+    assert.deepEqual([status, type, durationMs], [200, 'audio/wav', '59990'], 'the length the name states, not the header\'s 60000');
+    assert.ok(bytes.equals(voices.get('short')));
+    assert.equal((await fetchMedia(s, ids[1]))[0], 413, 'longer than 2 min 5 s');
+    assert.equal((await fetchMedia(s, ids[2]))[0], 413, 'no WAV header: the 6 MiB bound');
+    assert.ok(s.tmpEmpty());
+    assert.equal(wavByteCap(wav(48000, 0)), 4096 + 48000 * 125);
+    assert.equal(wavByteCap(wav(1_000_000, 0)), MEDIA_LIMITS.voiceWavMax);
+    // Without messageVoice the puppet's messageFile serves it.
+    delete bot.puppet.messageVoice;
+    const plain = mediaMessage({ kind: 'voice', id: 'plain', xml: XML.voice(10), bytes: wav(2000, 100) });
+    bot.emit('message', plain);
+    const [, later] = await s.json(`/events?after=${body.next_after}`);
+    const answer = await fetchMedia(s, later.events[0].attachments[0].media_id);
+    assert.deepEqual([answer[0], answer[3]], [200, '50'], 'a name without the length: 100 bytes at 2000 B/s');
+    assert.deepEqual(plain.fetched.via, ['messageFile']);
+    assert.equal(inboundVoiceMs('1200ms.wav', Buffer.alloc(0), 0), 1200);
+    assert.equal(inboundVoiceMs('0ms.wav', wav(32000, 3200), 3244), 100, 'no length in the name: the header');
+    assert.equal(inboundVoiceMs('note.wav', Buffer.from('not a wav'), 9), undefined);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: one fetch at a time - another request meanwhile is 503 busy', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'slow', gate }));
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'other' }));
+    const [, body] = await s.json('/events?after=0');
+    const [slow, other] = body.events.map(e => e.attachments[0].media_id);
+    const pending = fetchMedia(s, slow);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual((await s.json('/media/' + other))[0], 503);
+    assert.deepEqual(await s.json('/media/' + other), [503, { error: 'busy' }]);
+    release();
+    assert.equal((await pending)[0], 200);
+    assert.equal((await fetchMedia(s, other))[0], 200, 'free again once the first answer ended');
+    assert.ok(s.tmpEmpty());
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a fetch the puppet never answers, or whose stream stalls, ends at its deadline: 503, the lock released, nothing left', async () => {
+  // Read at each request: short for the two that must time out, then long again, so a loaded
+  // machine never times out the fetches that must succeed.
+  const limits = { firstByteMs: 100, totalMs: 2000, attempts: 5 };
+  const s = await mediaBridge({ fetchLimits: limits });
+  try {
+    const bot = await s.login();
+    const hung = mediaMessage({ kind: 'image', id: 'hung', hang: true, fails: 1 });
+    const stalled = mediaMessage({ kind: 'image', id: 'stalled', stall: true, bytes: Buffer.alloc(3000), chunk: 1000 });
+    bot.emit('message', hung);
+    bot.emit('message', stalled);
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'fine', bytes: Buffer.from('FINE') }));
+    const [, body] = await s.json('/events?after=0');
+    const [hungId, stalledId, fineId] = body.events.map(e => e.attachments[0].media_id);
+    let t0 = Date.now();
+    assert.deepEqual(await s.json('/media/' + hungId), [503, { error: 'unavailable' }], 'no first byte in time');
+    assert.ok(Date.now() - t0 < 1500, 'the first-byte deadline, not the total one');
+    assert.ok(s.tmpEmpty());
+    t0 = Date.now();
+    assert.deepEqual(await s.json('/media/' + stalledId), [503, { error: 'unavailable' }], 'a first byte, then never the rest');
+    assert.ok(Date.now() - t0 >= 1900, 'the first byte cleared the first-byte deadline; the total one ended it');
+    await until(() => stalled.fetched.destroyed === 1);
+    assert.ok(s.tmpEmpty());
+    Object.assign(limits, MEDIA_FETCH);
+    const [status, bytes] = await fetchMedia(s, fineId);
+    assert.deepEqual([status, bytes.toString()], [200, 'FINE'], 'the lock is free again');
+    const [again, hungBytes] = await fetchMedia(s, hungId);
+    assert.deepEqual([again, hungBytes.toString()], [200, 'JPEGDATA'], 'a timed-out fetch is transient: asked again, it is served');
+    assert.ok(s.tmpEmpty());
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a client that goes away releases the lock at once: the next GET /media is served, not 503', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const hung = mediaMessage({ kind: 'image', id: 'hung', hang: true });
+    bot.emit('message', hung);
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'next', bytes: Buffer.from('NEXT') }));
+    const [, body] = await s.json('/events?after=0');
+    const [hungId, nextId] = body.events.map(e => e.attachments[0].media_id);
+    const client = new AbortController();
+    const raw = fetch(`http://${s.address.address}:${s.address.port}/media/${hungId}`,
+      { headers: { authorization: `Bearer ${TOKEN}` }, signal: client.signal }).catch(error => error);
+    await until(() => hung.fetched.count === 1);
+    assert.deepEqual((await s.json('/media/' + nextId))[0], 503, 'busy while the first fetch runs');
+    client.abort();
+    await raw;
+    await until(() => s.tmpEmpty());
+    const [status, bytes] = await fetchMedia(s, nextId);
+    assert.deepEqual([status, bytes.toString()], [200, 'NEXT']);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a passing puppet error is 503 (held, asked again); a local tmpfs error is 503 and never asks the puppet; repeated failures end as 410', async () => {
+  const s = await mediaBridge({ fetchLimits: { ...MEDIA_FETCH, attempts: 3 } });
+  try {
+    const bot = await s.login();
+    const once = mediaMessage({ kind: 'image', id: 'once', fail: 'CDN hiccup', fails: 1, bytes: Buffer.from('LATER') });
+    const always = mediaMessage({ kind: 'file', id: 'always', xml: XML.file(10), fail: 'socket hang up' });
+    bot.emit('message', once);
+    bot.emit('message', always);
+    const [, body] = await s.json('/events?after=0');
+    const [onceId, alwaysId] = body.events.map(e => e.attachments[0].media_id);
+    assert.deepEqual(await s.json('/media/' + onceId), [503, { error: 'unavailable' }]);
+    const [status, bytes] = await fetchMedia(s, onceId);
+    assert.deepEqual([status, bytes.toString()], [200, 'LATER'], 'asked again, it is served');
+    assert.deepEqual(await s.json('/media/' + alwaysId), [503, { error: 'unavailable' }]);
+    assert.deepEqual(await s.json('/media/' + alwaysId), [503, { error: 'unavailable' }]);
+    assert.deepEqual(await s.json('/media/' + alwaysId), [410, { error: 'gone' }], 'the third failure: gone');
+    assert.deepEqual(await s.json('/media/' + alwaysId), [410, { error: 'gone' }]);
+    assert.equal(always.fetched.count, 3, 'once gone, the puppet is not asked again');
+    assert.ok(s.tmpEmpty());
+  } finally { await s.bridge.close(); }
+  // tmpfs cannot take the file (here: no such directory): the bridge's fault, not the media's.
+  const broken = await mediaBridge({ tmpDir: join(tmpdir(), 'wechat-bridge-no-such-dir-' + process.pid), fetchLimits: { ...MEDIA_FETCH, attempts: 1 } });
+  try {
+    const bot = await broken.login();
+    const photo = mediaMessage({ kind: 'image', id: 'photo' });
+    bot.emit('message', photo);
+    const [, body] = await broken.json('/events?after=0');
+    const id = body.events[0].attachments[0].media_id;
+    assert.deepEqual(await broken.json('/media/' + id), [503, { error: 'unavailable' }]);
+    assert.deepEqual(await broken.json('/media/' + id), [503, { error: 'unavailable' }], 'never counted against the media');
+    assert.equal(photo.fetched.count, 0, 'the puppet was not asked');
+  } finally { await broken.bridge.close(); }
+});
+
+test('media: a media_id that is not \'<seq>.<index>\' is 404, a malformed escape included', async () => {
+  const s = await mediaBridge();
+  try {
+    await s.login();
+    for (const path of ['/media/%E0%A4%A', '/media/abc', '/media/1.0.0', '/media/%31.0'])
+      assert.deepEqual(await s.json(path), [404, { error: 'not_found' }], path);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: a puppet refusal is 410 gone; after a new login an old media_id is 410 and the puppet is not asked', async () => {
+  // A second login request must wait out POST /login's 2-minute gap: the clock moves.
+  let clock = Date.parse('2026-11-22T10:00:00Z');
+  const s = await mediaBridge({ now: () => new Date(clock) });
+  try {
+    const bot = await s.login();
+    const refused = mediaMessage({ kind: 'file', id: 'refused', xml: XML.file(10), fail: 'Neo has no observed peer for this message' });
+    const old = mediaMessage({ kind: 'image', id: 'old' });
+    bot.emit('message', refused);
+    bot.emit('message', old);
+    const [, body] = await s.json('/events?after=0');
+    const [refusedId, oldId] = body.events.map(e => e.attachments[0].media_id);
+    assert.deepEqual(await s.json('/media/' + refusedId), [410, { error: 'gone' }]);
+    assert.ok(s.tmpEmpty());
+    // The delivered fork's own refusals of a message it will never hand over are gone too; its
+    // "not logged in" is not (a new login makes the media_id 410 anyway).
+    assert.ok(isGoneError(new Error('Neo message payload is no longer cached')));
+    assert.ok(isGoneError(new Error('Neo cannot fetch an image from a WeChat message of type 34')));
+    assert.ok(!isGoneError(new Error('Neo is not logged in to WeChat: cannot fetch a file')));
+    // Its refusals of a payload that can never be fetched are gone as well (never retried).
+    for (const message of ['Neo app message is of type 57, not a file',
+      "Neo image payload carries no encrypted picture on WeChat's CDN",
+      "Neo file payload carries no encrypted attachment on WeChat's CDN",
+      'Neo voice payload states no byte length to fetch'])
+      assert.ok(isGoneError(new Error(message)), message);
+    assert.ok(!isGoneError(new Error('Neo session is offline')));
+    bot.emit('logout');
+    assert.equal(s.bridge.state.phase, 'idle');
+    assert.deepEqual(await s.json('/media/' + oldId), [410, { error: 'gone' }], 'logged out');
+    clock += 3 * 60_000;
+    const next = await s.login();
+    assert.notEqual(next, bot);
+    assert.deepEqual(await s.json('/media/' + oldId), [410, { error: 'gone' }], 'another login generation');
+    assert.equal(old.fetched.count, 0, 'the puppet was never asked');
+  } finally { await s.bridge.close(); }
+});
+
+test('media: an event cut off the ring takes its live entry with it (404); live never outnumbers the ring', async () => {
+  const s = await mediaBridge({ ringSize: 3 });
+  try {
+    const bot = await s.login();
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'p1' }));
+    bot.emit('message', message({ id: 't1', text: 'text' }));
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'p2' }));
+    const [, first] = await s.json('/events?after=0');
+    const p1 = first.events[0].attachments[0].media_id;
+    assert.equal(s.bridge.live, 2);
+    for (let i = 3; i <= 6; i++) {
+      bot.emit('message', mediaMessage({ kind: 'image', id: 'p' + i }));
+      const [, now] = await s.json('/events?after=0');
+      assert.ok(s.bridge.live <= now.events.filter(e => e.attachments?.[0]?.media_id).length, 'live ≤ ring entries with a media_id');
+    }
+    assert.deepEqual(await s.json('/media/' + p1), [404, { error: 'not_found' }]);
+    assert.equal(s.bridge.live, 3);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: with owner_ref set a stranger\'s files are descriptions with gone and no media_id, never fetched; unset they share the ring', async () => {
+  const s = await mediaBridge({ known: ['wxid_owner', 'wxid_x'] });
+  try {
+    const bot = await s.login();
+    const early = mediaMessage({ kind: 'file', id: 'before-binding', from: 'wxid_x', xml: XML.file(10) });
+    bot.emit('message', early);
+    await withRooms(s, [], 'wxid_owner');
+    const late = mediaMessage({ kind: 'file', id: 'after-binding', from: 'wxid_x', xml: XML.file(25 * 1048576 + 5) });
+    bot.emit('message', late);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, e.attachments[0]]), [
+      ['before-binding', { media_id: `${body.events[0].seq}.0`, kind: 'file', name: '报告 & 附录.pdf', size: 10 }],
+      ['after-binding', { kind: 'file', name: '报告 & 附录.pdf', size: 25 * 1048576 + 5, gone: true }],
+    ]);
+    assert.equal(s.bridge.live, 1, 'the stranger buffer holds no live message');
+    assert.equal(late.fetched.count + early.fetched.count, 0);
+  } finally { await s.bridge.close(); }
+});
+
+test('media: an owner\'s held photo survives 600 strangers (half with files): still in the ring and fetchable', async () => {
+  const s = await mediaBridge({ known: ['wxid_owner', 'wxid_x'] });
+  try {
+    const bot = await s.login();
+    await withRooms(s, [], 'wxid_owner');
+    const photo = mediaMessage({ kind: 'image', id: 'owner-photo', bytes: Buffer.from('PHOTO') });
+    bot.emit('message', photo);
+    for (let i = 0; i < 600; i++)
+      bot.emit('message', i % 2 ? message({ id: 's' + i, from: 'wxid_x', text: 'hi' })
+        : mediaMessage({ kind: 'image', id: 's' + i, from: 'wxid_x' }));
+    const [, body] = await s.json('/events?after=0');
+    const own = body.events.find(e => e.message_ref === 'owner-photo');
+    assert.ok(own);
+    assert.equal(body.events.filter(e => e.sender_ref === 'wxid_x').length, 50);
+    assert.equal(s.bridge.live, 1);
+    const [status, bytes] = await fetchMedia(s, own.attachments[0].media_id);
+    assert.deepEqual([status, bytes.toString()], [200, 'PHOTO']);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: the plan follows what the fork can send: a bubble JPEG as an image, voice-bar PCM as a voice, the rest as a file', () => {
+  const small = jpeg(MEDIA_SEND.imageMaxBytes), pcm16k = wav(32000, 3200);
+  assert.deepEqual(MEDIA_SEND, { voiceSampleRate: 16000, voiceMaxMs: 60000, imageMaxBytes: 65536 });
+  // An image bubble only for a real JPEG of at most 64 KiB, named .jpg when its name is not;
+  // the file it falls back to never carries an image extension.
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'photo.jpeg', bytes: small }),
+    [{ as: 'image', name: 'photo.jpeg' }, { as: 'file', name: 'photo.jpeg.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'image-ab12.png', bytes: small }),
+    [{ as: 'image', name: 'image-ab12.jpg' }, { as: 'file', name: 'image-ab12.png.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'image-ab12.png', bytes: PNG_BYTES }), [{ as: 'file', name: 'image-ab12.png.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'big.jpg', bytes: jpeg(MEDIA_SEND.imageMaxBytes + 1) }), [{ as: 'file', name: 'big.jpg.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'chart', bytes: Buffer.from('GIF89a') }), [{ as: 'file', name: 'chart' }]);
+  assert.ok(isBubbleJpeg(small) && !isBubbleJpeg(PNG_BYTES) && !isBubbleJpeg(Buffer.from([0xff, 0xd8])));
+  // A voice bar for 16 kHz mono 16-bit PCM WAV of at most 60 s (the bridge encodes it at send
+  // time); anything else - another rate, stereo, 8-bit, longer, not a WAV - is a file at once.
+  const [voice, fallback] = sendPlan({ kind: 'voice', name: 'voice-ab12.wav', bytes: pcm16k });
+  assert.deepEqual([voice.as, voice.pcm.equals(pcm16k.subarray(44)), fallback], ['voice', true, { as: 'file', name: 'voice-ab12.wav' }]);
+  for (const bytes of [wav(48000, 4800), wav(64000, 6400, { channels: 2 }), wav(16000, 1600, { bits: 8 }),
+    wav(32000, 32000 * 60 + 2), Buffer.from('OggS not a wav')])
+    assert.deepEqual(sendPlan({ kind: 'voice', name: 'v.wav', bytes }), [{ as: 'file', name: 'v.wav' }]);
+  assert.ok(voicePcm(wav(32000, 32000 * 60)), 'exactly 60 s is a voice bar');
+  assert.deepEqual(sendPlan({ kind: 'file', name: '../a/报告.pdf', bytes: Buffer.from('%PDF') }), [{ as: 'file', name: '.._a_报告.pdf' }]);
+  assert.deepEqual(sendPlan({ kind: 'file', name: 'chart.png', bytes: small }), [{ as: 'file', name: 'chart.png.bin' }]);
+  for (const name of ['x.silk', 'x.SIL', 'x.slk', 'x.amr'])
+    assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.bin' }]);
+  // The fork's carrier() takes all after the last dot (the whole name when there is none) as the
+  // extension: a name that is only an extension, with or without its dot, gets .bin too.
+  assert.deepEqual(sendPlan({ kind: 'image', name: '.png', bytes: PNG_BYTES }), [{ as: 'file', name: '.png.bin' }]);
+  for (const name of ['png', '.png', 'JPG', 'silk', '.silk', 'amr', '.amr'])
+    assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.bin' }], name);
+  assert.deepEqual(sendPlan({ kind: 'voice', name: '.amr', bytes: Buffer.from('#!AMR') }), [{ as: 'file', name: '.amr.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'file', name: 'report', bytes: Buffer.from('x') }), [{ as: 'file', name: 'report' }]);
+});
+
+test('send-file: needs the token, sends through messageSendFile, and has its own 25 MiB limit (413, nothing sent)', async () => {
+  const s = await mediaBridge({ mediaLimits: { ...MEDIA_LIMITS, sendBody: 1000 } });
+  try {
+    const query = { to: 'wxid_owner', kind: 'image', mime: 'image/jpeg', name: 'image-1.jpg' };
+    const photo = jpeg(200);
+    assert.deepEqual(await postFile(s, query, photo, null), [401, { error: 'unauthorized' }]);
+    assert.deepEqual(await postFile(s, query, photo), [409, { error: 'not_logged_in' }]);
+    const bot = await s.login();
+    assert.deepEqual(await postFile(s, query, photo), [200, { ref: 'file-out-1', sent_as: 'image' }]);
+    assert.deepEqual(bot.files, [{ to: 'wxid_owner', name: 'image-1.jpg', bytes: photo }]);
+    assert.deepEqual(await postFile(s, query, Buffer.alloc(1001)), [413, { error: 'body_too_large' }]);
+    assert.deepEqual(await postFile(s, { ...query, kind: 'video' }, Buffer.from('x')), [400, { error: 'bad_request' }]);
+    assert.deepEqual(await postFile(s, { ...query, room: ROOM }, Buffer.from('x')), [400, { error: 'bad_request' }], 'to or room, not both');
+    assert.deepEqual(await postFile(s, query, Buffer.alloc(0)), [400, { error: 'bad_request' }]);
+    assert.deepEqual(await postFile(s, { ...query, to: 'wxid_unknown' }, Buffer.from('x')), [409, { error: 'recipient_unknown' }]);
+    assert.equal(bot.files.length, 1, 'nothing else was sent');
+    // POST /send keeps its own 64 KiB limit.
+    assert.deepEqual(await s.json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'x'.repeat(64 * 1024) } }),
+      [413, { error: 'body_too_large' }]);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: an image the fork cannot carry as a bubble goes as a file; a refused bubble goes again as a file', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const query = { to: 'wxid_owner', kind: 'image', mime: 'image/png', name: 'chart.png' };
+    assert.deepEqual(await postFile(s, query, PNG_BYTES), [200, { ref: 'file-out-1', sent_as: 'file' }]);
+    const big = jpeg(MEDIA_SEND.imageMaxBytes + 1);
+    assert.deepEqual(await postFile(s, { ...query, mime: 'image/jpeg', name: 'big.jpg' }, big), [200, { ref: 'file-out-2', sent_as: 'file' }]);
+    // The crate refuses a JPEG outside its small tier (say, wider than its thumbnail bound).
+    bot.refuse = name => name.endsWith('.jpg');
+    bot.refusal = 'prepare an image send: the thumbnail is larger than 320 px';
+    const wide = jpeg(4000);
+    assert.deepEqual(await postFile(s, { ...query, mime: 'image/jpeg', name: 'wide.jpg' }, wide), [200, { ref: 'file-out-3', sent_as: 'file' }]);
+    assert.deepEqual(bot.files.map(f => [f.name, f.bytes.length]),
+      [['chart.png.bin', PNG_BYTES.length], ['big.jpg.bin', big.length], ['wide.jpg.bin', wide.length]]);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: a voice goes as a voice bar - encodeVoice\'s SILK named <durationMs>.silk; refused at any step it goes as a file', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const audio = wav(32000, 32000 * 2);
+    const query = { to: 'wxid_owner', kind: 'voice', mime: 'audio/wav', name: 'voice-ab12.wav' };
+    assert.deepEqual(await postFile(s, query, audio), [200, { ref: 'file-out-1', sent_as: 'voice' }]);
+    // The fork's encoder was given the PCM (not the WAV), and its note went out named by its length.
+    assert.deepEqual(bot.encoded, [audio.subarray(44).toString('base64')]);
+    assert.deepEqual([bot.files[0].name, bot.files[0].bytes.toString()], ['2000.silk', 'SILK:' + bot.encoded[0]]);
+    const filed = () => bot.files.at(-1);
+    // The puppet refuses the voice bar: the same WAV under its own name as a file.
+    bot.refuse = name => name.endsWith('.silk');
+    assert.deepEqual(await postFile(s, query, audio), [200, { ref: 'file-out-2', sent_as: 'file' }]);
+    assert.deepEqual([filed().name, filed().bytes.equals(audio)], ['voice-ab12.wav', true]);
+    bot.refuse = () => true;
+    const [status, body] = await postFile(s, query, audio);
+    assert.deepEqual([status, body.error], [502, 'send_failed'], 'both refused: a failed send');
+    bot.refuse = () => false;
+    // The encoder refuses, or answers a note no voice bar carries: a file.
+    bot.encodeError = new Error('encode a voice note: Audio must be 16-bit samples');
+    assert.deepEqual(await postFile(s, query, audio), [200, { ref: 'file-out-3', sent_as: 'file' }]);
+    bot.encodeError = undefined;
+    const encode = bot.puppet.session.encodeVoice;
+    bot.puppet.session.encodeVoice = async pcm => ({ ...(await encode(pcm)), durationMs: 60_001 });
+    assert.deepEqual(await postFile(s, query, audio), [200, { ref: 'file-out-4', sent_as: 'file' }]);
+    // No live session to encode with: a file.
+    delete bot.puppet.session;
+    assert.deepEqual(await postFile(s, query, audio), [200, { ref: 'file-out-5', sent_as: 'file' }]);
+    assert.deepEqual(bot.files.slice(2).map(f => f.name), ['voice-ab12.wav', 'voice-ab12.wav', 'voice-ab12.wav']);
+    bot.puppet.session = { encodeVoice: encode };
+    // Not 16 kHz mono 16-bit, longer than 60 s, or not a WAV: a file at once, the encoder never asked.
+    const asked = bot.encoded.length;
+    for (const [bytes, name] of [[wav(48000, 48000), 'v48k.wav'], [wav(64000, 64000, { channels: 2 }), 'stereo.wav'],
+      [wav(32000, 32000 * 61), 'long.wav'], [Buffer.from('OggS not a wav'), 'voice-cd34.ogg']])
+      assert.deepEqual((await postFile(s, { ...query, name }, bytes))[1].sent_as, 'file');
+    assert.equal(bot.encoded.length, asked);
+    assert.deepEqual(bot.files.slice(-4).map(f => f.name), ['v48k.wav', 'stereo.wav', 'long.wav', 'voice-cd34.ogg']);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: a media send whose outcome the fork calls uncertain is a failed send, never sent again as a file', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    bot.refuse = name => name.endsWith('.silk') || name.endsWith('.jpg');
+    bot.refusal = 'WeChat media send outcome is uncertain';
+    for (const [kind, name, bytes] of [['voice', 'v.wav', wav(32000, 3200)], ['image', 'p.jpg', jpeg(100)]]) {
+      const [status, body] = await postFile(s, { to: 'wxid_owner', kind, mime: '', name }, bytes);
+      assert.deepEqual([status, body.error, /uncertain/.test(body.detail)], [502, 'send_failed', true]);
+    }
+    assert.deepEqual(bot.files, []);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: a peer neo no longer knows is 409 recipient_unknown, and no fallback is tried', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const tried = [];
+    bot.puppet.messageSendFile = async (to, box) => { tried.push(box.name); throw new Error('Neo has no observed peer for wxid_owner'); };
+    assert.deepEqual(await postFile(s, { to: 'wxid_owner', kind: 'voice', mime: 'audio/wav', name: 'v.wav' }, wav(32000, 3200)),
+      [409, { error: 'recipient_unknown' }]);
+    assert.deepEqual(tried, ['100.silk']);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: into a bound room through the group queue and its backstop', async () => {
+  let clock = Date.parse('2026-11-21T10:00:00Z');
+  const slept = [];
+  const s = await mediaBridge({ now: () => new Date(clock), sleep: async ms => { slept.push(ms); clock += ms; },
+    sendLimits: { sendGapMs: 10000, backstopPerHour: 2 },
+    prepare: bot => { bot.Room = { load: id => ({ say: async box => ({ id: await bot.puppet.messageSendFile(id, box) }) }) }; } });
+  try {
+    const bot = await s.login();
+    const query = { room: ROOM, kind: 'file', mime: 'application/pdf', name: 'a.pdf' };
+    assert.deepEqual(await postFile(s, query, Buffer.from('%PDF')), [409, { error: 'room_not_bound' }]);
+    await withRooms(s);
+    const answers = await Promise.all([1, 2, 3].map(() => postFile(s, query, Buffer.from('%PDF'))));
+    assert.deepEqual(answers.map(([status]) => status), [200, 200, 429]);
+    assert.deepEqual(bot.files.map(f => [f.to, f.name]), [[ROOM, 'a.pdf'], [ROOM, 'a.pdf']]);
+    assert.deepEqual(slept, [10000]);
+  } finally { await s.bridge.close(); }
+});
+
+test('run.sh gives /tmp a 32 MiB tmpfs (one fetched media file at a time)', () => {
+  const script = readFileSync(fileURLToPath(new URL('./run.sh', import.meta.url)), 'utf8');
+  assert.match(script, /--tmpfs \/tmp:rw,noexec,nosuid,size=32m /);
 });

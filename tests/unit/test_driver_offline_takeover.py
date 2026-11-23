@@ -30,6 +30,7 @@ from core.state_commands import WRITE_REQUESTS, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 ROOT = Path(__file__).resolve().parents[2]
 PEPPER = "offline-takeover-test-pepper-0123456789"
@@ -55,8 +56,8 @@ def set_seen(db, driver_id, seconds_ago):
 
 
 @pytest.fixture
-def world(tmp_path):
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+def world(tmp_path, state_db_copy):
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
     owner = StateService(db, actor="owner:o@example.com", project_read_trusted=True, is_admin=True)
     owner.create_project("p", "P")
     owner.store.add_nodes("p", [{"key": "a", **NODE}, {"key": "b", **NODE}])

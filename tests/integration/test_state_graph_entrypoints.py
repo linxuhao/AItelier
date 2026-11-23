@@ -23,6 +23,7 @@ from core.db_manager import DBManager
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import SEED_HEADING, StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support import state_template
 from tests.support.legacy_driver_note import seed_section
 
 
@@ -33,7 +34,7 @@ def spec(name, deps=None):
 
 
 @pytest.fixture
-def live(tmp_path, monkeypatch, request):
+def live(tmp_path, monkeypatch, request, state_db_copy):
     import api.dependencies as deps
     import core.scheduler as scheduler
     from api import state_graph_routers as routes
@@ -49,7 +50,7 @@ def live(tmp_path, monkeypatch, request):
     monkeypatch.setattr(workspace_module, "_GIT_ENV", {**workspace_module._GIT_ENV,
         "GIT_AUTHOR_NAME": "Test", "GIT_COMMITTER_NAME": "Test",
         "GIT_AUTHOR_EMAIL": "test@localhost", "GIT_COMMITTER_EMAIL": "test@localhost"})
-    db = DBManager(str(tmp_path / "state.sqlite"))
+    db = DBManager(state_db_copy(state_template.dbm_state, tmp_path / "state.sqlite"))
     ws = WorkspaceManager(str(tmp_path / "ws"), str(tmp_path / "projects"))
     from core.skillflow_host import AItelierSkillFlow
     runtime = AItelierSkillFlow if getattr(request, "param", None) == "host" else SkillFlow

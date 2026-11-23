@@ -1,6 +1,6 @@
 # The image installs its own dependencies from package-lock.json (npm ci).
 node_modules
-*.test.mjs
 README.md
-run.sh
-test-fixtures
+# The bridge's own suite runs inside the build (Dockerfile: `npm test`, then the two test files,
+# run.sh and test-fixtures are deleted in the same layer), so its inputs have to reach the build
+# context. The runtime image still ships the sources only.

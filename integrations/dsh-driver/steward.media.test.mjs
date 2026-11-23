@@ -12,6 +12,9 @@ import { aitelierHost, DriverRuntime } from './runtime.mjs';
 import { channelOps, groupOps, mediaOps, mediaRootFrom, stateWake, withAttachmentLines } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
+import { createRequire } from 'node:module';
+import { measuredEntryForTest } from './dsh-entry.mjs';
+import { registerMediaTools } from '../dsh-director/lib/media-tools.mjs';
 
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
@@ -178,4 +181,18 @@ test('a wake\'s id is the digest of the batch as State answered it: with or with
   assert.equal(plain.id, read.id);
   // A batch that grew is a new wake.
   assert.notEqual(stateWake({ ...result, events: [...result.events, { event_type: 'x' }] }, inbox).id, plain.id);
+});
+
+// 2026-11-22: media_call's `media` once declared additionalProperties as a schema; the pinned
+// DSH accepts only true/false there, so defineTool threw at the steward's boot and the steward
+// never started. The other media tests pass definitions through `t => t`; this one uses DSH's own.
+test('the media tools are accepted by the pinned DSH defineTool', async t => {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return;
+  const { defineTool } = await import(createRequire(entry).resolve('@deepseek-ai/dsh-tools'));
+  const names = [];
+  const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
+  registerMediaTools({ tools: { register: tool => names.push(tool.name) } }, { ctx: {}, defineTool, jsonOutput, HarnessError: Error,
+    media: {}, catalog: {}, turns: {}, channels: undefined, ledger: {} });
+  assert.deepEqual(names, ['media_call', 'send_media']);
 });

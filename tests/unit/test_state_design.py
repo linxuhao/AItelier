@@ -12,13 +12,14 @@ from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
+from tests.support import state_template
 
 SCOPE = {'mode': 'all'}
 
 
 @pytest.fixture
-def service(tmp_path):
-    s = StateService(StateDatabase(str(tmp_path / 'state.sqlite')), actor='authorized-author',
+def service(tmp_path, state_db_copy):
+    s = StateService(StateDatabase(state_db_copy(state_template.state, tmp_path / 'state.sqlite')), actor='authorized-author',
                      project_read_trusted=True)
     s.create_project('game', 'Game')
     s.store.add_nodes('game', [{'key': 'work', 'goal': 'Deliver behavior', 'acceptance': [

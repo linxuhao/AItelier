@@ -873,8 +873,19 @@ class AIGateway:
         self._suppress_thinking = True
         # Set once a 400 named an injected generation parameter and that key
         # was dropped for the retry. Bounds the self-correction to ONE extra
-        # call per gateway: a second refusal is a real request-shaped failure.
+        # call per CALL: a second refusal is a real request-shaped failure.
         self._dropped_injected_param: str | None = None
+        # ... and the refusals are REMEMBERED PER ENDPOINT, because
+        # `_apply_binding` writes those keys afresh on every turn of the
+        # session. A gateway that only budgeted the drop per call would send the
+        # refused key again on the next turn, be refused again, and — the drop
+        # already spent — die there. Measured 2026-11-22 on the worker route:
+        # every native child that drew an `opencodego*/beam-free` candidate
+        # answered one turn after dropping `extra_body.thinking` and then ended
+        # with `Unexpected end of JSON input` (the SSE body truncated by the
+        # 400). Keyed by `active_model`, so a failover onto an endpoint that
+        # never refused anything still gets the key.
+        self._refused_params: dict[str, str] = {}
         self._burst_hits = 0
         # Start at the first candidate whose usage window is not already known
         # to be spent, so a fresh gateway does not re-discover the same
@@ -1457,6 +1468,9 @@ class AIGateway:
             # Named, but this request never carried it — not our 400 to fix.
             return ""
         self._dropped_injected_param = name
+        # Remember WHICH endpoint refused it, so the next turn's `_apply_binding`
+        # does not put the key back and spend the whole session on 400s.
+        self._refused_params[self.active_model or ""] = name
         # Loud and once, on the same channel as the other degradations: a step
         # that suddenly thinks (or stops declaring an effort) has to be
         # explainable from the log, and `active_model` is the endpoint that
@@ -1517,6 +1531,10 @@ class AIGateway:
         """
         refuse_if_body_too_large(
             kwargs, identity=self._body_identity(kwargs, native=native))
+        # The self-correction is budgeted per CALL, not per gateway: one refused
+        # key per turn is a degradation the endpoint can live with, while a
+        # budget left spent from an earlier turn would kill this one outright.
+        self._dropped_injected_param = None
         while True:
             try:
                 response = self._observed_completion(kwargs, native=native)
@@ -1997,6 +2015,14 @@ class AIGateway:
                 if not _rejects_thinking_disabled(self.active_model or ""):
                     extra_body["thinking"] = {"type": "disabled"}
                 kwargs["extra_body"] = extra_body
+        # Never re-inject a key THIS endpoint already refused: the two branches
+        # above rebuild these keys on every turn, so remembering the refusal is
+        # what keeps the rest of the session alive instead of dying one turn
+        # after the drop-and-retry succeeded. Silent on purpose — the refusal
+        # itself was already printed, once, when it happened.
+        refused = self._refused_params.get(self.active_model or "")
+        if refused:
+            _drop_injected_param(kwargs, refused)
         return kwargs
 
     def _build_kwargs(self, messages: list[dict], **extra) -> dict:

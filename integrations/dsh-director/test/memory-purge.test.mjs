@@ -16,6 +16,11 @@ import { fakeEmbedServer } from './fixtures/embed-fake.mjs';
 
 const USER = 'owner@example.com';
 const SECRET = 'PURGE-ME secret account 4242';
+/** What every leak check looks for: the words, never the bare digits. A stored timestamp or
+ *  epoch can read 4242 (the scan that measured 271828 out of 2026-11-22T10:27:18.280550 read
+ *  the clock, not the owner's text), so a bare-digit arm fires on a timestamp and cannot say
+ *  which of the two it found. */
+const LEAK = 'secret account 4242';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-purge-'));
 const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, ...extra });
 const repo = root => join(root, USER);
@@ -23,6 +28,16 @@ const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir,
 const logLines = root => readdirSync(join(repo(root), 'log')).filter(n => n.endsWith('.jsonl'))
   .flatMap(n => readFileSync(join(repo(root), 'log', n), 'utf8').split('\n').filter(Boolean));
 const count = (root, id) => logLines(root).filter(l => JSON.parse(l).id === id).length;
+/** A purge journal row carries the purge id, ids, paths and a phase: checked on each parsed
+ *  row, as keys and as values, never on the raw bytes of the file, where a stored timestamp
+ *  or epoch can hold '4242' and mean nothing. */
+const JOURNAL_KEYS = new Set(['at', 'purge_id', 'ids', 'dir', 'new_dir', 'pre_purge_dir', 'phase', 'outcome',
+  'reason', 'from_layout', 'recovered_from', 'layout', 'forget_finished']);
+const journalProblems = rows => rows.flatMap(row => {
+  const unknown = Object.keys(row).filter(k => !JOURNAL_KEYS.has(k));
+  return [...(unknown.length ? [`unexpected key(s) ${unknown.join(', ')}: ${JSON.stringify(row)}`] : []),
+    ...(JSON.stringify(row).includes(LEAK) ? [`the text of the purged entry: ${JSON.stringify(row)}`] : [])];
+});
 /** A hash of every byte under a directory (names, modes left out): "unchanged" means equal. */
 function treeHash(dir) {
   const h = createHash('sha256');
@@ -51,18 +66,18 @@ test('purge: the text is in no commit, object, reflog or working file; everythin
   const r = await store.purge(['t-gone-0']);
   assert.equal(r.purged, true, JSON.stringify(r));
   assert.equal(r.status.purge, undefined, 'the status after a purge says nothing is running');
-  const has = buffer => buffer.toString('utf8').includes('secret account 4242');
+  const has = buffer => buffer.toString('utf8').includes(LEAK);
   assert.ok(!has(gitIn(repo(root), 'log', '-p', '--all').stdout), 'git log -p --all');
   assert.ok(!has(gitIn(repo(root), 'cat-file', '--batch-all-objects', '--batch').stdout), 'git cat-file --batch-all-objects');
   assert.equal(gitIn(repo(root), 'fsck', '--unreachable', '--no-reflogs').stdout.toString().trim(), '');
   for (const p of ['refs/original', 'refs/stash', 'lost-found']) assert.ok(!existsSync(join(repo(root), '.git', p)), p);
-  assert.ok(!logLines(root).some(l => l.includes('4242')), 'working tree');
+  assert.ok(!logLines(root).some(l => l.includes(LEAK)), 'working tree');
   assert.equal(count(root, 't-keep-0'), 1); assert.equal(count(root, 't-keep-1'), 1);
   assert.equal(count(root, 't-gone-1'), 1, 'the other message of the same turn stays');
   const read = await store.read(['t-gone-0', 't-gone-1'], { withTurn: true });
   assert.deepEqual(read.not_found, ['t-gone-0'], 'a purged id reads as never there');
   assert.equal(read.forgotten, undefined);
-  assert.ok(!JSON.stringify(read).includes('4242'), 'memory_read never returns purged text');
+  assert.ok(!JSON.stringify(read).includes(LEAK), 'memory_read never returns purged text');
   assert.equal(count(root, 't-gone-0'), 0, 'no line of the purged entry is left in the log, reduced or not');
   assert.ok(!gitIn(repo(root), 'log', '-p', '--all', '--format=', '--', 'log').stdout.toString().includes('"id":"t-gone-0"'),
     'no historical version of the log names it either (only forgotten.jsonl keeps {id, at, purged, batch})');
@@ -74,8 +89,8 @@ test('purge: the text is in no commit, object, reflog or working file; everythin
   assert.equal((await store.restore('t-gone-0')).refused, 'purged');
   assert.deepEqual((await store.search('secret account')).grep.hits, []);
   assert.ok(r.not_reached.some(s => /other clone/.test(s)));
-  const journal = readFileSync(join(root, USER + '.purge.jsonl'), 'utf8');
-  assert.ok(!journal.includes('4242'), 'the journal holds ids and phases only');
+  const journalRows = readFileSync(join(root, USER + '.purge.jsonl'), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  assert.deepEqual(journalProblems(journalRows), [], 'the journal holds ids and phases only');
   await store.close();
 });
 
@@ -89,7 +104,7 @@ test('purge, step 3 verification fails: the old repository is untouched, the new
   assert.deepEqual(r.failures, ['injected: the filter removed one line too many']);
   assert.equal(treeHash(repo(root)), before, 'old repository bytes unchanged');
   assert.deepEqual(leftovers(root), []);
-  assert.ok(gitIn(repo(root), 'log', '-p', '--all').stdout.toString().includes('secret account 4242'), 'nothing was purged');
+  assert.ok(gitIn(repo(root), 'log', '-p', '--all').stdout.toString().includes(LEAK), 'nothing was purged');
   await store.close();
 });
 
@@ -170,7 +185,7 @@ for (const [killAt, outcome] of Object.entries(points)) for (const writeDuring o
     assert.deepEqual(leftovers(root), []);
     assert.equal(gitIn(repo(root), 'fsck', '--full').status, 0);
     const history = gitIn(repo(root), 'log', '-p', '--all').stdout.toString();
-    assert.equal(history.includes('secret account 4242'), outcome === 'rolled_back');
+    assert.equal(history.includes(LEAK), outcome === 'rolled_back');
     assert.equal(count(root, 't-keep-0'), 1);
     if (writeDuring === '1') assert.equal(count(root, 't-during-0'), 1, 'the spooled write lands exactly once');
     // Step 21 (3.8.4 item 10): recovered, and again once a vector load has reconciled, the
@@ -219,7 +234,7 @@ test('c1: a torn old copy left by an interrupted delete is finished off, never p
   const store = await open(root); // the base commit puts the torn copy back here and loses the entries
   assert.ok(existsSync(join(repo(root), 'log')), 'the swapped-in copy is in place, not the torn old one');
   assert.equal(count(root, 't-keep-0'), 1, 'the entry that survives the purge is still there');
-  assert.ok(!logLines(root).some(l => l.includes('4242')), 'the purged text is gone');
+  assert.ok(!logLines(root).some(l => l.includes(LEAK)), 'the purged text is gone');
   assert.deepEqual(leftovers(root), [], 'the torn copy is finished off, not put back');
   assert.equal(gitIn(repo(root), 'fsck', '--full').status, 0);
   assert.deepEqual((await store.search('secret account')).grep.hits, []);
@@ -238,7 +253,7 @@ test('c1: the recovery journals its delete of the old copy before it runs, so a 
   assert.equal(killed.from_layout, 'repo/old/no-build', 'the row names the layout it decided from');
   const store = await open(root);
   assert.equal(count(root, 't-keep-0'), 1, 'the surviving entry is still there');
-  assert.ok(!logLines(root).some(l => l.includes('4242')), 'the purged text is gone');
+  assert.ok(!logLines(root).some(l => l.includes(LEAK)), 'the purged text is gone');
   assert.deepEqual(leftovers(root), []);
   const done = journalOf(root).at(-1);
   assert.equal(done.phase, 'done');
@@ -266,7 +281,7 @@ for (const [name, steps] of [['after its first rename', 1], ['after its second r
         await store.forget(['t-gone-0'], { reason: 'leave the next boots a clean purge state', by: 'owner' });
       }
       assert.equal(count(root, 't-keep-0'), 1, `boot ${boot}: the surviving entry is there`);
-      assert.ok(history(root).includes('4242'), `boot ${boot}: the rolled-back purge left the text in history`);
+      assert.ok(history(root).includes(LEAK), `boot ${boot}: the rolled-back purge left the text in history`);
       const last = journalOf(root).at(-1);
       assert.equal(last.phase, 'done', `boot ${boot}: one terminal row`);
       assert.equal(last.outcome, 'rolled_back', `boot ${boot}: the decision was rollback`);
@@ -283,7 +298,7 @@ for (const killAt of ['beforeRollback', 'duringRollback', 'afterRollback']) {
     for (let boot = 1; boot <= 3; boot++) {
       const store = await open(root);
       assert.equal(count(root, 't-keep-0'), 1, `boot ${boot}: the surviving entry is there`);
-      assert.ok(history(root).includes('4242'), `boot ${boot}: the rolled-back purge left the text in history`);
+      assert.ok(history(root).includes(LEAK), `boot ${boot}: the rolled-back purge left the text in history`);
       const last = journalOf(root).at(-1);
       assert.equal(last.phase, 'done', `boot ${boot}: one terminal row`);
       assert.equal(last.outcome, 'rolled_back', `boot ${boot}: the decision was rollback`);
@@ -302,7 +317,7 @@ test('c3: a forget that cannot record its records first leaves the text in the l
   mkdirSync(join(repo(root), 'forgotten.jsonl')); // a directory: the records cannot be written
   await assert.rejects(store.purge(['t-gone-0']));
   assert.equal(count(root, 't-gone-0'), 1, 'nothing is stripped before the record of the strip exists');
-  assert.ok(logLines(root).some(l => l.includes('4242')), 'the text is untouched');
+  assert.ok(logLines(root).some(l => l.includes(LEAK)), 'the text is untouched');
   await store.close();
 });
 
@@ -432,7 +447,7 @@ for (const [killAt, leftPhases, layout, phase] of [
     }
     assert.match(store.statusLine().notices?.[0] ?? '', /已回退/);
     assert.equal(count(root, 't-keep-0'), 1, 'the surviving entry is there');
-    assert.ok(history(root).includes('4242'), 'the repository in place still holds the entry');
+    assert.ok(history(root).includes(LEAK), 'the repository in place still holds the entry');
     assert.deepEqual(leftovers(root), []);
     await store.close();
   });

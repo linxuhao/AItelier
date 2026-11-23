@@ -235,6 +235,7 @@ def _run(argv: list[str], cwd: Path, home: Path) -> tuple[int, str, float]:
     return proc.returncode, ANSI.sub("", output or ""), time.monotonic() - started
 
 
+@pytest.mark.slow
 def test_web_suite_runs_under_vitest_in_the_image(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:

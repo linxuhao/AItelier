@@ -22,6 +22,7 @@ from core.state_attempts import StateAttempts
 from core.state_graph import StateGraphStore
 from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
+from tests.support import state_template
 
 ACCOUNT_EVENTS = ("prior_candidate_included", "prior_candidate_unreconciled")
 
@@ -47,9 +48,9 @@ def _commit_file(repo, name, text):
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, state_db_copy):
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
-    db = DBManager(str(tmp_path / "state.db"))
+    db = DBManager(state_db_copy(state_template.dbm_graph_attempts, tmp_path / "state.db"))
     store = StateGraphStore(db, project_read_trusted=True)
     store.create_project("game", "Long-running game")
     store.add_nodes("game", [{"key": "a", "goal": "Implement a", "dependencies": [], "acceptance": [

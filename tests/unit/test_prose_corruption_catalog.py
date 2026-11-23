@@ -518,6 +518,7 @@ def test_the_empty_control_applies_no_corruption(tmp_path, monkeypatch):
                                     "tests/unit/test_b.py"), rows
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("entry", CATALOG.CORRUPTIONS,
                          ids=lambda e: e["id"])
 def test_the_catalog_list_stays_green_on_a_damaged_live_tree(monkeypatch,
@@ -546,6 +547,7 @@ def test_the_catalog_list_stays_green_on_a_damaged_live_tree(monkeypatch,
 # the damage is reached along the same disk paths a real run produces.
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("entry", CATALOG.CORRUPTIONS, ids=lambda e: e["id"])
 def test_the_catalog_list_stays_green_on_a_real_damaged_tree(monkeypatch,
                                                              tmp_path, entry):

@@ -30,6 +30,7 @@ from core.state_commands import STEWARD_WRITE_ACTIONS, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError, canonical
 from core.state_service import StateService
+from tests.support import state_template
 from tests.unit.test_driver_inbox_answer_citation import BASE_ROW_KEYS
 
 HOME = "aitelier-home"
@@ -40,11 +41,11 @@ CREATE = {"project_id": "gamma", "title": "Gamma", "goal": "a new project", "see
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
+def world(tmp_path, monkeypatch, state_db_copy):
     # The binding codes are keyed with the driver pepper secret file; here it is the
     # registry's pepper, whatever the ambient container mounts.
     monkeypatch.setattr(drivers, "read_pepper", lambda: PEPPER)
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
     registry = DriverRegistry(db, PEPPER)
     registry.seed("steward-channel-owner-cli-token")
     seeder = StateService(db, actor="fixture", project_read_trusted=True)

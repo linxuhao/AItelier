@@ -22,18 +22,19 @@ from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
+from tests.support import state_template
 
 PEPPER = "test-only-pepper-not-a-production-secret"
 
 
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path, state_db_copy):
     """Two projects, three drivers. ada is a member of alpha; bob and carol of beta.
 
     The project-less note below names no project at all; alpha and beta exist so
     the project-inbox refusal has a real project to address.
     """
-    db = StateDatabase(str(tmp_path / "state.sqlite"))
+    db = StateDatabase(state_db_copy(state_template.state_registry, tmp_path / "state.sqlite"))
     seed = StateService(db, actor="fixture", project_read_trusted=True)
     seed.create_project("alpha", "alpha")
     seed.create_project("beta", "beta")

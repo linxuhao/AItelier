@@ -1237,7 +1237,8 @@ class StateGroups:
         return out
 
     # ---------------------------------------------------------------- the media switch (host side)
-    def group_media_notice(self, project_id, request_key, channel, group_ref, epoch, notice, phase, channel_down=False):
+    def group_media_notice(self, project_id, request_key, channel, group_ref, epoch, notice, phase, channel_down=False,
+                           reason=None):
         """The host's post of a media-switch notice (design/steward-group-media.md section 2):
         the switch is ON only once the on-notice was SENT (director 640 (c)).
 
@@ -1258,7 +1259,15 @@ class StateGroups:
         written and nothing recorded, so the same commit succeeds once the receipt is in.
 
         phase 'failed', called only when a send was attempted and failed: one more attempt; the
-        MEDIA_NOTICE_ATTEMPTS-th falls back to off with the note notice_not_sent."""
+        MEDIA_NOTICE_ATTEMPTS-th falls back to off with the note notice_not_sent. An optional
+        `reason` for that phase is the send's own code, not prose: a string kept to 40 characters
+        with control characters replaced, stored as this group's media_keep_note on the earlier
+        failures so a switch still owed names its cause. A missing reason leaves the note as it
+        was; the last attempt always keeps notice_not_sent."""
+        if phase == "failed" and isinstance(reason, str):
+            reason = "".join(char if char.isprintable() else "_" for char in reason)[:40] or None
+        else:
+            reason = None
         text = MEDIA_KEEP_ON_NOTICE if notice == "on" else MEDIA_KEEP_OFF_NOTICE
         owed = "on_pending" if notice == "on" else "off_notice"
         request_hash = _hash([channel, group_ref, epoch, notice, phase])
@@ -1320,8 +1329,12 @@ class StateGroups:
                                  (attempts, channel, group_ref))
                     result = {"attempts": attempts, "state": "off"}
                 else:
-                    conn.execute("UPDATE state_owner_groups SET media_keep_attempts=? WHERE channel=? AND group_ref=?",
-                                 (attempts, channel, group_ref))
+                    if reason is None:
+                        conn.execute("UPDATE state_owner_groups SET media_keep_attempts=? WHERE channel=? AND group_ref=?",
+                                     (attempts, channel, group_ref))
+                    else:
+                        conn.execute("UPDATE state_owner_groups SET media_keep_attempts=?, media_keep_note=? "
+                                     "WHERE channel=? AND group_ref=?", (attempts, reason, channel, group_ref))
                     result = {"attempts": attempts, "state": owed}
             out = self.steward._record(conn, "group_media_notice", request_key, request_hash, result)
         self._log(f"media notice {notice} {phase} -> {result.get('state', 'superseded')}", channel, group_ref, None)

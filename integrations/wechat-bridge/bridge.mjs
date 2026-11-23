@@ -1227,6 +1227,13 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     response.end(JSON.stringify(body));
   };
+  /** The two send endpoints' one answer place: a refused or failed send is attributable by
+   *  endpoint, status and code only - never by its text, room ref or member ref. A successful
+   *  send (status < 400) still logs nothing. */
+  const sendReply = (kind, response, status, body) => {
+    if (status >= 400) log(`send refused: ${kind} ${status} ${body?.error ?? 'unknown'}`);
+    return reply(response, status, body);
+  };
 
   const readJson = request => new Promise((resolve, reject) => {
     const chunks = [];
@@ -1253,6 +1260,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   };
 
   const server = createServer(async (request, response) => {
+    // Set as soon as a request is recognised as one of the two send endpoints, so an escaped
+    // send failure gets the same one attributable line as a refusal returned by the endpoint.
+    let sendKind;
     try {
       if (!authorized(request)) return reply(response, 401, { error: 'unauthorized' });
       const url = new URL(request.url, 'http://bridge');
@@ -1281,16 +1291,17 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       if (request.method === 'POST' && url.pathname === '/send-file') {
         // Step 24.2: ?to= (the bound owner) or ?room= (a bound group), kind, mime, name; the body
         // is the file's bytes, at most mediaLimits.sendBody.
+        sendKind = 'POST /send-file';
         const bytes = await readBytes(request, mediaLimits.sendBody);
         const query = url.searchParams;
         const to = query.get('to') ?? '', room = query.get('room') ?? '', kind = query.get('kind') ?? '';
         const mime = query.get('mime') ?? '', name = query.get('name') ?? '';
         const plan = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
           ? sendPlan({ kind, name, bytes }, mediaSend) : undefined;
-        if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return reply(response, 400, { error: 'bad_request' });
-        if (typeof makeFileBox !== 'function') return reply(response, 501, { error: 'not_supported' });
+        if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return sendReply(sendKind, response, 400, { error: 'bad_request' });
+        if (typeof makeFileBox !== 'function') return sendReply(sendKind, response, 501, { error: 'not_supported' });
         const [status, result] = await sendFile({ to, room }, bytes, plan);
-        return reply(response, status, result);
+        return sendReply(sendKind, response, status, result);
       }
       if (request.method === 'POST' && url.pathname === '/login') {
         const [status, result] = requestLogin();
@@ -1313,22 +1324,30 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         return reply(response, 200, { rooms: rooms.size, owner_ref_set: Boolean(ownerRef) });
       }
       if (request.method === 'POST' && url.pathname === '/send') {
+        sendKind = 'POST /send';
         const body = await readJson(request);
         if (typeof body?.room === 'string' && body.room) {
-          if (typeof body.text !== 'string' || !body.text.trim()) return reply(response, 400, { error: 'bad_request' });
+          if (typeof body.text !== 'string' || !body.text.trim()) return sendReply(sendKind, response, 400, { error: 'bad_request' });
           const [status, result] = await sendGroup(body.room, body.text);
-          return reply(response, status, result);
+          return sendReply(sendKind, response, status, result);
         }
         if (typeof body?.to !== 'string' || !body.to || typeof body.text !== 'string' || !body.text.trim()) {
-          return reply(response, 400, { error: 'bad_request' });
+          return sendReply(sendKind, response, 400, { error: 'bad_request' });
         }
         const [status, result] = await send(body.to, body.text);
-        return reply(response, status, result);
+        return sendReply(sendKind, response, status, result);
       }
       return reply(response, 404, { error: 'not_found' });
     } catch (error) {
+      if (sendKind) {
+        // One attributable line for the answer, whether the send refused itself or threw; the
+        // text is never logged, and the answer bodies/statuses are exactly as before.
+        const status = error?.status ?? 502;
+        const body = error?.status ? { error: error.message }
+          : { error: 'send_failed', detail: String(error?.message ?? error).slice(0, 200) };
+        return sendReply(sendKind, response, status, body);
+      }
       if (error?.status) return reply(response, error.status, { error: error.message });
-      // A failed send reaches the caller as one error; the text is never logged.
       log('request failed: ' + short(error));
       return reply(response, 502, { error: 'send_failed', detail: String(error?.message ?? error).slice(0, 200) });
     }

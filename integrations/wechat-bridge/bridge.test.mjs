@@ -823,6 +823,31 @@ test('group: sends go to bound rooms only, one queue with the gap, and a room\'s
   await s.bridge.close();
 });
 
+test('send: a refusal writes one line naming the endpoint, status and code, never the text or a ref', async () => {
+  const logs = [];
+  const s = await started({ log: line => logs.push(line) });
+  try {
+    await s.login();
+    const secret = 'private notice text that must never be logged';
+    assert.deepEqual(await s.json('/send', { method: 'POST', body: { room: ROOM, text: secret } }),
+      [409, { error: 'room_not_bound' }]);
+    assert.deepEqual(logs.filter(line => line.startsWith('send refused:')),
+      ['send refused: POST /send 409 room_not_bound']);
+    assert.ok(!logs.some(line => line.includes(secret) || line.includes(ROOM)), logs.join('\n'));
+  } finally { await s.bridge.close(); }
+});
+
+test('send: a successful send writes no refusal line', async () => {
+  const logs = [];
+  const s = await started({ log: line => logs.push(line) });
+  try {
+    await s.login();
+    assert.deepEqual(await s.json('/send', { method: 'POST', body: { to: 'wxid_owner', text: 'a private note' } }),
+      [200, { ref: 'out-1' }]);
+    assert.deepEqual(logs.filter(line => line.startsWith('send refused:')), [], logs.join('\n'));
+  } finally { await s.bridge.close(); }
+});
+
 test('group: a message whose room() throws still reaches the ring, because the payload carries the room id', async () => {
   // The live puppet's own message: `room()` raises the TypeError Wechaty's mixin raises
   // when the puppet answers no room payload, and `payload.roomId` is the room information

@@ -1017,7 +1017,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
           log('group_media_notice_waiting', { ...seen, reason: sent.refused });
         } else {
           // It may have started (a send_timeout among them): one attempt.
-          await groups.mediaNotice({ ...ask, phase: 'failed', attempts: Number.isInteger(owedNotice.attempts) ? owedNotice.attempts : 0 });
+          await groups.mediaNotice({ ...ask, phase: 'failed', attempts: Number.isInteger(owedNotice.attempts) ? owedNotice.attempts : 0,
+            reason: sent.failed });
           log('group_media_notice_failed', { ...seen, reason: sent.failed });
         }
       } catch (error) { log('group_media_notice_error', { ...seen, error: short(error) }); }

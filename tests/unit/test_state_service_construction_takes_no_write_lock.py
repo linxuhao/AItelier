@@ -86,6 +86,26 @@ def test_existing_foreign_key_violation_is_still_refused(db):
         StateService(database, actor="fixture", project_read_trusted=True)
 
 
+def untrusted_request(database):
+    """A public read's construction: the untrusted StateGraphStore path, which runs
+    its own per-request foreign-key verification (core.state_graph.StateGraphStore)."""
+    return StateService(database, actor="fixture", project_read_trusted=False)
+
+
+def assert_set_up_already(database):
+    """The attempt schema setup is recorded for this handle and file, so a request
+    runs only the per-request foreign-key verification, not the full setup."""
+    assert state_schema_setup.once(database, "attempts", pytest.fail, "setup re-ran") is False
+
+
+def test_existing_foreign_key_violation_is_still_refused_on_an_untrusted_request(db):
+    database, _ = db
+    assert_set_up_already(database)
+    plant_violation(database)
+    with pytest.raises(sqlite3.IntegrityError, match="foreign-key validation"):
+        untrusted_request(database)
+
+
 # ---------------------------------------------------------------------------
 # The one step the gate may reuse (iss-5de9f15b64f54027)
 # ---------------------------------------------------------------------------
@@ -223,6 +243,23 @@ def test_a_commit_by_another_connection_ends_an_open_window(db, monkeypatch):
     with pytest.raises(sqlite3.IntegrityError, match="foreign-key validation"):
         request(database)
     assert len(passes) == 2, "the next call after the commit must run the pass"
+
+
+def test_a_commit_by_another_connection_ends_an_open_window_on_an_untrusted_request(db, monkeypatch):
+    """The same, through the untrusted path a public read takes."""
+    database, _ = db
+    assert_set_up_already(database)
+    passes = []
+    count_passes(monkeypatch, passes)
+    open_window(monkeypatch, 600)
+    untrusted_request(database)
+    assert kept_verdict(database) is True and len(passes) == 1
+
+    plant_violation(database)
+    assert kept_verdict(database) is None, "the window outlived a commit"
+    with pytest.raises(sqlite3.IntegrityError, match="foreign-key validation"):
+        untrusted_request(database)
+    assert len(passes) == 2, "the next untrusted call after the commit must run the pass"
 
 
 def test_a_replaced_database_file_does_not_inherit_the_verdict(db, monkeypatch, tmp_path):

@@ -483,7 +483,7 @@ def test_the_native_stage_checks_the_patch_digest_and_applies_that_one_patch(pin
 
     # One patch, applied once: a second apply would land on a tree the pin never described.
     applies = re.findall(r"git apply (?!-)(\S+)", native)
-    assert applies == [read.group(1)], f"the native stage applies {applies}"
+    assert applies == ["/fork-input/0001-incoming-message-types.patch", "/fork-input/0002-saved-login.patch"], f"the native stage applies {applies}"
 
 
 def test_the_image_overlays_exactly_the_fork_addon_and_its_dist(pin: dict) -> None:

@@ -137,9 +137,10 @@ the two call sites, not something this window measured.
 
 What such a fetch costs per medium: one CDN POST, plus the channel's retries while it holds the
 message (the ladder in §3 is that cost when the CDN refuses), plus one library write
-(`integrations/dsh-director/lib/media.mjs` `storeMedia` → the write, counted nowhere in these
-lines). The bounds that hold it are the bridge's `MEDIA_LIMITS` per kind (size, decided before
-any fetch — `bridge.mjs:727` logs the refusal as `too_large`) and the
+(`integrations/dsh-director/lib/channels.mjs:711` `storeMedia` calls `media.ingest`
+(`:728`), which is the write; no line here counts it). The bounds that hold it are the bridge's
+`MEDIA_LIMITS` per kind (size, decided before any fetch — `bridge.mjs:735` answers `too_large`
+when the spooled medium passes the limit) and the
 media library's retention (`integrations/dsh-director/lib/media.mjs`: a 30-day age bound and
 `limits.total_bytes`, with `covers()` protecting what a pending answer owes). Retention is a
 bound on how long a kept medium may live, not a guarantee that a refused one is retried later.

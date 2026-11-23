@@ -10,7 +10,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aitelierHost, DriverRuntime } from './runtime.mjs';
-import { channelOps, groupOps, mediaOps, mediaRootFrom, stateWake, withAttachmentLines } from './steward-host.mjs';
+import { channelOps, forwardFinalText, groupOps, mediaOps, mediaRootFrom, stateWake, unansweredOwnerMessages, withAttachmentLines } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { createRequire } from 'node:module';
@@ -335,4 +335,32 @@ test('24.2b sendMediaToOwner: a State refusal is {refused} and nothing is mirror
   assert.equal(typeof steward.media.sendToOwner, 'function');
   assert.doesNotThrow(() => validateHost(steward));
   assert.equal(aitelierHost(env({ AITELIER_MEDIA_ROOT: root })).media.sendToOwner, undefined, 'a director has no owner turn');
+});
+
+test('24.2b C1: send_media in an owner turn, then the turn\'s final text: two steward messages - the file does not swallow the reply', async () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const { ref } = await library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  // State as the backend keeps it: the steward's messages under its token's driver id, with
+  // their attachments in the conversation read.
+  const conversation = [{ message_id: 'own-1', created_at: '2026-11-23T10:00:00Z', sender_kind: 'user', sender_driver_id: null,
+    subject: '画只猫', body: '画只猫', segments: [] }];
+  const request = async (path, body) => {
+    if (path === '/api/state/query/list_user_conversation') return { messages: conversation, next_cursor: null };
+    if (path !== '/api/state/commands/send_user_message') throw new Error(`unexpected ${path}`);
+    const id = `st-${conversation.length}`;
+    conversation.push({ message_id: id, created_at: `2026-11-23T10:00:0${conversation.length}Z`, sender_kind: 'driver',
+      sender_driver_id: 'drv-home', subject: body.subject, body: body.body, segments: [], reply_to_message_id: body.reply_to_message_id ?? null,
+      ...(body.attachments ? { attachments: body.attachments.map(id => ({ id, kind: 'image', mime: 'image/png', size: PNG.length, name: 'x.png' })) } : {}) });
+    return { result: { message_id: id } };
+  };
+  const ops = mediaOps({ request, library, gatewayFetch: async () => {}, owner: { request, project: 'aitelier-home', mirror: async () => ({ mirrored: false, reason: 'dashboard' }) } });
+  const sent = await ops.sendToOwner({ ref, replyTo: 'own-1' });
+  assert.equal(sent.message_id, 'st-1');
+  const base = { request, project: 'aitelier-home', me: 'drv-home' };
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), ['own-1'], 'the file alone answers nothing');
+  const auto = await forwardFinalText({ ...base, text: '画好了，一只橘猫。', input: 'own-1' });
+  assert.deepEqual(auto, { forwarded: true, reply_to: 'own-1', message_id: 'st-2' });
+  const mine = conversation.filter(m => m.sender_driver_id === 'drv-home');
+  assert.deepEqual(mine.map(m => [m.subject, m.body, Boolean(m.attachments)]), [['Image', '', true], ['Re: 画只猫', '画好了，一只橘猫。', false]]);
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), [], 'the text reply answers it');
 });

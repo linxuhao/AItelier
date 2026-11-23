@@ -348,6 +348,10 @@ export async function unansweredOwnerMessages({ request, project, me, signal }) 
   for (const m of newest) {
     // A push is written by the host with no owner message in view: it answers nothing.
     if (isPush(m)) continue;
+    // Step 24.2b (C1): a steward message carrying files is an owner turn's send_media
+    // (sendMediaToOwner; the steward's text replies never carry attachments). The file is not
+    // the turn's answer, so the turn's final words still go out as the reply.
+    if (m.sender_kind === 'driver' && m.sender_driver_id === me && Array.isArray(m.attachments) && m.attachments.length) continue;
     if (m.sender_kind === 'driver' && m.sender_driver_id === me) break;
     if (m.sender_kind === 'user') unanswered.push(m);
   }

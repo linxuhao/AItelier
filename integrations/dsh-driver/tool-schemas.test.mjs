@@ -13,7 +13,8 @@
  *   close_question, idle_dormant, grep_chat_history): runtime.steward.test.mjs and
  *   runtime.smoke.test.mjs;
  * - the adapter's own (runtime.mjs: state_read, project_work, schedule_*, reply_to_director,
- *   relay_answer, send_user_message): runtime.channels.test.mjs and runtime.group.test.mjs
+ *   relay_answer, send_user_message): runtime.channels.test.mjs, runtime.group.test.mjs and
+ *   runtime.smoke.test.mjs
  *   (runtime.steward.test.mjs does not install them all);
  * - dsh-director/hosts/local.mjs (work_update, note_write): runtime.local-host.test.mjs, which
  *   boots the director with that host and no adapter. */

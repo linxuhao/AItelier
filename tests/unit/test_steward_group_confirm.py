@@ -607,9 +607,12 @@ def test_the_gateway_judges_a_consumption_by_the_calls_own_turn_never_the_one_au
     assert record(world, asked)["armed_turn"] == "ga4"
     assert call()["error"]["data"]["code"] == "confirmation_required"
     assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
-    # In its own turn the arming runs.
+    # In its own turn the arming runs - also after that same turn is recorded again (the host's
+    # record() on a merge step, or its retry): only another turn's recording disarms.
     group_turn(world, turn="ga5")
     assert get(asked, "ga5")["status"] == "confirmed"
+    group_turn(world, senders=(MEMBER, MEMBER2), turn="ga5")
+    assert record(world, asked)["armed_turn"] == "ga5"
     answer = call()
     assert "result" in answer and "family group" not in json.dumps(answer, ensure_ascii=False)
     assert upstream.methods.count("tools/call") == before + 1 and record(world, asked)["status"] == "done"

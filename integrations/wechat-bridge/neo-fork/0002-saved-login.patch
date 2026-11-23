@@ -2499,7 +2499,7 @@ index ffa0bd5..34300b6 100644
  } from './native.js'
  
  const CACHE_LIMIT = 2048
-@@ -230,9 +237,27 @@ export class PuppetNeo extends Puppet {
+@@ -230,9 +237,36 @@ export class PuppetNeo extends Puppet {
    private readonly contacts = new Map<string, payloads.Contact>()
    private readonly rooms = new Map<string, true>()
    private readonly messages = new Map<string, CachedMessage>()
@@ -2509,10 +2509,18 @@ index ffa0bd5..34300b6 100644
 +   * resume this puppet has always done - whoever the stored login belongs to.
 +   */
 +  private readonly resume?: { expectUsername?: string }
++  /**
++   * Let the trusted local bridge send to a peer or group no inbound message has observed.
++   * Tests show a resumed login still refuses such a send while this is off, and that the
++   * fork's default is off; opting in lets the send reach the session.
++   */
++  private readonly allowUnobservedText: boolean
  
 -  constructor(options: PuppetOptions = {}) {
 +  constructor(
-+    options: PuppetOptions & { resume?: boolean | { expectUsername?: string }, expectUsername?: string } = {},
++    options: PuppetOptions & {
++      resume?: boolean | { expectUsername?: string }, expectUsername?: string, allowUnobservedText?: boolean
++    } = {},
 +  ) {
      super(options)
 +    // The expectation may ride on the resume option itself or beside it; a resume
@@ -2521,6 +2529,7 @@ index ffa0bd5..34300b6 100644
 +      options.resume === true ? { expectUsername: options.expectUsername } :
 +      options.resume && typeof options.resume === 'object' ? options.resume :
 +      undefined
++    this.allowUnobservedText = options.allowUnobservedText === true
 +  }
 +
 +  static savedLoginStatus(): SavedLoginStatus {
@@ -2528,7 +2537,15 @@ index ffa0bd5..34300b6 100644
    }
  
    protected createSession(): Session {
-@@ -550,7 +575,28 @@ export class PuppetNeo extends Puppet {
+@@ -385,6 +419,6 @@ export class PuppetNeo extends Puppet {
+   override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
+     if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
+     const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
+-    if (mentions?.length || !observed) {
++    if (mentions?.length || (!observed && !this.allowUnobservedText)) {
+       throw new Error('Neo supports text to an observed peer or group')
+     }
+@@ -550,7 +584,28 @@ export class PuppetNeo extends Puppet {
  
    private async serve(session: Session, signal: AbortSignal): Promise<void> {
      await delay(0, undefined, { signal })
@@ -2599,7 +2616,7 @@ index 0b4ffcd..ceb9c17 100644
      protected override createSession() { return scriptedSession(trace, script()) }
      protected override scanCode() { return 'fixture-qr' }
    }()
-@@ -621,6 +634,112 @@ test('an arriving file, image and voice note each come back as the FileBox to re
+@@ -621,6 +634,220 @@ test('an arriving file, image and voice note each come back as the FileBox to re
    }
  })
  
@@ -2707,6 +2724,114 @@ index 0b4ffcd..ceb9c17 100644
 +    assert(trace.includes('start-login'))
 +  } finally {
 +    await puppet.stop()
++  }
++})
++
++test('a trusted bridge can push text to a destination the puppet never observed', async () => {
++  const trace: unknown[] = []
++  const { puppet } = scriptedPuppet(trace, () => ({}), { allowUnobservedText: true })
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    await puppet.messageSendText('wxid_unobserved', 'proactive hello')
++    assert.deepEqual(
++      trace.filter(step => Array.isArray(step) && step[0] === 'send'),
++      [['send', 'wxid_unobserved', 'proactive hello']],
++      'the unobserved destination reached the scripted session',
++    )
++    // The option does not relax the mentions arm.
++    await assert.rejects(
++      puppet.messageSendText(sender, 'with mentions', [member]),
++      /Neo supports text to an observed peer or group/,
++    )
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('without the option an unobserved destination and mentions are still refused', async () => {
++  const trace: unknown[] = []
++  const { puppet } = scriptedPuppet(trace, () => ({}))
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    await assert.rejects(
++      puppet.messageSendText('wxid_unobserved', 'nope'),
++      /Neo supports text to an observed peer or group/,
++    )
++    await assert.rejects(
++      puppet.messageSendText(sender, 'nope', [member]),
++      /Neo supports text to an observed peer or group/,
++    )
++    assert(!trace.some(step => Array.isArray(step) && step[0] === 'send'))
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('an unobserved group is sent with the option on and refused with it off', async () => {
++  const unobservedRoom = 'wxid_unobserved@chatroom'
++  for (const allowUnobservedText of [true, false]) {
++    const trace: unknown[] = []
++    const { puppet } = scriptedPuppet(trace, () => ({}), { allowUnobservedText })
++    const ready = waitFor(done => puppet.once('ready', done), 'ready')
++    await puppet.start()
++    try {
++      await ready
++      if (allowUnobservedText) {
++        await puppet.messageSendText(unobservedRoom, 'group hello')
++        assert.deepEqual(
++          trace.filter(step => Array.isArray(step) && step[0] === 'send'),
++          [['send', unobservedRoom, 'group hello']],
++          'the unobserved room reached the scripted session',
++        )
++      } else {
++        await assert.rejects(
++          puppet.messageSendText(unobservedRoom, 'group hello'),
++          /Neo supports text to an observed peer or group/,
++        )
++        assert(!trace.some(step => Array.isArray(step) && step[0] === 'send'))
++      }
++    } finally {
++      await puppet.stop()
++    }
++  }
++})
++
++test('after a resumed saved login an unobserved send is refused by default and delivered when opted in', async () => {
++  const destination = 'wxid_after_resume'
++  for (const allowUnobservedText of [false, true]) {
++    const trace: unknown[] = []
++    const { puppet, events } = scriptedPuppet(
++      trace,
++      () => ({ resume: { status: 'resumed', username: 'wxid_resume' }, messages: [] }),
++      { resume: true, allowUnobservedText },
++    )
++    const ready = waitFor(done => puppet.once('ready', done), 'ready')
++    await puppet.start()
++    try {
++      await ready
++      assert.deepEqual(events.logins, [{ contactId: 'wxid_resume' }], 'the saved login resumed')
++      if (allowUnobservedText) {
++        await puppet.messageSendText(destination, 'after resume')
++        assert.deepEqual(
++          trace.filter(step => Array.isArray(step) && step[0] === 'send'),
++          [['send', destination, 'after resume']],
++          'the unobserved destination reached the session after a resume',
++        )
++      } else {
++        await assert.rejects(
++          puppet.messageSendText(destination, 'after resume'),
++          /Neo supports text to an observed peer or group/,
++          'a resumed login has observed nobody',
++        )
++        assert(!trace.some(step => Array.isArray(step) && step[0] === 'send'))
++      }
++    } finally {
++      await puppet.stop()
++    }
 +  }
 +})
  test('an inbound fetch says which stage it stopped at: no session, or no login', async () => {

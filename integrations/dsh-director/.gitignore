@@ -1,0 +1,5 @@
+# Generated, never shipped: the plugin has no dependencies, so `npm install`
+# writes only a stub lockfile naming the package. test/boundary.test.mjs keeps
+# it out of the shipped walk; this keeps it out of git as well.
+node_modules/
+package-lock.json

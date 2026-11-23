@@ -38,22 +38,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # measurement that decided it. Each was measured in the gate's own shape and
 # fails there, so declaring one turns a documented absence into a red gate --
 # which measures nothing and hides which suite is broken.
-EXCEPTIONS = {
-    "integrations/dsh-director": {
-        "reason": (
-            "its 23-file suite does not finish inside the gate's 300 s script "
-            "budget, and not inside 900 s either: the memory-* files alone take "
-            "hundreds of seconds in a 2-CPU container. It also has one test "
-            "that walks the plugin directory and fails while sibling test files "
-            "are still running there, so a declared run would be a timeout or a "
-            "red on every gate"),
-        "evidence": (
-            "dsh-director.log: `npm test` rc 124 (timed out) after 302 s with "
-            "test/memory-purge.test.mjs interrupted; dsh-director-diagnostic.log: "
-            "the same command rc 124 after 900 s with 317 of 328 tests passed, "
-            "10 cancelled and that one walk test failed (it passes alone: rc 0)"),
-    },
-}
+# Empty on purpose. The one entry this table ever held,
+# "integrations/dsh-director", was re-measured in the gate's own shape: the
+# whole 23-file suite ran in 135 s with 464 tests / 463 pass / 1 fail / 0
+# cancelled, and the single red was structural -- the plugin's boundary walk
+# reported the `package-lock.json` that the gate's own `npm install` had just
+# written as an undeclared file. With that lockfile kept out of the walk (it is
+# generated, never shipped source) a gate-shaped install followed by `npm test`
+# is green, so the directory belongs in node_projects.json, not here.
+EXCEPTIONS = {}
 
 # Evidence must carry a number from a run, not a feeling about the code -- and
 # the number has to be one only a FAILING run produces. `rc 0` is a suite that

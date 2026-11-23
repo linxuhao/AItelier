@@ -5,16 +5,30 @@
  *
  * It is separate from runtime.smoke.test.mjs because that test asserts the
  * whole resident lifecycle; this one asserts one tool reaches one real door.
+ *
+ * Step 24.2b (design-steward 7.8.12a "导演给业主发媒体", pending 19; 7.8.18 导演给业主发媒体
+ * 适配器): a director's `attachments` (absolute paths) are checked and stored in its own library
+ * before the message goes; any refusal refuses the whole message and nothing reaches the
+ * backend. And the director's media_call (7.8.12a "导演与管家的不同"): its own few tools, its own
+ * project's refs.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { mkdtemp, mkdir, writeFile, readFile, rm, truncate } from 'node:fs/promises';
+import fs, { mkdtempSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { mock } from 'node:test';
+import { homedir, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
+import { aitelierHost } from './runtime.mjs';
+import { ingestDirectorAttachments, sendUserMessageTool, DIRECTOR_ATTACHMENTS_SENTENCE } from './steward-host.mjs';
+import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
+import { registerDirectorMediaCall } from '../dsh-director/lib/media-tools.mjs';
+import { DIRECTOR_MEDIA_TOOLS } from '../dsh-director/index.mjs';
 
 const PROVIDER = `
 import { createRequire } from 'node:module';
@@ -118,10 +132,14 @@ test('native send_user_message tool calls the durable driver -> user action', { 
 // The same real driver, with the model's first tool call set to `toolArgs`.
 // It reports what reached the State command and what the model got back, so a
 // case can assert on the request body or on the refusal the tool returned.
-async function driveSendUserMessage(t, toolArgs) {
+// Step 24.2b: `media` gives the driver a media root (the director's own library under it);
+// `toolArgs` may then be a function of the scratch directory (to name files made there), and the
+// result carries the library's index lines.
+async function driveSendUserMessage(t, toolArgs, { media = false } = {}) {
   const entry = await measuredEntryForTest(t);
   if (!entry) return null;                  // nothing pinned is installed: reported unmeasured
   const directory = await mkdtemp(join(homedir(), 'dsh-user-message-'));
+  if (typeof toolArgs === 'function') toolArgs = await toolArgs(directory);
   const here = dirname(fileURLToPath(import.meta.url));
   const sent = [], turns = [], activity = [];
   let output = '', proc;
@@ -164,6 +182,7 @@ async function driveSendUserMessage(t, toolArgs) {
       AITELIER_DRIVER_ID: 'dsh-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'fixture-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_FIXTURE_TOOL_ARGS: JSON.stringify(toolArgs),
+      ...(media ? { AITELIER_MEDIA_ROOT: join(directory, 'media') } : {}),
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets') } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);
@@ -174,7 +193,9 @@ async function driveSendUserMessage(t, toolArgs) {
       if (activity.some(a => a.phase === 'failed')) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    return { sent, turns, activity, output, exitCode: proc.exitCode };
+    const index = media ? (await readFile(join(directory, 'media', 'd-dsh-fixture', 'index.jsonl'), 'utf8').catch(() => ''))
+      .split('\n').filter(Boolean).map(line => JSON.parse(line)) : undefined;
+    return { sent, turns, activity, output, exitCode: proc.exitCode, index };
   } finally {
     proc?.kill('SIGKILL');
     server.close();
@@ -250,4 +271,214 @@ test('native send_user_message refuses blocks totalling more than 8000 character
   assert.ok(result.turns.some(turn => turn.some(m => m.role === 'tool'
     && JSON.stringify(m).includes('invalid_segments') && JSON.stringify(m).includes('8000'))),
   'the total-length refusal did not reach the model\n' + JSON.stringify(result.turns.at(-1)).slice(0, 1500));
+});
+
+// --- step 24.2b: a director's attachments and its media_call --------------------------------
+
+/** A PNG whose header says width x height (the library reads the size from the header only). */
+const png = (width = 64, height = 64) => Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'),
+  Buffer.from([width >>> 24, (width >>> 16) & 255, (width >>> 8) & 255, width & 255, height >>> 24, (height >>> 16) & 255, (height >>> 8) & 255, height & 255]),
+  Buffer.alloc(40)]);
+const pdf = () => Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(80, 32)]);
+const REF = /^m_[0-9a-f]{16}$/;
+/** The files a director might attach, made in `dir`: their absolute paths. */
+async function attachable(dir) {
+  const at = name => join(dir, name);
+  await writeFile(at('shot.png'), png());
+  await writeFile(at('other.png'), png(32, 32));
+  await writeFile(at('report.pdf'), pdf());
+  await mkdir(at('a-directory'));
+  // An office document with macros: a zip, which the shared table does not know.
+  await writeFile(at('report.docm'), Buffer.concat([Buffer.from('504b030414000600', 'hex'), Buffer.alloc(200)]));
+  // 21 MiB that start like a PNG: over the 20 MiB a single image may be.
+  await writeFile(at('huge.png'), png());
+  await truncate(at('huge.png'), 21 * 1024 * 1024);
+  // 8000 x 5125 = 41 MP: within every byte bound, over the 40 MP an image may be.
+  await writeFile(at('wide.png'), png(8000, 5125));
+  return { shot: at('shot.png'), other: at('other.png'), report: at('report.pdf'), directory: at('a-directory'), docm: at('report.docm'),
+    huge: at('huge.png'), wide: at('wide.png'), missing: at('no-such-file.png') };
+}
+const rig = async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'director-attach-'));
+  const files = await attachable(dir);
+  const root = join(dir, 'media');
+  return { dir, files, root, library: createMediaLibrary({ root, userId: 'd-drv1' }) };
+};
+const attach = (library, requestKey, paths) => ingestDirectorAttachments({ library, project: 'alpha', requestKey, paths });
+
+test('24.2b director attachments: a missing path, a directory, .docm, a 21 MiB PNG and a 41 MP image each answer their code; nothing is stored', async () => {
+  const { files, library } = await rig();
+  const cases = [[files.missing, 'not_found'], ['relative/shot.png', 'not_found'], [files.directory, 'not_a_file'], [files.docm, 'type'],
+    [files.huge, 'too_large'], [files.wide, 'too_large']];
+  for (const [index, [path, code]] of cases.entries())
+    assert.deepEqual(await attach(library, `k-${index}`, [path]), { refused: 'attachment_refused', attachments: [{ path, refused: code }] }, path);
+  assert.deepEqual(library.rows, [], 'no file was stored');
+  // More than ten is the request's own fault, before any file is looked at.
+  assert.equal((await attach(library, 'k-many', Array(11).fill(files.shot))).refused, 'invalid_request');
+  assert.deepEqual(library.rows, []);
+});
+
+test('24.2b director attachments: one bad of three refuses the whole message and lists every refused path; nothing is stored', async () => {
+  const { files, library } = await rig();
+  assert.deepEqual(await attach(library, 'k1', [files.shot, files.missing, files.directory]), { refused: 'attachment_refused',
+    attachments: [{ path: files.missing, refused: 'not_found' }, { path: files.directory, refused: 'not_a_file' }] });
+  assert.deepEqual(library.rows, []);
+  // Good files: stored in order under (director, request_key, index), audience this project, source generated.
+  const ok = await attach(library, 'k2', [files.shot, files.report]);
+  assert.deepEqual(ok.attachments.map(a => [a.kind, a.mime, a.name]), [['image', 'image/png', 'shot.png'], ['file', 'application/pdf', 'report.pdf']]);
+  for (const a of ok.attachments) { assert.match(a.ref, REF); assert.ok(a.size > 0); }
+  assert.deepEqual(library.rows.map(r => [r.ref, r.channel, r.messageRef, r.index, r.audience, r.source]),
+    ok.attachments.map((a, index) => [a.ref, 'director', 'k2', index, 'project:alpha', 'generated']));
+});
+
+test('24.2b director attachments: the same key with the same file is the same ref (one row); with another file idempotency_conflict', async () => {
+  const { files, library } = await rig();
+  const first = await attach(library, 'k1', [files.shot]);
+  const again = await attach(library, 'k1', [files.shot]);
+  assert.deepEqual(again, first);
+  assert.equal(library.rows.length, 1);
+  assert.deepEqual(await attach(library, 'k1', [files.other]), { refused: 'attachment_refused',
+    attachments: [{ path: files.other, refused: 'idempotency_conflict' }] });
+  assert.equal(library.rows.length, 1, 'the old file is never sent under the new one\'s name');
+});
+
+test('24.2b director attachments: the 21st in an hour is rate_limited with retry_after, still after a restart (counted from the index)', async () => {
+  const { files, root, library } = await rig();
+  for (let i = 0; i < 20; i++) assert.match((await attach(library, `k-${i}`, [files.shot])).attachments[0].ref, REF);
+  const refused = await attach(library, 'k-20', [files.shot]);
+  assert.equal(refused.refused, 'attachment_refused');
+  assert.equal(refused.attachments[0].refused, 'rate_limited');
+  assert.ok(Number.isInteger(refused.attachments[0].retry_after) && refused.attachments[0].retry_after > 0, JSON.stringify(refused));
+  // A new host process: a new library over the same subdirectory.
+  const restarted = createMediaLibrary({ root, userId: 'd-drv1' });
+  assert.equal((await attach(restarted, 'k-21', [files.shot])).attachments[0].refused, 'rate_limited');
+  // A replay of a key already stored is not counted: it answers its ref.
+  assert.match((await attach(restarted, 'k-3', [files.shot])).attachments[0].ref, REF);
+});
+
+test('24.2b director attachments: a write the disk cannot take is store_failed; nothing is kept', async () => {
+  const { files, library } = await rig();
+  const real = fs.writeFileSync;
+  mock.method(fs, 'writeFileSync', function (path, ...rest) {
+    if (String(path).includes('.incoming-')) throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    return real.call(this, path, ...rest);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await attach(library, 'k1', [files.shot]), { refused: 'attachment_refused', attachments: [{ path: files.shot, refused: 'store_failed' }] });
+  } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+  assert.deepEqual(library.rows, []);
+  assert.match((await attach(library, 'k1', [files.shot])).attachments[0].ref, REF, 'not recorded: the same request goes through later');
+});
+
+test('24.2b send_user_message schema: only a director with a media library gets `attachments` and its one sentence', async () => {
+  const { library } = await rig();
+  const director = sendUserMessageTool({ steward: false, library });
+  assert.deepEqual(director.parameters.attachments, { type: 'array', items: { type: 'string' } });
+  assert.ok(director.description.endsWith(DIRECTOR_ATTACHMENTS_SENTENCE));
+  assert.equal(DIRECTOR_ATTACHMENTS_SENTENCE.trim().split(/(?<=[.;])\s+(?=[A-Z])/).length, 1, 'one sentence');
+  for (const sentence of ['30 days', 'this project', 'WeChat or Slack']) assert.ok(DIRECTOR_ATTACHMENTS_SENTENCE.includes(sentence), sentence);
+  const bare = sendUserMessageTool({ steward: false, library: undefined });
+  assert.ok(!('attachments' in bare.parameters)); assert.ok(!bare.description.includes(DIRECTOR_ATTACHMENTS_SENTENCE));
+  assert.deepEqual(Object.keys(director.parameters).slice(0, -1), Object.keys(bare.parameters), 'every other parameter as before');
+});
+
+/** The director host's media_call, registered as index.mjs does, with a fake registry. */
+function directorMediaCall({ root, registry = DIRECTOR_MEDIA_TOOLS }) {
+  const host = aitelierHost({ AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'root-1', AITELIER_DSH_PROVIDER: 'aitelier',
+    AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv1',
+    AITELIER_DSH_EXECUTION: 'host', AITELIER_MEDIA_ROOT: root });
+  const calls = [], tools = new Map();
+  const ctx = { tools: { schemas: () => registry.map(name => ({ name })),
+    execute: async call => { calls.push(call); return { value: { text: 'read' }, content: [{ type: 'text', text: 'read' }] }; } } };
+  registerDirectorMediaCall({ tools: { register: tool => tools.set(tool.name, tool) } }, { ctx, defineTool: t => t,
+    jsonOutput: {}, HarnessError: Error, media: host.media, rootSession: 'root-1', projectId: 'alpha', names: DIRECTOR_MEDIA_TOOLS });
+  const run = (args, session = 'root-1') => tools.get('media_call').execute(args, { agent: { session: { id: session } }, callId: 'c1',
+    rootCallId: 'c1', token: {}, signal: AbortSignal.timeout(5000) });
+  return { host, calls, run, names: [...tools.keys()] };
+}
+
+test('24.2b director media_call: its own project\'s ref is filled in as base64 and runs one of its three tools', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'director-media-call-'));
+  const d = directorMediaCall({ root });
+  assert.deepEqual(d.names, ['media_call']);
+  const { ref } = await d.host.media.ingest({ channel: 'dashboard', messageRef: 'msg-1', index: 0, audience: 'project:alpha', source: 'in' }, async () => png());
+  assert.deepEqual(await d.run({ name: 'mcp__agentmcp__ocr_image', media: { image_base64: ref } }), { text: 'read' });
+  assert.equal(d.calls.length, 1);
+  assert.equal(d.calls[0].name, 'mcp__agentmcp__ocr_image');
+  assert.equal(d.calls[0].arguments.image_base64, png().toString('base64'));
+});
+
+test('24.2b director media_call: another subdirectory\'s ref, another project\'s, a name outside the three, an unregistered one or a worker -> refused, nothing runs', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'director-media-call-'));
+  const d = directorMediaCall({ root });
+  // Another director's library, and the steward's, under the same root.
+  const theirs = await createMediaLibrary({ root, userId: 'd-drv2' }).ingest({ channel: 'director', messageRef: 'k', index: 0, audience: 'project:alpha', source: 'generated' }, async () => png());
+  const stewards = await createMediaLibrary({ root, userId: 'owner' }).ingest({ channel: 'wechat', messageRef: 'w', index: 0, audience: 'owner', source: 'in' }, async () => png());
+  for (const { ref } of [theirs, stewards])
+    assert.equal((await d.run({ name: 'mcp__agentmcp__ocr_image', media: { image_base64: ref } })).refused, 'unknown_ref', ref);
+  // Its own library, but a row of another project.
+  const elsewhere = await d.host.media.ingest({ channel: 'director', messageRef: 'k2', index: 0, audience: 'project:beta', source: 'generated' }, async () => png());
+  assert.equal((await d.run({ name: 'mcp__agentmcp__ocr_image', media: { image_base64: elsewhere.ref } })).refused, 'not_visible_in_this_turn');
+  const { ref } = await d.host.media.ingest({ channel: 'director', messageRef: 'k3', index: 0, audience: 'project:alpha', source: 'generated' }, async () => png());
+  for (const name of ['mcp__agentmcp__ocr_pdf', 'mcp__agentmcp__generate_image', 'bash', 'call_tool'])
+    assert.equal((await d.run({ name, media: { image_base64: ref } })).refused, 'not_allowed', name);
+  // One of the three, but not in this session's registry.
+  const unregistered = directorMediaCall({ root, registry: ['mcp__agentmcp__ocr_image'] });
+  assert.equal((await unregistered.run({ name: 'mcp__agentmcp__vision_critique', media: { image_base64: ref } })).refused, 'not_registered');
+  // A worker's session.
+  assert.equal((await d.run({ name: 'mcp__agentmcp__ocr_image', media: { image_base64: ref } }, 'child-1')).refused, 'not_available');
+  assert.deepEqual([...d.calls, ...unregistered.calls], [], 'nothing ran');
+});
+
+test('24.2b native send_user_message, director with a media root: the attached files go in as refs, the result names them', { timeout: 60000 }, async (t) => {
+  const result = await driveSendUserMessage(t, async dir => {
+    const files = await attachable(dir);
+    return { request_key: 'with-files', subject: 'Screens', body: 'see the frames', attachments: [files.shot, files.report] };
+  }, { media: true });
+  if (!result) return;
+  assert.equal(result.exitCode, null, result.output);
+  assert.equal(result.sent.length, 1, 'the message never reached the State command\n' + result.output);
+  const refs = result.index.map(row => row.ref);
+  assert.equal(refs.length, 2);
+  assert.deepEqual(result.sent[0], { request_key: 'with-files', subject: 'Screens', body: 'see the frames', project_id: 'alpha', attachments: refs });
+  assert.deepEqual(result.index.map(row => [row.channel, row.messageRef, row.index, row.audience, row.source]),
+    [['director', 'with-files', 0, 'project:alpha', 'generated'], ['director', 'with-files', 1, 'project:alpha', 'generated']]);
+  const tool = JSON.stringify(result.turns.flat().filter(m => m.role === 'tool'));
+  for (const ref of refs) assert.ok(tool.includes(ref), 'the result names ' + ref);
+  assert.ok(tool.includes('shot.png') && tool.includes('report.pdf') && tool.includes('fixture-message-id'), tool.slice(0, 1500));
+});
+
+test('24.2b native send_user_message, director with a media root: a bad attachment refuses the whole message - nothing reaches the backend', { timeout: 60000 }, async (t) => {
+  const result = await driveSendUserMessage(t, async dir => {
+    const files = await attachable(dir);
+    return { request_key: 'bad-files', subject: 'Screens', body: 'x', attachments: [files.shot, files.missing, files.directory, files.docm, files.huge] };
+  }, { media: true });
+  if (!result) return;
+  assert.equal(result.sent.length, 0, 'a refused message reached the State command: ' + JSON.stringify(result.sent));
+  assert.deepEqual(result.index, [], 'nothing was stored');
+  const tool = JSON.stringify(result.turns.flat().filter(m => m.role === 'tool'));
+  assert.ok(tool.includes('attachment_refused'), tool.slice(0, 1500));
+  for (const code of ['not_found', 'not_a_file', 'type', 'too_large']) assert.ok(tool.includes(code), code + ' ' + tool.slice(0, 1500));
+  // An ingest refusal (41 MP) refuses the message too.
+  const wide = await driveSendUserMessage(t, async dir => ({ request_key: 'wide', subject: 'S', body: 'x', attachments: [(await attachable(dir)).wide] }), { media: true });
+  assert.equal(wide.sent.length, 0);
+  assert.ok(JSON.stringify(wide.turns.flat().filter(m => m.role === 'tool')).includes('too_large'));
+});
+
+test('24.2b native send_user_message, director with a media root but no attachments: the request body is byte for byte today\'s', { timeout: 60000 }, async (t) => {
+  for (const extra of [{}, { attachments: [] }]) {
+    const result = await driveSendUserMessage(t, { request_key: 'plain', subject: 'S', body: 'b', node_key: 'n', ...extra }, { media: true });
+    if (!result) return;
+    assert.equal(result.sent.length, 1, result.output);
+    assert.equal(JSON.stringify(result.sent[0]), JSON.stringify({ request_key: 'plain', subject: 'S', body: 'b', project_id: 'alpha', refs: { node_key: 'n' } }));
+  }
+});
+
+test('24.2b native send_user_message, director without a media library: attachments are refused, never dropped - nothing reaches the backend', { timeout: 60000 }, async (t) => {
+  const result = await driveSendUserMessage(t, async dir => ({ request_key: 'no-library', subject: 'S', body: 'x',
+    attachments: [(await attachable(dir)).shot] }));
+  if (!result) return;
+  assert.equal(result.sent.length, 0, 'the text went out without its file: ' + JSON.stringify(result.sent));
+  assert.ok(JSON.stringify(result.turns.flat().filter(m => m.role === 'tool')).includes('attachments_unsupported'));
 });

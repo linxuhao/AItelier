@@ -421,6 +421,15 @@ test('director library: the same (director, key, index) with the same bytes is t
   assert.deepEqual(await lib.ingest({ ...directorMeta('req-c', first), sha256: 'abc' }, async () => first), { refused: 'invalid_media' });
 });
 
+test('director library: a director\'s voice is held to 2 minutes like an inbound one; send_media\'s generated voice is not (24.2b P16)', async () => {
+  const dir = root();
+  const long = createMediaLibrary({ root: root(), userId: 'd-drv1', ffprobe: fakeProbe(dir, '130.0') });
+  assert.deepEqual(await long.ingest(directorMeta('req-v', wav()), async () => wav()), { refused: 'too_large' });
+  assert.equal((await long.ingest({ channel: 'generated', audience: 'project:p1', source: 'generated' }, async () => wav())).durationMs, 130000);
+  const short = createMediaLibrary({ root: root(), userId: 'd-drv1', ffprobe: fakeProbe(dir, '119.0') });
+  assert.equal((await short.ingest(directorMeta('req-v', wav()), async () => wav())).durationMs, 119000);
+});
+
 test('director library: a write the disk cannot take is store_failed for a director\'s file, unavailable for the dashboard\'s; nothing is kept', async () => {
   const r = root();
   const lib = createMediaLibrary({ root: r, userId: 'd-drv1' });

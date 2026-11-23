@@ -13,6 +13,8 @@ import { loadRoles, validateRoles, roleOf } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { refusal, presentTools, presentSections, defaultDiscoveryTexts } from './tool-discovery.mjs';
 import { aitelierHost, INBOX_EXCERPT_CHARS } from './runtime.mjs';
+import { sendUserMessageTool, DIRECTOR_ATTACHMENTS_SENTENCE } from './steward-host.mjs';
+import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { conversationTurns, stewardOps, projectSummary, issuesSummary, syncConversation, replyToLetter, unansweredOwnerMessages,
   turnWatcher, forwardFinalText, autoReplyBody, recordAutoReply, stewardTexts, INBOX_LIMITS, channelOps, refusalCode, EXTERNAL_CONTENT_LINE,
   humanInput, catalogOps, relayAnswer, OwnerQuestionsTimer, OWNER_QUESTIONS_WAIT_MS, OWNER_QUESTIONS_FOLLOW_UP_MS, OWNER_QUESTION_EVENTS,
@@ -1953,4 +1955,18 @@ test('the snapshot names an open connection_change by op, conn_id and widens onl
   const listed = JSON.parse(text.split('Your open proposals:\n')[1].split('\n')[0]);
   assert.deepEqual(listed[0].payload, { op: 'reenable', conn_id: 'mailpub', widens: true });
   assert.deepEqual(listed[1].payload, { project_id: 'alpha' }, 'other kinds are unchanged');
+});
+
+// Step 24.2b (design-steward 7.8.12a "导演给业主发媒体" item 1, checked r43): send_user_message is
+// registered outside the steward-only block, so the steward gets the same tool - but never the
+// director's `attachments` (paths) nor its sentence: the steward's files go with send_media as
+// library refs. Even with a media library of its own.
+test('24.2b: the steward\'s send_user_message has no attachments parameter and no attachments sentence', () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-schema-')), userId: 'owner' });
+  const steward = sendUserMessageTool({ steward: true, library });
+  assert.deepEqual(Object.keys(steward.parameters), ['request_key', 'subject', 'body', 'node_key', 'segments', 'reply_to_message_id']);
+  assert.ok(!steward.description.includes(DIRECTOR_ATTACHMENTS_SENTENCE.trim()));
+  assert.doesNotMatch(steward.description, /attachment|30 days|WeChat or Slack/);
+  assert.equal(steward.attachments, false);
+  assert.equal(sendUserMessageTool({ steward: false, library }).attachments, true, 'a director with the same library has them');
 });

@@ -345,7 +345,8 @@ export interface DirectorHost {
   /** Step 24.2 (design-steward 7.8.12, 7.8.12a): the host's media library - one writer of
    *  `<media root>/<userId>/` (the root is the host's setting), lib/media.mjs. Declared, the
    *  plugin's ownerChannels.storeMedia stores into it and the steward gets media_call and
-   *  send_media; undeclared (the built-in local host), neither tool is registered and
+   *  send_media, a director (24.2b) media_call on its own project's refs through
+   *  DIRECTOR_MEDIA_TOOLS (index.mjs); undeclared (the built-in local host), neither tool is registered and
    *  storeMedia answers {refused: 'unsupported'}.
    *  - ingest: the library's one way in (no binding check: storeMedia makes that one first) -
    *    idempotent by (channel, messageRef, index) without calling `open` (a stored one answers

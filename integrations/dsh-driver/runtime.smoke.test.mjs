@@ -13,6 +13,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { readHistory, fullReadHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
+import { DIRECTOR_ATTACHMENTS_SENTENCE } from './steward-host.mjs';
 import { watchProgress } from './progress.mjs';
 
 const effective = aitelierRoles(loadRoles());
@@ -26,7 +27,7 @@ const shared = ['bash', 'call_tool', 'create_goal', 'edit', 'get_goal', 'glob', 
   'mcp__aitelier__state_graph_write', 'read', 'read_image', 'read_mcp_resource', 'search_tools', 'send_message', 'skill', 'subagent',
   'todo_begin', 'todo_done', 'todo_report', 'todo_status', 'update_goal', 'web_fetch', 'web_search', 'working_directory', 'write'];
 const hostRegistered = {
-  director: [...shared, 'ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
+  director: [...shared, 'ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'media_call', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
     'todo_finish', 'todo_plan', 'todo_rebind', 'todo_templates', 'watch_process'].sort(),
   worker: [...shared, 'mcp__aitelier__state_graph_read', 'mcp__aitelier__wait_for_driver_inbox', 'mcp__aitelier__wait_for_run'].sort(),
 };
@@ -199,6 +200,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_TEST_CHILD_CWD: childDirectory,
       AITELIER_TEST_OUTSIDE_CWD: outsideDirectory,
+      // Step 24.2b: the DSH host gives every driver a media root; the director then has its own
+      // library, media_call and send_user_message's attachments (presented by roles.json).
+      AITELIER_MEDIA_ROOT: join(scratch, 'media'),
     };
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
@@ -316,6 +320,13 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       if (r.child) for (const name of ['subagent', 'workflow', 'todo_plan']) assert.ok(!names.includes(name), 'child request lists ' + name);
     }
     assert.ok(listed.some(r => !r.child) && listed.some(r => r.child), 'tiers were not observed for both root and child');
+    // Step 24.2b (7.8.12a "导演给业主发媒体" item 1): the director's send_user_message, as the pinned
+    // DSH sends it to the model, has `attachments` (absolute paths) and the one sentence about them.
+    const userMessage = listed.find(r => !r.child && r.options.tools.some(t => t.name === 'send_user_message'))
+      .options.tools.find(t => t.name === 'send_user_message');
+    assert.ok(userMessage.description.endsWith(DIRECTOR_ATTACHMENTS_SENTENCE), userMessage.description);
+    assert.deepEqual(userMessage.parameters.properties?.attachments, { type: 'array', items: { type: 'string' } }, JSON.stringify(userMessage.parameters));
+    assert.ok(!userMessage.parameters.required?.includes('attachments'), 'attachments is optional');
     for (const child of [false,true]) {
       const relevant = requests.filter(r=>r.child===child && !r.summary);
       assert.ok(relevant.some(r=>JSON.stringify(r.options).includes('agentmcp image')), 'root or child did not receive tool-search usage instructions');

@@ -20,7 +20,7 @@ import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom, ingestDashboardAttachments, uploadBody, wakeMedia } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, wakeMedia } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -815,17 +815,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           execute: (args, exec) => relayAnswer({ request: toolRequest, project, ownerMessageId: args.owner_message_id, mirror: ownerMessageSent, signal: exec.signal }),
         }));
       }
+      const userMessageTool = sendUserMessageTool({ steward, library });
       scope.tools.register(defineTool({ name: 'send_user_message',
-        description: 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).',
-        parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
-          body: { type: 'string', required: true }, node_key: { type: 'string' },
-          segments: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
-            kind: { type: 'string', required: true }, text: { type: 'string', required: true },
-            id: { type: 'string' } } } },
-          reply_to_message_id: { type: 'string' } },
+        description: userMessageTool.description,
+        parameters: userMessageTool.parameters,
         output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
         async execute(args, exec) {
-          const { node_key, segments, ...rest } = args;
+          const { node_key, segments, attachments, ...rest } = args;
           // Tagged blocks: `info` or `question` only. A block of any other kind is
           // refused here, not dropped, so the driver learns its tag did not reach
           // the user. The State command validates the same vocabulary and the same
@@ -845,6 +841,18 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
             if (long !== -1) return { refused: 'invalid_segments', reason: `segments[${long}].text must be at most 2000 characters` };
             if (segments.reduce((total, s) => total + size(s.text), 0) > 8000) return { refused: 'invalid_segments', reason: 'segments text must total at most 8000 characters' };
           }
+          // Step 24.2b: a director's attached files go into its own library first; one refused
+          // refuses the whole message (no text goes out without its files).
+          // Without the parameter (the steward; a director with no library) they are refused,
+          // never dropped: the text never goes out alone.
+          let stored;
+          if (attachments !== undefined && !(Array.isArray(attachments) && !attachments.length)) {
+            if (!userMessageTool.attachments) return { refused: 'attachments_unsupported', reason: steward
+              ? 'send a file to your owner with send_media' : 'this host has no media library' };
+            const ingested = await ingestDirectorAttachments({ library, project, requestKey: args.request_key, paths: attachments, signal: exec.signal });
+            if (ingested.refused) return ingested;
+            stored = ingested.attachments;
+          }
           const body = { ...rest, project_id: project };
           if (node_key) body.refs = { node_key };
           // A caller-supplied `id` is the citation key the State guide tells a
@@ -853,6 +861,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           // (the service assigns the id in that case), and an absent or null id
           // is never sent as a key of its own.
           if (segments !== undefined) body.segments = segments.map(({ kind, text, id }) => (id == null ? { kind, text } : { kind, text, id }));
+          if (stored) body.attachments = stored.map(file => file.ref);
           const result = await (steward ? toolRequest : request)('/api/state/commands/send_user_message', body, exec.signal);
           // Never hand back a message identity that does not exist.
           if (result.error) throw new Error(result.error);
@@ -862,7 +871,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           // The steward's reply joins its owner's turn in memory (a failure is logged, the reply stands).
           if (steward && memory) await syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory, signal: exec.signal })
             .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300)));
-          return result;
+          return stored ? { ...result, attachments: stored } : result;
         },
       }));
     },

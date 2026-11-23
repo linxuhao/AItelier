@@ -370,7 +370,9 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
           if (probed.video) throw new Refused('type');
           durationMs = probed.ms;
         }
-        if (meta.source !== 'generated' && durationMs > limits.voice_ms) throw new Refused('too_large');
+        // A director's own file (channel 'director', generated) is held to the 2 minutes too
+        // (7.8.12a "导演给业主发媒体" item 2); send_media's generated file is not.
+        if ((meta.source !== 'generated' || meta.channel === 'director') && durationMs > limits.voice_ms) throw new Refused('too_large');
       }
       if (!file) {
         ensureDir(join(home, month));

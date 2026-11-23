@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { withoutLeadingClockLines, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
-import { attachmentLine } from '../dsh-director/lib/media.mjs';
+import { attachmentLine, MEDIA_LIMITS, sniff } from '../dsh-director/lib/media.mjs';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, isAbsolute } from 'node:path';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -1026,6 +1028,80 @@ export async function uploadBody(response) {
   await response.body?.cancel?.().catch(() => {});
   if (response.status === 404 || response.status === 410) throw Object.assign(new Error('gone'), { refused: 'gone' });
   throw Object.assign(new Error(`staged upload: HTTP ${response.status}`), { status: response.status });
+}
+
+const SEND_USER_MESSAGE_DESCRIPTION = 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).';
+/** Step 24.2b (design-steward 7.8.12a "导演给业主发媒体" items 1 and 7): the one sentence a director's
+ *  send_user_message adds, with its `attachments` parameter. */
+export const DIRECTOR_ATTACHMENTS_SENTENCE = ' attachments: up to 10 absolute paths of files on this machine (images, audio, PDF) sent with the message; they expire after 30 days, only this project\'s readers can see them, and they are never sent to WeChat or Slack.';
+const DIRECTOR_ATTACHMENTS_MAX = 10;
+
+/** send_user_message's description and parameters. Only a director with a media library gets
+ *  `attachments` and its sentence (7.8.12a "导演给业主发媒体" item 1, checked r43): the steward's
+ *  files go with send_media as library refs, never as paths, and a director without a library
+ *  could never store one. */
+export function sendUserMessageTool({ steward, library }) {
+  const attachments = !steward && Boolean(library);
+  return { attachments, description: SEND_USER_MESSAGE_DESCRIPTION + (attachments ? DIRECTOR_ATTACHMENTS_SENTENCE : ''),
+    parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
+      body: { type: 'string', required: true }, node_key: { type: 'string' },
+      segments: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+        kind: { type: 'string', required: true }, text: { type: 'string', required: true },
+        id: { type: 'string' } } } },
+      reply_to_message_id: { type: 'string' },
+      ...(attachments ? { attachments: { type: 'array', items: { type: 'string' } } } : {}) } };
+}
+
+/** One path a director attaches, judged before anything is stored (7.8.12a "导演给业主发媒体" item
+ *  2): an absolute path to a regular file (else not_found / not_a_file), whose first bytes name a
+ *  type of the shared table (else `type`: text, a key file, an office document never come in),
+ *  within that kind's single-file bound (image 20 MiB, file and voice 25 MiB; else too_large).
+ *  {type, sha256, name} or {refused}. Not bounded to the workspace: a director has the whole
+ *  machine already (pending 12). */
+async function checkDirectorAttachment(path) {
+  if (typeof path !== 'string' || !isAbsolute(path)) return { refused: 'not_found' };
+  let info;
+  try { info = await stat(path); } catch { return { refused: 'not_found' }; }
+  if (!info.isFile()) return { refused: 'not_a_file' };
+  if (info.size > Math.max(MEDIA_LIMITS.image_bytes, MEDIA_LIMITS.file_bytes, MEDIA_LIMITS.voice_bytes)) return { refused: 'too_large' };
+  let bytes;
+  try { bytes = await readFile(path); } catch { return { refused: 'not_found' }; }
+  const type = sniff(bytes.subarray(0, 64));
+  if (!type) return { refused: 'type' };
+  const cap = type.kind === 'image' ? MEDIA_LIMITS.image_bytes : type.kind === 'voice' ? MEDIA_LIMITS.voice_bytes : MEDIA_LIMITS.file_bytes;
+  if (bytes.length > cap) return { refused: 'too_large' };
+  return { type, sha256: createHash('sha256').update(bytes).digest('hex'), name: basename(path) };
+}
+
+/** Step 24.2b (design-steward 7.8.12a "导演给业主发媒体" items 2, 6, 7): a director's attached paths
+ *  into its own library (`d-<driver_id>/`) BEFORE its message is sent. Every path is checked
+ *  first; any refusal refuses the whole message, listing each refused path, and nothing is
+ *  stored. Then one ingest per path, in order: channel 'director', keyed by (request_key, index)
+ *  with the sha256 just read - the same key with the same file answers the same ref (the
+ *  backend then replays the same message), with another file idempotency_conflict; the
+ *  library refuses the 21st in an hour (rate_limited, retry_after; counted from its index, so a
+ *  restart keeps it), a file over 40 MP (too_large), a write the disk cannot take
+ *  (store_failed). The first ingest refused refuses the whole message; files stored before it
+ *  stay out of every message and go with the 30-day cleanup.
+ *  {attachments: [{ref, kind, mime, size, name}]} or {refused: 'attachment_refused',
+ *  attachments: [{path, refused, retry_after?}]} or {refused: 'invalid_request', reason}. */
+export async function ingestDirectorAttachments({ library, project, requestKey, paths, signal }) {
+  if (!Array.isArray(paths) || paths.length > DIRECTOR_ATTACHMENTS_MAX)
+    return { refused: 'invalid_request', reason: `attachments is a list of at most ${DIRECTOR_ATTACHMENTS_MAX} absolute paths` };
+  if (typeof requestKey !== 'string' || !requestKey) return { refused: 'invalid_request', reason: 'attachments need a request_key' };
+  const checked = [];
+  for (const path of paths) checked.push({ path, ...(await checkDirectorAttachment(path)) });
+  const refused = checked.filter(file => file.refused).map(({ path, refused: code }) => ({ path, refused: code }));
+  if (refused.length) return { refused: 'attachment_refused', attachments: refused };
+  const stored = [];
+  for (const [index, file] of checked.entries()) {
+    const answer = await library.ingest({ channel: 'director', messageRef: requestKey, index, audience: `project:${project}`,
+      source: 'generated', sha256: file.sha256 }, () => readFile(file.path), { signal });
+    if (typeof answer?.ref !== 'string') return { refused: 'attachment_refused', attachments: [{ path: file.path,
+      refused: answer?.refused ?? 'store_failed', ...(answer?.retry_after !== undefined ? { retry_after: answer.retry_after } : {}) }] };
+    stored.push({ ref: answer.ref, kind: answer.kind, mime: answer.mime, size: answer.size, name: file.name });
+  }
+  return { attachments: stored };
 }
 
 /** Step 24.2b (design-steward 7.8.12a "宿主入库"): the owner's dashboard uploads in one wake,

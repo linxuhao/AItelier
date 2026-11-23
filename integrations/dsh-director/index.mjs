@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
-import { registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
+import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
 import { attachmentLine } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
@@ -42,6 +42,10 @@ import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
 
 export const name = 'dsh-director';
+/** Step 24.2b (design-steward 7.8.12a "导演与管家的不同"): the tools a director's media_call runs on
+ *  its files - its own media connection's, each taking its file as `*_base64`. */
+export const DIRECTOR_MEDIA_TOOLS = Object.freeze(['mcp__agentmcp__ocr_image', 'mcp__agentmcp__vision_critique',
+  'mcp__agentmcp__transcribe_audio']);
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
   'credentials', 'llm', 'goals', 'tokenMeter', 'directorHost'];
 
@@ -124,6 +128,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // returned (send_media fetches only those, through the connection that returned them).
   const mediaHost = stewardCatalog && host.capabilities.includes('media') ? host.media : undefined;
   const urlLedger = mediaHost ? new UrlLedger() : undefined;
+  // Step 24.2b (7.8.12a "导演与管家的不同"): a director with a media library runs media_call on
+  // its own project's refs, through these tools of its own registry only (no catalog, no gateway).
+  const directorMedia = rootRole === 'director' && host.capabilities.includes('media') ? host.media : undefined;
   if (stewardCatalog) {
     // External content (7.8.8): the guard reads only the cache and the turn record; a
     // connection tool's result marks the turn before the result is released.
@@ -744,6 +751,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // Step 24.2 (design-steward 7.8.12): media_call and send_media, when the host has a media library.
     if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
       media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
+    if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
+      media: directorMedia, rootSession: config.sessionId, projectId: config.projectId, names: DIRECTOR_MEDIA_TOOLS });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
     // Step 23, 25 C4, 23.1: the family memory, the family lists and group_reminder_set (lib/group-tools.mjs).

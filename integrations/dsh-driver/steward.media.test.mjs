@@ -21,7 +21,7 @@ const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_D
   AITELIER_DSH_EXECUTION: 'host', ...extra });
 const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.from([0, 0, 0, 64, 0, 0, 0, 64]), Buffer.alloc(40)]);
 
-test('the media capability: a steward with a media root has it (and validates); without a root, or a director, has none', () => {
+test('the media capability: a steward with a media root has it (and validates); without a root it has none', () => {
   const root = mkdtempSync(join(tmpdir(), 'steward-media-'));
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: root }));
   assert.deepEqual(steward.capabilities.slice(-8), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog', 'media']);
@@ -30,8 +30,30 @@ test('the media capability: a steward with a media root has it (and validates); 
   assert.doesNotThrow(() => validateHost(steward));
   const bare = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }));
   assert.ok(!bare.capabilities.includes('media')); assert.equal(bare.media, undefined);
+});
+
+test('24.2b: a director with a media root has its own d-<driver_id> library (1 GiB), no gateway and no group', async () => {
+  // design-steward 7.8.12a "一个写者一个子目录": one writer per subdirectory.
+  const root = mkdtempSync(join(tmpdir(), 'director-media-'));
   const director = aitelierHost(env({ AITELIER_MEDIA_ROOT: root }));
-  assert.ok(!director.capabilities.includes('media'), 'the director gets the root (24.2b uses it), not the steward\'s tools');
+  assert.equal(director.capabilities.at(-1), 'media');
+  assert.doesNotThrow(() => validateHost(director));
+  for (const op of ['ingest', 'resolve', 'read', 'fetch', 'setProtected']) assert.equal(typeof director.media[op], 'function', op);
+  assert.equal(director.media.postGroup, undefined, 'a director has no group to post to');
+  const { ref } = await director.media.ingest({ channel: 'director', messageRef: 'k1', index: 0, audience: 'project:aitelier-home', source: 'generated' }, async () => PNG);
+  assert.match(ref, /^m_[0-9a-f]{16}$/);
+  assert.ok(existsSync(join(root, 'd-drv-home', 'index.jsonl')), 'the director writes d-<driver_id>/');
+  assert.equal(existsSync(join(root, 'owner')), false, 'never the steward\'s subdirectory');
+  assert.equal((await director.media.resolve(ref)).audience, 'project:aitelier-home');
+  const fetched = await director.media.fetch({ connId: 'x', url: 'https://example.invalid/a.png', audience: 'project:aitelier-home' });
+  assert.equal(fetched.refused, 'fetch_failed', 'no gateway');
+  // The library under the adapter is held to the director's 1 GiB.
+  assert.equal(createMediaLibrary({ root, userId: 'd-drv-home' }).limits.total_bytes, 1024 * 1024 * 1024);
+  // No media root, or a driver id that cannot name a subdirectory: no library, no capability.
+  for (const extra of [{}, { AITELIER_MEDIA_ROOT: root, AITELIER_DRIVER_ID: '../x' }, { AITELIER_MEDIA_ROOT: root, AITELIER_DRIVER_ID: '' }]) {
+    const bare = aitelierHost(env(extra));
+    assert.ok(!bare.capabilities.includes('media'), JSON.stringify(extra)); assert.equal(bare.media, undefined);
+  }
 });
 
 test('ingest through the host adapter keeps the caller\'s signal: already aborted is unavailable, open never called, nothing stored', async () => {

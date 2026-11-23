@@ -15,7 +15,7 @@
  *  different signature - and nothing imported this file's boot. The added names are
  *  SESSION_ENV, aitelierHost, attemptWorkState and stateRequest (the State retry policy,
  *  exported so its test can drive it). exports.test.mjs pins both lists. */
-import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
+import { installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
@@ -585,14 +585,23 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let sendToGroup;
   // Step 24.1a: the plugin's "this turn read outside content" (api.externalContent), kept from install().
   let externalContent = () => false;
-  // Step 24.2 (design-steward 7.8.12): the steward's media library, when the DSH host gave a
-  // media root (core/dsh_driver.py _environment); without one there is no `media` capability.
+  // Step 24.2 (design-steward 7.8.12): the media library, when the DSH host gave a media root
+  // (core/dsh_driver.py _environment); without one there is no `media` capability. 24.2b
+  // (7.8.12a "一个写者一个子目录"): the steward writes `<userId>/` (5 GiB), each director its own
+  // `d-<driver_id>/` (1 GiB, limitsFor) - one writer per subdirectory.
   let mediaLog = () => {}, gatewayToken;
-  const mediaRoot = steward ? mediaRootFrom(env) : undefined;
+  const mediaRoot = mediaRootFrom(env);
+  const mediaUser = steward ? env.AITELIER_DSH_MEMORY_USER || 'owner'
+    : /^[A-Za-z0-9_.-]+$/.test(env.AITELIER_DRIVER_ID ?? '') ? `d-${env.AITELIER_DRIVER_ID}` : undefined;
   // The voice length is measured with ffprobe: AITELIER_MEDIA_FFPROBE names it (default `ffprobe`
   // on PATH); one that is missing refuses every voice `unsupported` (fail closed).
-  const library = mediaRoot ? createMediaLibrary({ root: mediaRoot, userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
+  const library = mediaRoot && mediaUser ? createMediaLibrary({ root: mediaRoot, userId: mediaUser,
     ffprobe: env.AITELIER_MEDIA_FFPROBE || 'ffprobe', log: (event, fields) => mediaLog(event, fields) }) : undefined;
+  // Step 24.2b (7.8.12a "路线能力"): which routes take images, read from the backend at most once
+  // a minute (the model bridge asks on every step).
+  let routeLog = () => {};
+  const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
+    undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
   const gatewayFetch = (connId, url, signal) => fetch(`${String(env.AITELIER_STEWARD_GATEWAY_URL ?? 'http://127.0.0.1:4445/api/steward/mcp').replace(/\/+$/, '')}/${encodeURIComponent(connId)}/fetch?url=${encodeURIComponent(url)}`,
     { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal: signal ?? AbortSignal.timeout(180000) });
   const host = {
@@ -637,6 +646,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       gatewayToken = token;
       // The library logs a mime and a size, never a name or a byte.
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
+      routeLog = line => ctx.logger.warn(line);
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
       const sendRequest = async (path, body, signal, readAs) => {
@@ -681,7 +691,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       installHostModel(ctx, llm, { request, project, session: env.AITELIER_DSH_SESSION,
         rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles[steward ? 'steward' : 'director'].reasoning_effort),
         workerEffort: roles.worker.reasoning_effort,
-        retry: modelRetryOptions(env) });
+        retry: modelRetryOptions(env), routeInput });
       // Resolve the existing mounted secret file into DSH's private credential
       // store, never into the environment inherited by test/build subprocesses.
       const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';
@@ -1104,6 +1114,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     mirror: (...args) => mirrorOwnerMessage?.(...args), groupSend: (...args) => sendToGroup ? sendToGroup(...args) : false }) }) },
   // Step 24.2: the media library behind storeMedia, media_call and send_media.
   library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch }) } : {});
+  // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
+  else if (library) {
+    const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,
+      gatewayFetch: async () => { throw new Error('a director has no media gateway'); } });
+    host.media = media;
+  }
   return host;
 }
 

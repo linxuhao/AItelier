@@ -336,3 +336,40 @@ def test_the_staging_directory_is_created_when_missing(world, client):
     assert not world.staging.exists()
     assert upload(client, PNG).status_code == 200
     assert world.staging.is_dir()
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes through any mode")
+def test_a_staging_directory_the_backend_cannot_write_is_503_not_a_500(world, client):
+    """OPS-2: a bind source Docker created as root (the directory was missing before `up -d`)
+    answers 503 staging_unavailable, with no row and nothing staged - not an unhandled 500."""
+    world.staging.mkdir(mode=0o500)
+    try:
+        r = upload(client, PNG)
+        assert refusal(r) == (503, "staging_unavailable"), r.text
+        assert rows(world) == []
+    finally:
+        world.staging.chmod(0o700)
+    assert staged(world) == []
+    assert upload(client, PNG).status_code == 200
+
+
+def test_the_hour_is_counted_again_inside_the_commit(world, client):
+    """Nit TQ-2: two uploads that both passed admit() as the 20th cannot both be kept - the
+    second's commit counts again in its write transaction: 429, no row, no file left."""
+    for _ in range(uploads.RATE_PER_HOUR - 1):
+        assert upload(client, PNG).status_code == 200
+    world.staging.mkdir(exist_ok=True)
+    service = StateService(world.db, actor="owner:" + OWNER, project_read_trusted=True)
+    assert uploads.admit(service.store, "alpha", world.staging) >= 0
+    raced = uploads.new_upload_id()
+    partial = world.staging / (raced + ".part")
+    partial.write_bytes(PNG)
+    # The other upload that passed admit() commits first: the 20th row.
+    assert upload(client, PNG).status_code == 200
+    with pytest.raises(uploads.UploadRefused) as refused:
+        uploads.commit(service.store, project_id="alpha", user="owner:" + OWNER, upload_id=raced,
+                       entry={"kind": "image", "mime": "image/png"}, size=len(PNG), name="raced.png",
+                       partial=str(partial), directory=world.staging)
+    assert (refused.value.status, refused.value.code) == (429, "rate_limited")
+    assert raced not in [r["upload_id"] for r in rows(world)]
+    assert not partial.exists() and not (world.staging / raced).exists()

@@ -165,7 +165,9 @@ services:
       # and core/media_library.staging_dir() resolve unchanged (HOME above == the
       # host's). Mounted into NO other container (not dev_mcp, not aitelier-zg).
       # Create both before `up -d` (staging with mode 700): a missing bind source
-      # is created by Docker, owned by root.
+      # is created by Docker, owned by root, and every upload then answers 503
+      # staging_unavailable. Recreate (`up -d`), never just restart: a restart runs
+      # the live-mounted new code without these two mounts.
       - ${HOME}/.local/share/dsh-director/media:${HOME}/.local/share/dsh-director/media:ro
       - ${HOME}/.local/share/aitelier/media-staging:${HOME}/.local/share/aitelier/media-staging
       # The SPA bundle is baked into the image at /srv/web_dist (outside /app,

@@ -197,6 +197,15 @@ async def receive(chunks, directory, upload_id: str, base: int):
             _drop(partial)
         if exc.errno in (errno.ENOSPC, errno.EDQUOT):  # the staging disk itself is full
             raise UploadRefused(507, "staging_full") from exc
+        if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS):
+            # OPS-2: the staging directory is not the backend's to write - typically a bind
+            # source Docker created as root because it did not exist before `up -d`. A clear
+            # refusal and one log line, not an unhandled 500 per upload.
+            import logging
+            logging.getLogger(__name__).error(
+                "conversation upload refused: the staging directory is not writable (%s); create it "
+                "as the backend's user with mode 700 before `docker compose up -d`", errno.errorcode.get(exc.errno))
+            raise UploadRefused(503, "staging_unavailable") from exc
         raise
     except BaseException:
         if handle is not None:

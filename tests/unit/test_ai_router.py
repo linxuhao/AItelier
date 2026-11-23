@@ -956,6 +956,72 @@ class TestOnlyARefusedArgumentIsAttributed:
             "and nothing is remembered, so later turns keep the key too")
 
 
+class TestARefusalPhraseWithoutAColonStillNamesTheKey:
+    """The marker's noun slot can be a PHRASE, and the name needs no colon.
+
+    `_named_injected_param` knew two shapes with the name right behind the
+    marker: a `:`/`=` slot ("Unrecognized request argument supplied: thinking",
+    `_MARKER_THEN_ARG`) and a single noun ("unsupported parameter thinking",
+    `_MARKER_SPACE_ARG`). The shape litellm and the OpenAI SDK actually raise
+    for a bad kwarg puts a SECOND noun in between and then names the argument
+    with no separator at all:
+
+        Unexpected keyword argument thinking
+        unexpected keyword argument 'thinking'
+        got an unexpected keyword argument reasoning_effort
+
+    Measured on 210bba37f4: all three recorded nothing, so the refusal was never
+    remembered and every later turn rebuilt the key and paid the same 400 — the
+    degradation the memory around `_drop_refused_param` exists to prevent.
+
+    The prose counter-example in `TestOnlyARefusedArgumentIsAttributed` is
+    pinned again here because it is the one this widening could have broken:
+    the noun slot is STILL required, so a 400 that merely talks about the key
+    after an unrelated marker is not a refusal of it.
+    """
+
+    PROSE = ("messages.2: thinking blocks are not allowed when tools are "
+             "present")
+
+    @pytest.mark.parametrize("refusal, key", [
+        ("Unexpected keyword argument thinking", "thinking"),
+        ("unexpected keyword argument 'thinking'", "thinking"),
+        ("got an unexpected keyword argument reasoning_effort",
+         "reasoning_effort"),
+    ])
+    def test_the_named_key_is_dropped_and_remembered(self, refusal, key):
+        gw = AIGateway("deepseek/deepseek-v4-flash", enable_thinking=True,
+                       thinking_effort="low")
+        seen = _stub_transport(gw, litellm.exceptions.BadRequestError(
+            refusal, "m", "p"))
+        response = gw._complete_prebuilt(
+            gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert response is not None, (
+            "the turn must not die on a parameter WE injected")
+        assert len(seen) == 2, "one drop, one retry"
+        assert key in (seen[0].get("extra_body") or {}), (
+            "the first attempt must really have carried the refused key, or "
+            "the rest of this test proves nothing")
+        assert key not in (seen[1].get("extra_body") or {}), (
+            "the retry must not carry the key the endpoint refused: "
+            f"{sorted(seen[1].get('extra_body') or {})}")
+        assert key in _recorded(gw, gw.active_model), (
+            "and the refusal must be REMEMBERED for this endpoint, or the "
+            f"next turn pays the same 400 ({gw._refused_params!r})")
+
+    def test_the_prose_about_the_key_is_still_not_a_refusal(self):
+        gw = AIGateway("deepseek/deepseek-v4-flash", enable_thinking=True,
+                       thinking_effort="low")
+        seen = _stub_transport(gw, litellm.exceptions.BadRequestError(
+            self.PROSE, "m", "p"))
+        with pytest.raises(litellm.exceptions.BadRequestError):
+            gw._complete_prebuilt(
+                gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(seen) == 1, (
+            "the refusal phrase must not turn prose into a refusal of our key")
+        assert gw._refused_params == {}
+
+
 class TestAnEnvelopeWithdrawalNamesWhatWentWithIt:
     """Gap (iii): a whole-envelope refusal was silent about what it took.
 

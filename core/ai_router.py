@@ -497,11 +497,16 @@ _MARKER_THEN_ARG = re.compile(
     re.IGNORECASE)
 
 #: Marker FIRST, the argument right behind it with no separators at all:
-#: "unknown field chat_template_kwargs", "unsupported parameter thinking". The
-#: noun between them is required, which is what keeps this from matching a
-#: sentence that merely mentions the key after an unrelated "invalid".
+#: "unknown field chat_template_kwargs", "unsupported parameter thinking".
+#: The noun slot is a short PHRASE, because the shape litellm/openai raise on a
+#: bad kwarg puts the word in between and then drops the name behind the last
+#: noun with no colon at all: "unexpected keyword argument thinking",
+#: "got an unexpected keyword argument reasoning_effort". The noun between them
+#: is STILL required, which is what keeps this from matching a sentence that
+#: merely mentions the key after an unrelated "invalid".
 _MARKER_SPACE_ARG = re.compile(
     r"\b" + _REFUSAL_MARKER + r"\s+(?:request\s+)?"
+    r"(?:keywords?\s+)?"
     r"(?:arguments?|parameters?|fields?|keywords?|keys?|options?|properties"
     r"|inputs?)s?\s*[\"'`\[]?(?:extra_body\.)?(?P<name>"
     + _INJECTED_NAME_ALT + r")\b",

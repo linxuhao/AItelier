@@ -2965,22 +2965,22 @@ test('purge: a failed or malformed groups.list() purges nothing; an unlisted gro
   w.state.malformed = false;
   w.calls.length = 0;
   await w.pass();
-  assert.ok(w.library.lookup(kept.ref), 'r9 is listed by nobody: that is not authority to delete what State still advertises as kept');
+  assert.ok(w.library.lookup(kept.ref), 'r9 is listed by nobody: that is not authority to delete what the backend still advertises as kept');
   assert.deepEqual(w.named('record'), [], 'no receipt is owed for it');
   w.stop();
 });
 
-test('purge: a kept audience with no State debt is never purged and its skip is reported with the room only', async () => {
+test('purge: a kept audience with no backend debt is never purged and its skip is reported with the room only', async () => {
   const w = switchWorld();
   const kept = await w.keep('r9', 'x1');
   await w.settle();
   w.calls.length = 0; w.logs.length = 0;
   // The listing omits the room entirely - the same shape as a group that went missing from the
-  // backend answer - and State owes no purge. Under the old sweep this silently deleted the row.
+  // backend answer - and the backend owes no purge. Under the old sweep this silently deleted the row.
   w.state.groups = [];
   w.state.media_purges = [];
   await w.pass();
-  assert.deepEqual(w.purges, [], 'purgeKept is not called for an audience with no State debt');
+  assert.deepEqual(w.purges, [], 'purgeKept is not called for an audience with no backend debt');
   assert.ok(w.library.lookup(kept.ref), 'the kept row survives the pass');
   assert.equal(w.library.rows.filter(row => row.kept && row.audience === 'group:wechat:r9').length, 1, 'still in the library index');
   assert.deepEqual(w.logs.filter(([event]) => event === 'group_media_purge_skipped').map(([, fields]) => fields),
@@ -2989,7 +2989,7 @@ test('purge: a kept audience with no State debt is never purged and its skip is 
   w.stop();
 });
 
-test('purge: an audience State owes a purge for is purged once and its receipt is still recorded', async () => {
+test('purge: an audience the backend owes a purge for is purged once and its receipt is still recorded', async () => {
   const w = switchWorld();
   const kept = await w.keep('r9', 'x1');
   await w.settle();
@@ -2997,7 +2997,7 @@ test('purge: an audience State owes a purge for is purged once and its receipt i
   w.state.groups = [];
   w.state.media_purges = [{ channel: 'wechat', group_ref: 'r9', epoch: 'E1' }];
   await w.pass();
-  assert.equal(w.library.lookup(kept.ref), undefined, 'the State debt purges the kept row');
+  assert.equal(w.library.lookup(kept.ref), undefined, 'the backend debt purges the kept row');
   assert.deepEqual(w.purges, ['group:wechat:r9'], 'purgeKept called once for the owed audience');
   assert.deepEqual(w.named('record').map(a => [a.groupRef, a.epoch, a.receipt.rows_before]), [['r9', 'E1', 1]], 'the receipt is recorded');
   assert.deepEqual(w.logs.filter(([event]) => event === 'group_media_purge_skipped'), [], 'an owed audience is not a skip');

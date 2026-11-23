@@ -978,8 +978,9 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     const on = new Set(listed.groups.filter(g => g?.media_keep === 'on').map(g => audienceOf(g.channel, g.group_ref)));
     const owed = new Map(listed.media_purges.filter(p => text(p?.channel) && text(p?.group_ref) && text(p?.epoch))
       .map(p => [audienceOf(p.channel, p.group_ref), p]));
-    // State's purge debts are the only authority to delete kept rows: a room missing from this
-    // answer (or listed off) is NOT authority when State still advertises its rows as kept.
+    // The backend's purge debts are the only authority to delete kept rows: a room missing from
+    // this answer (or listed off) is NOT authority while the backend still advertises its rows
+    // as kept.
     // Report every such room held back for want of a debt, so a later loss is attributable.
     for (const audience of await media.keptAudiences()) {
       if (owed.has(audience) || on.has(audience)) continue;

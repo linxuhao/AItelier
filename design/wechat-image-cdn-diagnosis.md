@@ -18,7 +18,7 @@ claim that rests on neither is marked **inference**.
   `:690`–`:729`), the fork's own Rust in
   `integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch`, and the Rust
   dependency `wechat-protocol` — the crate the patch imports (`use wechat_protocol::` at
-  `neo-fork/0001-incoming-message-types.patch:28`). **This repository records no version for
+  `neo-fork/0001-incoming-message-types.patch:8`). **This repository records no version for
   it**: `neo-fork/pin.json` pins the upstream `puppet-neo` commit `ddfa5ecd…` (version 0.1.1),
   the sha256 of seven files — the four the patch touches, plus `LICENSE`, `package.json` and
   `rust-toolchain.toml` — and the patch's own digest; no `Cargo.toml` or lockfile is tracked
@@ -40,11 +40,12 @@ For a 1:1 image the chain is:
    `message.toImage().hd()`, every other kind through `message.toFileBox()`. This is the first
    place the image path parts company with the file path.
 2. Wechaty → `puppet-neo` → the fork's `download_media(file_id, aes_key, quality, …)`
-   (`0001-incoming-message-types.patch:209`, landing in `native/src/lib.rs`), called with
+   (`0001-incoming-message-types.patch:190`, landing in `native/src/lib.rs`), called with
    `quality = "original"` for an image and `"file"` for a file
-   (`0001-incoming-message-types.patch:1194`–`:1214`: an image's id is
+   (`0001-incoming-message-types.patch:1231`–`:1280`: an image's id is
    `attribute(image,'cdnbigimgurl') || attribute(image,'cdnmidimgurl')…` with
-   `quality:'original'`; a file's is `elementText(content,'cdnattachurl')` with `quality:'file'`).
+   `quality:'original'`; a file's is `elementText(content,'cdnattachurl')` with `quality:'file'`,
+   `'large_file'` above the fork's own byte bound).
 3. `wechat-protocol` 2.2.0 `src/media.rs:547` `download_with_transport` → `:619` builds the
    fields → `:635` posts to `/download` (`/downloadbig` only for a large file) via
    `src/media.rs:502` `post()`.
@@ -148,14 +149,21 @@ bound on how long a kept medium may live, not a guarantee that a refused one is 
 The observations that this environment cannot produce without a live WeChat message, and that
 would settle the question:
 
-1. The **shape** of this account's `cdnbigimgurl` value (bare media id versus a URL carrying a
-   path and query): it lives in the message's own XML payload, which carries owner content and
-   is not logged anywhere.
-2. The **CDN's response body** for the 400. A fork build that logs only the status and the body's
-   length (never the body) would name which field was rejected without keeping any content.
-3. Which pair the CDN accepts for an image: `filetype` 1 with `cdnbigimgurl`, versus `filetype`
-   2 with `cdnmidimgurl`. The fork already carries both ids; trying the other one is a one-line
-   change in the fork, but it needs a rebuilt native module and a fresh login (a QR scan).
+### 6.1 The shape of this account's `cdnbigimgurl` value
+
+Bare media id versus a URL carrying a path and query: it lives in the message's own XML payload,
+which carries owner content and is not logged anywhere.
+
+### 6.2 The CDN's response body for the 400
+
+A fork build that logs only the status and the body's length (never the body) would name which
+field was rejected without keeping any content.
+
+### 6.3 Which pair the CDN accepts for an image
+
+`filetype` 1 with `cdnbigimgurl`, versus `filetype` 2 with `cdnmidimgurl`. The fork already carries
+both ids; trying the other one is a one-line change in the fork, but it needs a rebuilt native
+module and a fresh login (a QR scan).
 
 ## 7. What is not determined
 
@@ -185,4 +193,4 @@ reader does not have to infer the split:
 4. §6: moving the fetch to the steward's read would only move the same failing POST later, and
    the library write happens once per ingested medium; both follow from the call sites, and
    neither is witnessed in the retained bytes.
-5. §6 items 1–3 and §7 are proposed observations and undetermined questions, not findings.
+5. §6.1–§6.3 and §7 are proposed observations and undetermined questions, not findings.

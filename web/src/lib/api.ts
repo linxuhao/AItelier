@@ -1062,10 +1062,20 @@ export interface GroupRecord {
   withheld_reason: string | null; reply_to: string | null; answered_by: string | null; at: string;
 }
 export interface FamilyMemoryEntry { entry_id: string; text: string; at: string; added_by_role: string | null; added_by_label: string | null }
+/** design/steward-group-media.md section 9 (owner 2026-11-23): a group's media switch - whether its
+ *  files sent without @ are kept (one day). on_pending: the group's notice is not sent yet (nothing is
+ *  kept); off_notice: off, the kept files being deleted (purge_owed) or the group being told. */
+export interface GroupMediaKeep {
+  state: 'off' | 'on_pending' | 'on' | 'off_notice'; since: string | null; note: string | null; attempts: number;
+  purge_owed: boolean; kept_24h: number;
+  last_purge: {at: string; reason: string; backend_rows: number; rows_before: number; files_unlinked: number; files_shared: number;
+    bytes_freed: number} | null;
+}
 export interface OwnerGroup {
   channel: OwnerChannelName; group_ref: string; label: string | null; mention_prefix: string; bound_at: string;
   messages_30d: number; last_message_at: string | null; members: GroupMember[];
   messages?: GroupRecord[]; family_note?: {text: string; updated_at: string} | null; family_memory?: FamilyMemoryEntry[];
+  media_keep?: GroupMediaKeep;
 }
 const groupPath = (channel: OwnerChannelName, groupRef: string) =>
   '/api/steward/groups/' + encodeURIComponent(channel) + '/' + encodeURIComponent(groupRef);
@@ -1082,6 +1092,10 @@ export function unbindOwnerGroup(channel: OwnerChannelName, groupRef: string): P
 }
 export function clearGroupRecords(channel: OwnerChannelName, groupRef: string): Promise<unknown> {
   return _post(groupPath(channel, groupRef) + '/clear');
+}
+/** Turn the group's media switch on (it waits for the group's notice) or off (deletes what was kept). */
+export function setGroupMediaKeep(channel: OwnerChannelName, groupRef: string, on: boolean): Promise<{state: GroupMediaKeep['state']}> {
+  return _put(groupPath(channel, groupRef) + '/media-keep', {on});
 }
 export function nameGroupMember(channel: OwnerChannelName, groupRef: string, senderRef: string, label: string): Promise<unknown> {
   return _put(groupPath(channel, groupRef) + '/members/' + encodeURIComponent(senderRef), {label});

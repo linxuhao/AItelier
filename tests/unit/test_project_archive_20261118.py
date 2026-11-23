@@ -465,6 +465,8 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
                  # Step 23's family group (core/state_groups.py).
                  "state_owner_groups", "state_group_messages", "state_group_members", "state_family_memory",
                  "state_family_note", "state_steward_turn_audience", "state_pending_groups",
+                 # design/steward-group-media.md: the purge ledger of a group's kept media.
+                 "state_group_media_purges",
                  # Step 25 C4's family lists (core/state_lists.py).
                  "state_steward_list_items",
                  # Step 24.1a's own MCP connections (core/state_steward_connections.py): the

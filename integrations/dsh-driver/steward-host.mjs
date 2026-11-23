@@ -868,10 +868,27 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     bind: ({ channel, groupRef, senderRef, messageRef, prefix, code }, signal) => request('/api/state/commands/bind_owner_group', {
       request_key: `group-bind:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       code, mention_prefix: prefix, channel_message_ref: messageRef }, signal).then(result, refused),
-    relay: ({ channel, groupRef, senderRef, messageRef, text, at, attachments }, signal) => request('/api/state/commands/relay_group_message', {
+    // design/steward-group-media.md section 3: `kept` - the message did not call the steward;
+    // the backend records it only while the group's media switch is on.
+    relay: ({ channel, groupRef, senderRef, messageRef, text, at, attachments, kept }, signal) => request('/api/state/commands/relay_group_message', {
       request_key: `group:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}),
-      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}) }, signal).then(result, refused),
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}), ...(kept === true ? { kept: true } : {}) },
+    signal).then(result, refused),
+    // design/steward-group-media.md section 2: a media-switch notice's check (a dry run: a fresh
+    // key, nothing recorded), sent (after the channel took the line: one key per epoch, so a
+    // commit retried after a lost answer is State's replay) or failed (one key per attempt).
+    mediaNotice: ({ channel, groupRef, epoch, notice, phase, channelDown, attempts = 0 }, signal) => request('/api/state/commands/group_media_notice', {
+      request_key: phase === 'check' ? `group-media-notice-check:${randomUUID()}`
+        : `group-media-notice:${channel}:${digest(groupRef)}:${epoch}:${phase}${phase === 'failed' ? `:${attempts}` : ''}`,
+      channel, group_ref: groupRef, epoch, notice, phase, ...(channelDown === true ? { channel_down: true } : {}) }, signal)
+      .then(result, refused),
+    // Section 6: the witness of a purge of a group's kept media (counts only).
+    recordPurge: ({ channel, groupRef, epoch, receipt }, signal) => request('/api/state/commands/record_group_media_purge', {
+      request_key: `group-media-purge:${channel}:${digest(groupRef)}:${epoch}:${digest(JSON.stringify(receipt))}`,
+      channel, group_ref: groupRef, epoch, receipt }, signal).then(result, refused),
+    // Section 4: the hourly sweep of kept media rows past their day.
+    expireMedia: signal => request('/api/state/commands/expire_group_media', {}, signal).then(result),
     // Step 23.1 (7.7.7): the turn that ended is named; the backend answers only a question it took.
     reply: ({ questionId, alsoAnswers = [], body, turn }, signal) => request('/api/state/commands/post_group_reply', {
       request_key: `group-reply:${questionId}`, question_id: questionId, body, turn: String(turn ?? ''),
@@ -938,6 +955,10 @@ export function mediaOps({ request, library, gatewayFetch, owner }) {
     read: ref => library.read(ref),
     setProtected: fn => library.setProtected(fn),
     withdraw: ref => library.withdraw(ref),
+    // design/steward-group-media.md section 6: the audiences that hold kept media, and the purge
+    // of one of them with its receipt (throws purge_incomplete when it does not close).
+    keptAudiences: async () => library.keptAudiences(),
+    purgeKept: audience => library.purgeKept(audience),
     async fetch({ connId, url, audience }, signal) {
       let response;
       try { response = await gatewayFetch(connId, url, signal); }

@@ -24,7 +24,9 @@ const turns = () => new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'group
 const STEWARD_TOOLS = JSON.parse(readFileSync(join(here, '../roles.json'), 'utf8')).steward.presented;
 
 test('the plugin keeps its group bounds as code constants, none of them a backend or bridge key', () => {
-  assert.deepEqual({ ...GROUP_LIMITS }, { mergeMax: 5, turnToolCalls: 6, recentChars: 1500 });
+  // keptChars, keptNameChars (design/steward-group-media.md section 7): what the kept media entries
+  // use before the answered pairs give way, and how short a long sender name is cut past both.
+  assert.deepEqual({ ...GROUP_LIMITS }, { mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000, keptNameChars: 8 });
   assert.ok(Object.isFrozen(GROUP_LIMITS));
   const backend = readFileSync(join(here, '../../../core/state_groups.py'), 'utf8');
   const bridge = readFileSync(join(here, '../../wechat-bridge/bridge.mjs'), 'utf8');

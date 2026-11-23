@@ -131,6 +131,9 @@ PRIVATE_STATE_TABLES = frozenset({
     # steward is in, and the groups awaiting the owner's pick. No projection: never public.
     "state_owner_groups", "state_group_messages", "state_group_members", "state_family_memory",
     "state_family_note", "state_steward_turn_audience", "state_pending_groups",
+    # design/steward-group-media.md section 6: the ledger of purges of a group's kept media
+    # (counts and the reason only, never a ref or a name). No projection.
+    "state_group_media_purges",
     # Step 25 C4: the family lists (core.state_lists): shopping and to-do items, who added and
     # checked them. No projection: never public (a group turn reads them only through
     # list_list_items with the recorded group audience).

@@ -544,13 +544,16 @@ def test_an_owner_turn_that_runs_a_groups_confirmation_is_told_whose_it_was_and_
 
 def test_the_gateway_judges_a_consumption_by_the_calls_own_turn_never_the_one_audience_row(world, server, upstream,
                                                                                           monkeypatch):
-    """Director 602 claim 7: the gateway's request carries no turn, so it never reads the one-row
-    turn audience record: run_confirmed's read names the call's own turn and arms the record for
-    it, and only an armed record is consumed. A record armed in group A's turn still runs when
-    the audience row was overwritten before the call (a refusal there would leave it live for
-    10 minutes); an owner audience never makes every record consumable (its scope is never
-    empty): a group's record nobody armed is not taken by an owner turn's direct call, nor is
-    another group's. An arming older than ARMED is not consumed."""
+    """Director 602 claim 7: the gateway's request carries no turn, so it never takes the one-row
+    turn audience record as its scope: run_confirmed's read names the call's own turn and arms
+    the record for it, and only an armed record is consumed. An owner audience never makes every
+    record consumable (its scope is never empty): a group's record nobody armed is not taken by
+    an owner turn's direct call, nor by another group's. An arming is consumed only in the turn
+    that made it (按 turn 判, guaranteed by code, failing closed): recording the next turn - group
+    B's, or the owner's - disarms it, so that turn's direct call takes nothing (the owner's would
+    otherwise run a group's action silently, PRIV-1) and the record stays confirmed; an arming
+    whose turn is not the recorded one is not consumed even if it was never disarmed. In its own
+    turn it runs. An arming older than ARMED is not consumed."""
     calendar_ready(world, monkeypatch)
     code = world.owner.groups.issue_group_code("wechat", "老家群")["code"]
     execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": "r2@chatroom",
@@ -577,22 +580,45 @@ def test_the_gateway_judges_a_consumption_by_the_calls_own_turn_never_the_one_au
         "channel": "wechat", "group_ref": "r2@chatroom"}, "sender_refs": [MEMBER2]}, allow_write=True)
     assert call()["error"]["data"]["code"] == "confirmation_required"
     assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
-    # A's own turn arms it; the arming is the record's, so a later audience row changes nothing.
+    # A's own turn arms it; group B's turn, recorded next, disarms it: B's direct call takes nothing.
     group_turn(world, turn="ga2")
     assert get(asked, "ga2")["status"] == "confirmed"
     armed = record(world, asked)
     assert (armed["armed_turn"], armed["armed_owner"]) == ("ga2", 0)
     execute(world.steward, "set_steward_turn_audience", {"turn": "gb2", "audience": "group", "group": {
         "channel": "wechat", "group_ref": "r2@chatroom"}, "sender_refs": [MEMBER2]}, allow_write=True)
+    assert (record(world, asked)["armed_turn"], record(world, asked)["armed_at"]) == (None, None)
+    assert call()["error"]["data"]["code"] == "confirmation_required"
+    assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
+    # So the owner's turn, recorded next: it never takes a group's arming, silently or otherwise.
+    group_turn(world, turn="ga3")
+    assert get(asked, "ga3")["status"] == "confirmed"
+    execute(world.steward, "set_steward_turn_audience", {"turn": "o2", "audience": "owner"}, allow_write=True)
+    assert record(world, asked)["armed_turn"] is None
+    assert call()["error"]["data"]["code"] == "confirmation_required"
+    assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
+    # An arming whose turn is not the recorded one is not consumed even if it was never disarmed.
+    group_turn(world, turn="ga4")
+    assert get(asked, "ga4")["status"] == "confirmed"
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_turn_audience SET turn='o3', audience='owner', channel=NULL, "
+                     "group_ref=NULL WHERE id=1")
+        conn.commit()
+    assert record(world, asked)["armed_turn"] == "ga4"
+    assert call()["error"]["data"]["code"] == "confirmation_required"
+    assert upstream.methods.count("tools/call") == before and record(world, asked)["status"] == "confirmed"
+    # In its own turn the arming runs.
+    group_turn(world, turn="ga5")
+    assert get(asked, "ga5")["status"] == "confirmed"
     answer = call()
     assert "result" in answer and "family group" not in json.dumps(answer, ensure_ascii=False)
     assert upstream.methods.count("tools/call") == before + 1 and record(world, asked)["status"] == "done"
     # An arming older than ARMED is not consumed.
     question = gask(world, "q2", "再加一次")["message_id"]
-    group_turn(world, turn="ga3")
+    group_turn(world, turn="ga6")
     late = request(world, question, event, name="mcp__sw__calfam__create_event")["code"]
     assert gask(world, "c2", f"确认 {late}")["confirmation"]["outcome"] == "confirmed"
-    assert get(late, "ga3")["status"] == "confirmed"
+    assert get(late, "ga6")["status"] == "confirmed"
     with world.db.get_connection() as conn:
         conn.execute("UPDATE state_steward_confirmations SET armed_at=? WHERE code=?",
                      (sconf._iso(sconf._utcnow() - sconf.ARMED - timedelta(seconds=1)), late))

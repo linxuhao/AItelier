@@ -1065,7 +1065,8 @@ class StateGroups:
         questions it took) are stamped with this turn, in the same transaction - only those of
         THIS group still unanswered (a question put back and taken by a later turn is
         re-stamped with that turn): post_group_reply answers a question only in its turn
-        (7.7.7, step 23.1)."""
+        (7.7.7, step 23.1). Every confirmation another turn armed is disarmed in the same
+        transaction: an arming is consumed only in the turn that made it (director 602 claim 7)."""
         if audience not in ("owner", "group"):
             raise StateGraphError("invalid_request: audience is owner or group")
         if audience == "group" and not (isinstance(group, dict) and group.get("channel") in CHANNELS
@@ -1081,6 +1082,7 @@ class StateGroups:
                          "sender_refs_json=excluded.sender_refs_json,at=excluded.at",
                          (str(turn), audience, group["channel"] if audience == "group" else None,
                           group["group_ref"] if audience == "group" else None, json.dumps(refs), _now().isoformat()))
+            confirmations.disarm_other_turns(conn, str(turn))
             stamped = conn.execute(
                 f"UPDATE state_group_messages SET turn=? WHERE message_id IN ({','.join('?' * len(ids))}) AND channel=? "
                 "AND group_ref=? AND direction='in' AND accepted=1 AND answered_by IS NULL",

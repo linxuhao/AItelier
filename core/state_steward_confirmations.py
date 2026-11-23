@@ -34,10 +34,15 @@ that asked for it (`create_steward_confirmation`); this module
   director 581): `get` then names the group and who confirmed it. A `get` that names its
   turn and passes ARMS the confirmed record for that turn (armed_turn, armed_at,
   armed_owner); `consume` (the gateway, whose request carries no turn) takes only a record
-  armed within ARMED and never reads the turn audience record: whose turn may run a record
-  was judged at arming, from the call's own turn (platform director 602 claim 7). A direct
-  call of an outward tool, without run_confirmed, consumes nothing. A `get` without a turn
-  (a caller that cannot name one) is the read of before step 23.1: read-only, it arms nothing.
+  armed within ARMED: whose turn may run a record was judged at arming, from the call's own
+  turn (platform director 602 claim 7). An arming is valid only in the turn that made it:
+  recording the next turn (core.state_groups.set_steward_turn_audience) disarms, in the same
+  transaction, every record another turn armed (`disarm_other_turns`), and `consume` refuses
+  an arming whose turn is not the recorded one - so no later turn (another group's, or an
+  owner turn, silently) takes an arming it did not make. A direct call of an outward tool
+  consumes only a record run_confirmed armed in that same turn; with none, it consumes
+  nothing. A `get` without a turn (a caller that cannot name one) is the read of before step
+  23.1: read-only, it arms nothing.
 
 Both tables are private (core.state_privacy.PRIVATE_STATE_TABLES); records are kept 30 days.
 """
@@ -276,16 +281,23 @@ def consume(conn, connection, raw_name: str, arguments) -> str | None:
     None. Raises invalid_arguments.
 
     Step 23.1 (director 602 claim 7): the gateway's request carries no turn, so it never judges
-    whose turn this is - neither from the one-row turn audience record nor otherwise: the
-    record's arming (`get` with the call's own turn, which judged that turn may run it) is the
-    only scope, and it is never empty. A record no turn armed is consumed by no call."""
+    whose turn this is from the one-row turn audience record: the record's arming (`get` with
+    the call's own turn, which judged that turn may run it) is the only scope, and it is never
+    empty. A record no turn armed is consumed by no call. The arming is valid only in its own
+    turn: the next turn's record disarms it (`disarm_other_turns`), and, failing closed should
+    that ever be missed, an arming whose turn is not the recorded one is not consumed - the
+    recorded turn only ever narrows what the arming allows, never widens it."""
     if not _has_tables(conn):
         return None
     _migrate(conn)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_steward_turn_audience'"
+                    ).fetchone() is None:
+        return None  # no turn was ever recorded, so none armed a record
     digest = args_hash(connection["conn_uid"], connection["generation"], raw_name, canonical_arguments(arguments))
     now = _utcnow()
     row = conn.execute("SELECT code FROM state_steward_confirmations WHERE conn_id=? AND raw_name=? AND args_sha256=? "
                        "AND status='confirmed' AND confirmed_at>=? AND armed_turn IS NOT NULL AND armed_at>=? "
+                       "AND armed_turn=(SELECT turn FROM state_steward_turn_audience WHERE id=1) "
                        "ORDER BY armed_at DESC LIMIT 1",
                        (connection["conn_id"], raw_name, digest, _iso(now - TTL), _iso(now - ARMED))).fetchone()
     if row is None:
@@ -293,6 +305,19 @@ def consume(conn, connection, raw_name: str, arguments) -> str | None:
     taken = conn.execute("UPDATE state_steward_confirmations SET status='consumed', consumed_at=? WHERE code=? "
                          "AND status='confirmed'", (_iso(_utcnow()), row["code"])).rowcount
     return row["code"] if taken else None
+
+
+def disarm_other_turns(conn, turn: str) -> int:
+    """In the transaction that records the steward's next turn (core.state_groups
+    set_steward_turn_audience): every confirmed record armed by another turn is disarmed, so a
+    turn never consumes an arming it did not make (director 602 claim 7: judged by the call's
+    own turn, guaranteed by code though turns do not overlap). A consumed or finished record
+    keeps its arming as history: it can be consumed no more. The number disarmed."""
+    if not _has_tables(conn):
+        return 0
+    _migrate(conn)
+    return conn.execute("UPDATE state_steward_confirmations SET armed_turn=NULL, armed_at=NULL, armed_owner=NULL "
+                        "WHERE status='confirmed' AND armed_turn IS NOT NULL AND armed_turn<>?", (turn,)).rowcount
 
 
 def _group_origin(conn, row) -> tuple:

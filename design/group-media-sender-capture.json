@@ -1,11 +1,11 @@
 {
   "question": "Why does a WeChat group message relayed by the bridge arrive at the host with sender_ref equal to the ROOM id (27960105726@chatroom) instead of the member who posted it, and which field or call could name that member instead?",
   "snapshot": {
-    "worktree": "/home/linxuhao/.AItelier/director/work/sender-1123k",
+    "worktree": "a director scratch worktree, detached at the base commit; the path is not part of this record",
     "commit": "fad28d4927f54decb9f302712fe3edfcf2d93ca1",
     "state": "clean before this report; the only file written is design/group-media-sender-capture.json",
     "method": "the worktree's own bytes; no network, no image build, no container started, no WeChat login; one local npm-cache blob of the pinned wechaty 1.20.2 was read because the bridge calls a wechaty method and the bridge has no node_modules in the tree",
-    "premise_from_dispatch": "state_group_messages in ~/.AItelier/aitelier.db holds sender_ref = 27960105726@chatroom for a member's group media and questions (measured by the director, 2026-11-23); only the owner's own messages resolve to a wxid"
+    "premise_from_dispatch": "the project's State database (state_group_messages) holds sender_ref = 27960105726@chatroom for a member's group media and questions (measured by the director, 2026-11-23); only the owner's own messages resolve to a wxid"
   },
   "wire_fields": [
     {
@@ -297,7 +297,7 @@
       "means": "the sender field exists only in the fork patch and in the decoder's struct as the test helper builds it; no other module in the repository mentions it"
     },
     {
-      "command": "tar -xzOf /home/linxuhao/.npm/_cacache/content-v2/sha512/6c/86/7c9b694ec9ae122a7c55ba76cc19e984f09c997675e19cb9df5ed040655f7dede7fabaa3f8a49c6ec22267574a9b5c6c8813e1770766fcca340e661e3795 package/dist/esm/src/user-modules/message.js | sed -n 183,209p",
+      "command": "tar -xzOf <the npm cache root>/content-v2/sha512/6c/86/7c9b...e3795 package/dist/esm/src/user-modules/message.js | sed -n 183,209p",
       "output": "    talker() {\n        if (!this.payload) {\n            throw new Error('no payload');\n        }\n        let talkerId = this.payload.talkerId;\n        ...\n        let talker;\n        if (this.wechaty.isLoggedIn && talkerId === this.wechaty.puppet.currentUserId) {\n            talker = this.wechaty.ContactSelf.load(talkerId);\n        }\n        else {\n            talker = this.wechaty.Contact.load(talkerId);\n        }\n        return talker;",
       "means": "wechaty's talker() is exactly payload.talkerId (npm cache blob for wechaty-1.20.2.tgz, the version package.json:13 pins; the bridge has no node_modules in this worktree, so the pinned tarball's own dist was read instead)"
     },

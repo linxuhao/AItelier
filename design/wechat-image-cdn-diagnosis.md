@@ -1,6 +1,6 @@
 # Why a 1:1 WeChat image download is refused (CDN HTTP 400) — diagnosis
 
-Status: diagnosis only. Nothing in this document has been fixed. Issue `iss-c8597b02f70d4640`.
+Status: diagnosis only. The CDN refusal itself is not fixed; the instrument and the mid-size retry are built into the fork patch in this tree, and what remains is one live image message through a recreated bridge. Issue `iss-c8597b02f70d4640`.
 
 Dates are UTC. Every sentence below is meant to be traceable to a line of the repository, a
 line of the pinned dependency's source, or a line of the retained log excerpt named in §1; a
@@ -61,7 +61,10 @@ lines repeat, so the refusal comes from the HTTP layer, before WeChat's own retr
 read.
 
 **What the image request carries that the file request does not**: only two fields differ —
-`filetype` (1 for an image, 5 for a file, 7 for a large file: `src/media.rs:285`–`:294`) and the
+`filetype` (1 for an image on the first attempt, which carries `cdnbigimgurl` under the
+`Original` profile; 2 for the fallback retry that carries `cdnmidimgurl` and sets
+`quality = MediaQuality::Standard`, patch lines 465–478; 5 for a file, 7 for a large file:
+`src/media.rs:285`–`:294`) and the
 `fileid` (a `cdnbigimgurl`, else `cdnmidimgurl`, value for an image; a `cdnattachurl` value for a
 file). Host, port, path, headers, every other field, and the retry loop are shared.
 
@@ -86,7 +89,7 @@ one medium being asked five times, each time refused by the CDN, and then no lon
 
 **This window cannot measure it, and the honest bound is what the lines allow**: the first
 attempt came 206.96 s (3 min 26.96 s) after `logged in`, and the excerpt records no arrival line
-them. **Inference, from the code and not from these lines:** the first attempt was made when the
+between them. **Inference, from the code and not from these lines:** the first attempt was made when the
 channel asked for the bytes, not after a timer, and the later four are that channel's retries of
 the same request — `integrations/dsh-channel-wechat/index.mjs` retries an `unavailable` answer
 with a growing pause, but no line here names a retry reason. The observation that would settle it — a line on the bridge when a media message is
@@ -138,8 +141,8 @@ the two call sites, not something this window measured.
 
 What such a fetch costs per medium: one CDN POST, plus the channel's retries while it holds the
 message (the ladder in §3 is that cost when the CDN refuses), plus one library write
-(`integrations/dsh-director/lib/channels.mjs:711` `storeMedia` calls `media.ingest`
-(`:728`), which is the write; no line here counts it). The bounds that hold it are the bridge's
+(`integrations/dsh-director/lib/channels.mjs:719` `storeMedia` calls `media.ingest`
+(`:747`), which is the write; no line here counts it). The bounds that hold it are the bridge's
 `MEDIA_LIMITS` per kind (size, decided before any fetch — `bridge.mjs:735` answers `too_large`
 when the spooled medium passes the limit) and the
 media library's retention (`integrations/dsh-director/lib/media.mjs`: a 30-day age bound and
@@ -161,22 +164,25 @@ field was rejected without keeping any content.
 
 ### 6.3 Which pair the CDN accepts for an image
 
-`filetype` 1 with `cdnbigimgurl`, versus `filetype` 2 with `cdnmidimgurl`. The fork already carries
-both ids; trying the other one is a one-line change in the fork, but it needs a rebuilt native
-module and a fresh login (a QR scan).
+`filetype` 1 with `cdnbigimgurl`, versus `filetype` 2 with `cdnmidimgurl`. The fork in this tree
+now tries the second pair automatically: when the CDN refuses the first attempt it retries once
+with the mid-size id as `quality = MediaQuality::Standard`
+(`neo-fork/0001-incoming-message-types.patch:465`–`:478`, whose comment cites this section). That
+needs a rebuilt native module and a fresh login (a QR scan); what remains is one live image
+message through a recreated bridge. Whether that retry is accepted is still open.
 
 ## 7. What is not determined
 
 - Which field the CDN rejected (§5, §6.2).
 - Whether the image id WeChat advertised for this account is a bare id at all (§6.1).
-- Whether a rebuilt fork with the alternate id would be accepted — untestable without one live
-  image message after the rebuild.
+- Whether the rebuilt fork's mid-size retry is accepted — untestable without one live image
+  message through a recreated bridge.
 
-The instrument for the next step is therefore not another log reading: it is a fork build that
-(a) logs the request's field *names* and the shape of `fileid` (length and whether it contains
-`/` or `?`), never the key and never the bytes, and (b) tries `cdnmidimgurl` when
-`cdnbigimgurl` is refused for an image. That needs the owner's QR window, which is why this
-document stops at the diagnosis.
+The instrument and the retry are now built into the fork patch in this tree (two
+`neo cdn download:` diagnostic lines, the attempt line and the `served:` line, plus the one-shot
+mid-size retry at patch lines 465–478). The CDN refusal itself is not fixed. What remains is one
+live image message through a recreated bridge; that needs the owner's QR window, which is why
+this document stops at the diagnosis.
 
 ## 8. Measurements versus inferences in this document
 

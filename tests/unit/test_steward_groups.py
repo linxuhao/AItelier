@@ -17,7 +17,7 @@ from core import state_channels, state_groups, state_schema_setup
 from core.state_commands import ProjectPrivate, _driver_defaults, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
-from tests.unit.test_steward_channels import (HOME, OWNER_HEADERS, bind, client, conversation, refused,  # noqa: F401
+from tests.unit.test_steward_channels import (OWNER_HEADERS, bind, client, conversation, refused,  # noqa: F401
                                               world)
 
 OWNER_WX, MEMBER, MEMBER2, ROOM, ROOM2 = "wxid_owner", "wxid_m1", "wxid_m2", "r1@chatroom", "r2@chatroom"
@@ -281,6 +281,38 @@ def test_two_live_groups_both_relay_and_unbinding_one_leaves_the_other_whole(wor
     assert world.owner.groups.unbind_owner_group("wechat", ROOM)["unbound"] is False
 
 
+def test_the_relay_command_carries_sender_name_only_when_given_and_refuses_a_blank_one(world):
+    """The wire (iss-e59f9032024e43c3): `sender_name` is a declared field of the HTTP relay
+    command, which is what makes the name a channel carries reach State at all - the service
+    took the parameter before the command model named it. With it, the member's label is that
+    name in list_group_recent; without it, the request is exactly the pre-change one and the
+    member keeps the 成员X alias; an EMPTY string is refused by the model before anything is
+    read or stored, because a blank is not a name. Every name, id and body here is invented."""
+    bound_group(world)
+    named = execute(world.steward, "relay_group_message",
+                    {"request_key": "g-w1", "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER,
+                     "channel_message_ref": "w1", "body": "今天谁在家", "channel_at": state_channels._now().isoformat(),
+                     "sender_name": "阿蓝"}, allow_write=True)
+    assert (named["sender_role"], named["sender_label"]) == ("member", "阿蓝")
+    reply(world, named["message_id"], "我们在家", turn="tw1")
+    # No sender_name in the body: the member's ordinal alias, byte for byte as before.
+    plain = ask(world, "w2", body="几点吃饭", sender=MEMBER2)
+    assert plain["sender_label"] == "成员乙"
+    reply(world, plain["message_id"], "六点", turn="tw2")
+    recent = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})["recent"]
+    assert [(entry["sender"], entry["q"]) for entry in recent] == [("阿蓝", "今天谁在家"), ("成员乙", "几点吃饭")]
+    # Blank refused by the command model itself: StateGraphError names the field, and the
+    # refusal happens before the handler, so nothing of that call is stored and no row is made.
+    with pytest.raises(StateGraphError) as caught:
+        execute(world.steward, "relay_group_message",
+                {"request_key": "g-w3", "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER2,
+                 "channel_message_ref": "w3", "body": "在吗", "channel_at": state_channels._now().isoformat(),
+                 "sender_name": ""}, allow_write=True)
+    assert "sender_name" in str(caught.value), str(caught.value)
+    assert rows(world, "SELECT channel_message_ref FROM state_group_messages WHERE direction='in'") == [("w1",), ("w2",)]
+    assert rows(world, "SELECT label FROM state_group_members WHERE sender_ref=?", (MEMBER2,)) == [(None,)]
+
+
 def test_a_carried_sender_name_names_the_recent_rows_and_no_name_keeps_the_memberX_alias(world, caplog):
     """The owner's ruling of 2026-11-23T20:48:25Z (「让微信桥带上发送者昵称/微信id」): the name the
     channel carried for a member (the bridge's group event `sender_name`) becomes that member's
@@ -291,12 +323,13 @@ def test_a_carried_sender_name_names_the_recent_rows_and_no_name_keeps_the_membe
     bound_group(world)
 
     def carried(ref, name, sender=MEMBER, body="问一句", **extra):
-        """The host's relay of a group message WITH the name its channel carried. The State
-        object is called directly: relay_group_message takes `sender_name`, which the HTTP
-        command model does not declare, so the wire cannot reach this parameter yet."""
-        return world.steward.groups.relay_group_message(
-            HOME, f"g-{ref}", "wechat", ROOM, sender, ref, body,
-            channel_at=state_channels._now().isoformat(), sender_name=name, **extra)
+        """The host's relay of a group message WITH the name its channel carried, sent over the
+        HTTP command surface: `sender_name` is a declared field of the relay command model, so
+        the wire reaches relay_group_message's own parameter."""
+        return execute(world.steward, "relay_group_message",
+                       {"request_key": f"g-{ref}", "channel": "wechat", "group_ref": ROOM, "sender_ref": sender,
+                        "channel_message_ref": ref, "body": body, "channel_at": state_channels._now().isoformat(),
+                        "sender_name": name, **extra}, allow_write=True)
 
     # The carried name (trimmed) is the member's label, and the group's recent pair says it.
     named = carried("c1", "  阿蓝  ")

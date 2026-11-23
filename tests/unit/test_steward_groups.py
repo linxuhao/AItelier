@@ -989,9 +989,11 @@ def notice(world, which, phase, room=ROOM, epoch=None, key=None, **extra):
 
 
 def reason_notice(world, which, phase, reason, room=ROOM, epoch=None, key=None):
-    """Call the service directly with `reason`: the HTTP command model on this side of the
-    change does not declare it yet. `_driver_defaults` supplies project_id exactly as execute()
-    does; the older `notice` helper stays on the validated command path."""
+    """Call the service directly with `reason` to measure the SERVICE's own truncation and
+    sanitization of an over-long, multi-line reason - an input the command model refuses (its
+    `reason` field is capped at 64 characters), so only a direct call reaches that branch.
+    Every other reason goes through `notice(..., reason=...)`, the validated command path the
+    host actually uses."""
     epoch = epoch or switch(world, room)[1]
     args = _driver_defaults(world.steward, "group_media_notice",
                             {"request_key": key or f"gmn:{room}:{epoch}:{which}:{phase}:reason", "channel": "wechat",
@@ -1166,17 +1168,20 @@ def test_r2_a_failed_notice_names_its_send_reason_until_the_last_attempt(world):
     bound_group(world)
     world.owner.groups.set_group_media_keep("wechat", ROOM, True)
     epoch = switch(world)[1]
-    # While the switch is still owed, the row names the outcome of this send attempt.
-    assert reason_notice(world, "on", "failed", "send_failed", key="why-1", epoch=epoch) \
+    # While the switch is still owed, the row names the outcome of this send attempt. The
+    # reason travels through the validated command model, the way the host sends it.
+    assert notice(world, "on", "failed", reason="send_failed", key="why-1", epoch=epoch) \
         == {"attempts": 1, "state": "on_pending"}
     assert switch(world)[0] == "on_pending" and switch(world)[3] == "send_failed"
     # A code is at most 40 characters and never carries a control character (a log code, not prose).
+    # The model refuses a reason longer than 64 characters, so this over-long one is handed to
+    # the service directly: what is measured here is the service's own truncation and sanitizing.
     long_reason = "room\n" + "x" * 60
     assert reason_notice(world, "on", "failed", long_reason, key="why-2", epoch=epoch) \
         == {"attempts": 2, "state": "on_pending"}
     assert switch(world)[3] == "room_" + "x" * 35
     # The last attempt keeps the long-standing note, whatever reason was supplied.
-    assert reason_notice(world, "on", "failed", "recipient_unknown", key="why-3", epoch=epoch) \
+    assert notice(world, "on", "failed", reason="recipient_unknown", key="why-3", epoch=epoch) \
         == {"attempts": 3, "state": "off"}
     assert switch(world)[0] == "off" and switch(world)[3] == "notice_not_sent"
     # A successful notice clears the note and the attempt count with the fresh epoch.

@@ -2908,6 +2908,10 @@ test('F4: the bridge\'s refusals before say() spend no attempt; a send that may 
   answer = () => { throw bridge(500, 'send_failed'); };
   await w.pass();
   assert.deepEqual(w.named('notice').filter(a => a.phase === 'failed').length, 2, 'a timeout and a failed say() are each one attempt');
+  // The reason hop: each failed attempt must hand the command the code its own send logged, so
+  // the group row can name why the notice is still owed (design/steward-group-media.md section 2).
+  assert.deepEqual(w.named('notice').filter(a => a.phase === 'failed').map(a => a.reason), ['send_timeout', 'send_failed'],
+    'each failed attempt hands the command the code its own send logged');
   w.stop();
 });
 

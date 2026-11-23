@@ -264,7 +264,7 @@ index 768d869..ddc635b 100644
      #[test]
      fn unhandled_sync_commands_are_skipped() {
          let messages = incoming_messages(
-@@ -1572,3 +1736,1954 @@ mod tests {
+@@ -1572,3 +1736,1958 @@ mod tests {
          );
      }
  }
@@ -633,6 +633,11 @@ index 768d869..ddc635b 100644
 +
 +    /// Serialise the steal on the reap file and re-judge staleness from a fresh
 +    /// read before unlinking. Returns true only when the lock was actually removed.
++    ///
++    /// What this does not close: a live session's own renewal, on the recovery path
++    /// in `read_session`, writes the store without taking this lock, so a resume that
++    /// races it can still read the credentials from before that renewal. The reap
++    /// file serialises stealers against each other, not against that writer.
 +    fn steal_if_stale(store: &Store, path: &Path, _judged: &[u8], now: SystemTime) -> bool {
 +        let Ok(Some(_reap)) = reap(store) else {
 +            return false;
@@ -643,8 +648,7 @@ index 768d869..ddc635b 100644
 +        if !abandoned(path, &second, now) {
 +            return false;
 +        }
-+        let _ = std::fs::remove_file(path);
-+        true
++        std::fs::remove_file(path).is_ok()
 +    }
 +    /// deliberately never removed: unlinking it would let a later attempt lock a
 +    /// different inode at the same name, which is the race this closes.

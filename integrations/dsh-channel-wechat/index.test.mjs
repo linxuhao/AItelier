@@ -1,17 +1,19 @@
 /** The WeChat channel plugin against a fake bridge (a loopback HTTP server that
- *  answers like wechat-bridge) and a fake ownerChannels service. One test runs it
- *  against the real bridge module with a fake Wechaty, to pin the wire format. */
+ *  answers like wechat-bridge) and a fake ownerChannels service. Two tests run it
+ *  against the real bridge module with a fake Wechaty, to pin the wire format and the
+ *  retry of a transient media fetch through the real media library. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, truncateSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, truncateSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as plugin from './index.mjs';
 import { startWechatChannel, statusFromBridge } from './index.mjs';
-import { createBridge } from '../wechat-bridge/bridge.mjs';
+import { createBridge, MEDIA_FETCH } from '../wechat-bridge/bridge.mjs';
+import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 
 const TOKEN = 'plugin-test-token';
 const dir = mkdtempSync(join(tmpdir(), 'dsh-channel-wechat-'));
@@ -953,5 +955,55 @@ test('media end to end with the real bridge module: an owner\'s photo stored, a 
       { ref: 'out-1' });
     assert.deepEqual(refusedSilk, ['10.silk'], 'the voice bar was tried first');
     assert.deepEqual(sent.map(x => [x.to, x.name, x.bytes.equals(audio)]), [['wxid_owner', 'voice-e2e.wav', true]]);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('media end to end with the real bridge and the real media library: a fetch that missed its deadline five times is stored, not refused', async () => {
+  // The owner's use case: an image has to be readable when the owner asks about it a message
+  // later. The real bridge, the real plugin and the real media library, with a puppet that
+  // misses the fetch deadline MEDIA_FETCH.attempts times and then hands the file over: the
+  // message must end with a stored ref, and the library's index must carry no refusal row -
+  // a refusal (gone) would be replayed after every restart, which is what made one blip
+  // permanent.
+  const types = { Message: { Attachment: 1, Image: 6, Text: 7 }, Contact: { Official: 2 }, ScanStatus: { Waiting: 2 } };
+  const bot = new EventEmitter();
+  let fetches = 0;
+  bot.start = async () => {};
+  bot.stop = async () => {};
+  bot.Contact = { find: async ({ id }) => ({ id, say: async () => ({ id: 'out-1' }) }) };
+  const bridge = createBridge({ makeBot: () => bot, types, token: TOKEN, tmpDir: mkdtempSync(join(tmpdir(), 'wechat-media-retry-')) });
+  const address = await bridge.listen(0);
+  const root = mkdtempSync(join(tmpdir(), 'media-library-retry-'));
+  const library = createMediaLibrary({ root });
+  const channels = fakeChannels();
+  channels.storeMedia = async (meta, open) => library.ingest({ ...meta, audience: 'owner', source: 'in' }, open);
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet,
+    config: { tokenFile, url: `http://${address.address}:${address.port}` }, waitSeconds: 1, retryMs: 10, statusEveryMs: 20 });
+  // A file's payload carries its appmsg XML (type 6), as the fork hands it over; the bytes are
+  // a PDF, so the library's own type table reads them without a decoder.
+  const fileXml = Buffer.from('<msg><appmsg><title>a.pdf</title><type>6</type><appattach>'
+    + '<totallen>16</totallen></appattach></appmsg></msg>').toString('base64');
+  const media = { id: 'retry-1', self: () => false, type: () => types.Message.Attachment, text: () => '', date: () => new Date(),
+    payload: { messageType: 49, content: fileXml }, talker: () => ({ id: 'wxid_owner', type: () => 0 }),
+    toFileBox: async () => {
+      fetches++;
+      if (fetches <= MEDIA_FETCH.attempts) throw new Error(`media store timed out: no first byte in ${MEDIA_FETCH.firstByteMs} ms`);
+      return { name: 'a.pdf', mediaType: 'application/pdf', toStream: async () => Readable.from([Buffer.from('%PDF-1.7 late file')]) };
+    } };
+  try {
+    assert.deepEqual(await channels.registered.login(), { requested: true });
+    bot.emit('scan', 'https://login.weixin.qq.com/l/x', 2);
+    bot.emit('login', { id: 'wxid_bot' });
+    await until(() => channels.registered.status().connected);
+    bot.emit('message', media);
+    await until(() => channels.received.length === 1);
+    assert.equal(fetches, MEDIA_FETCH.attempts + 1, 'five failed fetches, then the one that served it');
+    assert.equal(channels.received[0].attachments.length, 1);
+    const [attachment] = channels.received[0].attachments;
+    assert.equal('refused' in attachment, false, `no refusal for a media that was only late: ${JSON.stringify(attachment)}`);
+    assert.match(attachment.ref, /^m_[0-9a-f]{16}$/);
+    const index = readFileSync(join(root, 'owner', 'index.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(index.filter(row => row.refused), [], 'the library recorded no refusal row');
+    assert.deepEqual(index.filter(row => row.ref).map(row => [row.channel, row.messageRef, row.index]), [['wechat', 'retry-1', 0]]);
   } finally { await channel.stop(); await bridge.close(); }
 });

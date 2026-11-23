@@ -4,9 +4,15 @@ What it runs: one ``node --test`` invocation from the repository root, and nothi
 Its argv is ``[<node>, "--test", "integrations/wechat-bridge/bridge.test.mjs"]`` -- the file
 named explicitly, with the path the package's own npm script uses (``package.json``'s
 ``test`` script), so the suite is run exactly the way its author runs it. The floor is
-``\u2139 tests 126`` / ``\u2139 pass 126`` / ``\u2139 fail 0``, measured in the shipped image on
-2026-11-23 with the sender-attribution witnesses -- five cases hold the member id a group
-medium's raw content begins with (``<member>:\\n<XML>``): a medium whose talker is the room
+``\u2139 tests 128`` / ``\u2139 pass 128`` / ``\u2139 fail 0``, measured in the shipped image on
+2026-11-23 with the transient-media-retry case: one new test holds that a media whose fetch
+missed its deadline ``MEDIA_FETCH.attempts`` times is still answered 503 and is served by the
+next attempt, and that its event leaving the ring (404) is what ends it, not a failure count;
+two earlier cases were rewritten to assert the same (a media that never answers, and a failed
+download during a resumed login). The floor before it was 126, which the suite had then already
+grown one case past without saying so (127 measured on this tree before the change above), and
+it was the same suite with the sender-attribution witnesses -- five cases hold the member id a
+group medium's raw content begins with (``<member>:\\n<XML>``): a medium whose talker is the room
 records that id as its ``sender_ref`` and the probe line says ``senderSource=content-prefix``; a
 group text message and a 1:1 message keep the sender they had; a medium with no such prefix
 keeps the room and says ``senderSource=room``; and a token that is not id-shaped (a display
@@ -110,8 +116,8 @@ class Suite:
 BRIDGE = Suite(
     name="wechat-bridge",
     file="integrations/wechat-bridge/bridge.test.mjs",
-    expected_tests=126,
-    expected_pass=126,
+    expected_tests=128,
+    expected_pass=128,
 )
 
 

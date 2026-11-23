@@ -295,14 +295,15 @@ describe('the transport', () => {
     vi.stubGlobal('XMLHttpRequest', FakeXhr);
   });
 
-  it('uploads the raw bytes with the upload header, the name in the query and a 120 s timeout', async () => {
+  it('uploads the raw bytes with the upload header, the name in its own header (never the URL) and a 120 s timeout', async () => {
     const a = file('my shot.png', 'image/png', 100);
     const progress = vi.fn();
     const done = real.uploadConversationFile('alpha', a, 'my shot.png', progress);
     const xhr = FakeXhr.last;
     expect(xhr.method).toBe('POST');
-    expect(xhr.url).toBe('/api/dsh-drivers/alpha/conversation/uploads?name=my%20shot.png');
+    expect(xhr.url).toBe('/api/dsh-drivers/alpha/conversation/uploads');
     expect(xhr.headers['X-AItelier-Upload']).toBe('1');
+    expect(xhr.headers['X-AItelier-Upload-Name']).toBe('my%20shot.png');
     expect(xhr.timeout).toBe(120000);
     expect(xhr.body).toBe(a);
     xhr.upload.onprogress?.({lengthComputable: true, loaded: 50, total: 100});

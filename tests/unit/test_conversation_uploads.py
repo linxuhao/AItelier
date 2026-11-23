@@ -1,6 +1,6 @@
 """The dashboard's conversation upload route (step 24.2b, design-steward 7.8.12a "上传").
 
-`POST /api/dsh-drivers/{project_id}/conversation/uploads?name=...` takes ONE file as the raw
+`POST /api/dsh-drivers/{project_id}/conversation/uploads` (name in `X-AItelier-Upload-Name`) takes ONE file as the raw
 request body. These run the real app with the write gate ON and test mode OFF, and
 authenticate with real driver tokens through the registry (as tests/unit/
 test_steward_read_only.py does); the owner's browser is an allowlisted Access email.
@@ -26,6 +26,7 @@ import sqlite3
 import stat
 import sys
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -110,8 +111,9 @@ def upload(client, body, *, project="alpha", name="photo.png", headers=None,
            content_type="application/octet-stream"):
     sent = dict(OWNER_HEADERS if headers is None else headers)
     sent.setdefault("Content-Type", content_type)
-    return client.post(f"/api/dsh-drivers/{project}/conversation/uploads", params={"name": name},
-                       content=body, headers=sent)
+    if name is not None:
+        sent.setdefault("X-AItelier-Upload-Name", quote(name, safe=""))
+    return client.post(f"/api/dsh-drivers/{project}/conversation/uploads", content=body, headers=sent)
 
 
 def rows(world, project=None):
@@ -267,6 +269,20 @@ def test_a_bad_name_is_refused(world, client, name):
     r = upload(client, PNG, name=name)
     assert r.status_code == 422, r.text
     assert staged(world) == [] and rows(world) == []
+
+
+def test_the_name_travels_in_its_header_never_the_query(world, client):
+    """Nit PRIV-2: the access log writes the path with its query, so the name is the
+    percent-encoded `X-AItelier-Upload-Name` header; a `?name=` is not read at all."""
+    r = upload(client, PNG, name="体检 报告.png")
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "体检 报告.png" and rows(world)[0]["name"] == "体检 报告.png"
+    sent = {**OWNER_HEADERS, "Content-Type": "image/png"}
+    r = client.post("/api/dsh-drivers/alpha/conversation/uploads", params={"name": "scan.png"}, content=PNG, headers=sent)
+    assert refusal(r) == (422, "invalid_name")
+    r = upload(client, PNG, name=None, headers={**OWNER_HEADERS, "X-AItelier-Upload-Name": "%FF%FE.png"})
+    assert refusal(r) == (422, "invalid_name")
+    assert len(rows(world)) == 1
 
 
 # --- per-project hourly count and staging total -------------------------------------------

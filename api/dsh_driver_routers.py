@@ -153,14 +153,28 @@ def conversation(project_id: str, limit: int = Query(default=30, ge=1, le=200),
 
 
 UPLOAD_HEADER = "X-AItelier-Upload"
+# The file's display name, percent-encoded UTF-8 (nit PRIV-2): in a header, not the query
+# string, so the access log and the tunnel's request log never carry it.
+UPLOAD_NAME_HEADER = "X-AItelier-Upload-Name"
+
+
+def _upload_name(request) -> str | None:
+    from urllib.parse import unquote
+    raw = request.headers.get(UPLOAD_NAME_HEADER)
+    if raw is None or len(raw) > 3 * 4 * 255:
+        return None
+    try:
+        return unquote(raw, errors="strict")
+    except UnicodeDecodeError:
+        return None
 
 
 @router.post("/{project_id}/conversation/uploads", dependencies=[Depends(authz.require_writer)])
-async def conversation_upload(project_id: str, request: Request,
-                              name: str = Query(min_length=1, max_length=255),
-                              service=Depends(get_service)):
+async def conversation_upload(project_id: str, request: Request, service=Depends(get_service)):
     """Step 24.2b (design-steward 7.8.12a "上传"): one file for the conversation, as the raw
     request body (no multipart), staged until a message carries it and the hosts store it.
+    The display name is the `X-AItelier-Upload-Name` header, percent-encoded UTF-8 (never the
+    query string: the access log writes the path with its query).
 
     Who: the write gate and `require_writer` as for every write (a steward token is refused
     by the gate: this is not one of its runtime endpoints), then the project-user check
@@ -177,6 +191,7 @@ async def conversation_upload(project_id: str, request: Request,
         raise HTTPException(403, "cross_site")
     if request.headers.get(UPLOAD_HEADER) != "1":
         raise HTTPException(400, "upload_header_required")
+    name = _upload_name(request)
     if not uploads.valid_name(name):
         raise HTTPException(422, "invalid_name")
     if not service.driver_inbox._project_user():

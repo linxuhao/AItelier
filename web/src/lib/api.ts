@@ -818,11 +818,12 @@ export function uploadConversationFile(projectId: string, file: Blob, name: stri
   }
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/dsh-drivers/' + encodeURIComponent(projectId) + '/conversation/uploads?name='
-      + encodeURIComponent(name));
+    xhr.open('POST', '/api/dsh-drivers/' + encodeURIComponent(projectId) + '/conversation/uploads');
     xhr.timeout = UPLOAD_TIMEOUT_MS;
     xhr.setRequestHeader('Accept', 'application/json');
     xhr.setRequestHeader('X-AItelier-Upload', '1');
+    // The name in a header, never in the URL: an access log writes the path and its query.
+    xhr.setRequestHeader('X-AItelier-Upload-Name', encodeURIComponent(name));
     if (file.type) xhr.setRequestHeader('Content-Type', file.type);
     if (onProgress) xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(event.loaded / event.total); };
     xhr.onload = () => {

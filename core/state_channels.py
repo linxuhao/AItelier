@@ -637,7 +637,10 @@ class StateChannels:
                 inbox.owner_text_guard = self.owner_text_guard
             # Only the steward's own service repairs the steward's channel ledger: a
             # director's, an owner's or the recovery actor's starts nothing here.
-            if self.driver_id is not None and self.steward.is_steward():
+            # The settled check first: is_steward() opens a connection, and every
+            # driver request would pay for it after the start has been settled.
+            if (self.driver_id is not None and self.store.db.db_path not in _START_SETTLED
+                    and self.steward.is_steward()):
                 self._settle_at_start()
 
     # ---------------------------------------------------------------- a start's repair

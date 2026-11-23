@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from core import state_attempt_schema, state_graph, state_schema_setup
+from core import state_attempt_schema, state_channels, state_graph, state_schema_setup
 from core.db_manager import DBManager
 from core.state_service import StateService
 
@@ -109,6 +109,19 @@ def test_after_a_commit_only_the_foreign_key_verification_runs(tmp_path, monkeyp
     assert not [s for s in counted.statements if s.upper().startswith(("COMMIT", "BEGIN IMMEDIATE", "INSERT", "UPDATE"))]
 
 
+def test_a_driver_request_after_the_start_was_settled_opens_nothing(tmp_path, monkeypatch, window):
+    """Every DSH request carries a driver_id. Once the steward's start repair has run
+    for this file, building that request's service asks nothing more of the database
+    (the steward check used to open a connection on every such request)."""
+    db = DBManager(str(tmp_path / "state.db"))
+    construct(db)
+    construct(db)
+    monkeypatch.setattr(state_channels, "_START_SETTLED", {db.db_path})
+    counted = Counted(monkeypatch)
+    StateService(db, None, actor="driver:ada", project_read_trusted=True, driver_id="ada")
+    assert counted.connections == 0, counted.statements[:5]
+
+
 def test_a_new_file_gets_its_own_setup(tmp_path, monkeypatch, window):
     construct(DBManager(str(tmp_path / "a.db")))
     counted = Counted(monkeypatch)
@@ -124,9 +137,13 @@ def test_a_new_handle_on_the_same_file_sets_it_up_again(tmp_path, monkeypatch, w
     one handle per process."""
     path = str(tmp_path / "state.db")
     construct(DBManager(path))
+    # Built before counting starts: DBManager's own init runs CREATE TABLE statements,
+    # which would satisfy the assertion with no StateService setup at all.
+    second = DBManager(path)
     counted = Counted(monkeypatch)
-    construct(DBManager(path))
-    assert counted.schema_statements(), "a new handle must run the setup"
+    construct(second)
+    assert [s for s in counted.statements if "TABLE_INFO(DRIVER_INBOX_MESSAGES)" in s.upper()], \
+        "a new handle must run the StateService setup"
 
 
 def test_a_file_replaced_at_the_same_path_gets_its_own_setup(tmp_path, monkeypatch, window):

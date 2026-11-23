@@ -548,15 +548,18 @@ export function isBase64Content(value) {
 }
 
 // A member id as the content prefix carries it: at most 32 characters of `[A-Za-z0-9_-]`. A
-// room id cannot match (its '@' is outside the set), and neither can a display name.
+// room id cannot match (its '@' is outside the set); an ASCII alias without a space can, which
+// is why the accepted shape is stated here rather than described as "never a display name".
 const MEMBER_ID = /^[A-Za-z0-9_-]{1,32}$/;
 
 /** The member id a raw group payload content begins with, or undefined when it begins with
  *  anything else. A group message's content is `<member>:\n<XML>` (the prefix the text path
  *  reads, upstream/native/src/lib.rs:494-504): the poster's id is the token before the first
  *  ':' or newline inside the bytes before the first '<'. Accepted only when it is non-empty,
- *  at most 32 characters and made only of `[A-Za-z0-9_-]`, so a display name, a room id (its
- *  '@' is outside that set) or an over-long run is never taken for a member id. This is the one
+ *  at most 32 characters and made only of `[A-Za-z0-9_-]`, so a room id (its '@' is outside
+ *  that set), a name holding a space or a non-ASCII character, or an over-long run is never
+ *  taken for a member id. An ASCII alias without a space does match: the measured prefix is a
+ *  19-character wxid, and what keeps an alias out is that WeChat does not put one there. This is the one
  *  rule the probe below reads as `prefixShape=wxid`. `content` is the base64 payload content
  *  the puppet carries; anything that is not base64, or has no '<' after a non-empty prefix,
  *  yields undefined. The caller decides what to record; nothing here logs an id. */

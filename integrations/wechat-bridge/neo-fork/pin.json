@@ -49,7 +49,7 @@
     },
     {
       "path": "integrations/wechat-bridge/neo-fork/0002-saved-login.patch",
-      "sha256": "bf1dc8b3a5bfaab27eec62a2c145708f33bf66d73712e76471c1958c64387d7e"
+      "sha256": "f6a6822a772971e930cbabbcac3deda471f9b7c38570fc612499e54fc1009151"
     }
   ]
 }

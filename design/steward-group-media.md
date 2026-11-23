@@ -73,10 +73,21 @@ here:
    word for it) with nothing fetched; a host it cannot reach is `unavailable`, so the
    channel holds the message; a host without a media library or without groups stores
    nothing, as before.
-4. **A later turn cannot see what it must resolve: still open** (the follow-up card, not
-   this one). The group wake's `recent` is still built from answered question/reply pairs
-   only (`core/state_groups.py:1219-1233`); the rows to compose an un-answered medium from
-   now exist (item 3 and the measurement above), but the wake does not read them yet.
+4. **A later turn sees what it must read: implemented.** The medium an un-mentioned group
+   message carries is relayed (item 5) as an un-answered inbound row whose
+   `attachments_json` holds its kind, ref and - when the library knew them - mime, size and
+   durationMs. The group wake's reader `list_group_recent`
+   (`core/state_groups.py:1219-1254`) now returns, for its own channel and `group_ref` alone,
+   that group's un-answered inbound rows carrying `attachments_json`, each as an entry of its
+   own (`at`, `sender`, `q`, `attachments`) in the place its time gives it among the answered
+   pairs; both parts keep their own last `limit` rows. The wake renders those attachments
+   with the very `attachmentLine` the current message's own use, through
+   `withAttachmentLines` (`integrations/dsh-director/lib/media.mjs:140-148`) applied at
+   `integrations/dsh-director/index.mjs:414`. Measured by
+   `tests/unit/test_steward_groups.py::test_a_later_mention_turn_sees_an_unmentioned_medium_in_its_group_alone`
+   (group A's `recent` names the ref, group B's is empty) and by
+   `integrations/dsh-director/test/media.test.mjs`'s test `a group wake's recent: a kept
+   medium names its ref, a pair without attachments is untouched`.
 5. **An un-mentioned medium must not answer: implemented**
    (`integrations/dsh-director/lib/channels.mjs:858-905`). The wake is steered by
    `channels.setGroupWake` (`integrations/dsh-director/index.mjs:402-419`); `handleGroup`
@@ -104,7 +115,14 @@ here:
   nothing is fetched, and the message itself still goes on (the group's relay then decides
   it - an unbound room is refused `group_not_bound` there).
 * Group scope: one group's ref is never shown to another group's turn (the audience rule
-  above), and the bridge keeps its own group ring separate from the 1:1 ring.
+  above), and the bridge keeps its own group ring separate from the 1:1 ring. On the wake
+  path it is enforced by the reader's own scope - `list_group_recent` filters both its
+  answered pairs and its kept media by one `channel` and one `group_ref`
+  (`core/state_groups.py:1219-1254`) - and by the wake being built for that one group
+  (`integrations/dsh-director/index.mjs:402-419`). Measured over the same records in two
+  groups by
+  `tests/unit/test_steward_groups.py::test_a_later_mention_turn_sees_an_unmentioned_medium_in_its_group_alone`:
+  group A's `recent` names the kept medium's ref, group B's is empty.
 
 ## "Later", measured: bounded, not guaranteed
 
@@ -186,5 +204,6 @@ rather than blocked; only a real group image, after this code lands, can settle 
 * What a group quota refusal costs a kept medium: past `group_per_hour`/`member_per_hour`
   the relay keeps an `over_quota` row without `attachments_json`
   (`core/state_groups.py:795-796`), so the file is in the library but its history row does
-  not name it. A follow-up that reads the history for un-answered media has to know that;
-  this card stores the file and records it whenever the relay accepts the message.
+  not name it, and the reader in item 4 (which returns only rows carrying that metadata)
+  does not show it. This card stores the file and records it whenever the relay accepts the
+  message.

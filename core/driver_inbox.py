@@ -459,7 +459,7 @@ class DriverInbox:
         return None if row is None else dict(row)
 
     def send_user_message(self, request_key, subject, body, project_id, refs=None,
-                          reply_to_message_id=None, segments=None):
+                          reply_to_message_id=None, segments=None, attachments=None):
         """Record one message from the calling driver to the project's user.
 
         PRESENTATION, never authority: this writes one message row with NO
@@ -476,11 +476,24 @@ class DriverInbox:
         it is persisted on the row and joins that message's thread. It changes
         nothing about the message's standing: a reply is no more authoritative
         than the message it answers.
+
+        `attachments` (step 24.2b, design-steward 7.8.12a "出站", pending 19) names at most
+        10 `m_` refs of the calling driver's OWN media library. Which subdirectory is read is
+        decided by the token's driver, never by the request: a director's `d-<driver_id>/`,
+        where the row's audience must be `project:<this project>`; the steward's memory user,
+        where it must be `owner` (and only in the steward's own project's conversation). The
+        row must be in that index and its file still there. One that is not - another
+        director's ref, another project's, the steward's ref sent by a director, a director's
+        sent by the steward, an unknown ref, a repeat - refuses the whole message
+        invalid_attachment with nothing written. The row keeps them as attachments_json
+        [{id, kind, mime, size, name}] (`id` the m_ ref). They are appended to the
+        idempotency payload only when set, so every older request replays byte-identically.
         """
         if type(request_key) is not str or not request_key or len(request_key)>320:
             raise StateGraphError("invalid_request")
         if type(subject) is not str or not 1 <= len(subject) <= 200 or type(body) is not str or len(body)>8000:
             raise StateGraphError("invalid_request")
+        attachments = self._attachment_ids(attachments)
         # The one guard call for this writer: subject, body and the segment text
         # that lands in segments_json, before the INSERT below.
         refuse_credential_body(subject, body, segments)
@@ -501,6 +514,8 @@ class DriverInbox:
             payload.append(reply_to_message_id)
         if sent:
             payload.append(sent)
+        if attachments:
+            payload.append({"attachments": attachments})
         payload = json.dumps(payload, sort_keys=True)
         with self.store.transaction(write=True) as conn:
             replay = self._replay(conn, "send_user", request_key, payload)
@@ -509,7 +524,7 @@ class DriverInbox:
             self._driver(conn, self.driver_id)
             if conn.execute("SELECT status FROM drivers WHERE driver_id=?", (self.driver_id,)).fetchone()[0]!="active":
                 raise StateGraphError("inactive_driver")
-            self.store._project(conn, project_id)
+            pid = self.store._project(conn, project_id)["project_id"]
             self._refs(conn, refs, project_id)
             parent = None
             if reply_to_message_id is not None:
@@ -518,13 +533,15 @@ class DriverInbox:
                     raise StateGraphError("unknown_message")
                 if parent["audience"] != "driver" or parent["channel"] != "user":
                     raise StateGraphError("invalid_reply_target")
+            shown = self._library_attachments(conn, pid, attachments)
             mid, created = str(uuid4()), now()
             conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,"
                          "kind,delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience,"
-                         "segments_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                         "segments_json,attachments_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                          (mid, parent["thread_id"] if parent else mid, self.driver_id, project_id, "note",
                           "transient", subject, body, json.dumps(refs), reply_to_message_id, created, "user",
-                          json.dumps(segments) if segments else None))
+                          json.dumps(segments) if segments else None,
+                          json.dumps(shown) if shown else None))
             asked = any(isinstance(s, dict) and s.get("kind") == "question" for s in segments or [])
             if asked:
                 from core.state_owner_questions import question_changed
@@ -536,6 +553,33 @@ class DriverInbox:
             from core.state_changes import notify
             notify(self.store.db.db_path)
         return result
+
+    def _library_attachments(self, conn, project_id, refs):
+        """The message-row attachments of the library refs a driver's message names, checked
+        in its write transaction against the CALLER's own subdirectory (see send_user_message);
+        one that does not pass refuses the whole message invalid_attachment."""
+        if not refs:
+            return []
+        from core import media_library
+        from core.dsh_driver import STEWARD_MEMORY_USER
+        from core.state_steward import steward_project
+        store = state_conversation_uploads.store_for(conn, self.driver_id)
+        steward = store == STEWARD_MEMORY_USER
+        audience = "owner" if steward else "project:" + project_id
+        shown = []
+        for ref in refs:
+            found = media_library.lookup(store, ref)
+            if (found.status != media_library.FOUND or found.row.get("audience") != audience
+                    or (steward and project_id != steward_project())
+                    or any(item["id"] == ref for item in shown)):
+                raise StateGraphError("invalid_attachment: each attachment is an m_ ref of your own media "
+                                      "library, for this project's reader, whose file is still there")
+            name = found.row.get("name")
+            if not state_conversation_uploads.valid_name(name):
+                name = media_types.made_up_name(found.kind, ref, found.row["mime"])
+            shown.append(media_types.message_attachment(ref, found.kind, found.row["mime"],
+                                                        found.path.stat().st_size, name))
+        return shown
 
     def withdraw_user_question(self, request_key, project_id, message_id, segment_id, reason):
         """Withdraw one of the calling driver's OWN open questions, as a record.
@@ -686,7 +730,7 @@ class DriverInbox:
         if self.owner_text_guard is not None:
             self.owner_text_guard(subject, body)
         answers = self._answers(answers)
-        attachments = self._upload_ids(attachments)
+        attachments = self._attachment_ids(attachments)
         # The answers and the attachments are appended only when there are some, so the
         # payload of every request written before they existed still replays byte-identically.
         payload = [subject, body, project_id, reply_to_message_id, target_driver_id]
@@ -719,11 +763,11 @@ class DriverInbox:
         return result
 
     @staticmethod
-    def _upload_ids(attachments):
-        """The upload_ids a user's message names: a list of at most
-        media_types.ATTACHMENTS_MAX strings, [] for none; anything else is invalid_request.
-        Whether each names a usable upload is judged in the write transaction
-        (state_conversation_uploads.claim)."""
+    def _attachment_ids(attachments):
+        """The attachment ids a message names (a user's upload_ids, a driver's m_ refs): a list
+        of at most media_types.ATTACHMENTS_MAX strings, [] for none; anything else is
+        invalid_request. Whether each names a usable attachment is judged in the write
+        transaction (state_conversation_uploads.claim, _library_attachments)."""
         if attachments is None:
             return []
         if (not isinstance(attachments, list) or len(attachments) > media_types.ATTACHMENTS_MAX

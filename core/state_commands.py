@@ -403,6 +403,11 @@ class SendUserMessage(Project):
     reply_to_message_id: str | None = Field(default=None, max_length=200, description=(
         "The id of one of the USER's messages in this project, from "
         "list_user_conversation. The link is stored on the message; it grants nothing."))
+    attachments: list[str] = Field(default_factory=list, max_length=10, description=(
+        "Optional: up to 10 m_ refs from YOUR OWN media library (a director's, for this "
+        "project's readers; the steward's, for the owner), each with its file still there; one "
+        "that is not refuses the whole message (invalid_attachment). Shown in the dashboard "
+        "conversation only."))
 
     @field_serializer("refs")
     def _set_refs_only(self, refs: MessageRefs) -> dict:

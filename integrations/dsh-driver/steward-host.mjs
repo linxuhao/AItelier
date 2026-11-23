@@ -1100,7 +1100,7 @@ export async function ingestDirectorAttachments({ library, project, requestKey, 
   const stored = [];
   for (const [index, file] of checked.entries()) {
     const answer = await library.ingest({ channel: 'director', messageRef: requestKey, index, audience: `project:${project}`,
-      source: 'generated', sha256: file.sha256 }, () => readFile(file.path), { signal });
+      source: 'generated', sha256: file.sha256, name: file.name }, () => readFile(file.path), { signal });
     if (typeof answer?.ref !== 'string') return { refused: 'attachment_refused', attachments: [{ path: file.path,
       refused: answer?.refused ?? 'store_failed', ...(answer?.retry_after !== undefined ? { retry_after: answer.retry_after } : {}) }] };
     stored.push({ ref: answer.ref, kind: answer.kind, mime: answer.mime, size: answer.size, name: file.name });
@@ -1134,7 +1134,8 @@ export async function ingestDashboardAttachments({ inbox, library, audience, fet
         files.push({ kind: item?.kind, refused: item?.refused ?? 'gone' });
         continue;
       }
-      const stored = await library.ingest({ channel: 'dashboard', messageRef: message.message_id, index, audience, source: 'in' },
+      const stored = await library.ingest({ channel: 'dashboard', messageRef: message.message_id, index, audience, source: 'in',
+        ...(typeof item.name === 'string' ? { name: item.name } : {}) },
         ({ signal }) => fetchUpload(item.id, signal));
       if (stored.refused && !ACK_REFUSALS.has(stored.refused)) throw new Error(`dashboard upload ${item.id} not stored: ${stored.refused}`);
       try { await ack(item.id, stored.refused ? { refused: stored.refused } : { ref: stored.ref }); }

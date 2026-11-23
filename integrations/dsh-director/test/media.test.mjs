@@ -988,3 +988,18 @@ test('step 23.1 (7.7.16, review P5): group B\'s turn refuses group A\'s media re
   const fromB = await t.library.ingest({ channel: 'generated', audience: 'group:wechat:r2', source: 'generated' }, async () => png(12, 12));
   assert.deepEqual(await t.run('media_call', { name: OCR, media: { image_base64: fromB.ref } }), { text: 'OCR: 你好' });
 });
+
+test('24.2b C1: an index row keeps the display name ingest was given (1-255 characters, no control character), nothing else', async () => {
+  const library = createMediaLibrary({ root: root(), userId: 'd-drv' });
+  const meta = (index, name) => ({ channel: 'director', messageRef: 'req-1', index, audience: 'project:alpha', source: 'generated',
+    ...(name === undefined ? {} : { name }) });
+  const kept = await library.ingest(meta(0, 'report final.pdf'), async () => pdf(10));
+  const rows = () => readFileSync(join(library.home, 'index.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(rows().find(r => r.ref === kept.ref).name, 'report final.pdf');
+  assert.equal(library.lookup(kept.ref).name, 'report final.pdf');
+  for (const [index, name] of [[1, undefined], [2, ''], [3, 'a\nb.pdf'], [4, 'x'.repeat(256)], [5, 42]]) {
+    const other = await library.ingest(meta(index, name), async () => pdf(10 + index));
+    assert.equal(typeof other.ref, 'string', JSON.stringify(other));
+    assert.ok(!('name' in rows().find(r => r.ref === other.ref)), `not kept: ${JSON.stringify(name)}`);
+  }
+});

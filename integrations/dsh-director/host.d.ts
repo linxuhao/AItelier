@@ -381,7 +381,8 @@ export interface DirectorHost {
    *    channel?, reason?}} or {refused, reason?} (nothing written). Absent: an owner turn's
    *    send_media is refused `unsupported`. */
   media?: {
-    ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
+    ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated';
+      sha256?: string; name?: string },
       open: (options: { signal: AbortSignal }) => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>,
       options?: { signal?: AbortSignal }): Promise<{ ref: string; kind: 'image' | 'voice' | 'file';
       mime: string; size: number; durationMs?: number; duplicate?: boolean } | { refused: string; duplicate?: boolean }>;

@@ -84,6 +84,11 @@ export const MEDIA_REFUSALS = Object.freeze(['too_large', 'type', 'unsupported',
 export const REF_PATTERN = /^m_[0-9a-f]{16}$/;
 const CHANNEL_SOURCES = new Set(['slack', 'wechat']);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+/** A display name an index row may keep (step 24.2b C1): what the backend's message row accepts -
+ *  1 to 255 characters, no control character (core/state_conversation_uploads.valid_name). It
+ *  names nothing on disk. Anything else is not kept (the backend then shows the made-up name). */
+const keptName = name => typeof name === 'string' && name.length >= 1 && name.length <= 255
+  && !/[\u0000-\u001f\u007f]/.test(name) ? name : undefined;
 /** Write errors that mean the disk cannot take the file (answered store_failed to a director). */
 const DISK_FULL = new Set(['ENOSPC', 'EDQUOT', 'EFBIG', 'EROFS', 'EIO']);
 const SNIFF_BYTES = 64;
@@ -384,8 +389,9 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
       if (error instanceof Refused) throw error;
       throw writeFailed(meta, type, size, error);
     } finally { rmSync(temporary, { force: true }); }
+    const name = keptName(meta.name);
     const row = { ref: freshRef(), sha256, mime: type.mime, size, ...(durationMs !== undefined ? { durationMs } : {}),
-      audience: meta.audience, source: meta.source, channel: meta.channel,
+      audience: meta.audience, source: meta.source, channel: meta.channel, ...(name ? { name } : {}),
       ...(typeof meta.messageRef === 'string' ? { messageRef: meta.messageRef } : {}),
       ...(Number.isInteger(meta.index) ? { index: meta.index } : {}), file, at: at.toISOString() };
     try { append(row); }
@@ -403,8 +409,10 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   let lane = Promise.resolve();
   const AUDIENCE = /^(owner|group:.+|project:.+)$/s;
   /** @param meta {channel, messageRef?, index?, audience: 'owner' | 'group:<channel>:<ref>' |
-   *    'project:<project_id>', source: 'in' | 'generated', sha256?} (sha256: the bytes the
-   *    caller read, for a keyed replay's idempotency_conflict) @param open ({signal}) => a byte
+   *    'project:<project_id>', source: 'in' | 'generated', sha256?, name?} (sha256: the bytes the
+   *    caller read, for a keyed replay's idempotency_conflict; name: the file's display name,
+   *    kept on the row when it is 1-255 characters without a control character - the name the
+   *    backend shows on a message carrying the ref) @param open ({signal}) => a byte
    *    stream (async iterable, web stream or Buffer); throwing {refused: <closed set>} passes
    *    that refusal on. @param signal the caller's: aborted while this waits for the lane, the
    *    answer is `unavailable` at once and nothing is fetched; aborted while it reads, the

@@ -24,6 +24,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -122,14 +125,34 @@ def test_a_director_sends_its_own_ref_for_this_project(world, client, media_root
     assert shown["attachments"] == expected
 
 
-def test_a_library_row_name_is_kept(world, client, media_root):
-    store = director_store(world)
-    shelve(media_root, store, REF_A, IMAGE, "project:alpha")
-    with open(media_root / store / "index.jsonl", encoding="utf-8") as index:
-        line = json.loads(index.readline())
-    (media_root / store / "index.jsonl").write_text(json.dumps({**line, "name": "frame-12.png"}) + "\n")
-    assert say(client, world.tokens["director"], [REF_A]).status_code == 200
-    assert json.loads(sent_rows(world)[0]["attachments_json"])[0]["name"] == "frame-12.png"
+# The real host adapter and the real JS library write the director's rows (contracts C1): the
+# name the director's tool reports is the name the message row - and so the panel - shows.
+_INGEST = """
+const [repo, root, store, project, ...paths] = process.argv.slice(2);
+const { createMediaLibrary } = await import(new URL('integrations/dsh-director/lib/media.mjs', repo));
+const { ingestDirectorAttachments } = await import(new URL('integrations/dsh-driver/steward-host.mjs', repo));
+const library = createMediaLibrary({ root, userId: store });
+console.log(JSON.stringify(await ingestDirectorAttachments({ library, project, requestKey: 'req-1', paths })));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node for the real host adapter and media library")
+def test_the_name_the_directors_tool_reports_is_the_name_the_message_shows(world, client, media_root, tmp_path):
+    repo = Path(__file__).resolve().parents[2].as_uri() + "/"
+    script = tmp_path / "ingest.mjs"
+    script.write_text(_INGEST, encoding="utf-8")
+    frame = tmp_path / "frame-12.png"
+    frame.write_bytes(bytes.fromhex("89504e470d0a1a0a0000000d49484452") + (64).to_bytes(4, "big") * 2 + bytes(40))
+    paper = tmp_path / "report final.pdf"
+    paper.write_bytes(PAPER)
+    run = subprocess.run(["node", str(script), repo, str(media_root), director_store(world), "alpha", str(frame), str(paper)],
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    told = json.loads(run.stdout)["attachments"]
+    assert [file["name"] for file in told] == ["frame-12.png", "report final.pdf"]
+    assert say(client, world.tokens["director"], [file["ref"] for file in told]).status_code == 200
+    shown = json.loads(sent_rows(world)[0]["attachments_json"])
+    assert [item["name"] for item in shown] == [file["name"] for file in told]
 
 
 def test_the_steward_sends_its_own_owner_ref_in_its_project(world, client, media_root):

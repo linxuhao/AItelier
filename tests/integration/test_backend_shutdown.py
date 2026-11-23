@@ -156,6 +156,7 @@ class Backend:
         config_path.write_text(json.dumps(config))
         cmd = _command(self.entry)
         cmd[cmd.index("--port") + 1] = str(port)
+        self.start_monotonic = time.monotonic()
         self.process = subprocess.Popen(cmd + ["--log-config", str(config_path)],
                                         cwd=ROOT, env=self.env,
                                         stdout=self.log, stderr=subprocess.STDOUT)
@@ -166,7 +167,13 @@ class Backend:
                     for p in ("aitelier.db", "skillflow.db")])
 
     async def healthy(self, client):
-        deadline = time.monotonic() + 35
+        # 120 s, not 35: this fixture starts the backend with a sitecustomize
+        # cleanup observer that arms sys.setprofile in the child, and that
+        # instrumented startup was measured at 11.62 s on an idle 2-CPU container
+        # (2026-11-23). The suite's own 2-CPU arm plus host load multiplies that,
+        # and a full-suite run under load was still inside the child's lifespan
+        # when a 35-second deadline expired - the only red in a 1h35m baseline.
+        deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             assert self.process.poll() is None, self.log_path.read_text()
             try:
@@ -174,6 +181,7 @@ class Backend:
                 if r.status_code == 200:
                     proc = Path(f"/proc/{self.process.pid}")
                     self.record("health", status=r.status_code, body=r.json(),
+                                startup_seconds=round(time.monotonic() - self.start_monotonic, 2),
                                 pid=self.process.pid,
                                 proc_cmdline=proc.joinpath("cmdline").read_bytes()
                                 .replace(b"\0", b" ").decode(),

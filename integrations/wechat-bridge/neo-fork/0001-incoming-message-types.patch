@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..81b0494 100644
+index ec6c930..d8815a6 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -9,14 +9,21 @@ use std::{
@@ -316,7 +316,7 @@ index ec6c930..81b0494 100644
  fn options() -> NativeOptions {
      NativeOptions {
          timeout: Duration::from_secs(10),
-@@ -284,6 +525,219 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -284,6 +525,239 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
                  account.request_blocking(|request| request.send_text(&destination, &text, &send))
              }))
          }
@@ -421,19 +421,25 @@ index ec6c930..81b0494 100644
 +                Some(n) if n > 0 => "small",
 +                _ => "unknown",
 +            };
-+            let filetype = match quality {
-+                MediaQuality::Original => 1,
-+                MediaQuality::File => 5,
-+                MediaQuality::LargeFile => 7,
-+            };
++            // The filetype is not written here: the crate's own `MediaQuality::filetype`
++            // maps the profile each attempt's descriptor carries (`Original` 1 for the
++            // full-size picture, `Standard` 2 for the mid-size one the retry falls back to,
++            // `File` 5, `LargeFile` 7 beyond 25 MiB), so this addon cannot fall behind a
++            // variant upstream adds - or send the refused pairing a second time.
 +            let is_image = quality == MediaQuality::Original;
 +            let mut file_id = file_id;
++            let mut quality = quality;
++            // Whether this attempt is the image's one fallback: set only where the retry
++            // swaps the id and the profile, and named in both diagnostic lines.
++            let mut mid_size = false;
 +            let mut attempted_fallback = false;
 +            let downloaded = loop {
++                let filetype = quality.filetype();
++                let variant = if mid_size { "mid" } else { "primary" };
 +                let shape_slash = file_id.contains('/');
 +                let shape_query = file_id.contains('?');
 +                eprintln!(
-+                    "neo cdn download: quality={quality:?} filetype={filetype} downpicformat=1 size_class={size_class} file_id_len={} has_slash={shape_slash} has_query={shape_query}",
++                    "neo cdn download: variant={variant} quality={quality:?} filetype={filetype} downpicformat=1 size_class={size_class} file_id_len={} has_slash={shape_slash} has_query={shape_query}",
 +                    file_id.len()
 +                );
 +                let descriptor = MediaDescriptor {
@@ -446,13 +452,27 @@ index ec6c930..81b0494 100644
 +                    expires_at: None,
 +                };
 +                match cdn_client(account)?.download(&descriptor) {
-+                    Ok(downloaded) => break downloaded,
++                    Ok(downloaded) => {
++                        // The one thing a log owes a download that worked: which of the two
++                        // ids answered, and that id's shape. Never the id, the key or a byte.
++                        eprintln!(
++                            "neo cdn download served: variant={variant} filetype={filetype} file_id_len={} has_slash={shape_slash} has_query={shape_query}",
++                            file_id.len()
++                        );
++                        break downloaded;
++                    }
 +                    Err(err) => {
 +                        if is_image
 +                            && !attempted_fallback
 +                            && fallback_file_id.as_ref().map(|other| other != &file_id).unwrap_or(false)
 +                        {
 +                            attempted_fallback = true;
++                            mid_size = true;
++                            // The mid-size id is the crate's `Standard` profile, whose own
++                            // mapping is the `filetype` 2 design/wechat-image-cdn-diagnosis.md
++                            // section 6.3 names for `cdnmidimgurl`; sent as `Original` the
++                            // second id would repeat the pair the CDN already refused.
++                            quality = MediaQuality::Standard;
 +                            file_id = fallback_file_id.clone().unwrap();
 +                            continue;
 +                        }
@@ -536,7 +556,7 @@ index ec6c930..81b0494 100644
          Operation::LookupSelf => lookup_self(session),
          Operation::Logout => {
              session.incoming = None;
-@@ -324,7 +778,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+@@ -324,7 +798,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
          .own_username;
      let cursor = session.received_cursor.clone();
      let batch = connection(session)?.sync(&cursor, scene)?;
@@ -545,7 +565,7 @@ index ec6c930..81b0494 100644
      session.received_cursor = batch.cursor;
      Ok(json!({ "messages": messages, "continuation": batch.continuation }))
  }
-@@ -451,15 +905,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+@@ -451,15 +925,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      }
  }
  
@@ -696,7 +716,7 @@ index ec6c930..81b0494 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
-@@ -558,7 +1145,7 @@ mod tests {
+@@ -558,7 +1165,7 @@ mod tests {
          );
          let error = result.unwrap_err();
          assert!(error.is::<SessionEnded>());
@@ -705,7 +725,7 @@ index ec6c930..81b0494 100644
          assert_eq!(steps, ["attempt", "reconnect", "attempt", "renew"]);
      }
  
-@@ -611,7 +1198,7 @@ mod tests {
+@@ -611,7 +1218,7 @@ mod tests {
          let error = result.unwrap_err();
          assert!(!error.is::<SessionEnded>());
          assert_eq!(
@@ -714,7 +734,7 @@ index ec6c930..81b0494 100644
              "Neo could not read a sync page: Sync service returned -1"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -619,7 +1206,7 @@ mod tests {
+@@ -619,7 +1226,7 @@ mod tests {
          let stopped = anyhow::Error::new(AccountInterrupted::Stopped).context("Account is stopped");
          let (result, steps) = scripted_recovery(vec![Err(stopped)], Ok(()));
          assert_eq!(
@@ -723,7 +743,7 @@ index ec6c930..81b0494 100644
              "Neo could not read a sync page: Account stopped"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -632,7 +1219,7 @@ mod tests {
+@@ -632,7 +1239,7 @@ mod tests {
              Ok(()),
          );
          assert_eq!(
@@ -732,7 +752,7 @@ index ec6c930..81b0494 100644
              "Neo could not read a sync page"
          );
          assert_eq!(steps, ["attempt", "reconnect", "attempt"]);
-@@ -742,6 +1329,162 @@ mod tests {
+@@ -742,6 +1349,162 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }
  
@@ -895,7 +915,7 @@ index ec6c930..81b0494 100644
      #[test]
      fn closing_without_a_session_resets_state() {
          let mut session = Session {
-@@ -756,7 +1499,7 @@ mod tests {
+@@ -756,7 +1519,7 @@ mod tests {
  
      #[test]
      fn unhandled_sync_commands_are_skipped() {
@@ -904,7 +924,7 @@ index ec6c930..81b0494 100644
              vec![wire::SyncCommand {
                  id: 9999,
                  payload: vec![42],
-@@ -765,4 +1508,35 @@ mod tests {
+@@ -765,4 +1528,35 @@ mod tests {
          );
          assert!(messages.is_empty());
      }

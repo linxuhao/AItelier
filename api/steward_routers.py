@@ -172,10 +172,11 @@ class ScheduleCreate(BaseModel):
     schedule: dict
     tz: str = Field(min_length=1, max_length=64)
     enabled: bool = True
-    # Step 25 C11 (design-steward 7.9.4): 「发到：我 / 家庭群」; channel names the group when both
-    # channels have one.
+    # Step 25 C11 (design-steward 7.9.4): 「发到：我 / <群名>…」; group_ref names the group
+    # (required when several are bound, step 23.1); channel may narrow it.
     target: Literal["owner", "family_group"] = "owner"
     channel: Literal["slack", "wechat"] | None = None
+    group_ref: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ScheduleUpdate(BaseModel):
@@ -188,6 +189,7 @@ class ScheduleUpdate(BaseModel):
     enabled: bool | None = None
     target: Literal["owner", "family_group"] | None = None
     channel: Literal["slack", "wechat"] | None = None
+    group_ref: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class SchedulePreview(BaseModel):
@@ -222,7 +224,8 @@ def list_schedules(service=Depends(get_service)):
 def create_schedule(body: ScheduleCreate, service=Depends(get_service)):
     _owner(service)
     return _schedule_call(service.steward.create_schedule, body.title, body.instruction, body.schedule,
-                          tz=body.tz, enabled=body.enabled, as_owner=True, target=body.target, channel=body.channel)
+                          tz=body.tz, enabled=body.enabled, as_owner=True, target=body.target, channel=body.channel,
+                          group=body.group_ref)
 
 
 @router.post("/schedules/preview", dependencies=[Depends(authz.require_writer)])
@@ -237,7 +240,7 @@ def update_schedule(schedule_id: str, body: ScheduleUpdate, service=Depends(get_
     _owner(service)
     return _schedule_call(service.steward.update_schedule, schedule_id, body.expected_version, title=body.title,
                           instruction=body.instruction, schedule=body.schedule, tz=body.tz, enabled=body.enabled,
-                          as_owner=True, target=body.target, channel=body.channel)
+                          as_owner=True, target=body.target, channel=body.channel, group=body.group_ref)
 
 
 @router.delete("/schedules/{schedule_id}", dependencies=[Depends(authz.require_writer)])
@@ -324,7 +327,8 @@ def message_sources(ids: str = "", service=Depends(get_service)):
 
 class GroupCode(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    label: str | None = Field(default=None, max_length=40)
+    # Step 23.1 (7.7.9): the name of the group the code binds - required, unlike every bound group's.
+    label: str = Field(min_length=1, max_length=40)
 
 
 class MemberName(BaseModel):
@@ -355,49 +359,50 @@ def _group_call(call, *args):
 
 
 @router.get("/groups", dependencies=[Depends(authz.require_reader)])
-def list_groups(channel: Channel | None = None, service=Depends(get_service)):
-    """The bound groups (names, members, counts); with `channel`, that group's records
-    (withheld replies with their original and reason), family note and family memory."""
+def list_groups(channel: Channel | None = None, group_ref: str | None = None, service=Depends(get_service)):
+    """The bound groups (names, members, counts) and the cap per channel; with `channel` and
+    `group_ref`, that one group's records (withheld replies with their original and reason),
+    family note and family memory (step 23.1: every route names its group)."""
     _owner(service)
-    return _group_call(service.groups.owner_view, channel)
+    return _group_call(service.groups.owner_view, channel, group_ref)
 
 
 @router.post("/groups/{channel}/code", dependencies=[Depends(authz.require_writer)])
-def issue_group_code(channel: Channel, body: GroupCode | None = None, service=Depends(get_service)):
-    """A group code G-XXXX-XXXX, valid 10 minutes, once: the owner posts '@<the bot> code' in
-    the group from the bound account."""
+def issue_group_code(channel: Channel, body: GroupCode, service=Depends(get_service)):
+    """A group code G-XXXX-XXXX for the group named `label`, valid 10 minutes, once: the owner
+    posts '@<the bot> code' in the group from the bound account."""
     _owner(service)
-    return _group_call(service.groups.issue_group_code, channel, body.label if body else None)
+    return _group_call(service.groups.issue_group_code, channel, body.label)
 
 
-@router.delete("/groups/{channel}", dependencies=[Depends(authz.require_writer)])
-def unbind_group(channel: Channel, service=Depends(get_service)):
+@router.delete("/groups/{channel}/{group_ref}", dependencies=[Depends(authz.require_writer)])
+def unbind_group(channel: Channel, group_ref: str, service=Depends(get_service)):
     _owner(service)
-    return _group_call(service.groups.unbind_owner_group, channel)
+    return _group_call(service.groups.unbind_owner_group, channel, group_ref)
 
 
-@router.post("/groups/{channel}/clear", dependencies=[Depends(authz.require_writer)])
-def clear_group(channel: Channel, service=Depends(get_service)):
+@router.post("/groups/{channel}/{group_ref}/clear", dependencies=[Depends(authz.require_writer)])
+def clear_group(channel: Channel, group_ref: str, service=Depends(get_service)):
     _owner(service)
-    return _group_call(service.groups.clear_group_messages, channel)
+    return _group_call(service.groups.clear_group_messages, channel, group_ref)
 
 
-@router.put("/groups/{channel}/members/{sender_ref}", dependencies=[Depends(authz.require_writer)])
-def name_member(channel: Channel, sender_ref: str, body: MemberName, service=Depends(get_service)):
+@router.put("/groups/{channel}/{group_ref}/members/{sender_ref}", dependencies=[Depends(authz.require_writer)])
+def name_member(channel: Channel, group_ref: str, sender_ref: str, body: MemberName, service=Depends(get_service)):
     _owner(service)
-    return _group_call(service.groups.name_group_member, channel, sender_ref, body.label)
+    return _group_call(service.groups.name_group_member, channel, group_ref, sender_ref, body.label)
 
 
-@router.put("/groups/{channel}/family-note", dependencies=[Depends(authz.require_writer)])
-def set_family_note(channel: Channel, body: FamilyNote, service=Depends(get_service)):
+@router.put("/groups/{channel}/{group_ref}/family-note", dependencies=[Depends(authz.require_writer)])
+def set_family_note(channel: Channel, group_ref: str, body: FamilyNote, service=Depends(get_service)):
     _owner(service)
-    return _group_call(service.groups.set_family_note, channel, body.text)
+    return _group_call(service.groups.set_family_note, channel, group_ref, body.text)
 
 
-@router.delete("/groups/{channel}/family-memory", dependencies=[Depends(authz.require_writer)])
-def delete_family_memory(channel: Channel, entry_id: str | None = None, service=Depends(get_service)):
+@router.delete("/groups/{channel}/{group_ref}/family-memory", dependencies=[Depends(authz.require_writer)])
+def delete_family_memory(channel: Channel, group_ref: str, entry_id: str | None = None, service=Depends(get_service)):
     _owner(service)
-    return _group_call(service.groups.delete_family_memory, channel, entry_id)
+    return _group_call(service.groups.delete_family_memory, channel, group_ref, entry_id)
 
 
 @router.get("/groups-pending", dependencies=[Depends(authz.require_reader)])
@@ -414,6 +419,9 @@ def pick_pending_group(body: PendingPick, service=Depends(get_service)):
 
 # --- the family lists (step 25 C4, design-steward 7.9.5) -----------------------------------
 # The owner's session only. Adding passes the family group's exit check (422 withheld: <kind>).
+# Step 23.1 (7.7.24): each group has its own lists. Every route names one group by `channel` and
+# `group_ref` (query): a bound one, or an unbound one that keeps items (shown, removed, never
+# added to); `unassigned=true` names the items no group owns; none named is the one bound group.
 
 ListName = Literal["shopping", "todo"]
 
@@ -429,35 +437,74 @@ class ListCheck(BaseModel):
     done: bool = True
 
 
-@router.get("/lists", dependencies=[Depends(authz.require_reader)])
-def family_lists(service=Depends(get_service)):
-    """Both family lists: each item with who added it, when, and who checked it."""
+def _list_group(channel, group_ref):
+    if (channel is None) != (group_ref is None):
+        raise HTTPException(422, "invalid_request: channel and group_ref name a group together")
+    return None if channel is None else {"channel": channel, "group_ref": group_ref}
+
+
+@router.get("/lists/groups", dependencies=[Depends(authz.require_reader)])
+def family_list_groups(service=Depends(get_service)):
+    """The groups that have lists to show (bound ones, unbound ones that keep items) and how many
+    items no group owns."""
     _owner(service)
-    return _group_call(lambda: service.lists.list_items(as_owner=True))
+    return _group_call(service.lists.list_groups)
+
+
+@router.get("/lists", dependencies=[Depends(authz.require_reader)])
+def family_lists(channel: Channel | None = None, group_ref: str | None = None, unassigned: bool = False,
+                 service=Depends(get_service)):
+    """One group's two lists: each item with who added it, when, and who checked it."""
+    _owner(service)
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.list_items(as_owner=True, group=group, unassigned=unassigned))
 
 
 @router.post("/lists/{list_name}/items", dependencies=[Depends(authz.require_writer)])
-def add_list_items(list_name: ListName, body: ListAdd, service=Depends(get_service)):
+def add_list_items(list_name: ListName, body: ListAdd, channel: Channel | None = None, group_ref: str | None = None,
+                   service=Depends(get_service)):
     _owner(service)
-    return _group_call(lambda: service.lists.add_items(list_name, body.items, as_owner=True))
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.add_items(list_name, body.items, as_owner=True, group=group))
 
 
 @router.post("/lists/check", dependencies=[Depends(authz.require_writer)])
-def check_list_items(body: ListCheck, service=Depends(get_service)):
+def check_list_items(body: ListCheck, channel: Channel | None = None, group_ref: str | None = None,
+                     unassigned: bool = False, service=Depends(get_service)):
     _owner(service)
-    return _group_call(lambda: service.lists.check_items(body.item_ids, body.done, as_owner=True))
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.check_items(body.item_ids, body.done, as_owner=True, group=group,
+                                                         unassigned=unassigned))
 
 
 @router.delete("/lists/items/{item_id}", dependencies=[Depends(authz.require_writer)])
-def remove_list_item(item_id: str, service=Depends(get_service)):
+def remove_list_item(item_id: str, channel: Channel | None = None, group_ref: str | None = None,
+                     unassigned: bool = False, service=Depends(get_service)):
     _owner(service)
-    return _group_call(lambda: service.lists.remove_items([item_id], as_owner=True))
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.remove_items([item_id], as_owner=True, group=group,
+                                                          unassigned=unassigned))
+
+
+class ListAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+@router.post("/lists/assign", dependencies=[Depends(authz.require_writer)])
+def assign_list_items(body: ListAssign, channel: Channel, group_ref: str, service=Depends(get_service)):
+    """Unassigned items (from before each group had its own lists) join a bound group's lists."""
+    _owner(service)
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.assign_items(body.item_ids, group))
 
 
 @router.post("/lists/clear-done", dependencies=[Depends(authz.require_writer)])
-def clear_done_list_items(list_name: ListName | None = None, service=Depends(get_service)):
+def clear_done_list_items(list_name: ListName | None = None, channel: Channel | None = None,
+                          group_ref: str | None = None, unassigned: bool = False, service=Depends(get_service)):
     _owner(service)
-    return _group_call(lambda: service.lists.clear_done(list_name))
+    group = _list_group(channel, group_ref)
+    return _group_call(lambda: service.lists.clear_done(list_name, group=group, unassigned=unassigned))
 # --- the steward's own MCP connections (step 24.1a) ----------------------------------------
 
 class ConnectionUpsert(BaseModel):

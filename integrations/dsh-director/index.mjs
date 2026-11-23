@@ -37,8 +37,9 @@ import { openMemory, profileSection, registerMemoryTools } from './lib/memory/to
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
 import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
-import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns } from './lib/group-turns.mjs';
+import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
+import { registerGroupTools } from './lib/group-tools.mjs';
 
 export const name = 'dsh-director';
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
@@ -400,14 +401,19 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // tag, never the text, makes the turn a group turn), with that group's recent exchanges.
   if (groupTurns && channels && host.groups) channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label, attachments }) => {
     await agentExists;
-    const listed = await host.groups.list().catch(() => ({}));
+    const listed = await host.groups.list().catch(error => { ctx.logger.warn('group wake: groups not read: ' + String(error?.message ?? error).slice(0, 200)); return {}; });
     const group = (listed?.groups ?? []).find(g => g.channel === channel && g.group_ref === groupRef);
+    // The group's own name (step 23.1, 7.7.4) or no wake at all (director 602 defect 3, fail closed):
+    // groupWakeName throws, the channel logs group_wake_failed and the question stays unanswered.
+    let label;
+    try { label = groupWakeName(group); }
+    catch (error) { ctx.logger.warn('group wake refused ' + JSON.stringify({ channel, group_ref: groupRef, message_id })); throw error; }
     const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
     while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
-    const wake = { group_turn: { group: group?.label ?? '家庭群', messages: [{ message_id, sender_role, sender: sender_label,
+    const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
       ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent } };
     ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],
-      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: group?.label ?? null, question_ids: [message_id],
+      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: label, question_ids: [message_id],
         sender_refs: [senderRef] } })));
     await ctx.sessionPersistence.flush();
   });
@@ -717,7 +723,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (stewardCatalog && catalogHost.confirm) registerConfirmTools(scope, { ctx, defineTool, jsonOutput,
       HarnessError: llm.HarnessError, confirm: catalogHost.confirm, catalog: stewardCatalog,
       // A group turn's requester is one of its askers (7.8.9): the questions it took, newest last.
-      groupQuestions: () => { const turn = groupTurns?.open(); return turn?.audience.kind === 'group' ? [...turn.questions] : undefined; } });
+      groupQuestions: () => { const turn = groupTurns?.open(); return turn?.audience.kind === 'group' ? [...turn.questions] : undefined; },
+      // run_confirmed reads a record for the turn open now (step 23.1, 7.8.9 step 5).
+      currentTurn: () => groupTurns?.open()?.turn });
     // Step 24.1c (design-steward 7.8.10a): the steward reads its connections and proposes
     // changes to them, when the host's catalog provides those operations.
     if (stewardCatalog && catalogHost.manage) registerConnectionTools(scope, { defineTool, jsonOutput,
@@ -727,40 +735,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
-    // Step 23: the family memory, a store of its own on the host, for group turns only (the
-    // guard refuses both tools in an owner turn; the host accepts them only from a group turn).
-    if (groupTurns && host.groups?.familyNote) {
-      scope.tools.register(defineTool({ name: 'family_memory_note',
-        description: 'Group turns only. Keep one short thing someone in this family group asked you to remember for the family (at most 200 characters). Never your owner\'s memory; shopping and to-do items go to the family lists.',
-        parameters: { text: { type: 'string', required: true } }, output: jsonOutput,
-        execute: (args, exec) => host.groups.familyNote(args.text, exec.signal, { turn: groupTurns.open()?.turn }) }));
-      scope.tools.register(defineTool({ name: 'family_memory_show',
-        description: 'Group turns only. This group\'s family memory (newest first) and your owner\'s note to the family.',
-        parameters: {}, output: jsonOutput, execute: (_args, exec) => host.groups.familyShow(exec.signal, { turn: groupTurns.open()?.turn }) }));
-    }
-    // Step 25 C4 (design-steward 7.9.5): the family lists, shopping and to-do. Show, add and check
-    // in a group turn too (the guard's whitelist; the host's request then carries the public-read
-    // header, and this code - never the model - names the open turn the backend checks against
-    // the recorded audience); remove in an owner turn only.
-    if (groupTurns && host.groups?.listShow) {
-      const turn = () => ({ turn: groupTurns.open()?.turn });
-      const list = { type: 'string', enum: ['shopping', 'todo'] };
-      scope.tools.register(defineTool({ name: 'list_show',
-        description: 'The family lists (shopping and to-do; or one, with list): each item\'s item_id, text, who added it and when, and whether it is checked. Every open item, then at most 100 checked items per list, newest first (a checked item is kept 30 days): done_total counts each list\'s checked items, done_more how many are not shown, and done_not_shown says it in words (另有 N 条已勾掉的未显示) - say so rather than call the list complete. Everyone in the family group can see everything on them, whoever added it.',
-        parameters: { list }, output: jsonOutput, execute: (args, exec) => host.groups.listShow({ list: args.list }, exec.signal, turn()) }));
-      scope.tools.register(defineTool({ name: 'list_add',
-        description: 'Add up to 10 items (each at most 100 characters) to the family shopping or to-do list. An item already open on that list is not added twice. Refused withheld when an item names something the family group may not see; list_full at 100 open items.',
-        parameters: { list: { ...list, required: true }, items: { type: 'array', items: { type: 'string' }, required: true } }, output: jsonOutput,
-        execute: (args, exec) => host.groups.listAdd({ list: args.list, items: args.items }, exec.signal, turn()) }));
-      scope.tools.register(defineTool({ name: 'list_check',
-        description: 'Check off (done: true, the default) or uncheck (done: false) family list items by the item_id list_show gave.',
-        parameters: { item_ids: { type: 'array', items: { type: 'string' }, required: true }, done: { type: 'boolean' } }, output: jsonOutput,
-        execute: (args, exec) => host.groups.listCheck({ itemIds: args.item_ids, done: args.done ?? true }, exec.signal, turn()) }));
-      scope.tools.register(defineTool({ name: 'list_remove',
-        description: 'Your owner\'s turns only: remove family list items by item_id (in the family group items are only checked off; only your owner removes).',
-        parameters: { item_ids: { type: 'array', items: { type: 'string' }, required: true } }, output: jsonOutput,
-        execute: (args, exec) => host.groups.listRemove({ itemIds: args.item_ids }, exec.signal, turn()) }));
-    }
+    // Step 23, 25 C4, 23.1: the family memory, the family lists and group_reminder_set (lib/group-tools.mjs).
+    if (groupTurns && host.groups) registerGroupTools(scope, { defineTool, jsonOutput, groups: host.groups, turns: groupTurns });
   };
   // Step 23: the first step of every steward turn decides its audience, puts input of another
   // audience back for the next turn, folds the finished group turns, records the audience on the
@@ -917,7 +893,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // groupReplies). An owner turn's words never go to a group.
   if (groupTurns && channels && host.groups) {
     const watch = groupReplies({ turns: groupTurns, reply: args => host.groups.reply(args),
-      sendGroup: (channel, groupRef, text) => channels.sendGroup(channel, groupRef, text), warn: line => ctx.logger.warn(line) });
+      sendGroup: (channel, groupRef, text) => channels.sendGroup(channel, groupRef, text), warn: line => ctx.logger.warn(line),
+      mirror: (messageId, text) => channels.ownerMessageSent(messageId, text) });
     ctx.on('session/event', (session, event) => { if (session === agent.session) void watch(event); });
     setTimeout(redeliver, 1000).unref?.();
   }

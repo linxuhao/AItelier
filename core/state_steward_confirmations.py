@@ -26,7 +26,23 @@ that asked for it (`create_steward_confirmation`); this module
   core.state_groups.relay_group_message, before its quotas), on the same channel,
   conversation and sender, within 10 minutes;
 - lets the gateway CONSUME one confirmed record whose hash equals the call it is about
-  to forward (api/steward_gateway.py): one confirmation, one forward, never retried.
+  to forward (api/steward_gateway.py): one confirmation, one forward, never retried;
+- in a group turn runs only that group's records (step 23.1, design-steward 7.8.9 step 5,
+  7.7.24 item 4): `get` (run_confirmed) names the call's own turn and is refused
+  not_this_conversation for a turn that is not the recorded one, or in a group turn for
+  another group's record or the owner's. An owner turn may run a group's record (platform
+  director 581): `get` then names the group and who confirmed it. A `get` that names its
+  turn and passes ARMS the confirmed record for that turn (armed_turn, armed_at,
+  armed_owner); `consume` (the gateway, whose request carries no turn) takes only a record
+  armed within ARMED: whose turn may run a record was judged at arming, from the call's own
+  turn (platform director 602 claim 7). An arming is valid only in the turn that made it:
+  recording the next turn (core.state_groups.set_steward_turn_audience) disarms, in the same
+  transaction, every record another turn armed (`disarm_other_turns`), and `consume` refuses
+  an arming whose turn is not the recorded one - so no later turn (another group's, or an
+  owner turn, silently) takes an arming it did not make. A direct call of an outward tool
+  consumes only a record run_confirmed armed in that same turn; with none, it consumes
+  nothing. A `get` without a turn (a caller that cannot name one) is the read of before step
+  23.1: read-only, it arms nothing.
 
 Both tables are private (core.state_privacy.PRIVATE_STATE_TABLES); records are kept 30 days.
 """
@@ -35,6 +51,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 
@@ -56,8 +73,11 @@ CREATE TABLE IF NOT EXISTS state_steward_dashboard_messages (
  message_id TEXT PRIMARY KEY, at TEXT NOT NULL);
 """
 TABLES = ("state_steward_confirmations", "state_steward_dashboard_messages")
+# Step 23.1 (director 602 claim 7): run_confirmed's read arms a confirmed record for its turn.
+ARM_COLUMNS = (("armed_turn", "TEXT"), ("armed_at", "TEXT"), ("armed_owner", "INTEGER"))
 
 TTL = timedelta(minutes=10)             # to confirm, and from confirming to running
+ARMED = timedelta(minutes=2)            # from run_confirmed's read to the gateway's consumption
 CLOCK_SKEW = timedelta(minutes=2)       # a channel time this far ahead of now still counts
 KEPT = timedelta(days=30)
 PENDING_MAX = 3                         # per requester at a time
@@ -150,9 +170,16 @@ def _new_code(conn) -> str:
     raise StateGraphError("confirmation_codes_exhausted")
 
 
+def _migrate(conn) -> None:
+    from core.state_schema_migration import add_column_if_missing
+    for column, definition in ARM_COLUMNS:
+        add_column_if_missing(conn, "state_steward_confirmations", column, definition)
+
+
 def ensure_schema(db) -> None:
     with db.get_connection() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
 
 
@@ -175,6 +202,7 @@ def ensure_tables(conn) -> None:
         for statement in SCHEMA.split(";"):
             if statement.strip():
                 conn.execute(statement)
+    _migrate(conn)
 
 
 def requester_of(conn, message_id: str, home: str) -> dict:
@@ -249,19 +277,70 @@ def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | 
 def consume(conn, connection, raw_name: str, arguments) -> str | None:
     """In the gateway's write transaction: the confirmed record (within 10 minutes of its
     confirmation) whose hash equals this call - with the connection's CURRENT conn_uid and
-    generation - becomes `consumed`; its code, else None. Raises invalid_arguments."""
+    generation - and that run_confirmed armed within ARMED becomes `consumed`; its code, else
+    None. Raises invalid_arguments.
+
+    Step 23.1 (director 602 claim 7): the gateway's request carries no turn, so it never judges
+    whose turn this is from the one-row turn audience record: the record's arming (`get` with
+    the call's own turn, which judged that turn may run it) is the only scope, and it is never
+    empty. A record no turn armed is consumed by no call. The arming is valid only in its own
+    turn: the next turn's record disarms it (`disarm_other_turns`), and, failing closed should
+    that ever be missed, an arming whose turn is not the recorded one is not consumed - the
+    recorded turn only ever narrows what the arming allows, never widens it."""
     if not _has_tables(conn):
         return None
+    _migrate(conn)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_steward_turn_audience'"
+                    ).fetchone() is None:
+        return None  # no turn was ever recorded, so none armed a record
     digest = args_hash(connection["conn_uid"], connection["generation"], raw_name, canonical_arguments(arguments))
-    since = _iso(_utcnow() - TTL)
+    now = _utcnow()
     row = conn.execute("SELECT code FROM state_steward_confirmations WHERE conn_id=? AND raw_name=? AND args_sha256=? "
-                       "AND status='confirmed' AND confirmed_at>=? ORDER BY confirmed_at LIMIT 1",
-                       (connection["conn_id"], raw_name, digest, since)).fetchone()
+                       "AND status='confirmed' AND confirmed_at>=? AND armed_turn IS NOT NULL AND armed_at>=? "
+                       "AND armed_turn=(SELECT turn FROM state_steward_turn_audience WHERE id=1) "
+                       "ORDER BY armed_at DESC LIMIT 1",
+                       (connection["conn_id"], raw_name, digest, _iso(now - TTL), _iso(now - ARMED))).fetchone()
     if row is None:
         return None
     taken = conn.execute("UPDATE state_steward_confirmations SET status='consumed', consumed_at=? WHERE code=? "
                          "AND status='confirmed'", (_iso(_utcnow()), row["code"])).rowcount
     return row["code"] if taken else None
+
+
+def disarm_other_turns(conn, turn: str) -> int:
+    """In the transaction that records the steward's next turn (core.state_groups
+    set_steward_turn_audience): every confirmed record armed by another turn is disarmed, so a
+    turn never consumes an arming it did not make (director 602 claim 7: judged by the call's
+    own turn, guaranteed by code though turns do not overlap). A consumed or finished record
+    keeps its arming as history: it can be consumed no more. The number disarmed."""
+    if not _has_tables(conn):
+        return 0
+    _migrate(conn)
+    return conn.execute("UPDATE state_steward_confirmations SET armed_turn=NULL, armed_at=NULL, armed_owner=NULL "
+                        "WHERE status='confirmed' AND armed_turn IS NOT NULL AND armed_turn<>?", (turn,)).rowcount
+
+
+def _group_origin(conn, row) -> tuple:
+    """A group record's group label and the label of the member who confirmed it."""
+    from core.state_groups import StateGroups
+    named = conn.execute("SELECT label FROM state_owner_groups WHERE channel=? AND group_ref=?",
+                         (row["channel"], row["conversation_ref"])).fetchone()
+    label = named[0] if named else row["conversation_ref"]
+    return label, StateGroups._label_of(conn, row["channel"], row["conversation_ref"], row["sender_ref"],
+                                        row["requester_kind"])
+
+
+def owner_turn_note(conn, code: str) -> str | None:
+    """In the gateway's transaction, after `consume`: when an OWNER turn armed and took a record
+    a family group confirmed (director 581 lets it), the line the forwarded result carries
+    naming the group and who confirmed it - the same text run_confirmed shows. Whose turn armed
+    it is the record's own (armed_owner), never the turn audience record. Else None."""
+    row = conn.execute("SELECT * FROM state_steward_confirmations WHERE code=?", (code,)).fetchone()
+    if row is None or row["audience"] != "group" or not row["armed_owner"]:
+        return None
+    label, confirmer = _group_origin(conn, row)
+    return (f"[This action was asked for and confirmed in the family group 「{label}」 by "
+            f"{confirmer or 'a member of that group'}; it ran in your owner's turn.]")
 
 
 def finish(conn, code: str, ok: bool, summary: str | None) -> None:
@@ -415,17 +494,52 @@ class StateStewardConfirmations:
         return ({"kind": kind, "channel": row["channel"], "conversation_ref": row["group_ref"], "sender_ref": sender},
                 dict(group))
 
-    def get(self, code):
-        """One record for run_confirmed: the stored public name and arguments, and its status."""
+    def get(self, code, turn=None):
+        """One record for run_confirmed in the turn `turn` (the plugin's open turn): the stored
+        public name and arguments, and its status. The turn must be the one the host recorded
+        last (else not_this_conversation: whose turn this is cannot be told); its audience is
+        read only from the record of THAT turn. In a group turn only a record of that group
+        (channel, conversation_ref) is given - another group's or the owner's is
+        not_this_conversation (step 23.1, 7.8.9 step 5); in an owner turn any record, and a
+        group's names its group and who confirmed it (`group`, `confirmed_by`, platform
+        director 581: the owner runs it knowingly). A confirmed record still in time is armed
+        for this turn: the gateway consumes only an armed record (director 602 claim 7).
+
+        Without `turn` (a caller that cannot name one, director 602 defect 8): the read of
+        before step 23.1 - the record's name, arguments and status, read-only; nothing is armed,
+        so nothing it returns can be consumed."""
         from core import state_steward_connections as sc
         if not isinstance(code, str) or not CODE.fullmatch(code):
             raise StateGraphError("invalid_code")
-        with self.store.transaction() as conn:
+        if turn is not None and (not isinstance(turn, str) or not turn):
+            raise StateGraphError("invalid_request: turn is the plugin's open turn")
+        group_label = confirmer = None
+        with self.store.transaction(write=turn is not None) as conn:
             self.steward._steward(conn)
             row = conn.execute("SELECT * FROM state_steward_confirmations WHERE code=?", (code,)).fetchone() \
                 if _has_tables(conn) else None
-        if row is None:
-            raise StateNotFound(f"unknown_code: no confirmation {code}")
+            if row is None:
+                raise StateNotFound(f"unknown_code: no confirmation {code}")
+            if turn is not None:
+                try:
+                    audience = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1 AND turn=?",
+                                            (turn,)).fetchone()
+                except sqlite3.OperationalError:  # no table yet: no turn was ever recorded
+                    audience = None
+                if audience is None:
+                    raise StateGraphError("not_this_conversation: this request is not the recorded turn's")
+                owner = audience["audience"] == "owner"
+                if not owner and (row["audience"] != "group" or row["channel"] != audience["channel"]
+                                  or row["conversation_ref"] != audience["group_ref"]):
+                    raise StateGraphError("not_this_conversation: a confirmation runs only in the conversation it was "
+                                          "asked for")
+                if owner and row["audience"] == "group":
+                    group_label, confirmer = _group_origin(conn, row)
+                now = _utcnow()
+                if row["status"] == "confirmed" and now - _parse(row["confirmed_at"]) <= TTL:
+                    _migrate(conn)
+                    conn.execute("UPDATE state_steward_confirmations SET armed_turn=?, armed_at=?, armed_owner=? "
+                                 "WHERE code=? AND status='confirmed'", (turn, _iso(now), 1 if owner else 0, code))
         status = row["status"]
         if status == "pending" and _utcnow() - _parse(row["created_at"]) > TTL:
             status = "expired"
@@ -433,7 +547,8 @@ class StateStewardConfirmations:
             status = "expired"
         return {"code": code, "status": status, "name": sc.public_name(row["conn_id"], row["gw_name"]),
                 "arguments": json.loads(row["args_json"]), "created_at": row["created_at"],
-                "confirmed_at": row["confirmed_at"]}
+                "confirmed_at": row["confirmed_at"],
+                **({"group": group_label, "confirmed_by": confirmer} if group_label is not None else {})}
 
     def cancel(self, code):
         """The host voids a PENDING record whose text never reached the requester (the

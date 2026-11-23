@@ -78,7 +78,9 @@
         <strong>{row.title}</strong>
         {#if row.updated_by === 'steward'}<span class="mark" data-steward-edited>{t('steward.schedStewardEdited')}</span>{/if}
         <!-- Step 25 C11: posted as written into the family group; marked once that group is unbound. -->
-        {#if row.target === 'family_group'}<span class="mark group" data-target-group>{t('steward.schedToGroup')}</span>{/if}
+        {#if row.target === 'family_group'}<span class="mark group" data-target-group>{t('steward.schedToGroup').replace('{name}', row.target_group_label ?? row.target_group_ref ?? '')}</span>{/if}
+        <!-- Step 23.1 (7.9.4): a one-time reminder a family member asked for in that group. -->
+        {#if row.created_via === 'group'}<span class="mark" data-made-by-member>{t('steward.schedByMember').replace('{who}', row.created_by_label ?? '').replace('{group}', row.target_group_label ?? '')}</span>{/if}
         {#if row.target === 'family_group' && row.target_unbound}<span class="mark overdue" data-group-unbound>{t('steward.schedGroupUnbound')}</span>{/if}
         <!-- Review 337: a stopped scheduler must not look healthy. Past its time by more than
              five minutes (the steward's clock fires within seconds and re-looks every 4 min). -->

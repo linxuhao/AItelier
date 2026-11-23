@@ -171,6 +171,10 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         # Step 25 (7.9.5): the family list tools; add and check are accepted from a group turn too
         # (public-read header + the recorded group audience of the named turn), remove never.
         "add_list_items", "check_list_items", "remove_list_items",
+        # Step 23.1 (design-steward 7.9.4): a family member's one-time reminder to their own group,
+        # the steward's group_reminder_set - accepted only from a group turn (public-read header +
+        # the recorded group audience of the named turn; tests/unit/test_steward_family.py).
+        "create_group_reminder",
         # Step 24.1a (design-steward 7.8.5, 7.8.18): the host writes a fallback-restart marker;
         # the steward re-reads one registered connection's tools (discovery fields only). The
         # gateway judges private connections by step 23's turn audience, above.

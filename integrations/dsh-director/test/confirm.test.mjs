@@ -19,7 +19,7 @@ const CACHE = {
 const wake = (...ids) => 'EVENT:\n' + JSON.stringify({ events: [], driver_inbox: ids.map(id => ({ message_id: id, sender_kind: 'user' })) });
 const userMessage = text => ({ type: 'user/message', data: { message: { content: [{ type: 'text', text }] } } });
 
-function fixture({ stateDir, turn = { kind: 'owner' }, questions } = {}) {
+function fixture({ stateDir, turn = { kind: 'owner' }, questions, openTurn = () => '5' } = {}) {
   const calls = [];
   const dir = stateDir ?? mkdtempSync(join(tmpdir(), 'confirm-'));
   const host = {
@@ -35,7 +35,7 @@ function fixture({ stateDir, turn = { kind: 'owner' }, questions } = {}) {
     create: async (request) => { calls.push(['create', request]); return { code: 'K7Q2A', text: 'TEXT', reply_to_message_id: request.requesterMessageId, expires_at: 'e',
       ...(request.audience === 'group' ? { channel: 'wechat', group_ref: 'room1' } : { channel: 'slack' }) }; },
     deliver: async (message) => { calls.push(['deliver', message]); return delivery.answer; },
-    get: async code => { calls.push(['get', code]); return { code, ...record }; },
+    get: async (code, _signal, options) => { calls.push(['get', code, options]); return { code, ...record }; },
     cancel: async code => { calls.push(['cancel', code]); return { code, status: 'cancelled' }; },
   };
   const delivery = { answer: { message_id: 'm-out' } };
@@ -43,10 +43,11 @@ function fixture({ stateDir, turn = { kind: 'owner' }, questions } = {}) {
   const scope = { tools: { register: tool => tools.set(tool.name, tool) } };
   const ctx = { tools: { execute: async request => { executed.push(request); return { value: { sent: true }, content: [{ type: 'text', text: 'sent' }] }; } } };
   class HarnessError extends Error { constructor(message, code) { super(message); this.code = code; } }
-  registerConfirmTools(scope, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError, confirm, catalog, groupQuestions: () => questions?.ids });
+  registerConfirmTools(scope, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError, confirm, catalog, groupQuestions: () => questions?.ids,
+    currentTurn: openTurn });
   const run = (name, args, session = 'root') => tools.get(name).execute(args, { agent: { session: { id: session } }, signal: undefined,
     callId: 'c1', rootCallId: 'r1', token: 'tok-1' });
-  return { catalog, calls, record, run, executed, dir, delivery };
+  return { catalog, calls, record, run, executed, dir, delivery, tools };
 }
 
 test('request_confirmation: no person\'s message in the turn is no_requester; the newest one is the requester', async () => {
@@ -181,4 +182,56 @@ test('request_confirmation: a text that did not reach the person gives no code, 
     assert.ok(!JSON.stringify(out).includes('K7Q2A'), JSON.stringify(out));
     assert.deepEqual(f.calls.at(-1), ['cancel', 'K7Q2A']);
   }
+});
+
+test('run_confirmed (step 23.1, 7.8.9 step 5): the read names the open turn; an owner turn running a group\'s record is told which group and who confirmed it', async () => {
+  const f = fixture({ openTurn: () => 12 });
+  await f.catalog.preStep();
+  f.catalog.observe({ type: 'turn/start', seq: 1 });
+  f.catalog.observe(userMessage(wake('m-1')));
+  Object.assign(f.record, { group: '家庭群', confirmed_by: '妈妈' });
+  const ran = await f.run('run_confirmed', { code: 'K7Q2A' });
+  assert.deepEqual(f.calls.filter(c => c[0] === 'get'), [['get', 'K7Q2A', { turn: '12' }]]);
+  assert.deepEqual(ran, { sent: true });
+  // What the model reads of the result: the line first, then the call's own content.
+  const shown = f.tools.get('run_confirmed').projectContent({ token: 'tok-1' });
+  assert.match(shown[0].text, /confirmed in the family group 「家庭群」 by 妈妈/);
+  assert.deepEqual(shown.slice(1), [{ type: 'text', text: 'sent' }]);
+  // A record of the turn's own conversation carries no group: nothing is added.
+  delete f.record.group; delete f.record.confirmed_by;
+  assert.deepEqual(await f.run('run_confirmed', { code: 'K7Q2A' }), { sent: true });
+  assert.deepEqual(f.tools.get('run_confirmed').projectContent({ token: 'tok-1' }), [{ type: 'text', text: 'sent' }]);
+});
+
+test('run_confirmed (step 23.1, PRIV-2): a failed forward of a group\'s record still names the group and confirmer; the gateway\'s own line is not repeated', async () => {
+  const f = fixture();
+  Object.assign(f.record, { group: '家庭群', confirmed_by: '妈妈' });
+  const line = '[This action was asked for and confirmed in the family group 「家庭群」 by 妈妈; it ran in your owner\'s turn.]';
+  const failing = { isError: true, error: { message: 'upstream_error: the connection did not answer this call', info: { code: 'upstream_error' } },
+    content: [{ type: 'text', text: 'boom' }] };
+  const tools = new Map();
+  class HarnessError extends Error { constructor(message, code) { super(message); this.code = code; } }
+  let answer = failing;
+  registerConfirmTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx: { tools: { execute: async () => answer } },
+    defineTool: t => t, jsonOutput: {}, HarnessError, catalog: f.catalog, currentTurn: () => '5',
+    confirm: { get: async code => ({ code, ...f.record }) } });
+  const exec = { agent: { session: { id: 'root' } }, token: 't1', callId: 'c', rootCallId: 'r' };
+  await assert.rejects(tools.get('run_confirmed').execute({ code: 'K7Q2A' }, exec), error => error.message.startsWith(line) && error.code === 'upstream_error');
+  assert.equal(tools.get('run_confirmed').projectContent(exec)[0].text, line);
+  // The backend's gateway already put the same line first: it is shown once.
+  answer = { value: { sent: true }, content: [{ type: 'text', text: line }, { type: 'text', text: 'sent' }] };
+  await tools.get('run_confirmed').execute({ code: 'K7Q2A' }, { ...exec, token: 't2' });
+  assert.deepEqual(tools.get('run_confirmed').projectContent({ token: 't2' }).map(b => b.text), [line, 'sent']);
+});
+
+test('run_confirmed (step 23.1): the backend\'s not_this_conversation reaches the model as it is and nothing runs', async () => {
+  const f = fixture();
+  f.record.status = undefined;
+  const tools = new Map(), executed = [];
+  registerConfirmTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx: { tools: { execute: async r => { executed.push(r); return {}; } } },
+    defineTool: t => t, jsonOutput: {}, HarnessError: Error, catalog: f.catalog, currentTurn: () => 3,
+    confirm: { get: async () => ({ refused: 'not_this_conversation', reason: 'a confirmation runs only in the conversation it was asked for' }) } });
+  const out = await tools.get('run_confirmed').execute({ code: 'K7Q2A' }, { agent: { session: { id: 'root' } }, token: 't' });
+  assert.equal(out.refused, 'not_this_conversation');
+  assert.deepEqual(executed, []);
 });

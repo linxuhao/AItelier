@@ -4,7 +4,8 @@
  *  operations map onto the step 23 commands. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stewardOps, groupOps, publicProjectSummary, listWhoShown } from './steward-host.mjs';
+import { stewardOps, groupOps, publicProjectSummary, listWhoShown, boundGroupsSection } from './steward-host.mjs';
+import { readFileSync } from 'node:fs';
 
 function recorder(answers = {}) {
   const calls = [];
@@ -46,13 +47,16 @@ test('the group operations are the host\'s own requests; only the family memory 
     { message_id: 'g1', sender_role: 'member' });
   assert.deepEqual(await ops.bind({ channel: 'wechat', groupRef: 'r1', senderRef: 'm', messageRef: 'x', prefix: '@管家', code: 'G-1' }),
     { refused: 'channel_sender_not_bound' });
-  await ops.reply({ questionId: 'g1', alsoAnswers: ['g0'], body: 'answer' });
-  await ops.audience({ turn: '3', audience: 'group', group: { channel: 'wechat', group_ref: 'r1' }, senderRefs: ['m'] });
+  await ops.reply({ questionId: 'g1', alsoAnswers: ['g0'], body: 'answer', turn: '3' });
+  await ops.audience({ turn: '3', audience: 'group', group: { channel: 'wechat', group_ref: 'r1' }, senderRefs: ['m'], questionIds: ['g0', 'g1'] });
   await ops.familyNote('周六去外婆家', undefined, { turn: '3' });
   await ops.familyShow(undefined, { turn: '3' });
   assert.ok(host.calls.every(c => c.readAs === undefined));
   assert.deepEqual(host.calls.map(c => c.path.split('/').at(-1)), ['relay_group_message', 'bind_owner_group', 'post_group_reply', 'set_steward_turn_audience']);
-  assert.deepEqual(host.calls[2].body, { request_key: 'group-reply:g1', question_id: 'g1', body: 'answer', also_answers: ['g0'] });
+  // Step 23.1 (7.7.7): the reply names its turn and the audience the questions that turn took.
+  assert.deepEqual(host.calls[2].body, { request_key: 'group-reply:g1', question_id: 'g1', body: 'answer', turn: '3', also_answers: ['g0'] });
+  assert.deepEqual(host.calls[3].body, { turn: '3', audience: 'group', group: { channel: 'wechat', group_ref: 'r1' }, sender_refs: ['m'],
+    question_ids: ['g0', 'g1'] });
   assert.deepEqual(tool.calls.map(c => [c.path.split('/').at(-1), c.readAs]), [['note_family_memory', 'public'], ['list_family_memory', 'public']]);
   // Both name the turn they run in (director 477 N1: the backend wants the recorded one).
   assert.deepEqual(tool.calls.map(c => c.body.turn), ['3', '3']);
@@ -155,4 +159,50 @@ test('after a group turn the adapter\'s own writes wait for the owner too; the g
   assert.equal(turns.guard('schedule_set'), pausedRefusal);
   assert.equal(turns.guard('reply_to_director'), pausedRefusal);
   assert.equal(turns.guard('send_user_message'), undefined);
+});
+
+test('step 23.1 (7.9.4, 7.9.5): an owner turn\'s list operations name the group; a member\'s reminder goes through the tools\' request with its turn', async () => {
+  const host = recorder();
+  const tool = recorder({ '/api/state/commands/create_group_reminder': { result: { schedule_id: 'sch-1', created_via: 'group' } } });
+  const ops = groupOps({ request: host.request, toolRequest: (p, b, s) => tool.request(p, b, s, { readAs: 'public' }), project: 'aitelier-home', me: 'drv' });
+  await ops.listShow({ group: '老家群' });
+  await ops.listAdd({ list: 'todo', items: ['交水费'], group: '老家群' });
+  await ops.listCheck({ itemIds: ['li-1'], group: '老家群' });
+  await ops.listRemove({ itemIds: ['li-1'], group: '老家群' });
+  assert.deepEqual(tool.calls.map(c => c.body.group), ['老家群', '老家群', '老家群', '老家群']);
+  // Without a group nothing names one (the backend picks the one bound group, or group_required).
+  await ops.listShow({});
+  assert.equal('group' in tool.calls.at(-1).body, false);
+  const made = await ops.reminderSet({ at: '2027-01-02T07:00', text: '明早带伞' }, undefined, { turn: '9' });
+  assert.deepEqual(made, { schedule_id: 'sch-1', created_via: 'group' });
+  const call = tool.calls.at(-1);
+  assert.deepEqual([call.path.split('/').at(-1), call.readAs, call.body.turn, call.body.at, call.body.text],
+    ['create_group_reminder', 'public', '9', '2027-01-02T07:00', '明早带伞']);
+  assert.match(call.body.request_key, /^group-reminder:9:/);
+  assert.deepEqual(host.calls, []);
+});
+
+test('step 23.1 (7.8.9 step 5): run_confirmed\'s read names the turn it runs in', async () => {
+  const { confirmOps } = await import('./steward-host.mjs');
+  const { calls, request } = recorder({ '/api/state/commands/get_steward_confirmation': { result: { status: 'confirmed', group: '家庭群', confirmed_by: '妈妈' } } });
+  const got = await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A', undefined, { turn: '12' });
+  assert.deepEqual(calls.map(c => c.body), [{ code: 'K7Q2A', turn: '12' }]);
+  assert.equal(got.group, '家庭群');
+  // Director 602 defect 8: no open turn is sent as none (the backend's read-only read), never as ''.
+  await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A', undefined, {});
+  await confirmOps(request, { project: 'aitelier-home' }).get('K7Q2A');
+  assert.deepEqual(calls.slice(1).map(c => c.body), [{ code: 'K7Q2A' }, { code: 'K7Q2A' }]);
+});
+
+test('director 602 defect 4: the snapshot says 群名暂不可用 when the group names cannot be read; schedule_set does not lean on it', async () => {
+  const names = await boundGroupsSection(recorder({ '/api/state/query/list_owner_groups': { result: { groups: [{ label: '家庭群' }, { label: '老家群' }] } } }).request);
+  assert.equal(names, '\n\nYour owner\'s bound family groups (by name):\n["家庭群","老家群"]');
+  assert.equal(await boundGroupsSection(recorder({ '/api/state/query/list_owner_groups': { result: { groups: [] } } }).request), '');
+  const failed = await boundGroupsSection(recorder({ '/api/state/query/list_owner_groups': new Error('AItelier: HTTP 503') }).request);
+  assert.match(failed, /bound family groups \(by name\): 群名暂不可用/);
+  // The snapshot is built from it, and schedule_set's description sends the model to the refusal, not the snapshot.
+  const runtime = readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8');
+  assert.ok(runtime.includes('await boundGroupsSection(request)'));
+  const description = runtime.match(/name: 'schedule_set',\s*description: '((?:[^'\\]|\\.)*)'/)?.[1] ?? '';
+  assert.ok(description.includes('a group_required refusal names every bound group') && !description.includes('snapshot'), description);
 });

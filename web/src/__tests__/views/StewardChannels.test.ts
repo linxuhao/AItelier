@@ -268,7 +268,7 @@ describe('the channels tab', () => {
     });
     expect(qr.textContent).toContain('用要绑定的微信小号扫码登录');
     // 7.7.13: the intro says what a bound family group may do, in the owner's language.
-    expect(view.container.textContent).toContain('绑定的家庭群只能问公开项目，不能改任何东西');
+    expect(view.container.textContent).toContain('绑定的那几个家庭群（各有名字，每个渠道至多三个）只能问公开项目，不能改任何东西');
     expect(view.container.querySelector('script, svg, [onload]')).toBeNull();
     expect(view.container.innerHTML).not.toContain('<script');
     expect((window as unknown as {pwned?: number}).pwned).toBeUndefined();

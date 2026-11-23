@@ -322,7 +322,10 @@ export interface DirectorHost {
       deliver(message: { code: string; text: string; replyTo: string; channel: string; groupRef?: string }, signal?: AbortSignal):
         Promise<{ message_id: string } | { refused: string; reason?: string }>;
       cancel(code: string, signal?: AbortSignal): Promise<unknown>;
-      get(code: string, signal?: AbortSignal): Promise<{ status: string; name: string; arguments: object } | { refused: string }>;
+      /** `turn` (step 23.1): the turn run_confirmed runs in; a group turn gets only its group's
+       *  records, an owner turn a group's record with `group` and `confirmed_by`. */
+      get(code: string, signal?: AbortSignal, options?: { turn?: string }): Promise<{ status: string; name: string; arguments: object;
+        group?: string; confirmed_by?: string } | { refused: string }>;
     };
     manage?: {
       tools(connId: string, signal?: AbortSignal): Promise<{ conn_id: string; tools: object[] } | { refused: string }>;
@@ -436,9 +439,12 @@ export interface GroupsHost {
   bind(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; prefix: string; code: string }, signal?: AbortSignal): Promise<unknown>;
   relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string;
     attachments?: object[] }, signal?: AbortSignal): Promise<unknown>;
-  reply(a: { questionId: string; alsoAnswers: string[]; body: string }, signal?: AbortSignal): Promise<unknown>;
+  /** `turn` (step 23.1): the group turn that ended; the host answers only a question it took. */
+  reply(a: { questionId: string; alsoAnswers: string[]; body: string; turn: string }, signal?: AbortSignal): Promise<unknown>;
   recent(a: { channel: string; groupRef: string }, signal?: AbortSignal): Promise<{ recent: unknown[] }>;
-  audience(a: { turn: string; audience: 'owner' | 'group'; group?: { channel: string; group_ref: string }; senderRefs: string[] }, signal?: AbortSignal): Promise<unknown>;
+  /** `questionIds` (step 23.1): the group questions the turn took, recorded as that turn's. */
+  audience(a: { turn: string; audience: 'owner' | 'group'; group?: { channel: string; group_ref: string }; senderRefs: string[];
+    questionIds?: string[] }, signal?: AbortSignal): Promise<unknown>;
   ownerSpokeSince(since: string, input: string, signal?: AbortSignal): Promise<boolean>;
   /** `turn`: the turn the tool runs in (the plugin's open turn, the one `audience` recorded);
    *  the host refuses a request that does not name the recorded turn. */
@@ -447,10 +453,13 @@ export interface GroupsHost {
   /** Step 25 C4: the family lists. `turn` as for the family memory: required by the host in a
    *  group turn (the public-read header), ignored in an owner turn. listRemove is an owner
    *  turn's alone (the guard refuses it in a group turn). */
-  listShow(a: { list?: 'shopping' | 'todo' }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
-  listAdd(a: { list: 'shopping' | 'todo'; items: string[] }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
-  listCheck(a: { itemIds: string[]; done?: boolean }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
-  listRemove(a: { itemIds: string[] }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listShow(a: { list?: 'shopping' | 'todo'; group?: string }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listAdd(a: { list: 'shopping' | 'todo'; items: string[]; group?: string }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listCheck(a: { itemIds: string[]; done?: boolean; group?: string }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  listRemove(a: { itemIds: string[]; group?: string }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
+  /** Step 23.1 (7.9.4): a family member's one-time reminder to the group of the turn `turn`
+   *  (group turns only; the host takes the group and the asker from its record). */
+  reminderSet?(a: { at: string; text: string }, signal?: AbortSignal, options?: { turn?: string }): Promise<unknown>;
 }
 
 export type ChannelLoginAnswer = { requested: true } | { refused: string; retry_after_s?: number };

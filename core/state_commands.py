@@ -1224,10 +1224,11 @@ class CreateStewardSchedule(Project):
     tz: str | None = Field(default=None, min_length=1, max_length=64, description=_TZ)
     enabled: bool = True
     # Step 25 C11 (design-steward 7.9.4): family_group posts the instruction - then the exact
-    # words for the group, at most 500 characters - into the bound family group; channel names
-    # which group when both channels have one.
+    # words for the group, at most 500 characters - into a bound family group; group names it
+    # (its name or group_ref) when several are bound (step 23.1); channel may narrow it.
     target: Literal["owner", "family_group"] = "owner"
     channel: Literal["slack", "wechat"] | None = None
+    group: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class UpdateStewardSchedule(Project):
@@ -1241,6 +1242,7 @@ class UpdateStewardSchedule(Project):
     enabled: bool | None = None
     target: Literal["owner", "family_group"] | None = None
     channel: Literal["slack", "wechat"] | None = None
+    group: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class DeleteStewardSchedule(Project):
@@ -1384,6 +1386,9 @@ class CreateStewardConfirmation(Request):
 
 class GetStewardConfirmation(Request):
     code: str = Field(min_length=5, max_length=5)
+    # Step 23.1 (7.8.9 step 5): the turn run_confirmed runs in (the plugin's open turn); it arms
+    # the record for that turn. Without it (director 602 defect 8): the read-only read of before.
+    turn: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class CancelStewardConfirmation(Request):
@@ -1437,6 +1442,8 @@ class PostGroupReply(Project):
     question_id: str = Field(min_length=1, max_length=64)
     body: str = Field(min_length=1, max_length=8000)
     also_answers: list[str] | None = Field(default=None, max_length=10)
+    # Step 23.1 (7.7.7, review P3): the group turn that ends; the question must be its own.
+    turn: str = Field(min_length=1, max_length=64)
 
 
 class SetStewardTurnAudience(Project):
@@ -1444,6 +1451,17 @@ class SetStewardTurnAudience(Project):
     audience: Literal["owner", "group"]
     group: dict[str, Any] | None = None
     sender_refs: list[str] | None = Field(default=None, max_length=10)
+    # Step 23.1: the group questions this turn took (stamped with the turn, 7.7.7).
+    question_ids: list[str] | None = Field(default=None, max_length=20)
+
+
+class CreateGroupReminder(Project):
+    """Step 23.1 (design-steward 7.9.4): a family member's one-time reminder to the group of the
+    recorded group turn (the steward's group_reminder_set; public-read header + `turn`)."""
+    request_key: str = Field(min_length=1, max_length=320)
+    at: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=2000)
+    turn: str = Field(min_length=1, max_length=64)
 
 
 class NoteFamilyMemory(Project):
@@ -1471,10 +1489,13 @@ class PostGroupNotice(Project):
 _LIST = Literal["shopping", "todo"]
 
 
+# Step 23.1 (7.9.5): `group` (a bound group's name or group_ref) names whose lists in an owner
+# turn - required when several groups are bound; a group turn's lists are its own (ignored).
 class ListListItems(Request):
     list: _LIST | None = None
     include_done: bool = True
     turn: str | None = Field(default=None, min_length=1, max_length=64)
+    group: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class AddListItems(Project):
@@ -1482,6 +1503,7 @@ class AddListItems(Project):
     list: _LIST
     items: list[str] = Field(min_length=1, max_length=10)
     turn: str | None = Field(default=None, min_length=1, max_length=64)
+    group: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class CheckListItems(Project):
@@ -1489,11 +1511,13 @@ class CheckListItems(Project):
     item_ids: list[str] = Field(min_length=1, max_length=50)
     done: bool = True
     turn: str | None = Field(default=None, min_length=1, max_length=64)
+    group: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class RemoveListItems(Project):
     request_key: str = Field(min_length=1, max_length=320)
     item_ids: list[str] = Field(min_length=1, max_length=50)
+    group: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ListGroupRecent(Request):
@@ -1718,7 +1742,7 @@ WRITE_REQUESTS = {
     "claim_channel_alert": ClaimChannelAlert, "record_channel_alert": RecordChannelAlert,
     "bind_owner_group": BindOwnerGroup, "relay_group_message": RelayGroupMessage,
     "post_group_reply": PostGroupReply, "set_steward_turn_audience": SetStewardTurnAudience,
-    "post_group_media": PostGroupMedia,
+    "post_group_media": PostGroupMedia, "create_group_reminder": CreateGroupReminder,
     "note_family_memory": NoteFamilyMemory,
     "post_group_notice": PostGroupNotice,
     "add_list_items": AddListItems, "check_list_items": CheckListItems, "remove_list_items": RemoveListItems,
@@ -2108,6 +2132,7 @@ def _handlers(service) -> dict:
         "relay_group_message": service.groups.relay_group_message,
         "post_group_reply": service.groups.post_group_reply,
         "post_group_media": service.groups.post_group_media,
+        "create_group_reminder": service.groups.create_group_reminder,
         "set_steward_turn_audience": service.groups.set_steward_turn_audience,
         "note_family_memory": service.groups.note_family_memory,
         "list_owner_groups": service.groups.list_owner_groups,
@@ -2273,6 +2298,10 @@ STEWARD_WRITE_ACTIONS = frozenset({
     # with the schedule row that fired (the model has no tool for it); the three list writes are
     # the family list tools (add and check from a group turn too, remove in an owner turn only).
     "post_group_notice", "add_list_items", "check_list_items", "remove_list_items",
+    # Step 23.1 (design-steward 7.9.4): the family's one-time reminder to their own group, the
+    # steward's group_reminder_set - accepted only from a group turn (public-read header and the
+    # recorded turn of a bound group's audience), its group and maker taken from that record.
+    "create_group_reminder",
     # Step 22 (design-steward 7.6): the HOST's push of the open questions and its relay of an
     # owner channel answer (the model passes one message id through relay_answer).
     "sync_owner_questions", "relay_owner_answer",
@@ -2284,12 +2313,14 @@ STEWARD_WRITE_ACTIONS = frozenset({
 # X-AItelier-Read-As) may make; every other write is public_view_read_only. Each handler
 # judges the recorded turn audience (core.state_groups.StateGroups.group_turn). Step 25 C4 adds
 # the family lists' add and check (owner 2026-11-21: lists are edited in the group).
-PUBLIC_VIEW_WRITES = frozenset({"note_family_memory", "add_list_items", "check_list_items"})
+# Step 23.1 adds a family member's reminder to their own group (create_group_reminder, 7.9.4).
+PUBLIC_VIEW_WRITES = frozenset({"note_family_memory", "add_list_items", "check_list_items", "create_group_reminder"})
 # ... and the actions it is made trusted for (api.state_graph_routers.get_service): the family
 # memory pair and the lists' read and two writes, each refused without a group audience of the
 # turn the request names.
 FAMILY_MEMORY_ACTIONS = frozenset({"note_family_memory", "list_family_memory"})
-GROUP_TURN_ACTIONS = FAMILY_MEMORY_ACTIONS | {"list_list_items", "add_list_items", "check_list_items"}
+GROUP_TURN_ACTIONS = FAMILY_MEMORY_ACTIONS | {"list_list_items", "add_list_items", "check_list_items",
+                                              "create_group_reminder"}
 _STEWARD_NOTEBOOK_WRITES = frozenset({
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry"})
 # Settling a delivery in the PROJECT inbox. A delivery's target is

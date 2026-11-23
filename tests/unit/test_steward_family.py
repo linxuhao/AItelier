@@ -254,7 +254,7 @@ def test_unbinding_disables_the_groups_reminders_and_a_rebinding_never_revives_t
     bound_group(world)
     later = group_reminder(world, key="later", at="2027-01-02T08:00:00+00:00")
     made, shot = fired_reminder(world, clock, key="c-fired")
-    unbound = world.owner.groups.unbind_owner_group("wechat")
+    unbound = world.owner.groups.unbind_owner_group("wechat", ROOM)
     assert unbound["reminders_disabled"] == 1
     listed = {s["schedule_id"]: s for s in world.owner.steward.list_schedules()["schedules"]}
     assert listed[later["schedule_id"]]["enabled"] is False and listed[later["schedule_id"]]["target_unbound"] is True
@@ -286,7 +286,7 @@ def test_director_489_b_a_notice_row_reads_as_the_stewards_notice_and_a_null_rol
     assert rows(world, "SELECT kind, direction, sender_role, sender_ref FROM state_group_messages WHERE message_id=?",
                 (posted["message_id"],)) == [("notice", "out", None, None)]
     # The dashboard's group view: the notice is the steward's notice; the members are the people.
-    view = world.owner.groups.owner_view("wechat")["groups"][0]
+    view = world.owner.groups.owner_view("wechat", ROOM)["groups"][0]
     by_id = {m["message_id"]: m for m in view["messages"]}
     assert by_id[posted["message_id"]]["sender_label"] == state_groups.STEWARD_NOTICE_LABEL == "管家通知"
     assert [m["label"] for m in view["members"]] == ["成员甲"]
@@ -347,7 +347,7 @@ def test_review_f3_unbinding_emits_a_change_per_stopped_reminder(world, clock):
     group_reminder(world, key="a", at="2027-01-02T08:00:00+00:00")
     group_reminder(world, key="b", text="倒垃圾", at="2027-01-02T09:00:00+00:00")
     before = changed_events(world)
-    assert world.owner.groups.unbind_owner_group("wechat")["reminders_disabled"] == 2
+    assert world.owner.groups.unbind_owner_group("wechat", ROOM)["reminders_disabled"] == 2
     assert changed_events(world) == before + 2
 
 
@@ -405,7 +405,7 @@ def test_in_a_group_turn_the_lists_are_read_and_written_and_the_author_is_the_re
     bound_group(world)
     ask(world, "m1", "加牛奶和鸡蛋")
     audience(world, senders=(MEMBER,))
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     view = lists_view(world)
     added = add(view, ["牛奶", " 鸡蛋 ", "牛奶"], turn="t1")
     assert [(i["text"], i["added_by"], i["added_via"], i["added"]) for i in added["items"]] == [
@@ -468,6 +468,8 @@ def test_the_list_requests_name_the_live_turn_and_a_stale_record_serves_no_other
 
 
 def test_an_owner_turn_and_the_dashboard_use_the_lists_without_the_header(world, clock):
+    refused(lambda: add(world.steward, ["牛奶"], key="none"), "no_group_bound")  # step 23.1: lists are a group's
+    bound_group(world)
     milk = add(world.steward, ["牛奶"])["items"][0]
     assert (milk["added_by"], milk["added_by_role"], milk["added_via"]) == ("管家", "steward", "owner_dm")
     # The steward in an owner turn checks and removes; no turn needed (and none is read).
@@ -511,6 +513,7 @@ def test_review_f3_a_group_turn_learns_only_that_an_item_was_withheld_never_why(
 
 
 def test_the_list_bounds_dedupe_and_thirty_day_purge(world, clock):
+    bound_group(world)
     first = add(world.steward, ["牛奶"])["items"][0]
     again = add(world.steward, ["  牛奶 "], key="a2")["items"][0]
     assert again["item_id"] == first["item_id"] and again["added"] is False
@@ -531,6 +534,7 @@ def test_the_list_bounds_dedupe_and_thirty_day_purge(world, clock):
 
 
 def test_the_list_routes_are_the_owner_sessions_alone(world, clock, client):
+    bound_group(world)
     steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
     for method, path, body in (("GET", "/api/steward/lists", None),
                                ("POST", "/api/steward/lists/shopping/items", {"items": ["牛奶"]}),
@@ -556,7 +560,7 @@ def test_director_489_a_unbinding_keeps_the_lists_and_forgets_who_added_or_check
     bound_group(world)
     ask(world, "m1", "@管家 加牛奶和鸡蛋")
     audience(world, senders=(MEMBER,), turn="t1")
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     view = lists_view(world)
     milk, eggs = [i["item_id"] for i in add(view, ["牛奶", "鸡蛋"], turn="t1")["items"]]
     check(view, [milk], turn="t1")
@@ -570,17 +574,25 @@ def test_director_489_a_unbinding_keeps_the_lists_and_forgets_who_added_or_check
     assert rows(world, refs) == [(milk, MEMBER, MEMBER), (eggs, MEMBER, None), (bread, OWNER_WX, None),
                                  (task, None, None)]
     before = rows(world, kept)
-    world.owner.groups.unbind_owner_group("wechat")
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
     # After: every item still there, unchanged but for who.
     assert rows(world, kept) == before
     assert rows(world, refs) == [(milk, None, None), (eggs, None, None), (bread, None, None), (task, None, None)]
     assert rows(world, "SELECT added_by_label, done_by_label FROM state_steward_list_items ORDER BY added_at, rowid") == [
         (None, None), (None, None), ("业主", None), ("业主", None)]
-    # list_show (the owner's turn) and the dashboard: no name of the group's members, no throw.
-    for shown in (execute(world.steward, "list_list_items", {})["lists"], world.owner.lists.list_items(as_owner=True)["lists"]):
-        assert [(i["text"], i["added_by"], i["done"], i["done_by"]) for i in shown["shopping"]] == [
-            ("鸡蛋", None, False, None), ("面包", "业主", False, None), ("牛奶", None, True, None)]
-        assert [(i["text"], i["added_by"]) for i in shown["todo"]] == [("交水费", "业主")]
+    # Step 23.1 (7.9.5): the unbound group's lists are the dashboard's alone - no name of the
+    # group's members, no throw; an owner turn has no group to read now.
+    shown = world.owner.lists.list_items(as_owner=True, group={"channel": "wechat", "group_ref": ROOM})
+    assert shown["group"] == {"channel": "wechat", "group_ref": ROOM, "label": "家庭群", "bound": False}
+    shown = shown["lists"]
+    assert [(i["text"], i["added_by"], i["done"], i["done_by"]) for i in shown["shopping"]] == [
+        ("鸡蛋", None, False, None), ("面包", "业主", False, None), ("牛奶", None, True, None)]
+    assert [(i["text"], i["added_by"]) for i in shown["todo"]] == [("交水费", "业主")]
+    refused(lambda: execute(world.steward, "list_list_items", {}), "no_group_bound")
+    refused(lambda: world.owner.lists.add_items("todo", ["x"], as_owner=True,
+                                                group={"channel": "wechat", "group_ref": ROOM}), "group_unbound")
+    assert world.owner.lists.list_groups() == {"groups": [{"channel": "wechat", "group_ref": ROOM, "label": "家庭群",
+                                                           "bound": False}], "unassigned": 0}
     # A rebinding of the same group brings no name back.
     code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
     execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": ROOM,
@@ -595,35 +607,37 @@ def _member_checked_milk_then_unbound(world):
     bound_group(world)
     ask(world, "m1", "@管家 加牛奶")
     audience(world, senders=(MEMBER,), turn="t1")
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     view = lists_view(world)
     milk = add(view, ["牛奶"], turn="t1")["items"][0]["item_id"]
     check(view, [milk], turn="t1")
-    world.owner.groups.unbind_owner_group("wechat")
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
     return view, milk
 
 
 def test_review_d1_rechecking_an_item_after_unbind_never_names_someone_who_did_not_check_it(world, clock):
     """A re-check of an already-checked item changes nothing: after the unbind forgot who
     checked 牛奶, neither the owner (dashboard, owner turn) nor a new member after a rebinding
-    becomes its 「done_by」 - it stays null (「曾由一位成员勾掉」)."""
+    becomes its 「done_by」 - it stays null (「曾由一位成员勾掉」). While the group is unbound
+    the dashboard does not check its items at all (director 602 defect 5)."""
     view, milk = _member_checked_milk_then_unbound(world)
     whole = ("SELECT done_at, done_by_role, done_by_ref, done_by_label, added_by_ref, added_by_label "
              "FROM state_steward_list_items WHERE item_id=?")
     before = rows(world, whole, (milk,))
     assert before[0][1:] == ("member", None, None, None, None)
     clock.moment += timedelta(minutes=5)
-    assert world.owner.lists.check_items([milk], as_owner=True)["items"][0]["done_by"] is None
-    assert check(world.steward, [milk], key="k-owner-turn")["items"][0]["done_by"] is None
+    refused(lambda: world.owner.lists.check_items([milk], as_owner=True, group={"channel": "wechat", "group_ref": ROOM}),
+            "group_unbound")
     assert rows(world, whole, (milk,)) == before
-    # A new member, named, after the group is bound again.
+    # A new member, named, after the group is bound again (its lists come back, 7.9.5).
     code = world.owner.groups.issue_group_code("wechat", "家庭群")["code"]
     execute(world.steward, "bind_owner_group", {"request_key": "bg-2", "channel": "wechat", "group_ref": ROOM,
                                                 "sender_ref": OWNER_WX, "code": code, "mention_prefix": "@管家"},
             allow_write=True)
+    assert check(world.steward, [milk], key="k-owner-turn")["items"][0]["done_by"] is None
     ask(world, "m2", "@管家 牛奶买了", sender=MEMBER2)
     audience(world, senders=(MEMBER2,), turn="t2")
-    world.owner.groups.name_group_member("wechat", MEMBER2, "爸爸")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER2, "爸爸")
     assert check(view, [milk], key="k-new-member", turn="t2")["items"][0]["done_by"] is None
     assert rows(world, whole, (milk,)) == before
     for shown in (show(view, turn="t2")["lists"]["shopping"], world.owner.lists.list_items(as_owner=True)["lists"]["shopping"]):
@@ -640,7 +654,7 @@ def test_review_d2_the_request_ledger_keeps_no_members_name_and_a_replay_shows_t
     bound_group(world)
     ask(world, "m1", "@管家 加牛奶和鸡蛋")
     audience(world, senders=(MEMBER,), turn="t1")
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     view = lists_view(world)
     first = add(view, ["牛奶", "鸡蛋"], turn="t1")
     assert [i["added_by"] for i in first["items"]] == ["妈妈", "妈妈"]
@@ -650,9 +664,9 @@ def test_review_d2_the_request_ledger_keeps_no_members_name_and_a_replay_shows_t
     # A replay before the unbind: the same answer.
     assert add(view, ["牛奶", "鸡蛋"], turn="t1") == first
     assert check(view, [milk], turn="t1") == checked
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈咪")  # a rename shows on replay too
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈咪")  # a rename shows on replay too
     assert [i["added_by"] for i in add(view, ["牛奶", "鸡蛋"], turn="t1")["items"]] == ["妈咪", "妈咪"]
-    world.owner.groups.unbind_owner_group("wechat")
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
     ledger = rows(world, "SELECT operation, result_json FROM driver_inbox_requests WHERE operation IN "
                          "('add_list_items','check_list_items','remove_list_items')")
     assert {r[0] for r in ledger} == {"add_list_items", "check_list_items"}
@@ -679,7 +693,7 @@ def test_acceptance_four_a_member_adds_the_owner_checks_in_dm_the_dashboard_remo
     bound_group(world)
     ask(world, "m1", "@管家 加牛奶和鸡蛋")
     audience(world, senders=(MEMBER,), turn="t1")
-    world.owner.groups.name_group_member("wechat", MEMBER, "妈妈")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
     view = lists_view(world)
     add(view, ["牛奶", "鸡蛋"], turn="t1")
     board = world.owner.lists.list_items(as_owner=True)["lists"]["shopping"]
@@ -697,6 +711,7 @@ def test_director_505_more_than_100_checked_in_30_days_are_counted_not_silently_
     list, newest first, while a checked item is kept 30 days. 150 checked within 30 days: the
     newest 100 shown, done_total 150 and done_more 50 say the rest exists (list_show and the
     dashboard read the same answer)."""
+    bound_group(world)
     ids = []
     for batch in range(15):
         ids += [i["item_id"] for i in add(world.steward, [f"物品{batch}-{n}" for n in range(10)], key=f"d{batch}")["items"]]
@@ -719,3 +734,262 @@ def test_director_505_more_than_100_checked_in_30_days_are_counted_not_silently_
     assert (len(small["lists"]["shopping"]), small["done_total"]["shopping"], small["done_more"]["shopping"]) == (1, 1, 0)
     from core.state_lists import LIST_LIMITS
     assert LIST_LIMITS["done_shown"] == 100
+
+
+# --- step 23.1: several groups (design-steward 7.7.24, 7.9.4, 7.9.5) -----------------------------
+
+def two_groups(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+
+
+def test_two_groups_a_group_reminder_names_its_group_and_one_group_is_picked_alone(world, clock):
+    bound_group(world)
+    assert group_reminder(world, key="one")["target_group_ref"] == ROOM  # one bound: picked
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    refused(lambda: group_reminder(world, key="none"), "group_required")
+    refused(lambda: group_reminder(world, key="nope", group="不存在的群"), "unknown_group")
+    to_b = group_reminder(world, key="b", group="老家群")
+    assert (to_b["target_group_ref"], to_b["target_group_label"]) == (ROOM2, "老家群")
+    assert group_reminder(world, key="b-ref", group=ROOM2)["target_group_ref"] == ROOM2
+    # The dashboard names it by group_ref; an owner reminder with a group is invalid_target.
+    made = world.owner.steward.create_schedule("t", "倒垃圾", {"kind": "once", "at": IN_TEN}, as_owner=True,
+                                               target="family_group", group=ROOM2)
+    assert made["target_group_ref"] == ROOM2
+    refused(lambda: world.owner.steward.create_schedule("t", "x", {"kind": "once", "at": IN_TEN}, as_owner=True,
+                                                        group=ROOM2), "invalid_target")
+    # Re-pointing names the group too.
+    refused(lambda: world.owner.steward.update_schedule(made["schedule_id"], made["version"], target="family_group",
+                                                        as_owner=True), "group_required")
+    moved = world.owner.steward.update_schedule(made["schedule_id"], made["version"], group="家庭群", as_owner=True)
+    assert moved["target_group_ref"] == ROOM
+    # The reminder for B is posted into B, from its row.
+    clock.moment = datetime(2027, 1, 1, 8, 10, 5, tzinfo=timezone.utc)
+    shot = fire(world, to_b)
+    posted = notice(world, to_b["schedule_id"], shot["due_at"])
+    assert (posted["channel"], posted["group_ref"]) == ("wechat", ROOM2)
+    # Unbinding A stops only A's reminders.
+    assert world.owner.groups.unbind_owner_group("wechat", ROOM)["reminders_disabled"] == 2
+    assert rows(world, "SELECT DISTINCT enabled FROM state_steward_schedules WHERE target_group_ref=?", (ROOM,)) == [(0,)]
+    # B's: the one not fired yet stays on (the fired once row is off by its fire).
+    assert rows(world, "SELECT enabled FROM state_steward_schedules WHERE target_group_ref=? ORDER BY created_at, "
+                       "schedule_id<>?", (ROOM2, to_b["schedule_id"])) in ([(0,), (1,)], [(1,), (0,)])
+    later = group_reminder(world, key="b-after", group="老家群", at="2027-01-02T08:00:00+00:00")
+    assert later["enabled"] is True and later["target_unbound"] is False
+
+
+def member_reminder(world, turn="tb", text="明早带伞", at="2027-01-02T07:00:00+00:00", key=None, **extra):
+    return execute(family_view(world), "create_group_reminder",
+                   {"request_key": key or f"mr-{turn}-{text}-{at}", "at": at, "text": text, "turn": turn, **extra},
+                   allow_write=True)
+
+
+def test_a_family_member_makes_a_one_time_reminder_for_their_own_group_only(world, clock):
+    two_groups(world)
+    question = ask(world, "b1", "@管家 明早 7 点提醒大家带伞", room=ROOM2)
+    audience(world, room=ROOM2, turn="tb", questions=(question["message_id"],))
+    made = member_reminder(world)
+    # The group and the maker are the record's; the title is code's, in the owner's zone.
+    row = rows(world, "SELECT target, target_channel, target_group_ref, created_via, created_by_ref, created_by, kind, "
+                      "instruction, title FROM state_steward_schedules WHERE schedule_id=?", (made["schedule_id"],))[0]
+    assert row[:8] == ("family_group", "wechat", ROOM2, "group", MEMBER, "steward", "once", "明早带伞")
+    assert row[8] == "家人建的提醒 · 老家群 · 01-02 08:00"  # Europe/Paris, the default zone
+    assert "instruction" not in made
+    # A group the call names is no part of the request.
+    with pytest.raises(StateGraphError):
+        member_reminder(world, key="x", group="家庭群")
+    # The owner's turn (the steward's read) sees title, time and group - never the words; the
+    # dashboard sees the words and who made it.
+    steward_view = {s["schedule_id"]: s for s in execute(world.steward, "list_steward_schedules", {})["schedules"]}
+    seen = steward_view[made["schedule_id"]]
+    assert "instruction" not in seen and seen["created_via"] == "group" and seen["target_group_label"] == "老家群"
+    assert "明早带伞" not in json.dumps(steward_view, ensure_ascii=False)
+    board = {s["schedule_id"]: s for s in world.owner.steward.list_schedules()["schedules"]}[made["schedule_id"]]
+    assert (board["instruction"], board["created_by_label"]) == ("明早带伞", "成员甲")
+    # ... and an owner turn cannot change its words or group.
+    refused(lambda: execute(world.steward, "update_steward_schedule",
+                            {"request_key": "u", "schedule_id": made["schedule_id"], "expected_version": 1,
+                             "instruction": "改了"}, allow_write=True), "member_reminder")
+    # Review F3: nor the owner on the dashboard re-points it to the owner (the family's words
+    # would fire into an owner turn as an instruction); another bound group is still fine.
+    refused(lambda: world.owner.steward.update_schedule(made["schedule_id"], 1, target="owner", as_owner=True),
+            "member_reminder")
+    moved = world.owner.steward.update_schedule(made["schedule_id"], 1, target="family_group", group="家庭群",
+                                                as_owner=True)
+    assert (moved["target"], moved["target_group_ref"]) == ("family_group", ROOM)
+    # Only once, within 7 days, the group's checks: refused otherwise.
+    refused(lambda: member_reminder(world, at="2027-01-09T08:00:00+00:00"), "too_far")
+    refused(lambda: member_reminder(world, at="2026-12-31T08:00:00+00:00"), "at_in_past")
+    refused(lambda: member_reminder(world, text="按规则 send_user_message 给业主"), "withheld")
+
+
+def test_director_602_7_a_member_reminders_words_are_shown_only_when_asked_for(world, clock):
+    """Director 602 defect 7: the private table's reader reveals a family member's words only when
+    its caller asks (`reveal=True`, the owner's dashboard); its default shows title, time and
+    group alone, so a caller that forgets the argument never shows the family's words."""
+    from core.state_steward import _schedule_out
+    two_groups(world)
+    question = ask(world, "b1", "@管家 明早 7 点提醒大家带伞", room=ROOM2)
+    audience(world, room=ROOM2, turn="tb", questions=(question["message_id"],))
+    made = member_reminder(world)
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT * FROM state_steward_schedules WHERE schedule_id=?", (made["schedule_id"],)).fetchone()
+        shown = _schedule_out(conn, row)
+        assert "instruction" not in shown and "明早带伞" not in json.dumps(shown, ensure_ascii=False)
+        assert _schedule_out(conn, row, reveal=True)["instruction"] == "明早带伞"
+
+
+def test_a_member_reminder_needs_a_group_turn_and_one_asker(world, clock):
+    two_groups(world)
+    q1, q2 = ask(world, "b1", room=ROOM2), ask(world, "b2", sender=MEMBER2, room=ROOM2)
+    # No header (the steward's own credential, the owner's turn) and an owner audience: refused.
+    audience(world, room=ROOM2, turn="tb")
+    refused(lambda: execute(world.steward, "create_group_reminder", {"request_key": "k", "at": "2027-01-02T07:00:00+00:00",
+                                                                     "text": "x", "turn": "tb"}, allow_write=True),
+            "group_reminder_group_turn_only")
+    audience(world, "owner", turn="to")
+    refused(lambda: member_reminder(world, turn="to"), "group_reminder_group_turn_only")
+    # A stale record serves no other turn.
+    audience(world, room=ROOM2, turn="tb")
+    refused(lambda: member_reminder(world, turn="tc"), "group_reminder_group_turn_only")
+    # Questions of two people: ambiguous.
+    audience(world, room=ROOM2, senders=(MEMBER, MEMBER2), turn="tm", questions=(q1["message_id"], q2["message_id"]))
+    refused(lambda: member_reminder(world, turn="tm"), "ambiguous_requester")
+
+
+def test_member_reminders_are_capped_per_person_and_per_group_apart_from_the_owners(world, clock):
+    two_groups(world)
+    audience(world, room=ROOM, senders=(MEMBER,), turn="ta1")
+    for i in range(state_steward.MEMBER_REMINDERS_PER_PERSON):
+        member_reminder(world, turn="ta1", text=f"提醒{i}")
+    refused(lambda: member_reminder(world, turn="ta1", text="第四条"), "member_reminders_full")
+    audience(world, room=ROOM, senders=(MEMBER2,), turn="ta2")
+    for i in range(state_steward.MEMBER_REMINDERS_PER_GROUP - state_steward.MEMBER_REMINDERS_PER_PERSON):
+        member_reminder(world, turn="ta2", text=f"另一位{i}")
+    audience(world, room=ROOM, senders=("wxid_m3",), turn="ta3")
+    refused(lambda: member_reminder(world, turn="ta3", text="第七条"), "group_member_reminders_full")
+    # The owner still makes reminders for B, B's family still makes theirs, and the owner's 20
+    # count none of the family's.
+    assert group_reminder(world, key="owner-b", group="老家群")["target_group_ref"] == ROOM2
+    audience(world, room=ROOM2, senders=(MEMBER,), turn="tb")
+    assert member_reminder(world, turn="tb", text="B 的提醒")["target_group_ref"] == ROOM2
+    for i in range(state_steward.GROUP_SCHEDULES_MAX - 1):
+        group_reminder(world, f"业主{i}", key=f"o{i}", group="家庭群")
+    refused(lambda: group_reminder(world, key="o-21", group="家庭群"), "too_many_group_reminders")
+    # A fired (sent) one leaves the cap: the same person may ask again.
+    clock.moment = datetime(2027, 1, 2, 7, 0, 5, tzinfo=timezone.utc)
+    first = [s for s in world.owner.steward.list_schedules()["schedules"] if s["instruction"] == "提醒0"][0]
+    fire(world, first)
+    audience(world, room=ROOM, senders=(MEMBER,), turn="ta4")
+    assert member_reminder(world, turn="ta4", text="又一条", at="2027-01-03T07:00:00+00:00")["created_via"] == "group"
+
+
+def test_two_groups_each_has_its_own_lists(world, clock):
+    two_groups(world)
+    ask(world, "a1", "加牛奶")
+    ask(world, "b1", "加牛奶和酱油", room=ROOM2)
+    audience(world, room=ROOM, senders=(MEMBER,), turn="ta")
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
+    view = lists_view(world)
+    milk = add(view, ["牛奶"], turn="ta")["items"][0]
+    audience(world, room=ROOM2, senders=(MEMBER,), turn="tb")
+    seen = show(view, turn="tb")
+    assert seen["lists"] == {"shopping": [], "todo": []} and seen["group"]["group_ref"] == ROOM2
+    # A's item is unknown in B's turn; the same text in B is a new item, named as B knows him.
+    assert check(view, [milk["item_id"]], key="kb", turn="tb") == {"items": [], "unknown": [milk["item_id"]]}
+    soy = add(view, ["牛奶", "酱油"], key="ab", turn="tb")["items"]
+    assert [(i["text"], i["added"], i["added_by"]) for i in soy] == [("牛奶", True, "成员甲"), ("酱油", True, "成员甲")]
+    assert soy[0]["item_id"] != milk["item_id"]
+    # The owner's turn names the group when two are bound.
+    refused(lambda: show(world.steward), "group_required")
+    assert [i["text"] for i in show(world.steward, group="家庭群")["lists"]["shopping"]] == ["牛奶"]
+    removed = execute(world.steward, "remove_list_items", {"request_key": "r2", "item_ids": [milk["item_id"]],
+                                                           "group": "老家群"}, allow_write=True)
+    assert removed == {"removed": [], "unknown": [milk["item_id"]]}
+    # Unbinding A forgets who only on A's items; the same person's B items keep his name.
+    world.owner.groups.name_group_member("wechat", ROOM2, MEMBER, "二姨")
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
+    assert rows(world, "SELECT group_ref, text, added_by_ref FROM state_steward_list_items ORDER BY added_at, rowid") \
+        == [(ROOM, "牛奶", None), (ROOM2, "牛奶", MEMBER), (ROOM2, "酱油", MEMBER)]
+    assert [i["added_by"] for i in show(world.steward)["lists"]["shopping"]] == ["二姨", "二姨"]  # one bound now
+
+
+def test_the_migration_gives_the_old_items_to_the_one_bound_group(tmp_path, clock):
+    from core.state_database import StateDatabase
+    from core import state_lists
+    db = StateDatabase(str(tmp_path / "old.sqlite"))
+    with db.get_connection() as conn:  # step 25.2's table, one item, and a bound group
+        conn.executescript(state_lists.SCHEMA)
+        conn.executescript(state_groups.SCHEMA)
+        conn.execute("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_via,added_at) "
+                     "VALUES('li-old','shopping','牛奶','steward','owner_dm','2027-01-01T00:00:00+00:00')")
+        conn.execute("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at) "
+                     "VALUES('wechat','r1@chatroom','家庭群','@管家','2027-01-01T00:00:00+00:00')")
+        conn.commit()
+    StateService(db, actor="fixture", project_read_trusted=True)
+    with db.get_connection() as conn:
+        assert [tuple(r) for r in conn.execute("SELECT item_id, channel, group_ref FROM state_steward_list_items")] == [
+            ("li-old", "wechat", "r1@chatroom")]
+
+
+def test_director_602_5_an_unbound_groups_and_unassigned_items_are_shown_and_removed_never_checked(world, clock):
+    """Director 602 defect 5: the dashboard's label says an unbound group's lists are view and
+    remove only; the backend holds the owner's session to that too (group_unbound), and to the
+    items no group owns. Removing and clearing still work; nothing changes on a refused tick."""
+    bound_group(world)
+    milk = add(world.steward, ["牛奶"], key="k-milk")["items"][0]["item_id"]
+    eggs = add(world.steward, ["鸡蛋"], key="k-eggs")["items"][0]["item_id"]
+    world.owner.lists.check_items([eggs], as_owner=True)
+    with world.db.get_connection() as conn:
+        conn.execute("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_via,added_at) "
+                     "VALUES('li-u1','shopping','酱油','steward','owner_dm','2027-01-01T00:00:00+00:00')")
+        conn.commit()
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
+    group = {"channel": "wechat", "group_ref": ROOM}
+    state = "SELECT item_id, done_at, done_by_label, deleted_at FROM state_steward_list_items ORDER BY item_id"
+    before = rows(world, state)
+    for done in (True, False):
+        refused(lambda: world.owner.lists.check_items([milk, eggs], done=done, as_owner=True, group=group),
+                "group_unbound")
+        refused(lambda: world.owner.lists.check_items(["li-u1"], done=done, as_owner=True, unassigned=True),
+                "group_unbound")
+    assert rows(world, state) == before
+    assert world.owner.lists.remove_items([milk], as_owner=True, group=group)["removed"] == [milk]
+    assert world.owner.lists.clear_done(group=group)["cleared"] == 1
+    assert world.owner.lists.remove_items(["li-u1"], as_owner=True, unassigned=True)["removed"] == ["li-u1"]
+
+
+def test_review_f2_the_owner_moves_unassigned_items_into_a_bound_groups_lists(world, clock, client):
+    """7.9.5 (review F2): items the migration left without a group (none or several bound when
+    the column came) are shown under 「未归属」 and the owner moves them into a bound group -
+    the owner's session alone, a bound group only, the group's exit check and bound again."""
+    two_groups(world)
+    with world.db.get_connection() as conn:
+        for item_id, text in (("li-u1", "牛奶"), ("li-u2", "酱油"), ("li-u3", "看 /home/x")):
+            conn.execute("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_via,added_at) "
+                         "VALUES(?,'shopping',?,'steward','owner_dm','2027-01-01T00:00:00+00:00')", (item_id, text))
+        conn.commit()
+    to_a = "/api/steward/lists/assign?channel=wechat&group_ref=" + ROOM
+    steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
+    assert client.post(to_a, json={"item_ids": ["li-u1"]}, headers=steward).status_code == 403
+    assert client.post("/api/steward/lists/assign", json={"item_ids": ["li-u1"]},
+                       headers=OWNER_HEADERS).status_code == 422, "the group is named"
+    # One withheld text refuses the whole move: nothing moved.
+    bad = client.post(to_a, json={"item_ids": ["li-u1", "li-u3"]}, headers=OWNER_HEADERS)
+    assert bad.status_code == 422 and bad.json()["detail"].startswith("withheld"), bad.text
+    assert rows(world, "SELECT COUNT(*) FROM state_steward_list_items WHERE channel IS NULL") == [(3,)]
+    moved = client.post(to_a, json={"item_ids": ["li-u1", "li-u2", "li-x"]}, headers=OWNER_HEADERS)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["assigned"] == ["li-u1", "li-u2"] and moved.json()["unknown"] == ["li-x"]
+    assert [i["text"] for i in show(world.steward, group="家庭群")["lists"]["shopping"]] == ["牛奶", "酱油"]
+    assert show(world.steward, group="老家群")["lists"]["shopping"] == []
+    # An item of a group is no longer unassigned: moving it again is unknown, it stays in A.
+    again = client.post("/api/steward/lists/assign?channel=wechat&group_ref=" + ROOM2, json={"item_ids": ["li-u1"]},
+                        headers=OWNER_HEADERS)
+    assert again.json()["assigned"] == [] and again.json()["unknown"] == ["li-u1"]
+    # An unbound group takes no items.
+    world.owner.groups.unbind_owner_group("wechat", ROOM2)
+    gone = client.post("/api/steward/lists/assign?channel=wechat&group_ref=" + ROOM2, json={"item_ids": ["li-u3"]},
+                       headers=OWNER_HEADERS)
+    assert gone.status_code == 404, gone.text
+    assert world.owner.lists.list_groups()["unassigned"] == 1

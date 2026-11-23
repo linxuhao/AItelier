@@ -10,7 +10,8 @@ messages of at most PUSH_CHARS) as the steward's own message in its conversation
 subject PUSH_SUBJECT, in the SAME transaction that records it in the ledger
 `state_owner_question_pushes`: a question gets its code `Q<code_no>` the first time it is
 pushed, and the code is never reused. The host mirrors each message to the channel
-(lib/channels.mjs); a message written but never mirrored is handed back as `unmirrored`.
+(lib/channels.mjs); a message written but never mirrored is handed back as `unmirrored`, and
+so is the owner's line about a withheld group reply (core.state_groups, WITHHELD_OWNER_SUBJECT).
 
 `relay_owner_answer` (steward only; its host's `relay_answer` tool, which the model calls
 with ONE message id) turns an owner message that came from a chat channel into the
@@ -38,6 +39,7 @@ from zoneinfo import ZoneInfo
 from core.driver_questions import all_questions, conversation_rows
 from core.state_channels import require_bound
 from core.state_graph import ARCHIVED_PROJECT_SQL, StateGraphError
+from core.state_groups import WITHHELD_OWNER_SUBJECT
 from core.state_privacy import UntrustedDatabase, writer_only_read
 from core.state_steward import _hash, default_tz, steward_project
 
@@ -327,11 +329,12 @@ class StateOwnerQuestions:
             messages = self._push(conn, moment, default, found, archived)
             unmirrored = [{"message_id": r["message_id"], "body": r["body"]} for r in conn.execute(
                 "SELECT m.message_id,m.body FROM driver_inbox_messages m WHERE m.project_id=? AND m.audience='user' "
-                "AND m.sender_driver_id=? AND m.subject=? AND m.reply_to_message_id IS NULL "
+                "AND m.sender_driver_id=? AND m.subject IN (?,?) AND m.reply_to_message_id IS NULL "
                 "AND m.created_at<=? AND m.created_at>=? "
                 "AND NOT EXISTS(SELECT 1 FROM state_message_sources s WHERE s.message_id=m.message_id) "
                 "ORDER BY m.created_at,m.message_id LIMIT 20",
-                (steward_project(), self.driver_id, PUSH_SUBJECT, (moment - UNMIRRORED_AFTER).isoformat(),
+                (steward_project(), self.driver_id, PUSH_SUBJECT, WITHHELD_OWNER_SUBJECT,
+                 (moment - UNMIRRORED_AFTER).isoformat(),
                  (moment - UNMIRRORED_WINDOW).isoformat()))]
         if messages:
             self.steward._notify()

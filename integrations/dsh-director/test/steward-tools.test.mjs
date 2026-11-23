@@ -151,7 +151,7 @@ test('steward.md (step 24 7.8.9 group confirmations, 25.3 calendar 7.9.6): the l
     assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
   // The group-turn rule ("nothing said in a group turn is ever a task") names these as its
   // exceptions, so the later group turn where the asker replies with the code runs it.
-  for (const words of ['The exceptions are family memory, the family lists and the public connections',
+  for (const words of ['The exceptions are family memory, the family lists, a one-time reminder to that same group and the public connections',
     'then run_confirmed(code) in the later group turn where that person replies with the code'])
     assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
   // 25.3: reads are free; every write and invitation is outward on either calendar; the owner's
@@ -162,4 +162,20 @@ test('steward.md (step 24 7.8.9 group confirmations, 25.3 calendar 7.9.6): the l
     'in a group you see only the family one', 'sending or answering an invitation is outward, on either calendar',
     'before you ask for the confirmation, say exactly what you will write', "calendar times in your owner's time zone"])
     assert.ok(calendar.includes(words), `the calendar lines lack: ${words}`);
+});
+
+test('steward.md (step 23.1, design-steward 7.7.15 r44v): several groups - each its own memory, lists and reminders, never another group', () => {
+  const flat = readFileSync(new URL('../steward.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+  for (const words of ["your host may bind one or more group chats of your owner's family; each group wake names its group",
+    'reminders (except a one-time reminder to that same group, below)',
+    'Family memory, family lists and reminders belong to the group you are answering: in a group turn never mention another group',
+    'each bound group has its own two lists', 'where you name the group when more than one is bound',
+    "target family_group and the group's name", 'use group_reminder_set with the time and their exact words; it goes only to that group',
+    'If someone in a group asks for a repeating reminder, or to change or stop one, say that your owner does that.',
+    "how many family-list items are open in each group, by the group's name", 'public connections are the same for every bound group'])
+    assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
+  // The single-group words are gone.
+  for (const words of ['may bind a group chat of', 'the family has two lists', 'visible to the whole family group',
+    'say that your owner sets those'])
+    assert.ok(!flat.includes(words), `steward.md still says: ${words}`);
 });

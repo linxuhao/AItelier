@@ -13,7 +13,8 @@
  *    until the owner writes, an owner turn not the PAUSED_TOOLS (group-pause.json);
  *  - the FOLD: each finished group turn is replaced on the surface by one fixed line at the
  *    first step of the next turn (DSH's own positional replace, the one compaction uses), so
- *    an owner turn's request carries no byte of a group turn;
+ *    an owner turn's request carries no byte of a group turn - and, with several groups (step
+ *    23.1), the next group's turn neither: the line names no group, time or count (FOLD_LINE);
  *  - the COMPACTION FILTER: a compaction request never carries a group turn's messages;
  *  - grep_chat_history skips group turns (`withoutGroupTurns`).
  *  Nothing here names a backend; the host's `groups` operations do the backend side. */
@@ -30,22 +31,25 @@ export const FOLD_SOURCE = 'dsh-director-group-fold';
  *  outward one runs only after the asker confirms it in the group (request_confirmation,
  *  run_confirmed; 7.8.9). The connection tools themselves are the catalog's names
  *  (`connectionTools`), never listed here; the four connection-configuration tools are not here.
- *  Any tool added later is refused in a group turn by default. */
+ *  Step 23.1 (7.9.4, owner 2026-11-22): group_reminder_set, a one-time reminder to this same
+ *  group. Any tool added later is refused in a group turn by default. */
 export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfolio_project', 'family_memory_note',
-  'family_memory_show', 'list_show', 'list_add', 'list_check', 'search_tools', 'call_tool', 'request_confirmation',
-  'run_confirmed',
+  'family_memory_show', 'list_show', 'list_add', 'list_check', 'group_reminder_set', 'search_tools', 'call_tool',
+  'request_confirmation', 'run_confirmed',
   // Step 24.2 (7.8.8, 7.8.12): media_call (its own nested call is the catalog's, judged by name and
   // not counted again) and send_media (only into this group, one of its group_send_budget sends).
   'media_call', 'send_media']));
-/** The family memory is for group turns only (7.7.8a, platform director 420). */
-export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
  *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
 export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose',
   // 7.8.8: a connection change waits for the owner too.
   'propose_connection_change']));
-export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
+export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check, group_reminder_set and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
+/** The tools only a group turn may call (7.7.5): the family memory (7.7.8a) and, step 23.1, a
+ *  family member's reminder to their own group (7.9.4). */
+export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show', 'group_reminder_set']));
 export const familyRefusal = 'family memory is for group turns only';
+export const groupReminderRefusal = 'group_reminder_set is for group turns only: in your owner\'s turns use your host\'s reminder tool';
 export const pausedRefusal = 'a group turn ran since your owner last wrote; this waits until your owner writes';
 export const answerNow = 'answer now';
 
@@ -102,9 +106,10 @@ export function groupSeqs(events) {
 /** The raw log without anything a group turn said (grep_chat_history). */
 export const withoutGroupTurns = events => { const inGroup = groupSeqs(events); return events.filter(e => !inGroup.has(e.seq)); };
 
-const REMOVED = "Your host removed it from this conversation: what is said in a group is not your owner's context. Its record is on your owner's dashboard.]";
-export const FOLD_LINE = '[A family-group turn ran here. ' + REMOVED;
-export const foldText = span => `[A family-group turn ran here (group ${span.audience.label ?? span.audience.group_ref ?? '?'}, ${span.time ?? 'earlier'}, ${span.questions} question(s)). ${REMOVED}`;
+/** The one line a folded group turn leaves (7.7.6a one): fixed, without the group's name, the
+ *  time or how many questions (step 23.1, 7.7.24 item 3: another group's turn reads this surface).
+ *  The named lines written before step 23.1 stay as they are (accepted, review P4). */
+export const FOLD_LINE = "[A family-group turn ran here. Your host removed it from this conversation: what is said in a group is not your owner's context. Its record is on your owner's dashboard.]";
 
 /** Replace every finished group turn's surface nodes (each contiguous run) by one fold line.
  *  Returns how many runs were folded. Throws whatever the session's append refuses. */
@@ -124,9 +129,8 @@ export function foldGroupTurns(session, createUserMessage, { before } = {}) {
       else { run = { span, seqs: [seq] }; runs.push(run); }
     } else run = undefined;
   }
-  for (const { span, seqs } of runs) {
-    span.time = bySeq.get(span.start)?.time ? new Date(bySeq.get(span.start).time).toISOString() : undefined;
-    const message = createUserMessage({ content: [{ type: 'text', text: foldText(span) }], source: { kind: FOLD_SOURCE } });
+  for (const { seqs } of runs) {
+    const message = createUserMessage({ content: [{ type: 'text', text: FOLD_LINE }], source: { kind: FOLD_SOURCE } });
     session.append('user/message', message, { surfaceOp: { op: 'replace', startSeq: seqs[0], endSeq: seqs.at(-1) }, sourceEventSeqs: seqs });
   }
   return runs.length;
@@ -234,8 +238,12 @@ export class GroupTurns {
   resume(events, turn) {
     const open = turnSpans(events).findLast(span => span.end === undefined);
     if (!open || open.turn !== turnKey(turn)) return false;
+    // The group messages the turn took so far (their askers and questions), for a later merge
+    // to record the whole turn again (createGroupSetup).
+    const kept = open.audience.unknown ? [] : events.filter(e => e.seq >= open.start && e.type === 'user/message' && isGroup(e.data)
+      && e.data.source.channel === open.audience.channel && e.data.source.group_ref === open.audience.group_ref).map(e => e.data);
     this.current = { turn: turnKey(turn) ?? open.turn, audience: open.audience, calls: open.calls, merged: open.questionIds.length,
-      ownerWaiting: false, questions: open.audience.unknown ? [] : [...open.questionIds] };
+      ownerWaiting: false, questions: open.audience.unknown ? [] : [...open.questionIds], kept };
     return true;
   }
 
@@ -295,7 +303,7 @@ export class GroupTurns {
       if (!GROUP_TOOLS.has(name) && !catalog?.has(name)) return groupTurnRefusal;
       return turn ? undefined : answerNow;
     }
-    if (FAMILY_TOOLS.has(name)) return familyRefusal;
+    if (FAMILY_TOOLS.has(name)) return name === 'group_reminder_set' ? groupReminderRefusal : familyRefusal;
     if (this.paused() && this.pausedTools.has(name)) return pausedRefusal;
     return undefined;
   }
@@ -315,6 +323,16 @@ export class GroupTurns {
     renameSync(temporary, this.pauseFile);
   }
   unpause() { if (this.pauseFile) rmSync(this.pauseFile, { force: true }); }
+}
+
+/** The name a group wake carries (step 23.1, 7.7.4): the bound group's own label, required and
+ *  unlike every other bound group's, so the model tells two groups apart by it - never a shared
+ *  fallback name and never null. A group the host's list does not name (the list could not be
+ *  read, or the group is not in it) throws `group_wake_unnamed` (director 602 defect 3: fail
+ *  closed, steward.md promises every wake names its group); the caller logs it and wakes nothing. */
+export function groupWakeName(group) {
+  if (typeof group?.label !== 'string' || !group.label.trim()) throw new Error('group_wake_unnamed: the host named no bound group for this question; no wake');
+  return group.label;
 }
 
 /** Puts input of another audience back for a later turn (7.7.3 item 2). DSH opens one turn per
@@ -340,9 +358,12 @@ const short = error => String(error?.message ?? error).slice(0, 300);
  *  record, writing group-pause.json) rejects the step; its input is
  *  kept in `pendingFile` and delivered again after `retryMs`; a second failure in a row is
  *  reported as the host error group_turn_setup_failed (cleared, and what was kept delivered,
- *  by the next first step that succeeds). */
+ *  by the next first step that succeeds). The audience record itself is tried `recordAttempts`
+ *  times, `recordRetryMs` apart, before it counts as failed (director 602 defect 1: one lost
+ *  request must not cost a group its answer; recording a turn again is idempotent). */
 export function createGroupSetup({ turns, groups, createUserMessage, pendingFile, canSteer = () => true, steer,
-  setHostError = async () => {}, clearHostError = async () => {}, log = () => {}, retryMs = 30000, fold = foldGroupTurns }) {
+  setHostError = async () => {}, clearHostError = async () => {}, log = () => {}, retryMs = 30000, fold = foldGroupTurns,
+  recordAttempts = 3, recordRetryMs = 500 }) {
   let failures = 0, reported = false;
   const pending = () => {
     try { return pendingFile ? JSON.parse(readFileSync(pendingFile, 'utf8')) : []; } catch { return []; }
@@ -356,17 +377,54 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
     steer(messages);
     return messages.length;
   };
+  // The host records the turn's audience, its askers and (step 23.1, 7.7.7) the questions it took,
+  // which the backend stamps with the turn: a reply answers only a question of its own turn.
+  const recordOnce = (payload, audience, keep) => groups.audience({ turn: String(payload.turn), audience: audience.kind,
+    ...(audience.kind === 'group' ? { group: { channel: audience.channel, group_ref: audience.group_ref } } : {}),
+    senderRefs: [...new Set(keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.sender_refs ?? [] : []))],
+    ...(audience.kind === 'group' ? { questionIds: keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.question_ids ?? [] : []) } : {}) },
+  payload.signal);
+  const record = async (payload, audience, keep) => {
+    if (!groups?.audience) return undefined;
+    for (let attempt = 1; ; attempt += 1) {
+      try { return await recordOnce(payload, audience, keep); }
+      catch (error) {
+        if (attempt >= recordAttempts || payload.signal?.aborted) throw error;
+        log(`group audience not recorded (attempt ${attempt} of ${recordAttempts}): ` + short(error));
+        await new Promise(resolve => setTimeout(resolve, recordRetryMs));
+      }
+    }
+  };
   async function step(payload, decision) {
     if (payload.step !== 1 && turns.current?.turn !== turnKey(payload.turn)) turns.resume(payload.agent.session.snapshotEvents(), payload.turn);
     const { keep, back } = turns.split(decision.messages, payload.step, payload.turn);
     putBack(payload.agent.inbox, back, turns);
-    if (payload.step !== 1) return { ...decision, messages: keep };
+    if (payload.step !== 1) {
+      // A later step that merged more questions of this group records them too (the turn's
+      // askers and questions so far); one that cannot be recorded goes back for a later turn,
+      // which records it - never a question kept in a turn that did not take it on record.
+      const merged = keep.filter(isGroup);
+      const turn = turns.open();
+      if (merged.length && turn?.audience.kind === 'group') {
+        turn.kept = [...(turn.kept ?? []), ...merged];
+        try { await record(payload, turn.audience, turn.kept); }
+        catch (error) {
+          log('group merge not recorded: ' + short(error));
+          turn.kept = turn.kept.filter(m => !merged.includes(m));
+          const ids = new Set(merged.flatMap(m => m.source.question_ids ?? []));
+          turn.questions = turn.questions.filter(id => !ids.has(id));
+          turn.merged -= merged.length;
+          putBack(payload.agent.inbox, merged, turns);
+          return { ...decision, messages: keep.filter(m => !merged.includes(m)) };
+        }
+      }
+      return { ...decision, messages: keep };
+    }
     const audience = turns.audience();
     try {
       fold(payload.agent.session, createUserMessage);
-      if (groups?.audience) await groups.audience({ turn: String(payload.turn), audience: audience.kind,
-        ...(audience.kind === 'group' ? { group: { channel: audience.channel, group_ref: audience.group_ref } } : {}),
-        senderRefs: keep.flatMap(m => m.source?.kind === GROUP_SOURCE ? m.source.sender_refs ?? [] : []) }, payload.signal);
+      if (turns.current) turns.current.kept = keep.filter(isGroup);
+      await record(payload, audience, keep);
       if (audience.kind === 'group') turns.pause();
       else {
         const pause = turns.pauseRecord();
@@ -400,9 +458,10 @@ export function createGroupSetup({ turns, groups, createUserMessage, pendingFile
  *  words go to the host (`reply`: exit check, one message, the latest question's group), then
  *  out through the channel (`sendGroup`). An owner turn's words never go to a group. The system
  *  clock lines the steward copied to the start of its words are not sent; words that were only
- *  such lines send nothing (only_clock_text, as the owner's automatic reply). Returns the
- *  handler of the root session's events. */
-export function groupReplies({ turns, reply, sendGroup, warn }) {
+ *  such lines send nothing (only_clock_text, as the owner's automatic reply). A withheld
+ *  reply's line for the owner (`owner_notice`, r44w 7.7.7) goes to `mirror`, the owner's
+ *  channel mirror, never into the group. Returns the handler of the root session's events. */
+export function groupReplies({ turns, reply, sendGroup, warn, mirror }) {
   let last = '';
   return event => {
     if (event.type === 'turn/start') last = '';
@@ -416,8 +475,12 @@ export function groupReplies({ turns, reply, sendGroup, warn }) {
         || (turn.turn !== undefined && turn.turn !== String(event.data?.turn))) return;
       const questions = [...turn.questions], body = withoutLeadingClockLines(said);
       if (!body) return void warn('group reply not sent ' + JSON.stringify({ reason: 'only_clock_text', question_id: questions.at(-1) }));
-      return reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body })
-        .then(sent => sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused)))
+      // The turn is named: the backend answers only a question this turn took (step 23.1, 7.7.7).
+      return reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body, turn: String(event.data?.turn ?? turn.turn) })
+        .then(sent => {
+          if (sent?.owner_notice?.message_id && mirror) void mirror(sent.owner_notice.message_id, sent.owner_notice.body);
+          return sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused));
+        })
         .catch(error => warn('group reply: ' + short(error)));
     }
   };

@@ -1,8 +1,10 @@
 """The steward in the owner's family group (step 23, design-steward 7.7): WeChat first.
 
-The owner binds ONE group per channel with a group code (`G-XXXX-XXXX`, 10 minutes, once,
-kind 'group' in state_owner_channel_codes) that the owner's bound account posts in the
-group; the steward's HOST relays every @-message the bridge hands over
+The owner binds up to GROUP_LIMITS["groups_per_channel"] groups per channel (step 23.1,
+design-steward 7.7.24), each with a group code (`G-XXXX-XXXX`, 10 minutes, once, kind 'group'
+in state_owner_channel_codes, issued with the group's name: required and unlike every bound
+group's, on any channel) that the owner's bound account posts in the group; the steward's
+HOST relays every @-message the bridge hands over
 (`relay_group_message`) and posts the steward's last words back (`post_group_reply`).
 What the backend decides here, in code, never the model nor the message text:
 
@@ -49,6 +51,7 @@ import secrets
 import unicodedata
 from datetime import datetime, timedelta
 from types import MappingProxyType
+from uuid import uuid4
 
 from core.message_body_guard import refuse_credential_body
 from core import media_types, state_channels
@@ -58,7 +61,7 @@ from core.state_channels import (BODY_MAX_BYTES, CHANNELS, CODE_TTL, _code_hash,
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_privacy import writer_only_read
 from core.state_schema_migration import add_column_if_missing
-from core.state_steward import _hash
+from core.state_steward import _hash, steward_project
 
 log = logging.getLogger(__name__)
 
@@ -68,8 +71,6 @@ CREATE TABLE IF NOT EXISTS state_owner_groups (
  group_ref TEXT NOT NULL CHECK(group_ref<>''),
  label TEXT, mention_prefix TEXT NOT NULL, bound_at TEXT NOT NULL, revoked_at TEXT,
  PRIMARY KEY(channel, group_ref));
-CREATE UNIQUE INDEX IF NOT EXISTS state_owner_groups_one_live ON state_owner_groups(channel)
- WHERE revoked_at IS NULL;
 CREATE TABLE IF NOT EXISTS state_group_messages (
  message_id TEXT PRIMARY KEY,
  channel TEXT NOT NULL, group_ref TEXT NOT NULL,
@@ -121,7 +122,17 @@ GROUP_LIMITS = MappingProxyType({
     # Step 24 (design-steward 7.8.9): the 20 of that sum - confirmation texts, the lines
     # deciding them and (step 24.2, 7.8.12) send_media's files, apart from the 60 questions.
     "group_sends_per_hour": 20,
+    # Step 23.1 (design-steward 7.7.24, owner 2026-11-22): a channel binds at most this many
+    # groups (the bridge takes at most 10 rooms); each its own family memory, lists and reminders.
+    "groups_per_channel": 3,
+    # r44w (design-steward 7.7.7, director 583): the owner-conversation lines telling the owner
+    # a group reply was withheld; further withholds that hour stay in the group record only.
+    "withheld_owner_lines_per_hour": 3,
 })
+# A group's name (7.7.9): required, at most this many characters after NFKC, unlike every bound
+# group's on any channel; a group bound before names were required is given DEFAULT_GROUP_LABEL.
+GROUP_LABEL_CHARS = 20
+DEFAULT_GROUP_LABEL = "家庭群"
 # The outbound kinds group_sends_per_hour counts - the one list send_refusal reads, so every
 # path that posts one of them is held to the same budget.
 GROUP_SEND_KINDS = ("confirmation", "confirmation_line", "media")
@@ -140,6 +151,13 @@ WITHHELD_TEXT = "这个我在群里答不了。"
 WITHHELD_REASONS = MappingProxyType({"live_code": "a live binding code", "private_project":
                                      "the name or id of a project that is not public",
                                      "host_path": "a path on the host"})
+# r44w (7.7.7 「业主那一侧也要知道」): the same kinds, as the owner's conversation reads them in
+# the one line code writes there when a group reply is withheld - never the reply, never what
+# it named. WITHHELD_OWNER_SUBJECT is that message's subject.
+WITHHELD_OWNER_REASONS = MappingProxyType({"live_code": "含有绑定码", "private_project": "涉及私有项目",
+                                           "host_path": "含有主机上的路径"})
+WITHHELD_OWNER_LINE = "{group}里有一条回答没发出去：{reason}。要问可以私聊我。"
+WITHHELD_OWNER_SUBJECT = "群里没发出的回答"
 QUOTA_NOTICE = "问得太多了，过一会儿再问。"
 # The line a group gets when the requester's reply decided a confirmation (7.8.9 step 4):
 # code's words, never the model's.
@@ -231,6 +249,33 @@ def _initialize_schema(db) -> None:
         conn.executescript(SCHEMA)
         # Step 24.2 (7.8.12): a group message's attachments as metadata (core.media_types).
         add_column_if_missing(conn, "state_group_messages", "attachments_json", "TEXT")
+        # Step 23.1 (7.7.24): a channel binds several groups. The live database of step 23
+        # carries the one-live-group-per-channel index (CREATE ... IF NOT EXISTS never
+        # removes it), and its bound group may have no name; a question row records the
+        # turn that took it (post_group_reply answers it only in that turn, 7.7.7).
+        conn.execute("DROP INDEX IF EXISTS state_owner_groups_one_live")
+        add_column_if_missing(conn, "state_group_messages", "turn", "TEXT")
+        # r44w (7.7.7): a withheld reply's row names the owner-conversation line it caused.
+        add_column_if_missing(conn, "state_group_messages", "owner_notice", "TEXT")
+        for (channel, group_ref) in conn.execute(
+                "SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL AND "
+                "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
+            conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
+                         (StateGroups._free_label(conn), channel, group_ref))
+        # Director 602 defect 6: a live group's name is unique in the database too. A name two
+        # live groups share (none should: the code refuses it) is renamed on the later one
+        # first, so the index can be made.
+        seen = set()
+        for (channel, group_ref, label) in conn.execute(
+                "SELECT channel,group_ref,label FROM state_owner_groups WHERE revoked_at IS NULL "
+                "ORDER BY bound_at").fetchall():
+            if label in seen:
+                label = StateGroups._free_label(conn)
+                conn.execute("UPDATE state_owner_groups SET label=? WHERE channel=? AND group_ref=?",
+                             (label, channel, group_ref))
+            seen.add(label)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS state_owner_groups_live_label ON "
+                     "state_owner_groups(label) WHERE revoked_at IS NULL")
         conn.commit()
 
 
@@ -253,12 +298,63 @@ class StateGroups:
                     sender_ref, _now().isoformat(), "" if size is None else f" bytes={size}")
 
     @staticmethod
-    def _live_group(conn, channel, group_ref=None):
-        row = conn.execute("SELECT * FROM state_owner_groups WHERE channel=? AND revoked_at IS NULL",
-                           (channel,)).fetchone()
-        if row is None or (group_ref is not None and row["group_ref"] != group_ref):
-            return None
-        return row
+    def _live_group(conn, channel, group_ref):
+        """The live binding of exactly this group (a channel may have several, 7.7.24)."""
+        return conn.execute("SELECT * FROM state_owner_groups WHERE channel=? AND group_ref=? AND revoked_at IS NULL",
+                            (channel, group_ref)).fetchone()
+
+    @staticmethod
+    def _live_count(conn, channel):
+        return conn.execute("SELECT COUNT(*) FROM state_owner_groups WHERE channel=? AND revoked_at IS NULL",
+                            (channel,)).fetchone()[0]
+
+    @staticmethod
+    def _label_taken(conn, label):
+        """Whether a bound group of ANY channel has this name (NFKC): the owner's turn, a group
+        wake and the dashboard tell groups apart by name alone (7.7.9, review F3)."""
+        return any(unicodedata.normalize("NFKC", r[0]).strip() == label for r in conn.execute(
+            "SELECT label FROM state_owner_groups WHERE revoked_at IS NULL AND label IS NOT NULL"))
+
+    @staticmethod
+    def _code_labels(conn, channel, moment):
+        """The names (NFKC, trimmed) that the live unused group codes of every channel but
+        `channel` hold (every channel's, for None): such a code binds later under its name
+        (review F4)."""
+        return {unicodedata.normalize("NFKC", r[0]).strip() for r in conn.execute(
+            "SELECT label FROM state_owner_channel_codes WHERE kind='group' AND channel IS NOT ? AND used_at IS NULL "
+            "AND retired_at IS NULL AND expires_at>? AND label IS NOT NULL", (channel, moment.isoformat()))}
+
+    @classmethod
+    def _free_label(cls, conn, channel=None):
+        """DEFAULT_GROUP_LABEL, or with a number when a bound group already has it or a live
+        unused group code of another channel than `channel` holds it (director 602 defect 6: the
+        F4 hole for a code issued before names were required)."""
+        held = cls._code_labels(conn, channel, _now())
+        label, n = DEFAULT_GROUP_LABEL, 1
+        while cls._label_taken(conn, label) or label in held:
+            n += 1
+            label = f"{DEFAULT_GROUP_LABEL}{n}"
+        return label
+
+    @staticmethod
+    def group_label(label) -> str:
+        """A group's name as given on the dashboard: NFKC, trimmed, 1-GROUP_LABEL_CHARS characters."""
+        label = unicodedata.normalize("NFKC", "" if label is None else str(label)).strip()
+        if not label or len(label) > GROUP_LABEL_CHARS:
+            raise StateGraphError(f"invalid_label: a group's name is 1-{GROUP_LABEL_CHARS} characters")
+        return label
+
+    def _room_refusal(self, conn, channel, group_ref, label):
+        """Why this group cannot be bound now, or None (7.7.9 step 5): it is bound already
+        (group_already_bound, only the same room), the channel is full (too_many_groups), or a
+        bound group of any channel has its name (group_label_taken)."""
+        if self._live_group(conn, channel, group_ref) is not None:
+            return "group_already_bound"
+        if self._live_count(conn, channel) >= GROUP_LIMITS["groups_per_channel"]:
+            return "too_many_groups"
+        if label and self._label_taken(conn, unicodedata.normalize("NFKC", label).strip()):
+            return "group_label_taken"
+        return None
 
     @staticmethod
     def _member(conn, channel, group_ref, sender_ref, role):
@@ -331,15 +427,17 @@ class StateGroups:
             "AND used_at IS NULL AND retired_at IS NULL") if datetime.fromisoformat(row["expires_at"]) > moment}
 
     # ---------------------------------------------------------------- the owner (dashboard)
-    def issue_group_code(self, channel, label=None):
-        """A fresh group code for `channel` (owner session only): the channel must have a
-        bound account and no bound group (v1: one group per channel). Any earlier unused
-        group code of the channel stops working; account codes are untouched."""
+    def issue_group_code(self, channel, label):
+        """A fresh group code for `channel` (owner session only), named `label` - the name of
+        the group it binds (7.7.9, step 23.1): the channel must have a bound account and fewer
+        than groups_per_channel bound groups (else too_many_groups), and no bound group of any
+        channel nor a live unused group code of another channel may have that name (else
+        group_label_taken). Any earlier unused group code of
+        the channel stops working; account codes are untouched."""
         self.steward._owner()
         if channel not in CHANNELS:
             raise StateGraphError("invalid_channel")
-        if label is not None:
-            label = unicodedata.normalize("NFKC", label).strip()[:40] or None
+        label = self.group_label(label)
         pepper = self._pepper()
         moment = _now()
         with self.store.transaction(write=True) as conn:
@@ -347,8 +445,16 @@ class StateGroups:
                                    (channel,)).fetchone()
             if account is None or account[0] is None:
                 raise StateGraphError("channel_not_bound: bind your own account on this channel first")
-            if self._live_group(conn, channel) is not None:
-                raise StateConflict("group_already_bound: unbind the bound group first")
+            if self._live_count(conn, channel) >= GROUP_LIMITS["groups_per_channel"]:
+                raise StateConflict(f"too_many_groups: at most {GROUP_LIMITS['groups_per_channel']} groups on a "
+                                    "channel; unbind one first")
+            if self._label_taken(conn, label):
+                raise StateConflict("group_label_taken: a bound group already has this name; choose another")
+            # Review F4: a live code of another channel with this name would bind second and be
+            # refused in the group, where the dashboard never hears it - refuse it here instead.
+            if label in self._code_labels(conn, channel, moment):
+                raise StateConflict("group_label_taken: an unused code for another channel's group has this name; "
+                                    "choose another")
             conn.execute("DELETE FROM state_owner_channel_codes WHERE channel=? AND kind='group' AND used_at IS NULL",
                          (channel,))
             code = "G" + "".join(secrets.choice(_CROCKFORD) for _ in range(8))
@@ -358,20 +464,22 @@ class StateGroups:
                           (moment + CODE_TTL).isoformat(), label))
         return {"code": f"G-{code[1:5]}-{code[5:]}", "expires_at": (moment + CODE_TTL).isoformat()}
 
-    def unbind_owner_group(self, channel):
-        """Unbind the channel's group and delete everything kept about it; the family lists
-        stay, without who of this group added or checked an item (7.9.5)."""
+    def unbind_owner_group(self, channel, group_ref):
+        """Unbind this one group (7.7.24) and delete everything kept about it; its family lists
+        stay, shown on the dashboard only, without who of this group added or checked an item
+        (7.9.5); the channel's other groups are untouched."""
         self.steward._owner()
         with self.store.transaction(write=True) as conn:
-            row = self._live_group(conn, channel)
+            row = self._live_group(conn, channel, group_ref)
             if row is not None:
                 group = row["group_ref"]
                 conn.execute("UPDATE state_owner_groups SET revoked_at=? WHERE channel=? AND group_ref=?",
                              (_now().isoformat(), channel, group))
-                # 7.9.5 (director 489 (a)): the family lists stay; who of this group added or
-                # checked an item is forgotten (its members, and the owner's account here).
+                # 7.9.5 (director 489 (a), step 23.1): this group's lists stay; who of this group
+                # added or checked one of ITS items is forgotten (its members, and the owner's
+                # account here) - an item of another group keeps its names.
                 from core.state_lists import forget_group_senders
-                forget_group_senders(conn, [r[0] for r in conn.execute(
+                forget_group_senders(conn, channel, group, [r[0] for r in conn.execute(
                     "SELECT sender_ref FROM state_group_members WHERE channel=? AND group_ref=? UNION "
                     "SELECT sender_ref FROM state_owner_channels WHERE channel=?", (channel, group, channel))])
                 for table in ("state_group_messages", "state_group_members", "state_family_memory",
@@ -390,28 +498,29 @@ class StateGroups:
                 disabled = len(stopped)
         if row is not None and disabled:
             self.steward._notify()
-        return {"unbound": row is not None, "channel": channel,
+        return {"unbound": row is not None, "channel": channel, "group_ref": group_ref,
                 **({"reminders_disabled": disabled} if row is not None else {})}
 
-    def clear_group_messages(self, channel):
+    def clear_group_messages(self, channel, group_ref):
         self.steward._owner()
         with self.store.transaction(write=True) as conn:
-            row = self._live_group(conn, channel)
+            row = self._live_group(conn, channel, group_ref)
             if row is None:
                 raise StateNotFound("group_not_bound")
             deleted = conn.execute("DELETE FROM state_group_messages WHERE channel=? AND group_ref=?",
                                    (channel, row["group_ref"])).rowcount
         return {"cleared": deleted}
 
-    def name_group_member(self, channel, sender_ref, label):
-        """The owner names a member the bridge reported (7.7.4): only the label changes, so
-        the quota window and the family memory keep their key (`sender_ref`)."""
+    def name_group_member(self, channel, group_ref, sender_ref, label):
+        """The owner names a member the bridge reported in this group (7.7.4): only the label
+        changes, so the quota window and the family memory keep their key (`sender_ref`). A
+        name is per group (owner 2026-11-22, 7.7.21 item 8.6)."""
         self.steward._owner()
         label = unicodedata.normalize("NFKC", str(label)).strip()
         if not label or len(label) > 20:
             raise StateGraphError("invalid_label: 1-20 characters")
         with self.store.transaction(write=True) as conn:
-            row = self._live_group(conn, channel)
+            row = self._live_group(conn, channel, group_ref)
             if row is None:
                 raise StateNotFound("group_not_bound")
             changed = conn.execute("UPDATE state_group_members SET label=?, named_at=? WHERE channel=? AND group_ref=? "
@@ -443,25 +552,29 @@ class StateGroups:
                 raise StateConflict("several_pending_groups: issue a new group code and post it again")
             if not rows or rows[0]["room_ref"] != room_ref:
                 raise StateNotFound("unknown_pending_group")
-            if self._live_group(conn, channel) is not None:
-                raise StateConflict("group_already_bound")
             code = conn.execute("SELECT label,used_at,retired_at,expires_at FROM state_owner_channel_codes "
                                 "WHERE code_hash=?", (rows[0]["code_hash"],)).fetchone()
+            # Another bound group never stops a pick: only this room bound already, a full
+            # channel or the name taken (7.7.9 last item, step 23.1).
+            refusal = self._room_refusal(conn, channel, room_ref, code["label"] if code is not None else None)
+            if refusal is not None:
+                raise StateConflict(refusal)
             if code is None or code["used_at"] or code["retired_at"] or datetime.fromisoformat(code["expires_at"]) <= moment:
                 raise StateConflict("code_expired")
-            self._bind(conn, channel, room_ref, code["label"], rows[0]["mention_prefix"], rows[0]["code_hash"], moment)
+            self._bind(conn, channel, room_ref, code["label"] or self._free_label(conn, channel),
+                       rows[0]["mention_prefix"], rows[0]["code_hash"], moment)
             conn.execute("DELETE FROM state_pending_groups WHERE channel=?", (channel,))
             notice = self._out_row(conn, channel, room_ref, "bind_notice", BIND_NOTICE, moment)
         return {"bound": True, "channel": channel, "group_ref": room_ref, "notice": BIND_NOTICE,
                 "notice_message_id": notice}
 
-    def set_family_note(self, channel, text):
+    def set_family_note(self, channel, group_ref, text):
         self.steward._owner()
         text = unicodedata.normalize("NFKC", str(text)).strip()
         if len(text) > FAMILY_LIMITS["note_chars"]:
             raise StateGraphError(f"note_too_long: at most {FAMILY_LIMITS['note_chars']} characters")
         with self.store.transaction(write=True) as conn:
-            row = self._live_group(conn, channel)
+            row = self._live_group(conn, channel, group_ref)
             if row is None:
                 raise StateNotFound("group_not_bound")
             if text:
@@ -473,11 +586,11 @@ class StateGroups:
                              (channel, row["group_ref"]))
         return {"note": text}
 
-    def delete_family_memory(self, channel, entry_id=None):
+    def delete_family_memory(self, channel, group_ref, entry_id=None):
         """One entry (entry_id) or all of the group's (None)."""
         self.steward._owner()
         with self.store.transaction(write=True) as conn:
-            row = self._live_group(conn, channel)
+            row = self._live_group(conn, channel, group_ref)
             if row is None:
                 raise StateNotFound("group_not_bound")
             args = [_now().isoformat(), channel, row["group_ref"]]
@@ -488,10 +601,11 @@ class StateGroups:
             deleted = conn.execute(sql, args).rowcount
         return {"deleted": deleted}
 
-    def owner_view(self, channel=None):
+    def owner_view(self, channel=None, group_ref=None):
         """The dashboard's groups: each bound group with its members, message count and last
-        time; with `channel`, also its records (withheld originals included), the family note
-        and the family memory entries."""
+        time; with `channel` and `group_ref`, that one group's records too (withheld originals
+        included), its family note and its family memory entries. `groups_per_channel` is the
+        cap the dashboard's 「添加群」 stops at."""
         self.steward._owner()
         with self.store.transaction() as conn:
             groups = []
@@ -505,7 +619,7 @@ class StateGroups:
                 group = {"channel": row["channel"], "group_ref": row["group_ref"], "label": row["label"],
                          "mention_prefix": row["mention_prefix"], "bound_at": row["bound_at"],
                          "messages_30d": stats[0], "last_message_at": stats[1], "members": members}
-                if channel == row["channel"]:
+                if channel == row["channel"] and group_ref == row["group_ref"]:
                     group["messages"] = [dict(m) for m in conn.execute(
                         "SELECT message_id,direction,kind,accepted,sender_ref,sender_role,body,original,withheld_reason,"
                         "reply_to,answered_by,at FROM state_group_messages WHERE channel=? AND group_ref=? "
@@ -519,7 +633,7 @@ class StateGroups:
                     group["family_note"] = dict(note) if note else None
                     group["family_memory"] = self._entries(conn, *key)
                 groups.append(group)
-        return {"groups": groups}
+        return {"groups": groups, "groups_per_channel": GROUP_LIMITS["groups_per_channel"]}
 
     def _entries(self, conn, channel, group_ref):
         return [{"entry_id": e["entry_id"], "text": e["text"], "at": e["at"], "added_by_role": e["added_by_role"],
@@ -540,8 +654,9 @@ class StateGroups:
         """Bind the group a group code was posted in (the bridge passes only `@prefix code`
         messages from groups not yet bound). Only the channel's bound account binds, only
         with an unused, unexpired group code of that channel, and only while the channel
-        has no group. A refused attempt counts against nothing and is answered with nothing
-        in the group (the host sends a line only for `bound`)."""
+        has fewer than groups_per_channel groups and this group is not bound (step 23.1). A
+        refused attempt counts against nothing and is answered with nothing in the group (the
+        host sends a line only for `bound`)."""
         prefix = unicodedata.normalize("NFKC", str(mention_prefix)).strip()
         if not prefix:
             raise StateGraphError("invalid_request: mention_prefix must be the @ text before the code")
@@ -564,8 +679,8 @@ class StateGroups:
                 refusal = "code_used"
             elif row["retired_at"] is not None or datetime.fromisoformat(row["expires_at"]) <= moment:
                 refusal = "code_expired"
-            elif self._live_group(conn, channel) is not None:
-                refusal = "group_already_bound"
+            elif (refusal := self._room_refusal(conn, channel, group_ref, row["label"])) is not None:
+                pass
             else:
                 try:
                     require_bound(conn, channel, sender_ref)
@@ -578,9 +693,10 @@ class StateGroups:
                                      (channel, group_ref, prefix, digest, moment.isoformat()))
                         refusal = "pending_owner_pick"
             if refusal is None:
-                self._bind(conn, channel, group_ref, row["label"], prefix, digest, moment)
+                label = row["label"] or self._free_label(conn, channel)  # a code issued before names were required
+                self._bind(conn, channel, group_ref, label, prefix, digest, moment)
                 notice = self._out_row(conn, channel, group_ref, "bind_notice", BIND_NOTICE, moment)
-                result = {"bound": True, "channel": channel, "group_ref": group_ref, "label": row["label"],
+                result = {"bound": True, "channel": channel, "group_ref": group_ref, "label": label,
                           "mention_prefix": prefix, "notice": BIND_NOTICE, "notice_message_id": notice}
                 out = self.steward._record(conn, "bind_owner_group", request_key, request_hash, result)
         if refusal is not None:
@@ -729,13 +845,26 @@ class StateGroups:
             return "host_path"
         return None
 
-    def post_group_reply(self, project_id, request_key, question_id, body, also_answers=None):
+    def post_group_reply(self, project_id, request_key, question_id, body, turn, also_answers=None):
         """The steward's last words of a group turn, posted by its HOST to the group the
-        question came from (never a group the caller names). The exit check runs here, in
+        question came from (never a group the caller names), and only when that question is
+        unanswered and was taken by this `turn` (set_steward_turn_audience stamped it), else
+        not_this_turns_question and nothing is posted (7.7.7, review P3: with two groups a
+        wrong question id would send B's answer into A). The exit check runs here, in
         this transaction; a withheld reply keeps its original for the owner and the group
-        gets WITHHELD_TEXT. Formatted as one WeChat message: 「first 20 characters of the
+        gets WITHHELD_TEXT. In the same transaction the owner's conversation gets one line
+        code writes (WITHHELD_OWNER_LINE: this group's name and the kind, never the reply),
+        a steward message the host mirrors like any other (`owner_notice`), at most
+        withheld_owner_lines_per_hour per group (r44w). Formatted as one WeChat message: 「first 20 characters of the
         question」 on the first line, at most reply_chars in all, cut with '…'. Answered
-        once per request_key: the replay returns the first answer."""
+        once per request_key: the replay returns the first answer.
+
+        A question this turn never stamped - one its recorded audience left out of question_ids,
+        such as an id past the first 20 (director 602 defect 1) - is judged once more by the
+        audience record of THIS turn (`_stamp_late`), within bounds, before it is refused. A lost
+        stamping request is not this fallback's case: the stamping is the same request and
+        transaction as the audience record, so a turn whose request was lost has no record here;
+        the host's retry of that request (record()) covers it."""
         _require_utf8("body", body, "invalid_body")
         if not isinstance(body, str) or not body.strip():
             raise StateGraphError("empty_body")
@@ -751,6 +880,10 @@ class StateGroups:
                                     "AND accepted=1", (question_id,)).fetchone()
             if question is None:
                 raise StateNotFound("unknown_question")
+            if question["turn"] is None and self._stamp_late(conn, str(turn), [question_id, *others]):
+                question = conn.execute("SELECT * FROM state_group_messages WHERE message_id=?", (question_id,)).fetchone()
+            if question["turn"] is None or question["turn"] != str(turn) or question["answered_by"] is not None:
+                raise StateConflict("not_this_turns_question: that question is not an unanswered question of this turn")
             channel, group = question["channel"], question["group_ref"]
             if self._live_group(conn, channel, group) is None:
                 raise StateConflict("group_not_bound")
@@ -761,16 +894,65 @@ class StateGroups:
             text = quote + "\n" + (text if len(text) <= room else text[:room - 1] + "…")
             message_id = self._out_row(conn, channel, group, "reply", text, moment, reply_to=question_id,
                                        original=body if reason else None, reason=reason, request_key=request_key)
+            notice = self._withheld_owner_notice(conn, channel, group, message_id, reason, moment) if reason else None
             for other in [question_id, *others]:
                 conn.execute("UPDATE state_group_messages SET answered_by=? WHERE message_id=? AND channel=? AND "
-                             "group_ref=? AND direction='in' AND answered_by IS NULL", (message_id, other, channel, group))
+                             "group_ref=? AND direction='in' AND answered_by IS NULL AND turn=?",
+                             (message_id, other, channel, group, str(turn)))
             result = {"message_id": message_id, "channel": channel, "group_ref": group, "text": text,
-                      "withheld": bool(reason)}
+                      "withheld": bool(reason), **({"owner_notice": notice} if notice else {})}
             self._retain(conn, moment)
             out = self.steward._record(conn, "post_group_reply", request_key, request_hash, result)
         if reason:
             self._log("reply withheld " + reason, channel, group, None, len(body.encode("utf-8")))
         return out
+
+    def _stamp_late(self, conn, turn, ids):
+        """The bounded fallback for a question a recorded turn left out of its question_ids (director
+        602 defect 1; e.g. an id past the first 20 - a lost stamping request leaves no audience
+        record for the turn, so nothing here, and is covered by the host's retry of record()):
+        stamps with `turn` those of `ids` still unstamped and unanswered that the
+        audience record of THIS turn covers - a group audience naming the question's own group
+        (bound now), the question's sender among the turn's recorded senders, relayed before the
+        turn was recorded and at most fresh_minutes before it. Never a question of another group
+        or another turn (review P3 stands); the number stamped."""
+        row = conn.execute("SELECT * FROM state_steward_turn_audience WHERE id=1 AND turn=? AND audience='group'",
+                           (turn,)).fetchone()
+        senders = [r for r in json.loads(row["sender_refs_json"]) if isinstance(r, str)] if row is not None else []
+        ids = [i for i in ids if isinstance(i, str) and i]
+        if row is None or not senders or not ids or self._live_group(conn, row["channel"], row["group_ref"]) is None:
+            return 0
+        recorded = datetime.fromisoformat(row["at"])
+        stamped = conn.execute(
+            f"UPDATE state_group_messages SET turn=? WHERE message_id IN ({','.join('?' * len(ids))}) AND channel=? AND "
+            f"group_ref=? AND direction='in' AND accepted=1 AND answered_by IS NULL AND turn IS NULL AND sender_ref IN "
+            f"({','.join('?' * len(senders))}) AND at<=? AND at>=?",
+            (turn, *ids, row["channel"], row["group_ref"], *senders, recorded.isoformat(),
+             (recorded - timedelta(minutes=GROUP_LIMITS["fresh_minutes"])).isoformat())).rowcount
+        if stamped:
+            self._log(f"reply question stamped late ({stamped})", row["channel"], row["group_ref"], None)
+        return stamped
+
+    def _withheld_owner_notice(self, conn, channel, group, message_id, reason, moment):
+        """The owner's half of a withheld group reply (r44w, 7.7.7): one steward message in
+        the owner's conversation naming this group and the kind (WITHHELD_OWNER_REASONS), in
+        the caller's transaction, recorded on the withheld row; None once this group has had
+        withheld_owner_lines_per_hour of them this hour. Never sent into the group."""
+        hour = (moment - timedelta(hours=1)).isoformat()
+        if self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
+                       "direction='out' AND owner_notice IS NOT NULL AND at>?",
+                       (channel, group, hour)) >= GROUP_LIMITS["withheld_owner_lines_per_hour"]:
+            return None
+        label = self._live_group(conn, channel, group)["label"] or DEFAULT_GROUP_LABEL
+        body = WITHHELD_OWNER_LINE.format(group=label, reason=WITHHELD_OWNER_REASONS[reason])
+        notice_id = str(uuid4())
+        conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,kind,"
+                     "delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience) "
+                     "VALUES(?,?,?,?,'note','transient',?,?,'{}',NULL,?,'user')",
+                     (notice_id, notice_id, self.driver_id, steward_project(), WITHHELD_OWNER_SUBJECT, body,
+                      moment.isoformat()))
+        conn.execute("UPDATE state_group_messages SET owner_notice=? WHERE message_id=?", (notice_id, message_id))
+        return {"message_id": notice_id, "body": body}
 
     def post_group_notice(self, project_id, request_key, schedule_id, due_at):
         """A group reminder that fired, posted by the steward's HOST (step 25 C11, 7.9.4). The
@@ -889,15 +1071,21 @@ class StateGroups:
                   channel, group, None)
         return out
 
-    def set_steward_turn_audience(self, project_id, turn, audience, group=None, sender_refs=None):
+    def set_steward_turn_audience(self, project_id, turn, audience, group=None, sender_refs=None, question_ids=None):
         """The steward's host records whose turn this is, before the turn's first step runs
-        (7.7.3 item 5). One row, overwritten; no event."""
+        (7.7.3 item 5). One row, overwritten; no event. A group turn's `question_ids` (the
+        questions it took) are stamped with this turn, in the same transaction - only those of
+        THIS group still unanswered (a question put back and taken by a later turn is
+        re-stamped with that turn): post_group_reply answers a question only in its turn
+        (7.7.7, step 23.1). Every confirmation another turn armed is disarmed in the same
+        transaction: an arming is consumed only in the turn that made it (director 602 claim 7)."""
         if audience not in ("owner", "group"):
             raise StateGraphError("invalid_request: audience is owner or group")
         if audience == "group" and not (isinstance(group, dict) and group.get("channel") in CHANNELS
                                         and isinstance(group.get("group_ref"), str) and group["group_ref"]):
             raise StateGraphError("invalid_request: a group audience names {channel, group_ref}")
         refs = [r for r in (sender_refs or []) if isinstance(r, str) and r][:10]
+        ids = [i for i in (question_ids or []) if isinstance(i, str) and i][:20]
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
             conn.execute("INSERT INTO state_steward_turn_audience(id,turn,audience,channel,group_ref,sender_refs_json,at) "
@@ -906,7 +1094,13 @@ class StateGroups:
                          "sender_refs_json=excluded.sender_refs_json,at=excluded.at",
                          (str(turn), audience, group["channel"] if audience == "group" else None,
                           group["group_ref"] if audience == "group" else None, json.dumps(refs), _now().isoformat()))
-        return {"recorded": True, "turn": str(turn), "audience": audience}
+            confirmations.disarm_other_turns(conn, str(turn))
+            stamped = conn.execute(
+                f"UPDATE state_group_messages SET turn=? WHERE message_id IN ({','.join('?' * len(ids))}) AND channel=? "
+                "AND group_ref=? AND direction='in' AND accepted=1 AND answered_by IS NULL",
+                (str(turn), *ids, group["channel"], group["group_ref"])).rowcount if audience == "group" and ids else 0
+        return {"recorded": True, "turn": str(turn), "audience": audience,
+                **({"questions_stamped": stamped} if audience == "group" else {})}
 
     def group_turn(self, conn, turn, code):
         """The audience record of the group turn a public-view request (a group turn's tool)
@@ -971,6 +1165,35 @@ class StateGroups:
             result = {"noted": True, "entry_id": entry_id,
                       "added_by": self._label_of(conn, channel, group, sender, role)}
             return self.steward._record(conn, "note_family_memory", request_key, request_hash, result)
+
+    def create_group_reminder(self, project_id, request_key, at, text, turn):
+        """Step 23.1 (design-steward 7.9.4, owner 2026-11-22 「那个群问的哪个群提醒」): a family
+        member's one-time reminder to THIS group, asked for in a group turn (the steward's
+        group_reminder_set). The same gate as the family memory: the public-read header and the
+        recorded turn of a bound group's audience (else group_reminder_group_turn_only); the
+        target group and who made it come from that record, never from the call - the turn's one
+        asker (questions of several people: ambiguous_requester). The reminder itself is
+        core.state_steward.create_member_reminder. No State event wakes anyone (7.7.7)."""
+        if not self.public_view:
+            raise StateGraphError("group_reminder_group_turn_only: a family member's reminder is made in a group turn "
+                                  "only")
+        with self.store.transaction(write=True) as conn:
+            row = self.group_turn(conn, turn, "group_reminder_group_turn_only")
+            channel, group = row["channel"], row["group_ref"]
+            _role, sender, _label = self.turn_asker(conn, row)
+            if sender is None:
+                raise StateGraphError("ambiguous_requester: the questions of this turn come from more than one person; "
+                                      "the one who wants the reminder asks again alone")
+            request_hash = _hash([channel, group, sender, at, text])
+            replay = self.steward._replay(conn, "create_group_reminder", request_key, request_hash)
+            if replay is not None:
+                return replay
+            bound = self._live_group(conn, channel, group)
+            result = self.steward.create_member_reminder(conn, bound, sender, at, text)
+            out = self.steward._record(conn, "create_group_reminder", request_key, request_hash, result)
+        self._log("member reminder created", channel, group, sender)
+        self.steward._notify()
+        return out
 
     @writer_only_read("list_family_memory")
     def list_family_memory(self, turn, project_id=None):

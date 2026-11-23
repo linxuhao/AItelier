@@ -452,7 +452,12 @@ def ask(world, message_id, arguments=None, name=SEND):
 
 
 def status_of(world, code):
-    return execute(world.steward, "get_steward_confirmation", {"code": code}, allow_write=True)["status"]
+    """run_confirmed's read in the turn the host recorded last (step 23.1: it names its turn, and
+    a confirmed record is armed for that turn - the gateway consumes only an armed record)."""
+    with world.db.get_connection() as conn:
+        row = conn.execute("SELECT turn FROM state_steward_turn_audience WHERE id=1").fetchone()
+    return execute(world.steward, "get_steward_confirmation", {"code": code, "turn": row[0] if row else "none"},
+                   allow_write=True)["status"]
 
 
 def test_only_a_persons_message_of_a_channel_or_the_dashboard_can_ask(world, monkeypatch):
@@ -595,6 +600,7 @@ def test_the_gateway_consumes_one_confirmation_per_forward_and_never_retries(wor
     def confirmed(arguments=None):
         code = ask(world, dashboard(world, "send", f"o-{time.time_ns()}")["message_id"], arguments or args)["code"]
         assert dashboard(world, f"确认 {code}", f"c-{time.time_ns()}")["confirmation"]["outcome"] == "confirmed"
+        assert status_of(world, code) == "confirmed"  # run_confirmed's read arms it for this turn
         return code
 
     def call(arguments=None):
@@ -646,7 +652,7 @@ def test_the_owner_lists_the_confirmations_with_their_text(world):
     with pytest.raises(StateGraphError, match="owner_session_required"):
         world.steward.steward_confirmations.list_recent()
     with pytest.raises(StateNotFound):
-        execute(world.steward, "get_steward_confirmation", {"code": "K0000"}, allow_write=True)
+        execute(world.steward, "get_steward_confirmation", {"code": "K0000", "turn": "t1"}, allow_write=True)
 
 
 # --- review fixes (24.1b review) -----------------------------------------------------------------
@@ -757,11 +763,13 @@ def test_the_gateway_and_the_request_refuse_the_same_arguments_and_a_refusal_spe
     for n in range(2):
         code = ask(world, dashboard(world, "send", f"s-{n}")["message_id"], args)["code"]
         assert dashboard(world, f"确认 {code}", f"c-{n}")["confirmation"]["outcome"] == "confirmed"
+        assert status_of(world, code) == "confirmed"  # armed by run_confirmed's read
         assert "result" in call()
     assert used() == 2
-    # The cap is reached: a confirmed record is not consumed by a call that cannot run.
+    # The cap is reached: a confirmed (and armed) record is not consumed by a call that cannot run.
     code = ask(world, dashboard(world, "send", "s-3")["message_id"], args)["code"]
     dashboard(world, f"确认 {code}", "c-3")
+    assert status_of(world, code) == "confirmed"
     assert call()["error"]["data"]["code"] == "daily_cap_reached"
     assert status_of(world, code) == "confirmed" and used() == 2
 

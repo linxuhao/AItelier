@@ -411,7 +411,9 @@ def test_the_owner_round_trip_over_http(world, client):
                         "updated_at", "overdue_seconds",
                         # Step 25 C11 (design-steward 7.9.4): the target and the binding a group reminder
                         # records, and the run the row last fired for (tests/unit/test_steward_family.py).
-                        "target", "target_channel", "target_group_ref", "target_bound_at", "last_due_at"}
+                        "target", "target_channel", "target_group_ref", "target_bound_at", "last_due_at",
+                        # Step 23.1 (7.9.4): 'group' on a reminder a family member made in a group.
+                        "created_via"}
     assert row["target"] == "owner" and row["target_group_ref"] is None
     listed = client.get("/api/steward/schedules", headers=OWNER_HEADERS)
     assert listed.status_code == 200 and listed.json()["schedules"] == [row], listed.text

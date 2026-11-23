@@ -59,7 +59,9 @@ wechaty-puppet-neo: `neo-fork/pin.json` names the upstream commit and the sha256
 file the patch touches, `neo-fork/0001-incoming-message-types.patch` is the change, and
 the Dockerfile's `native` stage (Rust 1.93.1, the pin's `rust-toolchain.toml` channel)
 fetches that commit, verifies those blobs, applies the patch, runs `cargo build --release
---locked` and rebuilds `dist/` with `tsc`, then runs the package's own tests. The build
+--locked` and `cargo test --release --locked --lib` (the crate's own Rust tests, so a patch that
+leaves a test uncompilable fails the build instead of shipping), then rebuilds `dist/` with
+`tsc`, then runs the package's own tests. The build
 stage overlays exactly two paths from it - `node_modules/wechaty-puppet-neo/native/linux-x64/neo.node`
 and `node_modules/wechaty-puppet-neo/dist/` - before the load test above, so the image's
 own check runs the fork. The fork's source is not committed here; the upstream files the
@@ -267,6 +269,9 @@ node --test bridge.test.mjs qr-svg.test.mjs
 Fake Wechaty bots; nothing loads the puppet or reaches WeChat. Fresh real bots started
 and stopped in one process are checked offline by the image build (above).
 
-The image build also runs this suite, in its `build` stage, after the sources are copied: no
-pytest gate can run it (the aitelier image has no bridge dependencies), so the build is its only
-gate. The test files and fixtures are removed in that same layer and never reach the image.
+The image build also runs this suite, in its `build` stage, after the sources are copied, and that
+build is its only gate: the repository's node gate runs the projects the repo-root
+`node_projects.json` names (`web`, `integrations/dsh`, `integrations/dsh-driver`), and the bridge is
+not among them. The gate installs a project's dependencies itself (`aitelier/tools/run_tests`), so a
+missing bridge dependency in the aitelier image is not what keeps this suite out. The test files and
+fixtures are removed in that same layer and never reach the image.

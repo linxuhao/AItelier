@@ -1,5 +1,25 @@
+The fork of puppet-neo the bridge image ships, as one patch.
+
+Two concerns ride in it, and each file's hunks serve one of them:
+
+1. Incoming message types (native/src/lib.rs, src/native.ts, src/puppet-neo.ts,
+   test/ding-dong.test.ts). The addon carries a message's own WeChat type and raw
+   payload instead of dropping what is not text; the puppet answers what Wechaty asks
+   of it - the message type, the room and contact payloads, file/image/voice sends and
+   downloads, and the room member roster (`roomMemberList`, `roomMemberRawPayload`,
+   `roomMemberRawPayloadParser`) that Wechaty's `Room.ready()` awaits after
+   `roomPayload`, so a group message's Room loads instead of raising
+   `roomMemberList is not a function`.
+
+2. A refused media download keeps its cause (native/src/lib.rs, the hunks around
+   `failure_message` and the new `cause_chain`). "Neo could not download a WeChat
+   image" now ends in the sub-step that failed - the addon's own step, the crate's
+   reason, or the transport's message - and never in the CDN address.
+
+Every hunk applies to a blob pin.json pins, and upstream/ is the pristine snapshot.
+
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..cd05461 100644
+index ec6c930..650b659 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -9,14 +9,21 @@ use std::{
@@ -226,7 +246,7 @@ index ec6c930..cd05461 100644
      #[napi]
      pub fn lookup_self(&self) -> AsyncTask<NeoTask> {
          self.task(Operation::LookupSelf)
-@@ -167,6 +352,17 @@ impl Task for NeoTask {
+@@ -167,12 +352,30 @@ impl Task for NeoTask {
              Operation::PollIncoming => "wait for incoming message notifications",
              Operation::Sync { .. } => "read a sync page",
              Operation::SendText { .. } => "prepare a text send",
@@ -244,7 +264,76 @@ index ec6c930..cd05461 100644
              Operation::LookupSelf => "look up the account profile",
              Operation::Logout => "log out",
              Operation::Close => "close the session",
-@@ -284,6 +480,184 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+         };
++        // The media transfers reach a CDN this addon does not control, and theirs are the
++        // refusals an owner reads on their own: the stage alone ("download a WeChat image")
++        // says nothing about which step failed, so the cause comes with it.
++        let explain = matches!(
++            &operation,
++            Operation::DownloadMedia { .. } | Operation::DownloadVoice { .. }
++        );
+         run(&mut session, operation)
+-            .map_err(|error| napi::Error::from_reason(failure_message(stage, &error)))
++            .map_err(|error| napi::Error::from_reason(failure_message(stage, explain, &error)))
+     }
+ 
+     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+@@ -183,18 +386,53 @@ impl Task for NeoTask {
+ /// The error text TypeScript receives. When WeChat answered, it adds the service
+ /// and its code, or why the account stopped. It never contains credentials or
+ /// message content.
+-fn failure_message(stage: &str, error: &anyhow::Error) -> String {
++///
++/// `explain` adds the cause chain for the media transfers: an image that would not
++/// download fails at a step - a key the payload did not carry, a CDN that answered
++/// with a status, a transfer that never finished - and the stage alone named none of
++/// them, so a real send said only "Neo could not download a WeChat image".
++fn failure_message(stage: &str, explain: bool, error: &anyhow::Error) -> String {
+     if error.is::<SessionEnded>() {
+         SESSION_ENDED.into()
+     } else if let Some(rejected) = ServiceRejected::find(error) {
+         format!("Neo could not {stage}: {rejected}")
+     } else if let Some(reason) = AccountInterrupted::find(error) {
+         format!("Neo could not {stage}: {reason}")
++    } else if explain {
++        let cause = cause_chain(error);
++        if cause.is_empty() {
++            format!("Neo could not {stage}")
++        } else {
++            format!("Neo could not {stage}: {cause}")
++        }
+     } else {
+         format!("Neo could not {stage}")
+     }
+ }
+ 
++/// An error and its causes in one line, stopping at the endpoint the transport dialled.
++///
++/// The chain is the story of a failed transfer: the step this addon was in ("The media
++/// key is not 32 hex characters"), then the crate's own reason ("Invalid CDN key",
++/// "CDN HTTP status 500", "Advertised media size mismatch"). A transport error's text
++/// carries the CDN address it dialled - `error sending request for url (http://...)` -
++/// so each cause stops where its URL starts: the sub-step is kept and the address is
++/// not, and no credential or message content is in any of these messages.
++fn cause_chain(error: &anyhow::Error) -> String {
++    error
++        .chain()
++        .map(|cause| {
++            let text = cause.to_string();
++            match text.find(" for url (") {
++                Some(url) => text[..url].trim_end().to_string(),
++                None => text,
++            }
++        })
++        .filter(|cause| !cause.is_empty())
++        .collect::<Vec<_>>()
++        .join(": ")
++}
++
+ fn options() -> NativeOptions {
+     NativeOptions {
+         timeout: Duration::from_secs(10),
+@@ -284,6 +522,184 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
                  account.request_blocking(|request| request.send_text(&destination, &text, &send))
              }))
          }
@@ -429,7 +518,7 @@ index ec6c930..cd05461 100644
          Operation::LookupSelf => lookup_self(session),
          Operation::Logout => {
              session.incoming = None;
-@@ -324,7 +698,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+@@ -324,7 +740,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
          .own_username;
      let cursor = session.received_cursor.clone();
      let batch = connection(session)?.sync(&cursor, scene)?;
@@ -438,7 +527,7 @@ index ec6c930..cd05461 100644
      session.received_cursor = batch.cursor;
      Ok(json!({ "messages": messages, "continuation": batch.continuation }))
  }
-@@ -451,15 +825,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+@@ -451,15 +867,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      }
  }
  
@@ -589,7 +678,43 @@ index ec6c930..cd05461 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
-@@ -742,6 +1249,162 @@ mod tests {
+@@ -558,7 +1107,7 @@ mod tests {
+         );
+         let error = result.unwrap_err();
+         assert!(error.is::<SessionEnded>());
+-        assert_eq!(failure_message("read a sync page", &error), SESSION_ENDED);
++        assert_eq!(failure_message("read a sync page", false, &error), SESSION_ENDED);
+         assert_eq!(steps, ["attempt", "reconnect", "attempt", "renew"]);
+     }
+ 
+@@ -611,7 +1160,7 @@ mod tests {
+         let error = result.unwrap_err();
+         assert!(!error.is::<SessionEnded>());
+         assert_eq!(
+-            failure_message("read a sync page", &error),
++            failure_message("read a sync page", false, &error),
+             "Neo could not read a sync page: Sync service returned -1"
+         );
+         assert_eq!(steps, ["attempt"]);
+@@ -619,7 +1168,7 @@ mod tests {
+         let stopped = anyhow::Error::new(AccountInterrupted::Stopped).context("Account is stopped");
+         let (result, steps) = scripted_recovery(vec![Err(stopped)], Ok(()));
+         assert_eq!(
+-            failure_message("read a sync page", &result.unwrap_err()),
++            failure_message("read a sync page", false, &result.unwrap_err()),
+             "Neo could not read a sync page: Account stopped"
+         );
+         assert_eq!(steps, ["attempt"]);
+@@ -632,7 +1181,7 @@ mod tests {
+             Ok(()),
+         );
+         assert_eq!(
+-            failure_message("read a sync page", &result.unwrap_err()),
++            failure_message("read a sync page", false, &result.unwrap_err()),
+             "Neo could not read a sync page"
+         );
+         assert_eq!(steps, ["attempt", "reconnect", "attempt"]);
+@@ -742,6 +1291,162 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }
  
@@ -752,7 +877,7 @@ index ec6c930..cd05461 100644
      #[test]
      fn closing_without_a_session_resets_state() {
          let mut session = Session {
-@@ -756,7 +1419,7 @@ mod tests {
+@@ -756,7 +1461,7 @@ mod tests {
  
      #[test]
      fn unhandled_sync_commands_are_skipped() {
@@ -761,6 +886,42 @@ index ec6c930..cd05461 100644
              vec![wire::SyncCommand {
                  id: 9999,
                  payload: vec![42],
+@@ -765,4 +1470,35 @@ mod tests {
+         );
+         assert!(messages.is_empty());
+     }
++
++    #[test]
++    fn a_failed_media_download_names_the_step_and_not_the_endpoint() {
++        // A payload that carried no usable key stops this addon's own step first.
++        let key = hex_bytes("not a key")
++            .unwrap_err()
++            .context("read the picture's media descriptor");
++        assert_eq!(
++            failure_message("download a WeChat image", true, &key),
++            "Neo could not download a WeChat image: read the picture's media descriptor: \
++             The media key is not 32 hex characters"
++        );
++        // A transport error's text names the CDN address it dialled; the address is not
++        // the cause and is not repeated.
++        let transport = anyhow!("error sending request for url (http://203.0.113.9:443/download)");
++        assert_eq!(
++            failure_message("download a WeChat image", true, &transport),
++            "Neo could not download a WeChat image: error sending request"
++        );
++        // WeChat's own refusal already names the service and its code.
++        let rejected = anyhow::Error::new(ServiceRejected::new(Service::CdnDownload, -1));
++        assert_eq!(
++            failure_message("download a WeChat image", true, &rejected),
++            "Neo could not download a WeChat image: CDN download returned -1"
++        );
++        // Every other stage keeps the one line it had.
++        assert_eq!(
++            failure_message("read a sync page", false, &transport),
++            "Neo could not read a sync page"
++        );
++    }
+ }
 diff --git a/src/native.ts b/src/native.ts
 index eea2d34..22d17ca 100644
 --- a/src/native.ts
@@ -885,7 +1046,7 @@ index eea2d34..22d17ca 100644
      logout: async () => JSON.parse(await addon.logout()),
      close: async () => { await addon.close() },
 diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
-index 9da9e02..d3953ec 100644
+index 9da9e02..fe6dc4b 100644
 --- a/src/puppet-neo.ts
 +++ b/src/puppet-neo.ts
 @@ -1,11 +1,49 @@
@@ -1102,7 +1263,7 @@ index 9da9e02..d3953ec 100644
  
    constructor(options: PuppetOptions = {}) {
      super(options)
-@@ -125,14 +310,46 @@ export class PuppetNeo extends Puppet {
+@@ -125,14 +310,73 @@ export class PuppetNeo extends Puppet {
    override async contactRawPayload(id: string): Promise<payloads.Contact> {
      if (id === this.currentUserId) return this.selfContact(id)
      const contact = this.contacts.get(id)
@@ -1137,8 +1298,7 @@ index 9da9e02..d3953ec 100644
 +   * the bridge lost every group message that way before it handled it.
 +   *
 +   * Neo's sync stream names the group but carries no topic and no member roster, so
-+   * those stay empty and `Room.ready()` - which asks for the roster too - remains
-+   * unsupported by this puppet.
++   * those stay empty; the roster itself is what `roomMemberList` answers.
 +   */
 +  override async roomRawPayload(id: string): Promise<payloads.Room> {
 +    return { id, topic: '', memberIdList: [], adminIdList: [] }
@@ -1148,10 +1308,38 @@ index 9da9e02..d3953ec 100644
 +    return payload
 +  }
 +
++  /**
++   * A room's members as far as Neo can list them: none. Wechaty's `Room.ready()` asks
++   * for the roster straight after the payload, and a puppet without this method made
++   * that call a TypeError - `roomMemberList is not a function` - so loading any group
++   * message's Room raised an `error` event. Neo's sync stream names the group and the
++   * member who spoke, never who else is in it, so an empty roster is the whole truth
++   * this puppet has, and the load completes.
++   */
++  override async roomMemberList(_roomId: string): Promise<string[]> {
++    return []
++  }
++
++  /**
++   * One member of a room, named by the id WeChat gave it and nothing else. The roster
++   * above is empty, so this answers a caller that names a member itself: an id is all
++   * Neo has, and no display name is invented for one it has never heard speak.
++   */
++  override async roomMemberRawPayload(
++    roomId: string,
++    contactId: string,
++  ): Promise<payloads.RoomMember & { roomId: string }> {
++    return { id: contactId, roomId, avatar: '', name: contactId }
++  }
++
++  override async roomMemberRawPayloadParser(payload: payloads.RoomMember): Promise<payloads.RoomMember> {
++    return payload
++  }
++
    override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
      if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
      const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
-@@ -150,6 +367,103 @@ export class PuppetNeo extends Puppet {
+@@ -150,6 +394,103 @@ export class PuppetNeo extends Puppet {
      }
    }
  
@@ -1255,7 +1443,7 @@ index 9da9e02..d3953ec 100644
    private async stopServing(): Promise<void> {
      this.abort?.abort()
      await this.run
-@@ -236,7 +550,16 @@ export class PuppetNeo extends Puppet {
+@@ -236,7 +577,16 @@ export class PuppetNeo extends Puppet {
        for (const item of page.messages) {
          if (this.messages.has(item.id)) continue
          this.rememberContact(item.talker)
@@ -1274,7 +1462,7 @@ index 9da9e02..d3953ec 100644
            putRecent(this.rooms, item.room, true)
            putRecent(this.messages, item.id, { ...text, roomId: item.room })
 diff --git a/test/ding-dong.test.ts b/test/ding-dong.test.ts
-index 72e7b75..9bc5d01 100644
+index 72e7b75..0b4ffcd 100644
 --- a/test/ding-dong.test.ts
 +++ b/test/ding-dong.test.ts
 @@ -4,7 +4,8 @@ import { test } from 'node:test'
@@ -1361,7 +1549,7 @@ index 72e7b75..9bc5d01 100644
      async lookupSelf() {
        // Recorded one turn later, so the trace shows whether login waited for it.
        await nextTurn()
-@@ -190,6 +237,127 @@ test('group text names the group and the member, and the reply goes to the group
+@@ -190,6 +237,141 @@ test('group text names the group and the member, and the reply goes to the group
    }
  })
  
@@ -1465,6 +1653,20 @@ index 72e7b75..9bc5d01 100644
 +  assert.deepEqual(events.errors, [])
 +})
 +
++test('a room roster and a named member are answered, so Room.ready() completes', async () => {
++  const { puppet, events } = scriptedPuppet([], () => ({}))
++  // Wechaty's Room.ready() asks the puppet for the roster straight after the payload;
++  // before this answer that call was a TypeError on every inbound group message.
++  assert.deepEqual(await puppet.roomMemberList(room), [])
++  // The sync stream never names who is in a room, so the list is empty; a caller that
++  // names a member itself is answered with the id it gave and no invented name.
++  const payload = await puppet.roomMemberPayload(room, member)
++  assert.equal(payload.id, member)
++  assert.equal(payload.name, member)
++  assert.equal(payload.avatar, '')
++  assert.deepEqual(events.errors, [])
++})
++
 +test('a sender Neo has not cached is still nameable, and is not an official account', async () => {
 +  const { puppet, events } = scriptedPuppet([], () => ({ messages: [direct] }))
 +  const delivered = waitFor<payloads.EventMessage>(done => puppet.once('message', done), 'message')
@@ -1489,7 +1691,7 @@ index 72e7b75..9bc5d01 100644
  test('signing out from the phone during sync emits logout without an error', async () => {
    const trace: unknown[] = []
    const { puppet, events } = scriptedPuppet(trace, () => ({ laterSync: new Error(SESSION_ENDED) }))
-@@ -300,3 +468,162 @@ test('the TypeScript example replies through PuppetNeo directly', async t => {
+@@ -300,3 +482,162 @@ test('the TypeScript example replies through PuppetNeo directly', async t => {
    assert.equal(errors.mock.callCount(), 0)
    assert(output.mock.calls.every(call => [sender, username, room, member].every(id => !String(call.arguments[0]).includes(id))))
  })

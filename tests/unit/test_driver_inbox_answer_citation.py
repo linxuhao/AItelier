@@ -47,7 +47,7 @@ from tests.support import state_template
 BASE_ROW_KEYS = {
     "delivery_id", "message_id", "target_driver_id", "seq", "status", "version",
     "thread_id", "sender_driver_id", "project_id", "kind", "delivery_mode",
-    "subject", "body", "refs_json", "created_at"}
+    "subject", "body", "refs_json", "created_at", "sender_kind"}
 
 
 @pytest.fixture
@@ -193,7 +193,8 @@ def test_a_plain_inbox_row_keeps_its_exact_base_shape(world):
                    "subject": "Message from the user",
                    "body": "no blocks here",
                    "refs_json": "{}",
-                   "created_at": sent["created_at"]}
+                   "created_at": sent["created_at"],
+                   "sender_kind": "user"}
     # The message's own time, the same value the conversation read shows.
     assert row["created_at"] == conversation_row(world, sent["message_id"])["created_at"]
     assert "segments" not in row and "answers" not in row
@@ -225,7 +226,8 @@ def test_a_citing_inbox_row_gains_exactly_the_two_citation_keys(world):
         "subject": "Message from the user",
         "body": "yes, restart",
         "refs_json": "{}",
-        "created_at": reply["created_at"]}
+        "created_at": reply["created_at"],
+        "sender_kind": "user"}
     assert row["segments"] == own
     assert row["answers"] == [{"message_id": asked["message_id"], "segment_id": "q1"}]
     # The storage columns are not payload.

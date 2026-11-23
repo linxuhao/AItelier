@@ -159,6 +159,26 @@ test('24.2b F3: before the routes are measured (declared, no native blocks) an i
   assert.match(mediaLine(image, { declared: false }), /；本路线不收图：用 media_call 调 ocr_image 或 vision_critique\]$/);
 });
 
+test('24.2c (7.8.12b "二" 1): a steward\'s PDF line says read_document, on every route; a director\'s PDF line is unchanged', async () => {
+  const pdf = { ref: 'm_0123456789abcdef', kind: 'file', mime: 'application/pdf', size: 1258291 };
+  for (const route of [{}, { imageRoute: true }, { declared: true }])
+    assert.equal(mediaLine(pdf, route), '[文件 m_0123456789abcdef，application/pdf，1.2 MB；用 read_document 读]', JSON.stringify(route));
+  assert.equal(mediaLine(pdf, { director: true, path: '/media/d-drv/x.pdf' }),
+    '[文件 m_0123456789abcdef，application/pdf，1.2 MB；用原生文件工具读；文件 /media/d-drv/x.pdf]', 'the director keeps its native file tools');
+  // Through the real library and wakeMedia, as the steward's wake writes it.
+  const bytes = Buffer.from('%PDF-1.4\n%%EOF\n');
+  const r = rig({ answers: { u_0000000000000001: { bytes } } });
+  const dashboard = await r.run([ownerMessage('m-1', [['u_0000000000000001', 'file', 'application/pdf', bytes.length]])]);
+  const [stored] = dashboard.get('m-1');
+  assert.match(stored.ref, REF);
+  const attachments = { saveImage: async () => assert.fail('a PDF is never a native block of the wake') };
+  const steward = wakeMedia({ library: r.library, imageRoute: true, attachments });
+  assert.equal(await steward.line(stored), `[文件 ${stored.ref}，application/pdf，${bytes.length} B；用 read_document 读]`);
+  const director = wakeMedia({ library: r.library, imageRoute: true, attachments, director: true });
+  assert.equal(await director.line(stored), `[文件 ${stored.ref}，application/pdf，${bytes.length} B；用原生文件工具读；文件 ${r.library.lookup(stored.ref).path}]`);
+  assert.deepEqual([...steward.images, ...director.images], []);
+});
+
 test('the steward: a channel message\'s image (its source row) is attached on an image route too, merged with the dashboard\'s', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'media-steward-'));
   const library = createMediaLibrary({ root: dir, userId: 'owner' });

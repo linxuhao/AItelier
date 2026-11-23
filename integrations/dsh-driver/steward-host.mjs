@@ -1442,14 +1442,15 @@ export async function ingestDashboardAttachments({ inbox, library, audience, fet
   return results;
 }
 
-/** What a model is told to do with a file it cannot see (7.8.12a "不收图的路线", "语音与文件"). */
+/** What a model is told to do with a file it cannot see (7.8.12a "不收图的路线", "语音与文件";
+ *  a PDF, 7.8.12b "二" 1: the steward reads it with read_document). */
 const MEDIA_HINTS = Object.freeze({ image: '用 media_call 调 ocr_image 或 vision_critique',
-  voice: '用 media_call 调 transcribe_audio 转写', file: '用 media_call 调 ocr_pdf 读' });
+  voice: '用 media_call 调 transcribe_audio 转写', file: '用 read_document 读' });
 
 /** Step 24.2b (7.8.12a): one attachment's wake line. An image sent as a native block says so
  *  ([图片 m_…，image/jpeg，1.2 MB，原图已附]); any other file says how to read it - an image on a
  *  route without images ("；本路线不收图：用 media_call 调 ocr_image 或 vision_critique"), a voice
- *  (transcribe_audio), a file (ocr_pdf; a director's native file tools). A director's line also
+ *  (transcribe_audio), a file (read_document; a director's native file tools). A director's line also
  *  names the library file's absolute path (`path`, "；文件 /…"). A refused one is its refusal line.
  *  `declared`: the route is declared image-capable but this wake carries no native block (the
  *  routes are not measured yet, measured:false): the line says 原图未附, not 本路线不收图, and a

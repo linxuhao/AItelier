@@ -481,18 +481,42 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       for (const attachment of dropped.attachments ?? []) if (attachment.media_id) live.delete(attachment.media_id);
   };
 
-  /** A group message (step 23): the account's own and non-text ones are dropped; a bound
-   *  room's message passes only when it calls the bot with the room's prefix; an unbound
-   *  room's only when it is exactly "@prefix group-code". Nothing else is kept or logged. */
+  /** A group message (step 23): the account's own ones are dropped. In a BOUND room a text
+   *  message passes only when it calls the bot with the room's prefix, and a non-text one
+   *  that is an image, voice or file (design/steward-group-media.md §1, the owner's ruling of
+   *  2026-11-22) passes whether or not it calls the bot: it is described exactly as a 1:1 one
+   *  is (`mediaOf`, the same `mediaLimits`), registered in `live` under its own media_id, and
+   *  pushed as ONE `group_message` whose `text` is the prefix-stripped caption - '' when it
+   *  does not call the bot - and whose `asked` says which of the two it was. An unbound room's
+   *  only when it is exactly "@prefix group-code", text or not. Nothing else is kept or logged. */
   function relayGroup(message, roomRef, at) {
-    if (message.self() || message.type() !== types.Message.Text) return false;
+    if (message.self()) return false;
     const senderRef = message.talker()?.id;
     if (!roomRef || !senderRef) return false;
     const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id), ...(at ? { at } : {}) };
+    const media = rooms.has(roomRef) && message.type() !== types.Message.Text
+      ? mediaOf(message, types, mediaLimits) : undefined;
+    if (media) {
+      // The 1:1 path's own shape, unchanged: a description only - nothing is fetched until
+      // GET /media/:media_id asks - and one over its bound has no media_id. The group ring
+      // shares the one `seq`, so '<seq>.<index>' is unique across the rings.
+      const called = calledText(message.text(), rooms.get(roomRef));
+      const { too_large: tooLarge, ...described } = media;
+      const event = { type: 'group_message', ...base, text: called ?? '', asked: called !== undefined };
+      if (tooLarge) event.attachments = [{ ...described, too_large: true }];
+      else {
+        const mediaId = `${seq + 1}.0`;
+        live.set(mediaId, { message, index: 0, kind: media.kind, generation });
+        event.attachments = [{ media_id: mediaId, ...described }];
+      }
+      push(groupRing, groupRingSize, event);
+      return true;
+    }
+    if (message.type() !== types.Message.Text) return false;
     if (rooms.has(roomRef)) {
       const text = calledText(message.text(), rooms.get(roomRef));
       if (text === undefined) return false;
-      push(groupRing, groupRingSize, { type: 'group_message', ...base, text });
+      push(groupRing, groupRingSize, { type: 'group_message', ...base, text, asked: true });
       return true;
     }
     const attempt = groupBindAttempt(message.text());

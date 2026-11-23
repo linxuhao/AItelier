@@ -110,3 +110,28 @@ def lookup(store: str, ref: str, root=None) -> Lookup:
     if not os.path.isfile(path):
         return Lookup(UNKNOWN)
     return Lookup(FOUND, row=row, path=Path(path), kind=kind)
+
+
+def open_stored(store: str, ref: str, root=None):
+    """The display route's open of a library file (7.8.12a "显示"): (binary handle, mime, kind).
+
+    The caller has already established that `ref` belongs to what is being shown (an upload's
+    first ack, a conversation message), so a ref the index no longer names was cleaned - the
+    30-day cleanup and "清空媒体" drop the rows with the files - and reads as gone, like a row
+    whose file is missing: FileNotFoundError. A row whose `file` would leave `<store>/` is
+    never followed: LookupError. The file is opened before this returns."""
+    if root is None:
+        from core.dsh_driver import media_root
+        root = media_root()
+    if index_row(root, store, ref) is None:
+        raise FileNotFoundError("gone")
+    found = lookup(store, ref, root)
+    if found.status == GONE:
+        raise FileNotFoundError("gone")
+    if found.status != FOUND:
+        raise LookupError("unknown_media")
+    try:
+        fd = os.open(found.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise FileNotFoundError("gone") from exc
+    return os.fdopen(fd, "rb"), found.row["mime"], found.kind

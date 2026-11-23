@@ -227,6 +227,41 @@ async def staged_upload(project_id: str, upload_id: str, service=Depends(get_ser
         "Content-Length": str(size), "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
 
 
+@router.get("/{project_id}/conversation/media/{media_id}", dependencies=[Depends(authz.require_reader)])
+async def conversation_media(project_id: str, media_id: str, service=Depends(get_service)):
+    """Step 24.2b (design-steward 7.8.12a "显示"): the bytes of one attachment of this project's
+    conversation, for the panel's thumbnails, voice player and file downloads.
+
+    Who: `require_reader` and the conversation read's own verdict, so an anonymous request and
+    one carrying `X-AItelier-Read-As` are 403 even on a public project. Which: `u_...` (a
+    dashboard upload: staging, then the library after the first ack), `m_...` named by this
+    conversation (core.state_conversation_uploads.open_for_display); anything else is 404, a
+    file that was cleaned is 410 `gone`. Headers as workspace_raw: the type the magic bytes
+    decided, nosniff, `default-src 'none'` (security_headers only setdefaults), private
+    caching, inline for images and voice and attachment otherwise."""
+    from fastapi.responses import StreamingResponse
+    try:
+        handle, mime, kind, size = await asyncio.to_thread(
+            uploads.open_for_display, service, project_id, media_id, media_library.staging_dir())
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, uploads.UNKNOWN_MEDIA) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(410, "gone") from exc
+
+    def chunks():
+        with handle:
+            while data := handle.read(1024 * 1024):
+                yield data
+
+    return StreamingResponse(chunks(), media_type=mime, headers={
+        "Content-Length": str(size), "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+        "Cache-Control": "private",
+        "Content-Disposition": "inline" if kind in ("image", "voice") else "attachment"})
+
+
 @router.post("/{project_id}/start", dependencies=[Depends(authz.require_writer)])
 async def start(project_id: str, body: Start, request: Request, runtime=Depends(manager)):
     try:

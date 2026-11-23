@@ -420,3 +420,87 @@ class ConversationUploads:
         if kept_refused is not None:
             out["refused"] = kept_refused
         return out
+
+
+# --- The panel shows a conversation's files (step 24.2b P6, 7.8.12a "显示") -------------------
+#
+# `GET /api/dsh-drivers/{project_id}/conversation/media/{id}` (api/dsh_driver_routers.py) serves
+# the bytes of one attachment of THIS project's conversation to a project reader. The id says
+# where the bytes are:
+# - `u_...`, a dashboard upload of this project: from staging until the first host's ack, then
+#   from the library at that ack's store and ref;
+# - `m_...` on the steward's project: from the steward's subdirectory, when a conversation
+#   message the steward sent, or the channel source row of a relayed message, names it;
+# - `m_...` on a director's project: only from a message a director of this project sent, from
+#   that sender's `d-<driver_id>`, never from a store the request names.
+# Anything else - or an id this conversation does not name - is unknown (404); a file that was
+# there but is no longer (cleaned, refused, swept) is gone (410).
+
+UNKNOWN_MEDIA = "unknown_media"
+_SENT = ("SELECT sender_driver_id, attachments_json FROM driver_inbox_messages WHERE project_id=? "
+         "AND audience='user' AND sender_driver_id IS NOT NULL AND attachments_json LIKE ? "
+         "ORDER BY created_at, message_id")
+_RELAYED = ("SELECT s.attachments_json FROM state_message_sources s JOIN driver_inbox_messages m "
+            "USING(message_id) WHERE m.project_id=? AND (m.audience='user' OR m.channel='user') "
+            "AND s.direction='in' AND s.attachments_json LIKE ?")
+
+
+def _names(stored, ref: str, key: str) -> bool:
+    try:
+        items = json.loads(stored)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(items, list) and any(isinstance(item, dict) and item.get(key) == ref for item in items)
+
+
+def _ref_store(conn, project_id: str, ref: str) -> str | None:
+    """The library subdirectory holding `ref` for THIS project's conversation, or None."""
+    from core.dsh_driver import STEWARD_MEMORY_USER
+    from core.state_steward import steward_project
+    like = f"%{ref}%"   # a prefilter only ('_' matches any character); each hit is parsed
+    steward = project_id == steward_project()
+    for sender, stored in conn.execute(_SENT, (project_id, like)):
+        if _names(stored, ref, "id"):
+            return STEWARD_MEMORY_USER if steward else "d-" + sender
+    if steward:
+        for (stored,) in conn.execute(_RELAYED, (project_id, like)):
+            if _names(stored, ref, "ref"):
+                return STEWARD_MEMORY_USER
+    return None
+
+
+def open_for_display(service, project_id: str, media_id, directory, root=None):
+    """(open binary handle, mime, kind, size) of one attachment of `project_id`'s conversation,
+    for a reader of that conversation: the same verdict as the conversation read
+    (`list_user_conversation`, judged here from the service's own trust, so a public-view or
+    anonymous service is refused ProjectPrivate before any row is read). LookupError
+    (UNKNOWN_MEDIA) when this conversation does not name the id or the library row's file
+    would leave its subdirectory; FileNotFoundError("gone") when the file was there and no
+    longer is. The file is opened before this returns."""
+    from core import media_library
+    from core.state_privacy import refuse_private_read, trust_of
+    refuse_private_read(trust_of(service), "list_user_conversation")
+    store = service.store
+    with store.transaction() as conn:
+        pid = store._project(conn, project_id)["project_id"]
+        row = where = None
+        if isinstance(media_id, str) and media_types.UPLOAD_ID.fullmatch(media_id):
+            row = conn.execute(f"SELECT state, store, ref, mime, kind FROM {TABLE} "
+                               "WHERE upload_id=? AND project_id=?", (media_id, pid)).fetchone()
+        elif isinstance(media_id, str) and media_types.REF.fullmatch(media_id):
+            where = _ref_store(conn, pid, media_id)
+    if where is not None:
+        handle, mime, kind = media_library.open_stored(where, media_id, root)
+    elif row is None:
+        raise LookupError(UNKNOWN_MEDIA)
+    elif row["state"] == "stored" and row["store"] and row["ref"]:
+        handle, mime, kind = media_library.open_stored(row["store"], row["ref"], root)
+    elif row["state"] in ("staged", "attached"):
+        try:
+            fd = os.open(os.path.join(os.fspath(directory), media_id), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as exc:
+            raise FileNotFoundError("gone") from exc
+        handle, mime, kind = os.fdopen(fd, "rb"), row["mime"], row["kind"]
+    else:   # refused or expired: nothing is kept to show
+        raise FileNotFoundError("gone")
+    return handle, mime, kind, os.fstat(handle.fileno()).st_size

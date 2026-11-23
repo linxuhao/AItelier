@@ -781,6 +781,9 @@ def _steward_calls(svc):
             C.OPEN, C.CONVERSATION_UPLOAD, refused="gone"),
         "fetch open_for_target": lambda: _uploads().open_for_target(
             svc.store, C.OPEN, C.CONVERSATION_UPLOAD, "canary-sender", "/nonexistent-staging"),
+        # Step 24.2b P6: the panel's display of a conversation attachment.
+        "display open_for_display": lambda: _uploads().open_for_display(
+            svc, C.OPEN, C.CONVERSATION_UPLOAD, "/nonexistent-staging"),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -922,6 +925,7 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("GET", f"/api/dsh-drivers/{C.OPEN}/uploads/{C.CONVERSATION_UPLOAD}", None),
             ("POST", "/api/state/commands/ack_conversation_upload",
              {"project_id": C.OPEN, "upload_id": C.CONVERSATION_UPLOAD, "ref": "m_0123456789abcdef"}),
+            ("GET", f"/api/dsh-drivers/{C.OPEN}/conversation/media/{C.CONVERSATION_UPLOAD}", None),
             ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/client", {"client_id": "c"}),
         ]
         results = {}

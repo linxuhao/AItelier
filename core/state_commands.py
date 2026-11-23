@@ -1451,6 +1451,12 @@ class RelayGroupMessage(Project):
     channel: _CHANNEL
     group_ref: str = Field(min_length=1, max_length=200)
     sender_ref: str = Field(min_length=1, max_length=200)
+    # The name the channel carried for this sender (its group event's `sender_name`), which
+    # core.state_groups.relay_group_message records as the member's label so the group's
+    # recent/kept rows name the person (owner's ruling of 2026-11-23). Blank is refused here
+    # rather than stored: an empty string is not a name, and "no name" has one meaning only -
+    # the caller that has none omits the field, and the member keeps the 成员X alias.
+    sender_name: str | None = Field(default=None, min_length=1, max_length=200)
     channel_message_ref: str = Field(min_length=1, max_length=200)
     body: str
     channel_at: str | None = Field(default=None, min_length=1, max_length=64)

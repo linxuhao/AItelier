@@ -507,7 +507,7 @@ test('the pinned Slack SDK resolves from the DSH runtime install and has what th
   assert.match(webSource, /this\.files\.completeUploadExternal\(/);
 });
 
-test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mode, plain DMs, the scopes of every call', () => {
+test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mode, plain DMs, the scopes of every call', async () => {
   const here = new URL('..', import.meta.url);
   const raw = readFileSync(new URL('slack-app-manifest.json', here), 'utf8');
   const manifest = JSON.parse(raw);
@@ -532,9 +532,22 @@ test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mo
   assert.deepEqual([...source.matchAll(/\bweb\b(?!\.\w+(?:\.\w+)?\(| = new WebClient\(|-api)/g)].length, 1,
     'the Web API client is used other than as web.<group>.<method>( or web.<method>(: update methodScopes and this check');
   // The one download that is not a Web API call: a file's url_private_download, with the bot
-  // token, needs files:read (docs.slack.dev/messaging/working-with-files).
-  const downloadScopes = source.includes('url_private_download') ? { url_private_download: 'files:read' } : {};
-  assert.deepEqual(Object.keys(downloadScopes), ['url_private_download']);
+  // token, needs files:read (docs.slack.dev/messaging/working-with-files). Measured on the
+  // channel, not read off its source: a DM's file is fetched from exactly its
+  // url_private_download (not its url_private, nor anything else), with the bot token.
+  const downloadScopes = { url_private_download: 'files:read' };
+  {
+    const host = mediaHost();
+    const { fetch, requests } = fakeFetch({ [FILE_URL]: png });
+    const { channel, socket } = await started(host, { fetch });
+    await deliver(socket, envelope(dm({ subtype: 'file_share', text: '',
+      files: [slackFile({ url_private: 'https://files.slack.com/files-pri/T1-F1/photo.png' })] })));
+    await until(() => host.calls.length === 1);
+    assert.deepEqual(requests, [{ url: FILE_URL, authorization: 'Bearer xoxb-1', redirect: 'manual' }]);
+    assert.deepEqual(host.calls[0].attachments, [{ kind: 'image', ref: 'm_0000000000000001' }]);
+    await channel.stop();
+  }
+  assert.ok(manifest.oauth_config.scopes.bot.includes(downloadScopes.url_private_download), 'the manifest grants the download its scope');
   // The one event the plugin takes (isOwnerDm: a message in an im) and its scope.
   const eventScopes = { 'message.im': 'im:history' };
   assert.deepEqual(manifest.settings.event_subscriptions.bot_events, Object.keys(eventScopes));
@@ -647,6 +660,8 @@ test('only https files.slack.com addresses are fetched: http, another host, a po
     slackFile({ url_private_download: 'https://evil.example/files.slack.com/a.png' }),
     slackFile({ url_private_download: 'https://files.slack.com:8443/a.png' }),
     slackFile({ url_private_download: 'https://u:p@files.slack.com/a.png' }),
+    slackFile({ url_private_download: 'https://team.slack.com/files-pri/T1-F1/download/a.png' }),
+    slackFile({ url_private_download: 'https://evilfiles.slack.com.attacker/a.png' }),
     slackFile({ is_external: true, mode: 'external', url_private_download: undefined, external_type: 'gdrive' }),
     slackFile({ is_external: true }),
     slackFile({ url_private_download: undefined }),
@@ -654,9 +669,14 @@ test('only https files.slack.com addresses are fetched: http, another host, a po
   await deliver(socket, envelope(dm({ subtype: 'file_share', text: '', files })));
   await until(() => host.calls.length === 1);
   assert.deepEqual(requests, []);
-  assert.deepEqual(host.asked, [], 'refused by the channel itself, without storeMedia');
+  assert.deepEqual(host.asked.map(meta => meta.index), [0],
+    'refused by the channel itself: only the first goes to storeMedia, for the sender check, and is not fetched');
   assert.deepEqual(host.calls[0].attachments, files.map(() => ({ kind: 'image', refused: 'unsupported' })));
   assert.equal(slackFileUrl('/files-pri/x', FILE_URL), 'https://files.slack.com/files-pri/x');
+  assert.equal(slackFileUrl(FILE_URL), FILE_URL);
+  for (const sibling of ['https://team.slack.com/x', 'https://evilfiles.slack.com/x', 'https://evilfiles.slack.com.attacker/x',
+    'https://slack.com/x', 'https://files.slack.com.attacker/x', 'https://slack-files.com/x'])
+    assert.equal(slackFileUrl(sibling), undefined, sibling);
   assert.equal(slackFileUrl('not a url'), undefined);
   await channel.stop();
 });
@@ -677,7 +697,8 @@ test('a declared size over the shared bound is too_large and a deleted file is g
   assert.deepEqual(host.calls[0].attachments, [{ kind: 'image', refused: 'too_large' }, { kind: 'file', refused: 'too_large' },
     { kind: 'voice', refused: 'too_large' }, { kind: 'image', refused: 'gone' }, { kind: 'image', ref: 'm_0000000000000001' }]);
   assert.equal(requests.length, 1, 'only the file at the bound is fetched');
-  assert.equal(host.asked[0].index, 4, 'the attachment index is its place in the message');
+  assert.deepEqual(host.asked.map(meta => meta.index), [0, 4],
+    'the first for the sender check (its refusal thrown, nothing fetched), then the one at the bound: the index is its place');
   await channel.stop();
 });
 
@@ -783,4 +804,68 @@ test('apply registers sendFile and the three media kinds; the bounds are the med
   apply({ logger: quiet, on() {}, ownerChannels: { register: channel => (registered.push(channel), () => {}) } }, { secretsDir: dir });
   assert.equal(typeof registered[0].sendFile, 'function');
   assert.deepEqual(registered[0].mediaKinds, ['image', 'voice', 'file']);
+});
+
+test('at most 3 redirects are followed, all on files.slack.com: a file 3 hops away is stored, one 4 hops away is refused', async () => {
+  const hop = (file, n) => `https://files.slack.com/files-pri/T1-${file}/hop${n}`;
+  const routes = {};
+  // F3: three redirects, then the file. F4: four redirects, then the file (never reached).
+  for (const [file, hops] of [['F3', 3], ['F4', 4]]) {
+    for (let n = 0; n < hops; n++) routes[hop(file, n)] = () => new Response(null, { status: 302, headers: { location: hop(file, n + 1) } });
+    routes[hop(file, hops)] = png;
+  }
+  // F5: one redirect to a sibling Slack host, which is not files.slack.com.
+  routes[hop('F5', 0)] = () => new Response(null, { status: 302, headers: { location: 'https://team.slack.com/files-pri/T1-F5/a.png' } });
+  routes['https://team.slack.com/files-pri/T1-F5/a.png'] = png;
+  const host = mediaHost();
+  const { fetch, requests } = fakeFetch(routes);
+  const warnings = [];
+  const { channel, socket } = await started(host, { fetch, log: { info() {}, warn: line => warnings.push(line) } });
+  await deliver(socket, envelope(dm({ subtype: 'file_share', text: '',
+    files: ['F3', 'F4', 'F5'].map(id => slackFile({ id, url_private_download: hop(id, 0) })) })));
+  await until(() => host.calls.length === 1);
+  assert.deepEqual(host.calls[0].attachments, [{ kind: 'image', ref: 'm_0000000000000001' }, { kind: 'image', refused: 'unsupported' },
+    { kind: 'image', refused: 'unsupported' }]);
+  assert.deepEqual(requests.map(r => r.url), [0, 1, 2, 3].map(n => hop('F3', n)).concat([0, 1, 2, 3].map(n => hop('F4', n)), [hop('F5', 0)]),
+    'the 4th redirect target and the sibling host are never requested');
+  assert.match(warnings.join('\n'), /redirected too often/);
+  assert.match(warnings.join('\n'), /redirected off files\.slack\.com/);
+  await channel.stop();
+});
+
+test("a stranger's message whose files this channel refused all goes in without attachments; the owner's keeps its refusals", async () => {
+  const host = mediaHost({ bound: ['U1'] });
+  const { fetch, requests } = fakeFetch();
+  const { channel, socket } = await started(host, { fetch });
+  const files = [slackFile({ is_external: true }), slackFile({ mode: 'tombstone' }), slackFile({ size: MEDIA_LIMITS.image_bytes + 1 })];
+  await deliver(socket, envelope(dm({ user: 'U9', client_msg_id: 'c-9', subtype: 'file_share', text: 'hi', files })));
+  await until(() => host.calls.length === 1);
+  assert.deepEqual(host.calls[0], { channel: 'slack', senderRef: 'U9', messageRef: 'c-9', text: 'hi', at: '2025-11-18T16:00:00.000Z' },
+    'no attachments, so the host writes no placeholder line for a stranger');
+  assert.deepEqual(host.asked.map(meta => [meta.senderRef, meta.index]), [['U9', 0]], 'the first file asks the sender check; the rest are not asked');
+  await deliver(socket, envelope(dm({ subtype: 'file_share', text: 'hi', files })));
+  await until(() => host.calls.length === 2);
+  assert.deepEqual(host.calls[1].attachments, [{ kind: 'image', refused: 'unsupported' }, { kind: 'image', refused: 'gone' },
+    { kind: 'image', refused: 'too_large' }]);
+  assert.deepEqual(requests, [], 'nothing is fetched for either');
+  assert.deepEqual(host.stored, []);
+  await channel.stop();
+});
+
+test('a 204 or an empty 200 is gone for good: the message goes in at once, the file not fetched again', async () => {
+  const urls = [1, 2].map(n => `https://files.slack.com/files-pri/T1-F${n}/download/f.png`);
+  const host = mediaHost();
+  const { fetch, requests } = fakeFetch({
+    [urls[0]]: () => new Response(null, { status: 204 }),
+    [urls[1]]: () => new Response(null, { status: 200, headers: { 'content-type': 'image/png' } }),
+  });
+  const warnings = [];
+  const { channel, socket } = await started(host, { fetch, retryMs: 5, log: { info() {}, warn: line => warnings.push(line) } });
+  await deliver(socket, envelope(dm({ subtype: 'file_share', text: '', files: urls.map(url => slackFile({ url_private_download: url })) })));
+  await until(() => host.calls.length === 1, 1000);
+  assert.deepEqual(host.calls[0].attachments, [{ kind: 'image', refused: 'gone' }, { kind: 'image', refused: 'gone' }]);
+  await tick(30);
+  assert.deepEqual(requests.map(r => r.url), urls, 'each fetched once');
+  assert.doesNotMatch(warnings.join('\n'), /not delivered/, 'not held');
+  await channel.stop();
 });

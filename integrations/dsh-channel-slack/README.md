@@ -38,16 +38,26 @@ declares the `channels` capability). Design: step 19, §7.2.
   subtype, both still sent by Slack - is taken the same way (a bot's never). Before
   `inbound`, each of its first 10 files goes through `ownerChannels.storeMedia`, which checks
   that the sender is the bound account BEFORE asking for a byte (a stranger's file is never
-  fetched; the message then goes in without attachments). The plugin itself refuses, without
-  storeMedia: a remote file (`is_external`, another service's), a deleted one (`gone`), a
-  download address that is not `https://files.slack.com/...` on the default port, and a
-  declared size over the media library's bound for its kind (`too_large`; the bounds are
-  `integrations/dsh-director/media-types.json`, the library's own table). A download carries
-  the bot token, never follows a redirect off `files.slack.com` (refused `unsupported`), and
-  treats 404/410 as `gone`, 401/403 or an HTML page (what Slack serves when the app lacks
-  `files:read`) as `unsupported`, anything else (429, 5xx, the network) as transient: the
-  message is held and the file fetched again. The real type is decided by the library from
-  the first bytes; the placeholder lines are the host's. Logs carry no file name.
+  fetched; the message then goes in without attachments, so no placeholder line either). The
+  plugin itself refuses, never fetching: a remote file (`is_external`, another service's), a
+  deleted one (`gone`), a download address that is not `https://files.slack.com/...` on the
+  default port (`team.slack.com`, any other `*.slack.com` host and `files.slack.com.<else>`
+  included), and a declared size over the media library's bound for its kind (`too_large`;
+  the bounds are `integrations/dsh-director/media-types.json`, the library's own table). Such
+  a file goes in without storeMedia, except the message's first file, which always goes
+  through storeMedia (with an `open` that throws the refusal) so the host checks the sender
+  even when every file was refused here. A download carries the bot token, follows at most 3
+  redirects and only to `files.slack.com` (a 4th is refused `unsupported`), and treats
+  404/410 or an empty success (204, no body) as `gone`, 401/403 or an HTML page (what Slack
+  serves when the app lacks `files:read`) as `unsupported`, anything else (429, 5xx, the
+  network) as transient: the message is held and the file fetched again. A redirect to any
+  other host - another Slack host such as `slack-files.com` or `<team>.slack.com` too - is
+  not followed and the file is refused `unsupported` (logged `redirected off
+  files.slack.com`): fail-closed on purpose, so the bot token is only ever sent to
+  `files.slack.com`. Should Slack start serving downloads from another host, files show as
+  not received until this plugin's `slackFileUrl` admits that host. The real type is decided
+  by the library from the first bytes; the placeholder lines are the host's. Logs carry no
+  file name.
 - `sendFile({to, kind, name, path, caption?})` → uploads one file from the host's library to
   the DM of `to` with the SDK's `filesUploadV2` (`files.getUploadURLExternal`, the upload,
   `files.completeUploadExternal`; the old `files.upload` was retired 2025-11-12), the caption

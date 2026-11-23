@@ -144,8 +144,9 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   /** storeMedia's `open` for one Slack file: GET its url_private_download with the bot
    *  token, following redirects by hand and only to files.slack.com over https (a redirect
    *  anywhere else is not followed, so the token never leaves Slack's file host). Throws
-   *  {refused} for what will not change on a retry: gone (404, 410), unsupported (a redirect
-   *  off files.slack.com, 401/403, or a page instead of a file - what Slack serves when the
+   *  {refused} for what will not change on a retry: gone (404, 410, or a 2xx with no body -
+   *  204), unsupported (a redirect off files.slack.com - another Slack host included - or past
+   *  the MAX_REDIRECTS'th, 401/403, or a page instead of a file - what Slack serves when the
    *  app lacks files:read). Anything else (429, 5xx, the network) is thrown plainly: the
    *  host answers `unavailable` and the message is held. */
   const openFile = file => async ({ signal } = {}) => {
@@ -164,9 +165,10 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
         continue;
       }
       const page = /^text\/html\b/i.test(response.headers.get('content-type') ?? '');
-      if (response.ok && response.body && !page) return response.body;
+      if (response.ok && response.body && response.status !== 204 && !page) return response.body;
       await response.body?.cancel().catch(() => {});
-      if (response.status === 404 || response.status === 410) throw refusal('gone');
+      // An empty success will not fill on a retry: the file is gone, not held.
+      if (response.status === 404 || response.status === 410 || (response.ok && !page)) throw refusal('gone');
       if (page || response.status === 401 || response.status === 403) {
         log.warn(`slack: a file was not fetched: ${page ? 'Slack answered a page' : response.status} `
           + '(does the app have files:read? reinstall it with the manifest\'s scopes)');
@@ -177,21 +179,25 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   };
 
   /** The message's files into `resolved` (kept on the held message across retries, so a
-   *  stored file is never fetched twice). What this channel refuses itself goes in without
-   *  storeMedia; the rest are stored one by one. Returns 'unbound' when storeMedia answers
-   *  channel_sender_not_bound (the rest are not fetched); throws when an answer is transient. */
+   *  stored file is never fetched twice). The first file always goes through storeMedia, which
+   *  checks the sender before anything else: one this channel refuses itself goes with an
+   *  `open` that throws that refusal (nothing is fetched), so a stranger's message whose files
+   *  were all refused here still goes in without attachments. Later files this channel
+   *  refuses go in without storeMedia (the sender is known bound by then); the rest are stored
+   *  one by one. Returns 'unbound' when storeMedia answers channel_sender_not_bound (the rest
+   *  are not fetched); throws when an answer is transient. */
   async function storeAttachments(message, files, resolved) {
     for (let index = resolved.length; index < files.length; index++) {
       const file = files[index];
       const kind = slackFileKind(file?.mimetype);
       const refused = slackFileRefusal(file);
-      if (refused) { resolved.push({ kind, refused }); continue; }
+      if (refused && index > 0) { resolved.push({ kind, refused }); continue; }
       // A host without storeMedia (before 24.2) cannot take a file: unsupported, never held.
-      if (typeof ownerChannels.storeMedia !== 'function') { resolved.push({ kind, refused: 'unsupported' }); continue; }
+      if (typeof ownerChannels.storeMedia !== 'function') { resolved.push({ kind, refused: refused ?? 'unsupported' }); continue; }
       const meta = { channel: 'slack', senderRef: message.senderRef, messageRef: message.messageRef, index, kind,
-        ...(typeof file.mimetype === 'string' && file.mimetype ? { mime: file.mimetype } : {}),
-        ...(typeof file.name === 'string' && file.name ? { name: file.name } : {}) };
-      const answer = await ownerChannels.storeMedia(meta, openFile(file));
+        ...(typeof file?.mimetype === 'string' && file.mimetype ? { mime: file.mimetype } : {}),
+        ...(typeof file?.name === 'string' && file.name ? { name: file.name } : {}) };
+      const answer = await ownerChannels.storeMedia(meta, refused ? async () => { throw refusal(refused); } : openFile(file));
       if (typeof answer?.ref === 'string' && answer.ref) resolved.push({ kind, ref: answer.ref });
       else if (answer?.refused === 'channel_sender_not_bound') return 'unbound';
       else if (ATTACHMENT_REFUSALS.has(answer?.refused)) resolved.push({ kind, refused: answer.refused });

@@ -4,18 +4,25 @@ What it runs: one ``node --test`` invocation from the repository root, and nothi
 Its argv is ``[<node>, "--test", "integrations/wechat-bridge/bridge.test.mjs"]`` -- the file
 named explicitly, with the path the package's own npm script uses (``package.json``'s
 ``test`` script), so the suite is run exactly the way its author runs it. The floor is
-``\u2139 tests 121`` / ``\u2139 pass 121`` / ``\u2139 fail 0``, measured in the shipped image on
-2026-11-23 with the repaired group media sender probe and its nine witnesses -- the newest three
-hold the probe's linear base64 validator against the regex it replaced (a differential case over
-every string of length 0..6 and a boundary list), check that content shaped
-``<data>=<other>`` prints ``contentBytes=0``, and read a content accessor that answers once
-exactly once when that one answer is ``undefined`` (node v24.22.3, pytest wall clock 14 s). The
-earlier floor, 120, was the same suite with the probe and its eight witnesses; the one before
-that, 118, was the same suite with the probe and its six witnesses; the one before that,
+``\u2139 tests 126`` / ``\u2139 pass 126`` / ``\u2139 fail 0``, measured in the shipped image on
+2026-11-23 with the sender-attribution witnesses -- five cases hold the member id a group
+medium's raw content begins with (``<member>:\\n<XML>``): a medium whose talker is the room
+records that id as its ``sender_ref`` and the probe line says ``senderSource=content-prefix``; a
+group text message and a 1:1 message keep the sender they had; a medium with no such prefix
+keeps the room and says ``senderSource=room``; and a token that is not id-shaped (a display
+name, a space, 33 characters, a room id, no separator) is never taken for a member id. The
+earlier floor, 121, was the same suite with the repaired group media sender probe and its nine
+witnesses -- the newest three hold the probe's linear base64 validator against the regex it
+replaced (a differential case over every string of length 0..6 and a boundary list), check that
+content shaped ``<data>=<other>`` prints ``contentBytes=0``, and read a content accessor that
+answers once exactly once when that one answer is ``undefined``. The one before that, 120, was
+the same suite with the probe and its eight witnesses; the one before that, 118, was the same
+suite with the probe and its six witnesses; the one before that,
 116, was the same suite with the probe and its original four witnesses; the one before that, 112,
 was before that probe; the one before that, 110, was before the send-refusal log lines and their
 two witnesses were added; the one before that, 68, was before the bridge's media store and its
-group media path grew it.
+group media path grew it. (Measured on node v24.22.3 in the shipped image; this floor's runs
+took 12-15 s of pytest wall clock, the 121 floor's 14 s.)
 
 The counts are floors, not guesses: a run that prints fewer ``tests`` or fewer ``pass``
 than the numbers above has silently dropped cases, and this row goes RED and says so.
@@ -103,8 +110,8 @@ class Suite:
 BRIDGE = Suite(
     name="wechat-bridge",
     file="integrations/wechat-bridge/bridge.test.mjs",
-    expected_tests=121,
-    expected_pass=121,
+    expected_tests=126,
+    expected_pass=126,
 )
 
 

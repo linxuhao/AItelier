@@ -17,14 +17,17 @@ claim that rests on neither is marked **inference**.
   (`fetchBox`, the `GET /media/:media_id` handler, and the attempt bookkeeping at
   `:690`–`:729`), the fork's own Rust in
   `integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch`, and the Rust
-  dependency `wechat-protocol` — the crate that patch's `native/src/lib.rs` imports. **Its
-  version is not recorded in this repository**: `neo-fork/pin.json` pins the upstream
-  `puppet-neo` commit `ddfa5ecd…` (version 0.1.1) and its five files, no `Cargo.toml` is
-  vendored, and no tracked file names the crate (measured 2026-11-23: `git ls-files | grep -c
-  Cargo.toml` = 0; a grep for `wechat-protocol` over the fork, the bridge and its tests returns
-  nothing). The crate source read here is a copy taken outside this repository that reports
-  `version = "2.2.0"` in its own `Cargo.toml`; a rebuild of the fork resolves whatever crates.io
-  serves. Cited below as `src/<file>:<line>`, never vendored in this tree.
+  dependency `wechat-protocol` — the crate the patch imports (`use wechat_protocol::` at
+  `neo-fork/0001-incoming-message-types.patch:28`). **This repository records no version for
+  it**: `neo-fork/pin.json` pins the upstream `puppet-neo` commit `ddfa5ecd…` (version 0.1.1),
+  the sha256 of seven files — the four the patch touches, plus `LICENSE`, `package.json` and
+  `rust-toolchain.toml` — and the patch's own digest; no `Cargo.toml` or lockfile is tracked
+  (`git ls-files | grep -c Cargo.toml` = 0, measured 2026-11-23). The dependency is declared in
+  the fetched commit's own `native/Cargo.toml`, and `integrations/wechat-bridge/Dockerfile:53`
+  builds it with `cargo build --release --locked`, so the version is whatever that commit's
+  lockfile names — reproducible from the pin, but not visible in this tree. The source read for
+  this document is a copy taken outside the repository that reports `version = "2.2.0"` in its
+  own `Cargo.toml`. Cited below as `src/<file>:<line>`, never vendored here.
 - The file download that works is **not** in this window: the retained lines are all image
   attempts. The successful file download is the issue's own measurement (107,089 bytes on
   2026-11-23) and is used here only as the contrast the issue states.

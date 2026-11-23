@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index 768d869..1bb8887 100644
+index 768d869..ddc635b 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -15,8 +15,9 @@ use wechat_protocol::{
@@ -23,12 +23,13 @@ index 768d869..1bb8887 100644
      Heartbeat,
      PollIncoming,
      Sync { scene: u32 },
-@@ -182,6 +185,22 @@ impl NeoSession {
+@@ -182,6 +185,23 @@ impl NeoSession {
          self.task(Operation::PollLogin)
      }
  
 +    /// Try the login saved on disk. Every answer is one of `none`, `unreadable`,
-+    /// `throttled`, `busy` or `resumed`, and only `resumed` names the account.
++    /// `throttled`, `busy`, `rejected` or `resumed`, and only `resumed` names the
++    /// account.
 +    /// The only error that leaves this call is the renewal request's own, i.e. a
 +    /// transport fault on the one request a resume makes.
 +    #[napi]
@@ -46,7 +47,7 @@ index 768d869..1bb8887 100644
      #[napi]
      pub fn heartbeat(&self) -> AsyncTask<NeoTask> {
          self.task(Operation::Heartbeat)
-@@ -351,6 +370,7 @@ impl Task for NeoTask {
+@@ -351,6 +371,7 @@ impl Task for NeoTask {
          let stage = match &operation {
              Operation::StartLogin => "start QR login",
              Operation::PollLogin => "check or complete QR login",
@@ -54,7 +55,7 @@ index 768d869..1bb8887 100644
              Operation::Heartbeat => "check session heartbeat",
              Operation::PollIncoming => "wait for incoming message notifications",
              Operation::Sync { .. } => "read a sync page",
-@@ -377,8 +397,17 @@ impl Task for NeoTask {
+@@ -377,8 +398,17 @@ impl Task for NeoTask {
              &operation,
              Operation::DownloadMedia { .. } | Operation::DownloadVoice { .. }
          );
@@ -74,7 +75,7 @@ index 768d869..1bb8887 100644
      }
  
      fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-@@ -472,12 +501,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -472,12 +502,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
              if status == LoginStatus::Approved {
                  let mut attempt = session.attempt.take().expect("issued challenge");
                  let state = client.complete_login(&mut attempt)?;
@@ -92,7 +93,7 @@ index 768d869..1bb8887 100644
          Operation::Heartbeat => {
              let beat = read_session(session, heartbeat)?;
              Ok(
-@@ -776,6 +810,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -776,6 +811,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
              let account = session.account.take().context("No active session")?;
              // Reserving the logout stops new account requests before submission.
              let reply = account.prepare_logout()?.submit_blocking()?;
@@ -105,7 +106,7 @@ index 768d869..1bb8887 100644
              Ok(json!({ "accepted": reply.accepted }))
          }
          Operation::Close => {
-@@ -820,15 +860,20 @@ fn read_session<T>(
+@@ -820,15 +861,20 @@ fn read_session<T>(
      session: &mut Session,
      operation: impl FnMut(&mut Session) -> Result<T>,
  ) -> Result<T> {
@@ -131,7 +132,7 @@ index 768d869..1bb8887 100644
          },
          // A new socket is needed after a failure and after a renewal, because a
          // socket cannot adopt newer credentials.
-@@ -915,6 +960,105 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
+@@ -915,6 +961,106 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
      Ok(json!(profile))
  }
  
@@ -150,13 +151,14 @@ index 768d869..1bb8887 100644
 +        stored_login::Answer::Unreadable => "unreadable",
 +        stored_login::Answer::Throttled => "throttled",
 +        stored_login::Answer::Busy => "busy",
++        stored_login::Answer::Rejected => "rejected",
 +        stored_login::Answer::Resumed { .. } => "resumed",
 +    }
 +}
 +
 +/// Try the stored login instead of the QR path.
 +///
-+/// Every answer the caller can see is one of the five tokens; the store's own
++/// Every answer the caller can see is one of the six tokens; the store's own
 +/// faults are answered as tokens too, and the only error that leaves here is a
 +/// failed renewal, the one request to WeChat.
 +fn resume_login(session: &mut Session) -> Result<Value> {
@@ -237,7 +239,7 @@ index 768d869..1bb8887 100644
  fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      match send() {
          Ok(result)
-@@ -1529,6 +1673,24 @@ mod tests {
+@@ -1529,6 +1675,24 @@ mod tests {
          assert!(run(&mut session, Operation::Logout).is_err());
      }
  
@@ -262,7 +264,7 @@ index 768d869..1bb8887 100644
      #[test]
      fn unhandled_sync_commands_are_skipped() {
          let messages = incoming_messages(
-@@ -1572,3 +1734,1908 @@ mod tests {
+@@ -1572,3 +1736,1958 @@ mod tests {
          );
      }
  }
@@ -543,15 +545,15 @@ index 768d869..1bb8887 100644
 +    pub enum Opened<T> {
 +        /// WeChat accepted the credentials the stored bytes carry.
 +        Accepted(T),
-+        /// WeChat refused these credentials; the file is deleted.
++        /// WeChat refused these credentials; the file is deleted. A delete that
++        /// fails is a failed write and the answer is still `rejected`.
 +        Rejected,
 +    }
 +
 +    /// One resume attempt's answer: the closed set a caller branches on.
 +    #[derive(Debug, PartialEq)]
 +    pub enum Answer<T> {
-+        /// There is no stored login to resume: none was stored, the store is off,
-+        /// or WeChat refused the one that was and it has been deleted.
++        /// There is no stored login to resume: none was stored, or the store is off.
 +        None,
 +        /// A stored login is there and did not open: it will not decrypt, or the
 +        /// document is not a login this build can use. The file is kept.
@@ -563,6 +565,8 @@ index 768d869..1bb8887 100644
 +        /// Another resume holds the writer lock. Neither the envelope nor the
 +        /// counters were read, so a race costs nothing and records nothing.
 +        Busy,
++        /// WeChat refused the stored login; the file is deleted.
++        Rejected,
 +        /// WeChat accepted the stored login. `state` is the plaintext this attempt
 +        /// read, i.e. the credentials from before its own renewal rotated them;
 +        /// the rotated ones are what that renewal wrote back to the store.
@@ -573,6 +577,7 @@ index 768d869..1bb8887 100644
 +    /// path, a panic included.
 +    struct Lock {
 +        path: PathBuf,
++        holder: Holder,
 +    }
 +
 +    impl Lock {
@@ -593,8 +598,9 @@ index 768d869..1bb8887 100644
 +                    .open(&path)
 +                {
 +                    Ok(mut file) => {
++                        let holder = Holder::current();
 +                        let written = (|| -> Result<()> {
-+                            file.write_all(Holder::current().line().as_bytes())?;
++                            file.write_all(holder.line().as_bytes())?;
 +                            file.sync_all()?;
 +                            Ok(())
 +                        })();
@@ -602,7 +608,7 @@ index 768d869..1bb8887 100644
 +                            let _ = std::fs::remove_file(&path);
 +                            return Err(err);
 +                        }
-+                        return Ok(Some(Lock { path }));
++                        return Ok(Some(Lock { path, holder }));
 +                    }
 +                    Err(err) if err.kind() == ErrorKind::AlreadyExists => {
 +                        if attempt == 1 {
@@ -614,23 +620,9 @@ index 768d869..1bb8887 100644
 +                        if !abandoned(&path, &judged, SystemTime::now()) {
 +                            return Ok(None);
 +                        }
-+                        // Take the right to steal before reading again and
-+                        // unlinking. `create_new` is the only way a lock is
-+                        // created and only this steal unlinks a lock that exists,
-+                        // so at most one attempt is inside this read-then-unlink.
-+                        // For a fresh holder's lock to appear here the path would
-+                        // have to be absent during the window, and the only thing
-+                        // that could have removed the stale file is that same
-+                        // exclusivity-protected steal. The unlink below is
-+                        // therefore the file that was judged stale, never a lock
-+                        // that landed in the meantime.
-+                        let Some(_reap) = reap(store)? else {
-+                            return Ok(None);
-+                        };
-+                        if std::fs::read(&path).ok().as_deref() != Some(judged.as_slice()) {
++                        if !steal_if_stale(store, &path, &judged, SystemTime::now()) {
 +                            return Ok(None);
 +                        }
-+                        let _ = std::fs::remove_file(&path);
 +                    }
 +                    Err(err) => return Err(err.into()),
 +                }
@@ -639,7 +631,25 @@ index 768d869..1bb8887 100644
 +        }
 +    }
 +
-+    /// The file the steal is serialised on, next to the lock it protects. It is
++    /// Serialise the steal on the reap file and re-judge staleness from a fresh
++    /// read before unlinking. Returns true only when the lock was actually removed.
++    ///
++    /// What this does not close: a live session's own renewal, on the recovery path
++    /// in `read_session`, writes the store without taking this lock, so a resume that
++    /// races it can still read the credentials from before that renewal. The reap
++    /// file serialises stealers against each other, not against that writer.
++    fn steal_if_stale(store: &Store, path: &Path, _judged: &[u8], now: SystemTime) -> bool {
++        let Ok(Some(_reap)) = reap(store) else {
++            return false;
++        };
++        let Ok(second) = std::fs::read(path) else {
++            return false;
++        };
++        if !abandoned(path, &second, now) {
++            return false;
++        }
++        std::fs::remove_file(path).is_ok()
++    }
 +    /// deliberately never removed: unlinking it would let a later attempt lock a
 +    /// different inode at the same name, which is the race this closes.
 +    const REAP_FILE: &str = "resume.lock.reap";
@@ -686,7 +696,11 @@ index 768d869..1bb8887 100644
 +
 +    impl Drop for Lock {
 +        fn drop(&mut self) {
-+            let _ = std::fs::remove_file(&self.path);
++            if let Ok(bytes) = std::fs::read(&self.path) {
++                if bytes == self.holder.line().as_bytes() {
++                    let _ = std::fs::remove_file(&self.path);
++                }
++            }
 +        }
 +    }
 +
@@ -832,12 +846,12 @@ index 768d869..1bb8887 100644
 +                // WeChat said this login is no longer good, so the file is not
 +                // evidence of anything: keeping it would make every start pay the
 +                // same rejected round trip. A delete that fails is a failed write
-+                // and still `none` - the login is not resumed either way, and the
-+                // next start pays the same round trip rather than an error.
++                // and still `rejected` - the login is not resumed either way, and
++                // the next start pays the same round trip rather than an error.
 +                if store.delete().is_err() {
 +                    WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
 +                }
-+                Ok(Answer::None)
++                Ok(Answer::Rejected)
 +            }
 +        }
 +    }
@@ -1606,6 +1620,39 @@ index 768d869..1bb8887 100644
 +        }
 +
 +        #[test]
++        fn a_steal_does_not_unlink_a_lock_replaced_by_a_fresh_holder() {
++            let _counting = counting();
++            let scratch = Scratch::new("steal-replaced");
++            let store = scratch.store();
++            let path = store.lock_path();
++            // A lock naming a holder that is gone is stale at first sight.
++            std::fs::write(&path, b"999999 1\n").expect("a stale lock");
++            let judged = std::fs::read(&path).expect("read the stale lock");
++            // Before the steal can unlink it, a fresh holder replaces the file
++            // with an empty lock that is still inside its grace window.
++            std::fs::write(&path, b"").expect("a fresh empty lock");
++            let stolen = steal_if_stale(&store, &path, &judged, SystemTime::now());
++            assert!(!stolen, "a lock replaced by a fresh holder was stolen");
++            assert!(path.exists(), "the fresh lock was unlinked by the steal");
++        }
++
++        #[test]
++        fn dropping_a_lock_does_not_unlink_a_file_it_no_longer_owns() {
++            let scratch = Scratch::new("drop-foreign");
++            let path = scratch.store().lock_path();
++            std::fs::write(&path, b"foreign holder\n").expect("a foreign lock");
++            let lock = Lock {
++                path: path.clone(),
++                holder: Holder::current(),
++            };
++            drop(lock);
++            assert!(
++                path.exists(),
++                "drop unlinked a lock file that no longer held this lock's line"
++            );
++        }
++
++        #[test]
 +        fn an_empty_store_answers_none_without_spending_a_resume_slot() {
 +            let _counting = counting();
 +            let scratch = Scratch::new("none-slots");
@@ -1765,7 +1812,7 @@ index 768d869..1bb8887 100644
 +        }
 +
 +        #[test]
-+        fn a_rejected_login_whose_delete_fails_answers_none_and_counts_a_failed_write() {
++        fn a_rejected_login_whose_delete_fails_answers_rejected_and_counts_a_failed_write() {
 +            let _counting = counting();
 +            let scratch = Scratch::new("rejected-no-delete");
 +            let store = scratch.store();
@@ -1788,7 +1835,7 @@ index 768d869..1bb8887 100644
 +            .expect("a rejection whose delete failed is not an error");
 +            assert_eq!(
 +                answer,
-+                Answer::None,
++                Answer::Rejected,
 +                "a rejected login whose file could not be deleted answered something else"
 +            );
 +            if refused {
@@ -2053,7 +2100,7 @@ index 768d869..1bb8887 100644
 +                .expect("store the login");
 +            let answer = resume(&store, seconds(), usable, |_| Ok(Opened::Rejected))
 +                .expect("a rejection is not an error");
-+            assert_eq!(answer, Answer::None);
++            assert_eq!(answer, Answer::Rejected);
 +            assert!(
 +                !store.present(),
 +                "WeChat rejected this login and its file is still there"
@@ -2149,7 +2196,8 @@ index 768d869..1bb8887 100644
 +    use super::{resume_status, stored_login};
 +
 +    /// The bridge branches on these tokens, so each answer names exactly one of
-+    /// them and nothing else: `none`, `unreadable`, `throttled`, `busy`, `resumed`.
++    /// them and nothing else: `none`, `unreadable`, `throttled`, `busy`,
++    /// `rejected`, `resumed`.
 +    #[test]
 +    fn every_resume_answer_is_one_of_the_closed_set() {
 +        assert_eq!(resume_status(&stored_login::Answer::<()>::None), "none");
@@ -2163,6 +2211,10 @@ index 768d869..1bb8887 100644
 +        );
 +        assert_eq!(resume_status(&stored_login::Answer::<()>::Busy), "busy");
 +        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Rejected),
++            "rejected"
++        );
++        assert_eq!(
 +            resume_status(&stored_login::Answer::<()>::Resumed {
 +                state: Vec::new(),
 +                accepted: (),
@@ -2171,3 +2223,221 @@ index 768d869..1bb8887 100644
 +        );
 +    }
 +}
+diff --git a/src/native.ts b/src/native.ts
+index 74037d2..ce56d6e 100644
+--- a/src/native.ts
++++ b/src/native.ts
+@@ -4,6 +4,16 @@ import platforms from './native-platforms.json' with { type: 'json' }
+ /** Error message for a session that WeChat no longer accepts. */
+ export const SESSION_ENDED = 'Neo session ended by WeChat'
+ 
++/**
++ * Prefixes the puppet puts at the start of the error it raises when a saved login
++ * was not resumed, so a consumer can branch on which answer it got.
++ */
++export const RESUME_NONE = 'RESUME_NONE'
++export const RESUME_UNREADABLE = 'RESUME_UNREADABLE'
++export const RESUME_THROTTLED = 'RESUME_THROTTLED'
++export const RESUME_REJECTED = 'RESUME_REJECTED'
++export const RESUME_BUSY = 'RESUME_BUSY'
++
+ export interface SelfProfile {
+   nickname: string | null
+   alias: string | null
+@@ -79,6 +89,8 @@ export interface DownloadedMedia {
+   advertisedSizeMatches?: boolean | null
+ }
+ 
++export interface SavedLoginStatus { present: boolean, writes: number, write_failures: number, off?: string }
++
+ export interface Session {
+   startLogin(): Promise<{ png: string }>
+   pollLogin(): Promise<
+@@ -122,9 +134,11 @@ export interface Session {
+   lookupSelf(): Promise<SelfProfile>
+   logout(): Promise<{ accepted: boolean }>
+   close(): Promise<void>
++  resumeLogin(): Promise<{ status: 'none' | 'unreadable' | 'throttled' | 'busy' | 'rejected' | 'resumed', username?: string, off?: string }>
++  savedLoginStatus(): SavedLoginStatus
+ }
+ 
+-type Addon = { [K in keyof Session]: (...args: Parameters<Session[K]>) => Promise<string> }
++type Addon = { [K in keyof Session]: Session[K] extends (...args: infer A) => infer R ? (R extends Promise<any> ? (...args: A) => Promise<string> : (...args: A) => string) : never }
+ 
+ export function openNativeSession(): Session {
+   const platform = `${process.platform}-${process.arch}`
+@@ -166,5 +180,7 @@ export function openNativeSession(): Session {
+     lookupSelf: async () => JSON.parse(await addon.lookupSelf()),
+     logout: async () => JSON.parse(await addon.logout()),
+     close: async () => { await addon.close() },
++    resumeLogin: async () => JSON.parse(await addon.resumeLogin()),
++    savedLoginStatus: () => JSON.parse(addon.savedLoginStatus()),
+   }
+ }
+diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
+index ffa0bd5..4a17132 100644
+--- a/src/puppet-neo.ts
++++ b/src/puppet-neo.ts
+@@ -6,10 +6,16 @@ import { PNG } from 'pngjs'
+ import {
+   openNativeSession,
+   SESSION_ENDED,
++  RESUME_NONE,
++  RESUME_UNREADABLE,
++  RESUME_THROTTLED,
++  RESUME_REJECTED,
++  RESUME_BUSY,
+   type IncomingMessage,
+   type MediaProfile,
+   type SelfProfile,
+   type Session,
++  type SavedLoginStatus,
+ } from './native.js'
+ 
+ const CACHE_LIMIT = 2048
+@@ -230,9 +236,15 @@ export class PuppetNeo extends Puppet {
+   private readonly contacts = new Map<string, payloads.Contact>()
+   private readonly rooms = new Map<string, true>()
+   private readonly messages = new Map<string, CachedMessage>()
++  private readonly resume: boolean
+ 
+-  constructor(options: PuppetOptions = {}) {
++  constructor(options: PuppetOptions & { resume?: boolean } = {}) {
+     super(options)
++    this.resume = options.resume === true
++  }
++
++  static savedLoginStatus(): SavedLoginStatus {
++    return openNativeSession().savedLoginStatus()
+   }
+ 
+   protected createSession(): Session {
+@@ -550,7 +562,24 @@ export class PuppetNeo extends Puppet {
+ 
+   private async serve(session: Session, signal: AbortSignal): Promise<void> {
+     await delay(0, undefined, { signal })
+-    const username = await this.loginWithQr(session, signal)
++    let username: string
++    if (this.resume) {
++      const answer = await session.resumeLogin()
++      signal.throwIfAborted()
++      if (answer.status === 'resumed' && typeof answer.username === 'string' && answer.username !== '') {
++        username = answer.username
++      } else {
++        const token =
++          answer.status === 'none' ? RESUME_NONE :
++          answer.status === 'unreadable' ? RESUME_UNREADABLE :
++          answer.status === 'throttled' ? RESUME_THROTTLED :
++          answer.status === 'rejected' ? RESUME_REJECTED :
++          RESUME_BUSY
++        throw new Error(`${token} saved login was not resumed`)
++      }
++    } else {
++      username = await this.loginWithQr(session, signal)
++    }
+     signal.throwIfAborted()
+     // `login` comes with the account's profile. A failed lookup falls back to the username.
+     this.selfProfile = await session.lookupSelf().catch(() => undefined)
+diff --git a/test/ding-dong.test.ts b/test/ding-dong.test.ts
+index 0b4ffcd..c881ec1 100644
+--- a/test/ding-dong.test.ts
++++ b/test/ding-dong.test.ts
+@@ -32,6 +32,8 @@ interface Script {
+   laterSync?: Error
+   /** The bytes a media download answers with, base64, by the file id it asked for. */
+   downloads?: Record<string, string>
++  /** What resumeLogin answers when the resume option is set. */
++  resume?: { status: 'none' | 'unreadable' | 'throttled' | 'busy' | 'rejected' | 'resumed', username?: string, off?: string }
+   /** What the SILK of every voice note download decodes to. */
+   decodedVoice?: { wavBase64: string, durationMs: number }
+ }
+@@ -47,6 +49,13 @@ function scriptedSession(trace: unknown[], script: Script = {}): Session {
+     async pollLogin() {
+       return { status: 'completed', username }
+     },
++    async resumeLogin() {
++      trace.push('resume-login')
++      return script.resume ?? { status: 'none' }
++    },
++    savedLoginStatus() {
++      return { present: false, writes: 0, write_failures: 0 }
++    },
+     async heartbeat() {
+       beats++
+       if (beats > 1 && script.laterHeartbeat) throw script.laterHeartbeat
+@@ -136,8 +145,9 @@ function waitFor<T>(subscribe: (done: (value: T) => void) => void, label: string
+   })
+ }
+ 
+-function scriptedPuppet(trace: unknown[], script: () => Script) {
++function scriptedPuppet(trace: unknown[], script: () => Script, options: Record<string, unknown> = {}) {
+   const puppet = new class extends PuppetNeo {
++    constructor() { super(options as never) }
+     protected override createSession() { return scriptedSession(trace, script()) }
+     protected override scanCode() { return 'fixture-qr' }
+   }()
+@@ -621,6 +631,64 @@ test('an arriving file, image and voice note each come back as the FileBox to re
+   }
+ })
+ 
++test('a resumed login skips the scan and never starts a QR login', async () => {
++  const trace: unknown[] = []
++  const scans: payloads.EventScan[] = []
++  const { puppet, events } = scriptedPuppet(trace, () => ({ resume: { status: 'resumed', username: 'wxid_resume' } }), { resume: true })
++  puppet.on('scan', payload => { scans.push(payload) })
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    assert.deepEqual(events.logins, [{ contactId: 'wxid_resume' }])
++    assert.equal(scans.length, 0)
++    assert(!trace.includes('start-login'))
++    assert.deepEqual(events.errors, [])
++  } finally {
++    await puppet.stop()
++  }
++})
++
++for (const [status, token] of [
++  ['none', 'RESUME_NONE'],
++  ['unreadable', 'RESUME_UNREADABLE'],
++  ['throttled', 'RESUME_THROTTLED'],
++  ['rejected', 'RESUME_REJECTED'],
++  ['busy', 'RESUME_BUSY'],
++] as const) {
++  test(`a non-resumed answer (${status}) emits an error and logs out`, async () => {
++    const trace: unknown[] = []
++    const scans: payloads.EventScan[] = []
++    const { puppet, events } = scriptedPuppet(trace, () => ({ resume: { status } }), { resume: true })
++    puppet.on('scan', payload => { scans.push(payload) })
++    const errored = waitFor<string>(done => puppet.once('error', payload => done(payload.data ?? '')), 'error').catch(() => '')
++    await puppet.start().catch(() => {})
++    await errored
++    try {
++      assert(events.errors.some(message => message.includes(token)))
++      assert.equal(scans.length, 0)
++      assert(!trace.includes('start-login'))
++    } finally {
++      await puppet.stop()
++    }
++  })
++}
++
++test('a puppet without the resume option still scans and starts a QR login', async () => {
++  const trace: unknown[] = []
++  const scans: payloads.EventScan[] = []
++  const { puppet } = scriptedPuppet(trace, () => ({}))
++  puppet.on('scan', payload => { scans.push(payload) })
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    assert(scans.length > 0)
++    assert(trace.includes('start-login'))
++  } finally {
++    await puppet.stop()
++  }
++})
+ test('an inbound fetch says which stage it stopped at: no session, or no login', async () => {
+   // Nothing has started, so there is no session to fetch through at all.
+   const { puppet } = scriptedPuppet([], () => ({}))

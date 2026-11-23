@@ -7,12 +7,16 @@
  * dependencies (registration reads none of them) and checks every tool it registers is accepted.
  *
  * Not reached here (they register only inside a booted session's setup / the adapter's
- * install, which need the real DSH context): the inline tools of dsh-director/index.mjs
- * (todo_*, watch_process, ask_owner, close_question, idle_dormant, grep_chat_history) and the
- * adapter's own (runtime.mjs: state_read, project_work, schedule_*, reply_to_director,
- * relay_answer, send_user_message). The real-DSH boot tests (runtime.steward.test.mjs,
- * runtime.group.test.mjs, runtime.test.mjs and the others that boot the plugin) register them
- * through the same defineTool. */
+ * install, which need the real DSH context); real-DSH boot tests register them through the
+ * same pinned defineTool, so a refused schema fails these tests:
+ * - the inline tools of dsh-director/index.mjs (todo_*, watch_process, ask_owner,
+ *   close_question, idle_dormant, grep_chat_history): runtime.steward.test.mjs and
+ *   runtime.smoke.test.mjs;
+ * - the adapter's own (runtime.mjs: state_read, project_work, schedule_*, reply_to_director,
+ *   relay_answer, send_user_message): runtime.channels.test.mjs and runtime.group.test.mjs
+ *   (runtime.steward.test.mjs does not install them all);
+ * - dsh-director/hosts/local.mjs (work_update, note_write): runtime.local-host.test.mjs, which
+ *   boots the director with that host and no adapter. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

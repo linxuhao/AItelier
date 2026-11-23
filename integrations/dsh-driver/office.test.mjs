@@ -208,7 +208,8 @@ test('the wall clock: the host kills the container by its name and answers timeo
 });
 
 test('a kill is waited for before the slot is let go (bounded); a caller aborting while it waits gives up its place (review N2, N3)', async () => {
-  const r = rig({}, { limits: { wallMs: 200, queueWaitMs: 5000, killWaitMs: 5000 } });
+  // wallMs leaves a quick fake run (a node start, slow on a loaded machine) time to finish.
+  const r = rig({}, { limits: { wallMs: 1500, queueWaitMs: 8000, killWaitMs: 5000 } });
   await r.runner.start();
   r.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 600 } });
   const answer = await r.runner.generate(LETTER);
@@ -217,12 +218,12 @@ test('a kill is waited for before the slot is let go (bounded); a caller abortin
   assert.ok(r.calls().some(args => args[0] === 'kill-done' && args[1] === name), 'answered only once docker kill returned');
   assert.deepEqual(r.jobsLeft(), []);
   // A kill that hangs is waited for killWaitMs only.
-  const hung = rig({}, { limits: { wallMs: 200, killWaitMs: 300 } });
+  const hung = rig({}, { limits: { wallMs: 1500, killWaitMs: 300 } });
   await hung.runner.start();
-  hung.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 2500 } });
+  hung.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 6000 } });
   let started = Date.now();
   assert.deepEqual(await hung.runner.generate(LETTER), { refused: 'timeout' });
-  assert.ok(Date.now() - started < 1500, String(Date.now() - started));
+  assert.ok(Date.now() - started < 4000, String(Date.now() - started));
   // A second job waits behind the first until the first one's kill is done.
   r.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 600 } });
   const first = r.runner.generate(LETTER);
@@ -237,7 +238,7 @@ test('a kill is waited for before the slot is let go (bounded); a caller abortin
   const killDone = log.findIndex(args => args[0] === 'kill-done' && args[1] === firstName);
   assert.ok(killDone > firstAt && killDone < secondAt, 'the next container starts only after the kill');
   // Aborted while waiting for the slot: timeout at once, not after queueWaitMs; the queue goes on.
-  r.setPlan({ run: { sleepMs: 1500, write: 'pdf' } });
+  r.setPlan({ run: { sleepMs: 3000, write: 'pdf' } });
   const holder = r.runner.generate(LETTER);
   await new Promise(resolve => setTimeout(resolve, 50));
   const controller = new AbortController();

@@ -1,7 +1,7 @@
 /** Step 24.2d: a zip built from one of media-types.json's `container_samples` - local headers
  *  with `packed` bytes of filler each, a central directory declaring each entry's sizes and
  *  flags, and an End of Central Directory (or none, a zip64 locator before it, a directory said
- *  to start past it). tests/unit/office_zips.py builds the same bytes for the backend's side. */
+ *  to start past it, a directory size 10 bytes too big). tests/unit/office_zips.py builds the same bytes for the backend's side. */
 import { readFileSync } from 'node:fs';
 
 export const TABLE = JSON.parse(readFileSync(new URL('../../media-types.json', import.meta.url), 'utf8'));
@@ -27,7 +27,7 @@ export function zipFrom({ entries, filler = 0, eocd }) {
   const directory = Buffer.concat(central);
   const end = Buffer.alloc(22);
   end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(all.length, 8); end.writeUInt16LE(all.length, 10);
-  end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(eocd === 'past_end' ? offset + 100 : offset, 16);
+  end.writeUInt32LE(directory.length + (eocd === 'size_past' ? 10 : 0), 12); end.writeUInt32LE(eocd === 'past_end' ? offset + 100 : offset, 16);
   const tail = eocd === 'missing' ? [] : eocd === 'zip64' ? [Buffer.from('504b0607' + '00'.repeat(16), 'hex'), end] : [end];
   return Buffer.concat([...locals, directory, ...tail]);
 }

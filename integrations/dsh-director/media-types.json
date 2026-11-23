@@ -92,6 +92,7 @@
     { "about": "no end of central directory", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "eocd": "missing", "mime": null },
     { "about": "a backslash name", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500], ["word\\evil.xml", 10, 10]], "mime": null },
     { "about": "a bomb whose directory understates its sizes: taken here (the directory is all the judgement reads), held by the converter container's memory, tmpfs and fsize bounds (office-acceptance.mjs)", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 1024, 1040000]], "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { "about": "a central directory whose size runs past its end", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "eocd": "size_past", "mime": null },
     { "about": "a central directory past the end", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "eocd": "past_end", "mime": null }
   ]
 }

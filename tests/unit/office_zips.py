@@ -1,7 +1,8 @@
 """Step 24.2d: a zip built from one of media-types.json's `container_samples` - the same bytes
 integrations/dsh-director/test/fixtures/zip-samples.mjs builds for the host's side: local headers
 with `packed` filler bytes each, a central directory declaring each entry's sizes and flags, and
-an End of Central Directory (or none, a zip64 locator before it, a directory said to start past it)."""
+an End of Central Directory (or none, a zip64 locator before it, a directory said to start past it,
+a directory size 10 bytes too big)."""
 from __future__ import annotations
 
 import struct
@@ -25,7 +26,8 @@ def zip_from(sample: dict) -> bytes:
         offset += 30 + len(raw) + packed
     directory = b"".join(central)
     start = offset + 100 if sample.get("eocd") == "past_end" else offset
-    end = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), len(directory), start, 0)
+    size = len(directory) + (10 if sample.get("eocd") == "size_past" else 0)
+    end = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, len(entries), len(entries), size, start, 0)
     tail = {"missing": b"", "zip64": bytes.fromhex("504b0607") + b"\0" * 16 + end}.get(sample.get("eocd"), end)
     return b"".join(locals_) + directory + tail
 

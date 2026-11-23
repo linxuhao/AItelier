@@ -42,7 +42,22 @@
  *
  *  Kept 30 days (cleanup(), daily while started) and at most limits.total_bytes in all,
  *  oldest first; refs still owed to a relay (`protect()`) are never cleaned. Logs carry a
- *  mime and a size, never a name or a byte. */
+ *  mime and a size, never a name or a byte.
+ *
+ *  A director's subdirectory (24.2b, design-steward 7.8.12a "一个写者一个子目录" and "导演给业主
+ *  发媒体" items 2, 6, 7; pending 20): `d-<driver_id>/` is held to 1 GiB in all (limitsFor;
+ *  the steward's stays 5 GiB), and the files the director sends the owner come in as channel
+ *  'director', keyed by (director, request_key, index) with the sha256 the adapter read:
+ *   - a keyed replay whose sha256 differs from the stored one (or from a recorded refusal's)
+ *     is `idempotency_conflict` - never the old file under a new one's name;
+ *   - at most limits.director_per_hour 'director' rows an hour, counted from the index (a
+ *     restart keeps the count; a replay adds no row); one past it is `rate_limited` with
+ *     `retry_after` seconds; the dashboard's own source is never counted here (its uploads
+ *     are counted once, at the backend's upload route);
+ *   - a write the disk cannot take (ENOSPC and its kind) is `store_failed`, not the
+ *     transient `unavailable` a channel's or the dashboard's ingest answers.
+ *  None of these three is recorded: a later call may succeed. media-gc.mjs runs cleanup() on
+ *  one subdirectory with that writer's limits (the DSH host, for a director not running). */
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -52,12 +67,25 @@ import { Readable } from 'node:stream';
 
 const TABLE = JSON.parse(readFileSync(new URL('../media-types.json', import.meta.url), 'utf8'));
 export const MEDIA_TYPES = Object.freeze(TABLE.types);
-export const MEDIA_LIMITS = Object.freeze({ ...TABLE.limits });
+/** The table's limits, plus the hourly count of the files a director sends the owner (design
+ *  7.8.12a "导演给业主发媒体" item 6; JS-side only: the backend never counts them). */
+export const MEDIA_LIMITS = Object.freeze({ ...TABLE.limits, director_per_hour: 20 });
+/** What a director's subdirectory (`d-<driver_id>`) holds in all (pending 20). */
+export const DIRECTOR_TOTAL_BYTES = 1024 * 1024 * 1024;
+/** The limits of one writer's subdirectory: a director's `d-<driver_id>` is held to 1 GiB in
+ *  all, every other writer (the steward's `<userId>`) to the table's total_bytes. */
+export function limitsFor(userId) {
+  return typeof userId === 'string' && userId.startsWith('d-')
+    ? { ...MEDIA_LIMITS, total_bytes: DIRECTOR_TOTAL_BYTES } : { ...MEDIA_LIMITS };
+}
 export const MEDIA_KINDS = Object.freeze(['image', 'voice', 'file']);
 /** What an attachment that did not come in says (the closed set of design-steward 7.8.12). */
 export const MEDIA_REFUSALS = Object.freeze(['too_large', 'type', 'unsupported', 'gone']);
 export const REF_PATTERN = /^m_[0-9a-f]{16}$/;
 const CHANNEL_SOURCES = new Set(['slack', 'wechat']);
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+/** Write errors that mean the disk cannot take the file (answered store_failed to a director). */
+const DISK_FULL = new Set(['ENOSPC', 'EDQUOT', 'EFBIG', 'EROFS', 'EIO']);
 const SNIFF_BYTES = 64;
 const DAY_MS = 24 * 3600 * 1000;
 
@@ -102,20 +130,24 @@ export function imageSize(buffer, mime) {
   return undefined;
 }
 
-/** The audience label of a turn ({kind: 'owner'} or a group turn), or undefined when it
- *  cannot be named (a group turn of unknown group). */
+/** The audience label of a turn ({kind: 'owner'}, a group turn, or a director's
+ *  {kind: 'project', project_id}), or undefined when it cannot be named (a group turn of
+ *  unknown group, a project turn without its id). */
 export function audienceLabel(audience) {
   if (audience?.kind === 'owner') return 'owner';
   if (audience?.kind === 'group' && typeof audience.channel === 'string' && typeof audience.group_ref === 'string')
     return `group:${audience.channel}:${audience.group_ref}`;
+  if (audience?.kind === 'project' && typeof audience.project_id === 'string' && audience.project_id)
+    return `project:${audience.project_id}`;
   return undefined;
 }
 /** Whether a turn of `audience` may use this row: an owner turn every ref, a group turn only
- *  its own group's (design-steward 7.8.12 "受众标签"). Anything unreadable: no. */
+ *  its own group's (design-steward 7.8.12 "受众标签"), a director's project turn only its own
+ *  project's rows (7.8.12a). Anything unreadable: no. */
 export function covers(audience, row) {
   if (audience?.kind === 'owner') return true;
   const label = audienceLabel(audience);
-  return label !== undefined && label.startsWith('group:') && row?.audience === label;
+  return label !== undefined && (label.startsWith('group:') || label.startsWith('project:')) && row?.audience === label;
 }
 
 const KIND_NAMES = Object.freeze({ image: '图片', voice: '语音', file: '文件' });
@@ -179,10 +211,13 @@ export const MEDIA_DEADLINES = Object.freeze({ firstByteMs: 30000, totalMs: 1200
 
 /** @param root the media root the host gives; @param userId this writer's subdirectory.
  *  @param ffprobe the ffprobe command (the host's setting; default `ffprobe` on PATH).
- *  @param protect () => refs that must outlive cleanup (a relay not committed yet). */
-export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe', limits = MEDIA_LIMITS,
+ *  @param protect () => refs that must outlive cleanup (a relay not committed yet).
+ *  @param limits overrides of this writer's limits (limitsFor(userId): a director's
+ *  subdirectory 1 GiB in all, any other the table's), key by key. */
+export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe', limits: overrides,
   deadlines = MEDIA_DEADLINES, now = () => Date.now(), log = () => {}, protect = () => [], random = n => randomBytes(n) } = {}) {
   if (typeof root !== 'string' || !root) throw new Error('media library: root is required');
+  const limits = Object.freeze({ ...limitsFor(userId), ...(overrides ?? {}) });
   if (typeof userId !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(userId) || userId.startsWith('.')) throw new Error('media library: bad userId');
   const home = join(root, userId);
   const indexFile = join(home, 'index.jsonl');
@@ -222,7 +257,8 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     && row.messageRef === messageRef && row.index === index);
   const MAX_REFUSALS = 10000;
   const recordRefusal = (meta, refused) => {
-    const row = { refused, channel: meta.channel, messageRef: meta.messageRef, index: meta.index, at: new Date(now()).toISOString() };
+    const row = { refused, channel: meta.channel, messageRef: meta.messageRef, index: meta.index,
+      ...(typeof meta.sha256 === 'string' ? { sha256: meta.sha256 } : {}), at: new Date(now()).toISOString() };
     refusals.push(row);
     if (refusals.length > MAX_REFUSALS) { refusals = refusals.slice(-MAX_REFUSALS); rewrite(); } else append(row);
   };
@@ -300,6 +336,13 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     }
   }
 
+  /** A write that failed: a director's file the disk cannot take is store_failed (its tool
+   *  says so); everything else is unavailable (a channel's or the dashboard's ingest asks again). */
+  const writeFailed = (meta, type, size, error) => {
+    log('media_store_failed', { mime: type.mime, size, error: String(error?.code ?? 'error').slice(0, 40) });
+    return new Refused(meta.channel === 'director' && DISK_FULL.has(error?.code) ? 'store_failed' : 'unavailable');
+  };
+
   async function store(meta, open, signal) {
     const { buffer, size, type } = await receive(meta, open, signal);
     let durationMs;
@@ -337,15 +380,19 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
       }
     } catch (error) {
       if (error instanceof Refused) throw error;
-      log('media_store_failed', { mime: type.mime, size, error: String(error?.code ?? 'error').slice(0, 40) });
-      throw new Refused('unavailable');
+      throw writeFailed(meta, type, size, error);
     } finally { rmSync(temporary, { force: true }); }
     const row = { ref: freshRef(), sha256, mime: type.mime, size, ...(durationMs !== undefined ? { durationMs } : {}),
       audience: meta.audience, source: meta.source, channel: meta.channel,
       ...(typeof meta.messageRef === 'string' ? { messageRef: meta.messageRef } : {}),
       ...(Number.isInteger(meta.index) ? { index: meta.index } : {}), file, at: at.toISOString() };
+    try { append(row); }
+    catch (error) {
+      // The index did not take the row: no ref, and a file this call wrote goes again.
+      if (!rows.some(other => other.file === file)) rmSync(join(root, file), { force: true });
+      throw writeFailed(meta, type, size, error);
+    }
     rows.push(row);
-    append(row);
     log('media_stored', { mime: row.mime, size: row.size });
     enforceTotal(new Set([row.ref]));
     return row;
@@ -354,7 +401,8 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   let lane = Promise.resolve();
   const AUDIENCE = /^(owner|group:.+|project:.+)$/s;
   /** @param meta {channel, messageRef?, index?, audience: 'owner' | 'group:<channel>:<ref>' |
-   *    'project:<project_id>', source: 'in' | 'generated'} @param open ({signal}) => a byte
+   *    'project:<project_id>', source: 'in' | 'generated', sha256?} (sha256: the bytes the
+   *    caller read, for a keyed replay's idempotency_conflict) @param open ({signal}) => a byte
    *    stream (async iterable, web stream or Buffer); throwing {refused: <closed set>} passes
    *    that refusal on. @param signal the caller's: aborted while this waits for the lane, the
    *    answer is `unavailable` at once and nothing is fetched; aborted while it reads, the
@@ -364,13 +412,18 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
       if (typeof meta.audience !== 'string' || !AUDIENCE.test(meta.audience)) return { refused: 'invalid_media' };
       if (!['in', 'generated'].includes(meta.source) || typeof meta.channel !== 'string' || !meta.channel) return { refused: 'invalid_media' };
       if (typeof open !== 'function') return { refused: 'invalid_media' };
+      if (meta.sha256 !== undefined && (typeof meta.sha256 !== 'string' || !SHA256_PATTERN.test(meta.sha256))) return { refused: 'invalid_media' };
       if (signal?.aborted) return { refused: 'unavailable' };
       const keyed = typeof meta.messageRef === 'string' && Number.isInteger(meta.index);
+      // The same key with other bytes is not a replay (design 7.8.12a "导演给业主发媒体" item 2).
+      const conflicts = row => typeof meta.sha256 === 'string' && typeof row.sha256 === 'string' && row.sha256 !== meta.sha256;
       if (keyed) {
         const stored = find(meta.channel, meta.messageRef, meta.index);
+        if (stored && conflicts(stored)) { log('media_refused', { reason: 'idempotency_conflict' }); return { refused: 'idempotency_conflict' }; }
         if (stored) return { ref: stored.ref, kind: lookup(stored.ref)?.kind, mime: stored.mime, size: stored.size,
           ...(stored.durationMs !== undefined ? { durationMs: stored.durationMs } : {}), duplicate: true };
         const refusedBefore = findRefusal(meta.channel, meta.messageRef, meta.index);
+        if (refusedBefore && conflicts(refusedBefore)) { log('media_refused', { reason: 'idempotency_conflict' }); return { refused: 'idempotency_conflict' }; }
         if (refusedBefore) return { refused: refusedBefore.refused, duplicate: true };
       }
       // A refusal of the closed set is the attachment's answer for good (recorded by its key);
@@ -386,6 +439,16 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
         const hour = now() - 3600000;
         const taken = rows.filter(row => row.source === 'in' && row.channel === meta.channel && Date.parse(row.at) > hour).length;
         if (taken >= limits.inbound_per_channel_hour) { log('media_refused', { reason: 'rate' }); return refuse('too_large'); }
+      }
+      if (meta.channel === 'director') {
+        const hour = now() - 3600000;
+        const taken = rows.filter(row => row.channel === 'director' && Date.parse(row.at) > hour).map(row => Date.parse(row.at)).sort((a, b) => a - b);
+        if (taken.length >= limits.director_per_hour) {
+          // When the oldest counted row leaves the hour, one more fits.
+          const retryAfter = Math.max(1, Math.ceil((taken[taken.length - limits.director_per_hour] - hour) / 1000));
+          log('media_refused', { reason: 'rate' });
+          return { refused: 'rate_limited', retry_after: retryAfter };
+        }
       }
       try {
         const row = await store(meta, open, signal);
@@ -451,7 +514,7 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   }
   let timer;
   return {
-    root, home, indexFile, ingest, lookup, find, cleanup, enforceTotal, covers,
+    root, home, indexFile, limits, ingest, lookup, find, cleanup, enforceTotal, covers,
     get rows() { return rows.map(row => ({ ...row })); },
     totalBytes,
     /** The bytes of a ref (undefined when the ref is unknown or its file is gone). */

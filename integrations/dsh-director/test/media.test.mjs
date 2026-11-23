@@ -1,13 +1,15 @@
 /** Step 24.2 (design-steward 7.8.12, 7.8.12a, 7.8.18 "媒体"): the steward host's media library
  *  (lib/media.mjs), ownerChannels' storeMedia / attachments / sendFile (lib/channels.mjs) with a
  *  fake channel end to end, and media_call / send_media (lib/media-tools.mjs). No DSH. */
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync, writeFileSync, chmodSync, existsSync, readdirSync } from 'node:fs';
+import fs, { mkdtempSync, readFileSync, statSync, writeFileSync, chmodSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMediaLibrary, sniff, imageSize, covers, placeholder, attachmentLine, MEDIA_LIMITS, REF_PATTERN }
-  from '../lib/media.mjs';
+import { createMediaLibrary, sniff, imageSize, covers, audienceLabel, placeholder, attachmentLine, limitsFor, MEDIA_LIMITS,
+  DIRECTOR_TOTAL_BYTES, REF_PATTERN } from '../lib/media.mjs';
 import { createOwnerChannels } from '../lib/channels.mjs';
 import { registerMediaTools, UrlLedger } from '../lib/media-tools.mjs';
 import { GROUP_TOOLS } from '../lib/group-turns.mjs';
@@ -304,6 +306,163 @@ test('library: logs carry a mime and a size, never a name or a byte', async () =
   await lib.ingest({ ...owner, messageRef: 'y', index: 0 }, async () => zip());
   for (const [, fields] of lines) for (const key of Object.keys(fields)) assert.ok(['mime', 'size', 'reason', 'rows', 'error'].includes(key), key);
   assert.deepEqual(lines[0], ['media_stored', { mime: 'image/png', size: 33 }]);
+});
+
+// --- a director's subdirectory (24.2b, design-steward 7.8.12a) -------------------------
+
+const GiB = 1024 * MiB;
+const sha = buffer => createHash('sha256').update(buffer).digest('hex');
+/** An index of `entries` ({at, size} each) written by hand into <root>/<userId>/, each row's file a
+ *  tiny one of its own: the sizes the library sums are the index's, so 1 GiB needs no 1 GiB disk. */
+function seed(r, userId, entries) {
+  mkdirSync(join(r, userId, '2026-11'), { recursive: true, mode: 0o700 });
+  const rows = entries.map(({ at, size }, i) => {
+    const file = `${userId}/2026-11/seed${i}.png`;
+    writeFileSync(join(r, file), png(i + 1, 1), { mode: 0o600 });
+    return { ref: `m_${String(i).padStart(16, '0')}`, sha256: sha(png(i + 1, 1)), mime: 'image/png', size, audience: 'project:p1',
+      source: 'in', channel: 'dashboard', messageRef: `seed${i}`, index: 0, file, at };
+  });
+  writeFileSync(join(r, userId, 'index.jsonl'), rows.map(row => JSON.stringify(row) + '\n').join(''), { mode: 0o600 });
+  return rows;
+}
+
+test('director library: a d-<id> subdirectory is held to 1 GiB in all, oldest first; the steward\'s stays at the table\'s 5 GiB', async () => {
+  assert.equal(DIRECTOR_TOTAL_BYTES, GiB);
+  assert.equal(limitsFor('d-drv1').total_bytes, GiB);
+  assert.equal(limitsFor('owner').total_bytes, MEDIA_LIMITS.total_bytes);
+  assert.equal(MEDIA_LIMITS.total_bytes, 5 * GiB);
+  assert.equal(createMediaLibrary({ root: root(), userId: 'd-drv1' }).limits.total_bytes, GiB);
+  // An override is key by key: the rest stay this writer's.
+  const scaled = createMediaLibrary({ root: root(), userId: 'd-drv1', limits: { total_bytes: 3000 } }).limits;
+  assert.equal(scaled.total_bytes, 3000); assert.equal(scaled.image_bytes, MEDIA_LIMITS.image_bytes); assert.equal(scaled.director_per_hour, 20);
+  const entries = [{ at: '2026-11-20T10:00:00.000Z', size: 400 * MiB }, { at: '2026-11-21T10:00:00.000Z', size: 400 * MiB },
+    { at: '2026-11-22T09:00:00.000Z', size: 400 * MiB }];
+  const now = () => Date.parse('2026-11-22T10:00:00Z');
+  const director = root();
+  const seeded = seed(director, 'd-drv1', entries);
+  const lib = createMediaLibrary({ root: director, userId: 'd-drv1', now });
+  const added = await lib.ingest({ channel: 'dashboard', messageRef: 'msg-1', index: 0, audience: 'project:p1', source: 'in' }, async () => png());
+  assert.match(added.ref, REF_PATTERN);
+  assert.equal(lib.lookup(seeded[0].ref), undefined, 'the oldest went: 1200 MiB is past 1 GiB');
+  assert.ok(!existsSync(join(director, seeded[0].file)));
+  for (const kept of [seeded[1], seeded[2]]) assert.ok(lib.lookup(kept.ref), kept.ref);
+  assert.ok(lib.totalBytes() <= GiB);
+  // The same rows in the steward's subdirectory are under its 5 GiB: nothing goes.
+  const steward = root();
+  const ownRows = seed(steward, 'owner', entries);
+  const own = createMediaLibrary({ root: steward, userId: 'owner', now });
+  assert.ok((await own.ingest({ ...owner, messageRef: 'w', index: 0 }, async () => png())).ref);
+  for (const kept of ownRows) assert.ok(own.lookup(kept.ref), kept.ref);
+});
+
+const directorMeta = (key, bytes, index = 0) => ({ channel: 'director', messageRef: key, index, audience: 'project:p1', source: 'generated', sha256: sha(bytes) });
+
+test('director library: the 21st \'director\' file in an hour is rate_limited with retry_after, counted from the index (a restart keeps it); a replay adds no row', async () => {
+  const r = root();
+  const t0 = Date.parse('2026-11-22T10:00:00Z');
+  let now = t0;
+  const lib = createMediaLibrary({ root: r, userId: 'd-drv1', now: () => now });
+  let opened = 0;
+  for (let i = 0; i < 20; i += 1) {
+    now = t0 + i * 60000;
+    const bytes = png(10 + i, 10);
+    assert.match((await lib.ingest(directorMeta(`req-${i}`, bytes), async () => { opened += 1; return bytes; })).ref, REF_PATTERN, `file ${i}`);
+  }
+  now = t0 + 20 * 60000;
+  const late = png(99, 99);
+  const before = opened;
+  assert.deepEqual(await lib.ingest(directorMeta('req-20', late), async () => { opened += 1; return late; }),
+    { refused: 'rate_limited', retry_after: 2400 }, 'the first of the hour leaves it 40 minutes from now');
+  assert.equal(opened, before, 'nothing was read');
+  // A retry of a request already stored answers its ref and is not a new file.
+  const replay = await lib.ingest(directorMeta('req-0', png(10, 10)), async () => { opened += 1; return png(10, 10); });
+  assert.equal(replay.duplicate, true); assert.equal(opened, before);
+  // The count is the index's: a new library on the same subdirectory still refuses.
+  const again = createMediaLibrary({ root: r, userId: 'd-drv1', now: () => now });
+  assert.deepEqual(await again.ingest(directorMeta('req-20', late), async () => late), { refused: 'rate_limited', retry_after: 2400 });
+  assert.equal(again.rows.filter(row => row.channel === 'director').length, 20, 'the refusal was not recorded');
+  // Once the first one is an hour old, one more fits.
+  now = t0 + 3600 * 1000 + 1;
+  assert.match((await again.ingest(directorMeta('req-20', late), async () => late)).ref, REF_PATTERN);
+  assert.equal((await again.ingest(directorMeta('req-21', png(98, 98)), async () => png(98, 98))).refused, 'rate_limited');
+});
+
+test('director library: dashboard ingests are never rate-refused, and never count against the director\'s 20', async () => {
+  const lib = createMediaLibrary({ root: root(), userId: 'd-drv1', now: () => Date.parse('2026-11-22T10:00:00Z') });
+  for (let i = 0; i < 25; i += 1)
+    assert.match((await lib.ingest({ channel: 'dashboard', messageRef: `msg-${i}`, index: 0, audience: 'project:p1', source: 'in' },
+      async () => png(20 + i, 10))).ref, REF_PATTERN, `upload ${i}`);
+  for (let i = 0; i < 20; i += 1) assert.match((await lib.ingest(directorMeta(`req-${i}`, png(60 + i, 10)), async () => png(60 + i, 10))).ref, REF_PATTERN);
+  assert.equal((await lib.ingest(directorMeta('req-20', png(90, 10)), async () => png(90, 10))).refused, 'rate_limited');
+  assert.match((await lib.ingest({ channel: 'dashboard', messageRef: 'msg-25', index: 0, audience: 'project:p1', source: 'in' },
+    async () => png(91, 10))).ref, REF_PATTERN, 'a dashboard upload past the director\'s 20');
+});
+
+test('director library: the same (director, key, index) with the same bytes is the same ref; other bytes are idempotency_conflict, before anything is read', async () => {
+  const r = root();
+  const lib = createMediaLibrary({ root: r, userId: 'd-drv1' });
+  const first = png(30, 30), second = png(31, 31);
+  let opened = 0;
+  const stored = await lib.ingest(directorMeta('req-a', first), async () => { opened += 1; return first; });
+  const same = await lib.ingest(directorMeta('req-a', first), async () => { opened += 1; return first; });
+  assert.equal(same.ref, stored.ref); assert.equal(same.duplicate, true); assert.equal(opened, 1);
+  assert.deepEqual(await lib.ingest(directorMeta('req-a', second), async () => { opened += 1; return second; }), { refused: 'idempotency_conflict' });
+  assert.equal(opened, 1, 'the other file was not read');
+  assert.deepEqual(await createMediaLibrary({ root: r, userId: 'd-drv1' }).ingest(directorMeta('req-a', second), async () => second),
+    { refused: 'idempotency_conflict' }, 'after a restart too');
+  // Another index of the same key is another file.
+  assert.match((await lib.ingest(directorMeta('req-a', second, 1), async () => second)).ref, REF_PATTERN);
+  // A refusal kept by its key is the same: its bytes again answer it, other bytes conflict.
+  const big = png(8000, 8000);
+  assert.deepEqual(await lib.ingest(directorMeta('req-b', big), async () => big), { refused: 'too_large' });
+  assert.deepEqual(await lib.ingest(directorMeta('req-b', big), async () => big), { refused: 'too_large', duplicate: true });
+  assert.deepEqual(await lib.ingest(directorMeta('req-b', first), async () => first), { refused: 'idempotency_conflict' });
+  // A sha256 that is not one is invalid.
+  assert.deepEqual(await lib.ingest({ ...directorMeta('req-c', first), sha256: 'abc' }, async () => first), { refused: 'invalid_media' });
+});
+
+test('director library: a write the disk cannot take is store_failed for a director\'s file, unavailable for the dashboard\'s; nothing is kept', async () => {
+  const r = root();
+  const lib = createMediaLibrary({ root: r, userId: 'd-drv1' });
+  const realWrite = fs.writeFileSync, realAppend = fs.appendFileSync;
+  const failing = (real, match, code) => function (path, ...rest) {
+    if (String(path).includes(match)) throw Object.assign(new Error(code), { code });
+    return real.call(this, path, ...rest);
+  };
+  const withFs = async (name, fn, run) => {
+    mock.method(fs, name, fn); syncBuiltinESMExports();
+    try { return await run(); } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+  };
+  const bytes = png(40, 40);
+  for (const code of ['ENOSPC', 'EDQUOT']) {
+    assert.deepEqual(await withFs('writeFileSync', failing(realWrite, '.incoming-', code), () => lib.ingest(directorMeta('req-1', bytes), async () => bytes)),
+      { refused: 'store_failed' }, code);
+  }
+  assert.deepEqual(await withFs('writeFileSync', failing(realWrite, '.incoming-', 'ENOSPC'),
+    () => lib.ingest({ channel: 'dashboard', messageRef: 'msg-1', index: 0, audience: 'project:p1', source: 'in' }, async () => bytes)),
+  { refused: 'unavailable' }, 'the dashboard\'s ingest throws and is asked again');
+  assert.deepEqual(await withFs('writeFileSync', failing(realWrite, '.incoming-', 'EBUSY'), () => lib.ingest(directorMeta('req-1', bytes), async () => bytes)),
+    { refused: 'unavailable' }, 'not a full disk');
+  // The index cannot take the row: no ref, and the file this call wrote is gone again.
+  assert.deepEqual(await withFs('appendFileSync', failing(realAppend, 'index.jsonl', 'ENOSPC'), () => lib.ingest(directorMeta('req-1', bytes), async () => bytes)),
+    { refused: 'store_failed' });
+  assert.deepEqual(lib.rows, []);
+  assert.deepEqual(files({ library: lib }), [], 'no file left behind');
+  // None of it was recorded: the same request now goes through.
+  assert.match((await lib.ingest(directorMeta('req-1', bytes), async () => bytes)).ref, REF_PATTERN);
+  assert.equal(createMediaLibrary({ root: r, userId: 'd-drv1' }).rows.length, 1);
+});
+
+test('audience: a director\'s project turn covers only its own project\'s rows', () => {
+  const p1 = { kind: 'project', project_id: 'p1' };
+  assert.equal(audienceLabel(p1), 'project:p1');
+  assert.ok(covers(p1, { audience: 'project:p1' }));
+  for (const audience of ['project:p2', 'project:p10', 'owner', 'group:wechat:r1', undefined])
+    assert.ok(!covers(p1, { audience }), String(audience));
+  for (const turn of [{ kind: 'project' }, { kind: 'project', project_id: '' }, { kind: 'project', project_id: 7 }])
+    assert.ok(!covers(turn, { audience: 'project:' }) && !covers(turn, { audience: 'project:7' }), JSON.stringify(turn));
+  // A group turn still never covers a project's row.
+  assert.ok(!covers({ kind: 'group', channel: 'wechat', group_ref: 'r1' }, { audience: 'project:p1' }));
 });
 
 test('audience: an owner turn covers every ref, a group turn only its own group\'s, anything unreadable nothing', () => {

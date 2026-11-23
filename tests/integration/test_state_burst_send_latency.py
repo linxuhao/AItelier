@@ -11,6 +11,14 @@ send_driver_message queued behind it for 30-120 s. Now:
 * the State routes take the db/workspace getters on the event loop, so a request
   takes the limiter twice (reads) or three times (a command, with its verdict).
 
+The hard gate is deterministic: no schema setup and no overlap during the burst,
+and the per-request (limiter, token lookup) counts. Those counts are with the
+write gate off, as here; in production (gate on) a command or a private read also
+runs the router guard's own token lookup, so a command is (3, 2). The send's wall
+time is printed, but only bounded by the DSH client's 30 s State deadline: the send
+still waits FIFO behind the reads, so its time follows host load (1.6-5.2 s at the
+fix on a loaded host, 6.3-13.1 s at the base in the same containers).
+
 The app is the real `/api/state` router on a scratch database, driven in-process.
 Measured on the base commit in the same container: the send took 6.3 s behind the
 burst, 81 graph schema setups ran during it, and requests took the limiter 4/4/5
@@ -38,9 +46,9 @@ from core.state_service import StateService
 from core.workspace_manager import WorkspaceManager
 
 READS = 80
-# The base commit measured 6.3 s in a 2-CPU container; the fix measures under 2 s
-# there on an overloaded host. The bound keeps a wide margin for host load.
-SEND_BOUND_SECONDS = 5.0
+# A hang guard, not the gate: the DSH driver's State request deadline
+# (integrations/dsh-driver/runtime.mjs). The deterministic checks below are the gate.
+SEND_BOUND_SECONDS = 30.0
 
 
 @pytest.fixture

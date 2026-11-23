@@ -20,14 +20,36 @@ limits itself:
      ptrace, process_vm_readv/writev, pidfd_open/getfd/send_signal, kill, tkill,
      tgkill and rt_(tg)sigqueueinfo at any process but this one, and a file owner set
      to another process (fcntl F_SETOWN, F_SETOWN_EX, F_SETSIG; ioctl FIOSETOWN,
-     SIOCSPGRP: SIGIO or F_SETSIG's signal would go to that owner) fail with EPERM
-     (clone3 with ENOSYS, so a thread falls back to clone). With no owner set, O_ASYNC
-     signals nobody; F_NOTIFY and F_SETLEASE make the caller itself the owner.
+     SIOCSPGRP: SIGIO or F_SETSIG's signal would go to that owner), the limits or
+     scheduling of another process (prlimit64, sched_setaffinity, sched_setparam,
+     sched_setscheduler, sched_setattr at a pid other than 0 or this one; setpriority
+     and ioprio_set at another pid, any process group or any user: prlimit64(the host,
+     RLIMIT_CPU, {1, 1}) would kill it), migrate_pages, move_pages, kcmp,
+     get_robust_list, process_madvise, process_mrelease, perf_event_open, the keyring
+     calls (add_key, request_key, keyctl) and System V IPC (shm*, sem*, msg*) fail with
+     EPERM (clone3 with ENOSYS, so a thread falls back to clone). With no owner set,
+     O_ASYNC signals nobody; F_NOTIFY and F_SETLEASE make the caller itself the owner.
+  Same-uid calls at another process, measured on kernel 6.8 under each layer alone
+  (recheck CHK-5, CHK-6): the kernel by itself let prlimit64, setpriority, the
+  sched_set* calls, ioprio_set, get_robust_list and System V IPC through, so the
+  filter refuses them. Landlock also refuses get_robust_list, kcmp, migrate_pages,
+  move_pages and perf_event_open at another process (their check is ptrace_may_access,
+  which landlock refuses towards a process outside its domain), and Docker's default
+  profile refused kcmp, migrate_pages, move_pages, perf_event_open, process_madvise and
+  the keyring calls; the filter refuses them anyway, for a reader with no landlock
+  layer or outside Docker. process_madvise and process_mrelease need a pidfd, which
+  nothing here can get. The kernel alone refuses capset at another pid (EPERM),
+  setpgid of a process that is not our child (ESRCH) or into another session's group
+  (EPERM), timer_create SIGEV_THREAD_ID at another thread (EINVAL) and fanotify_init
+  (EPERM). Landlock refuses mq_open (POSIX message queues are files) and opening
+  /proc/<pid>, /dev/tty or /dev/ptmx (so no pidfd from /proc and no TIOCSTI/TIOCSIG).
+  setsid, prctl PR_SET_PTRACER and PR_SET_PDEATHSIG and timer_create SIGEV_SIGNAL act
+  on this process only (and ptrace is refused here), so they stay.
   What stays open even with every layer: reading inside the allowed paths, writing
   files of up to 8 MiB each in the output directory until the CPU limit, the
-  descriptors the host gave (stdout and stderr), and System V IPC (any message queue,
-  semaphore set or shared memory segment in the IPC namespace whose mode lets
-  this user in). Each layer fails open: the result's
+  descriptors the host gave (stdout and stderr), and the per-user counts while the
+  child lives (inotify instances, pipe buffer pages), held to 64 descriptors.
+  Each layer fails open: the result's
   `sandbox` names exactly the layers in place, joined by "+" - "landlock" (files and
   TCP) or "landlock_fs" (files only), then "seccomp" - or "none", and the read goes on.
 
@@ -112,9 +134,19 @@ DENIED_SYSCALLS = (
     425, 426, 427,  # io_uring_setup/enter/register (io_uring can open sockets past this filter)
     57, 58, 59, 322, 272, 308,  # fork vfork execve execveat unshare setns
     101, 310, 311, 424, 434, 438,  # ptrace process_vm_readv/writev pidfd_send_signal pidfd_open pidfd_getfd
+    256, 279, 312, 274, 440, 448, 298,  # migrate_pages move_pages kcmp get_robust_list process_madvise process_mrelease perf_event_open
+    248, 249, 250,  # add_key request_key keyctl (the user keyring is shared by every process of the uid)
+    29, 30, 31, 67, 64, 65, 66, 220, 68, 69, 70, 71,  # System V IPC: shmget shmat shmctl shmdt semget semop semctl semtimedop msgget msgsnd msgrcv msgctl
 )
 # A signal only to this process (its first argument, a 32-bit pid or tgid, must be ours).
 SELF_ONLY_SYSCALLS = (62, 129, 200, 234, 297)  # kill rt_sigqueueinfo tkill tgkill rt_tgsigqueueinfo
+# Limits and scheduling only of this process: the first argument, a 32-bit pid, must be 0 (the caller) or ours.
+# A same-uid caller may change another process's limits and lower its priority with no ptrace check:
+# prlimit64(the host, RLIMIT_CPU, {1, 1}) kills it. setrlimit is prlimit64(0, ...).
+SELF_OR_ZERO_SYSCALLS = (302, 203, 142, 144, 314)  # prlimit64 sched_setaffinity sched_setparam sched_setscheduler sched_setattr
+# The same for setpriority and ioprio_set, whose first argument picks a process, a process group or a
+# user: only the process kind (PRIO_PROCESS, IOPRIO_WHO_PROCESS), and its second argument 0 or ours.
+SYS_SETPRIORITY, SYS_IOPRIO_SET, PRIO_PROCESS, IOPRIO_WHO_PROCESS = 141, 251, 0, 1
 SYS_CLONE, SYS_CLONE3 = 56, 435
 # A process to signal through a file's owner: refused by command, every other fcntl and ioctl stays.
 # Both calls take cmd as an unsigned int, so only args[1]'s low word counts. x86_64 has no fcntl64.
@@ -185,6 +217,7 @@ def _landlock(syscall, input_path, out_dir):
 def seccomp_program(pid):
     """The seccomp filter as (code, jt, jf, k): DENIED_SYSCALLS and any non-x86_64 call -> EPERM,
     clone3 -> ENOSYS, clone without CLONE_THREAD -> EPERM, SELF_ONLY_SYSCALLS at another pid -> EPERM,
+    SELF_OR_ZERO_SYSCALLS, setpriority and ioprio_set at another process, group or user -> EPERM,
     fcntl with an OWNER_FCNTLS command and ioctl with an OWNER_IOCTLS command -> EPERM."""
     program = [
         (BPF_LD_W_ABS, 4, 0, 0), (BPF_JEQ_K, AUDIT_ARCH_X86_64, 0, "deny"),  # seccomp_data.arch
@@ -193,6 +226,9 @@ def seccomp_program(pid):
         (BPF_JEQ_K, SYS_CLONE3, "enosys", 0),
         (BPF_JEQ_K, SYS_CLONE, "clone", 0),
         *[(BPF_JEQ_K, nr, "self", 0) for nr in SELF_ONLY_SYSCALLS],
+        *[(BPF_JEQ_K, nr, "self_or_0", 0) for nr in SELF_OR_ZERO_SYSCALLS],
+        (BPF_JEQ_K, SYS_SETPRIORITY, "prio", 0),
+        (BPF_JEQ_K, SYS_IOPRIO_SET, "ioprio", 0),
         (BPF_JEQ_K, SYS_FCNTL, "fcntl", 0),
         (BPF_JEQ_K, SYS_IOCTL, "ioctl", 0),
         (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
@@ -203,6 +239,12 @@ def seccomp_program(pid):
         *[(BPF_JEQ_K, cmd, "deny", 0) for cmd in OWNER_IOCTLS],
         (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
         "clone", (BPF_LD_W_ABS, 16, 0, 0), (BPF_JSET_K, CLONE_THREAD, "allow", "deny"),  # args[0] low word: flags
+        "prio", (BPF_LD_W_ABS, 16, 0, 0), (BPF_JEQ_K, PRIO_PROCESS, "who", "deny"),  # args[0] low word: which
+        "ioprio", (BPF_LD_W_ABS, 16, 0, 0), (BPF_JEQ_K, IOPRIO_WHO_PROCESS, "who", "deny"),
+        "who", (BPF_LD_W_ABS, 28, 0, 0), (BPF_JEQ_K, 0, 0, "deny"),  # args[1] high word
+        (BPF_LD_W_ABS, 24, 0, 0), (BPF_JEQ_K, 0, "allow", 0), (BPF_JEQ_K, pid, "allow", "deny"),
+        "self_or_0", (BPF_LD_W_ABS, 20, 0, 0), (BPF_JEQ_K, 0, 0, "deny"),  # args[0] high word
+        (BPF_LD_W_ABS, 16, 0, 0), (BPF_JEQ_K, 0, "allow", 0), (BPF_JEQ_K, pid, "allow", "deny"),
         "self", (BPF_LD_W_ABS, 20, 0, 0), (BPF_JEQ_K, 0, 0, "deny"),  # args[0] high word
         (BPF_LD_W_ABS, 16, 0, 0), (BPF_JEQ_K, pid, "allow", "deny"),
         "allow", (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),

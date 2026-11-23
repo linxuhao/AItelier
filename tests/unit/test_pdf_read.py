@@ -662,6 +662,142 @@ def test_a_hijacked_child_cannot_make_another_process_a_file_owner(tmp_path):
     assert rec and set(rec.values()) == {"ok"}, rec
 
 
+HIJACK_LIMITS = r"""
+import ctypes, errno, importlib.util, json, os, resource, sys
+script, out_dir, sibling = sys.argv[1], sys.argv[2], int(sys.argv[3])
+spec = importlib.util.spec_from_file_location("pdf_read_limits", script)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sandbox = module.harden(None, out_dir)
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+L, P = ctypes.c_long, ctypes.c_void_p
+def sys_(*args):
+    if libc.syscall(*args) < 0:
+        raise OSError(ctypes.get_errno(), "")
+def attempt(fn):
+    try:
+        fn()
+        return "ok"
+    except OSError as exc:
+        return errno.errorcode.get(exc.errno, str(exc.errno))
+class Rlimit(ctypes.Structure):
+    _fields_ = [("cur", ctypes.c_uint64), ("max", ctypes.c_uint64)]
+class SchedAttr(ctypes.Structure):  # SCHED_ATTR_SIZE_VER0
+    _fields_ = [("size", ctypes.c_uint32), ("policy", ctypes.c_uint32), ("flags", ctypes.c_uint64),
+                ("nice", ctypes.c_int32), ("priority", ctypes.c_uint32), ("runtime", ctypes.c_uint64),
+                ("deadline", ctypes.c_uint64), ("period", ctypes.c_uint64)]
+one_second, mask, head, size = Rlimit(1, 1), ctypes.c_ulong(1), ctypes.c_void_p(), ctypes.c_size_t()
+idle = SchedAttr(ctypes.sizeof(SchedAttr), os.SCHED_IDLE, 0, 19, 0, 0, 0, 0)
+IOPRIO_IDLE, IOPRIO_BE4, NOBODY_UID = 3 << 13, (2 << 13) | 4, 54321
+rec = {"sandbox": sandbox}
+# From here on this is what a child taken over by a hostile PDF could try, at the host (our parent) and a sibling.
+for name, pid in (("parent", os.getppid()), ("sibling", sibling)):
+    rec[name] = {
+        "prlimit64 RLIMIT_CPU 1s": attempt(lambda: sys_(L(302), L(pid), L(resource.RLIMIT_CPU), ctypes.byref(one_second), P(None))),
+        "prlimit64 read": attempt(lambda: sys_(L(302), L(pid), L(resource.RLIMIT_CPU), P(None), ctypes.byref(Rlimit()))),
+        "setpriority 19": attempt(lambda: os.setpriority(os.PRIO_PROCESS, pid, 19)),
+        "sched_setaffinity": attempt(lambda: os.sched_setaffinity(pid, {0})),
+        "sched_setscheduler SCHED_IDLE": attempt(lambda: os.sched_setscheduler(pid, os.SCHED_IDLE, os.sched_param(0))),
+        "sched_setparam": attempt(lambda: os.sched_setparam(pid, os.sched_param(0))),
+        "sched_setattr SCHED_IDLE": attempt(lambda: sys_(L(314), L(pid), ctypes.byref(idle), L(0))),
+        "ioprio_set idle": attempt(lambda: sys_(L(251), L(1), L(pid), L(IOPRIO_IDLE))),
+        "migrate_pages": attempt(lambda: sys_(L(256), L(pid), L(64), ctypes.byref(mask), ctypes.byref(mask))),
+        "move_pages": attempt(lambda: sys_(L(279), L(pid), L(0), P(None), P(None), P(None), L(0))),
+        "kcmp": attempt(lambda: sys_(L(312), L(pid), L(os.getpid()), L(0), L(0), L(0))),
+        "get_robust_list": attempt(lambda: sys_(L(274), L(pid), ctypes.byref(head), ctypes.byref(size))),
+    }
+# Our process group is the parent's; a user nobody runs as gives ESRCH, not EPERM, without the filter.
+rec["group"] = {
+    "setpriority PRIO_PGRP": attempt(lambda: os.setpriority(os.PRIO_PGRP, 0, 19)),
+    "setpriority PRIO_USER": attempt(lambda: os.setpriority(os.PRIO_USER, NOBODY_UID, 19)),
+    "ioprio_set IOPRIO_WHO_PGRP": attempt(lambda: sys_(L(251), L(2), L(0), L(IOPRIO_IDLE))),
+    "ioprio_set IOPRIO_WHO_USER": attempt(lambda: sys_(L(251), L(3), L(NOBODY_UID), L(IOPRIO_IDLE))),
+    "process_madvise": attempt(lambda: sys_(L(440), L(-1), P(None), L(0), L(0), L(0))),
+    "process_mrelease": attempt(lambda: sys_(L(448), L(-1), L(0))),
+    "perf_event_open": attempt(lambda: sys_(L(298), P(None), L(-1), L(0), L(-1), L(0))),
+    "keyctl": attempt(lambda: sys_(L(250), L(0), L(-4), L(0))),  # KEYCTL_GET_KEYRING_ID, the user keyring
+    "msgget": attempt(lambda: sys_(L(68), L(0), L(0o600))),
+    "semget": attempt(lambda: sys_(L(64), L(0), L(1), L(0o600))),
+    "shmget": attempt(lambda: sys_(L(29), L(0), L(4096), L(0o600))),
+}
+# Its own limits and scheduling stay this process's to change.
+rec["self"] = {
+    "setrlimit": attempt(lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0))),
+    "prlimit64 pid 0": attempt(lambda: sys_(L(302), L(0), L(resource.RLIMIT_CPU), ctypes.byref(Rlimit(19, 22)), P(None))),
+    "prlimit64 own pid": attempt(lambda: sys_(L(302), L(os.getpid()), L(resource.RLIMIT_CPU), P(None), ctypes.byref(Rlimit()))),
+    "setpriority": attempt(lambda: os.setpriority(os.PRIO_PROCESS, 0, 1)),
+    "nice": attempt(lambda: os.nice(1)),
+    "sched_setaffinity": attempt(lambda: os.sched_setaffinity(0, os.sched_getaffinity(0))),
+    "sched_setscheduler": attempt(lambda: os.sched_setscheduler(os.getpid(), os.SCHED_OTHER, os.sched_param(0))),
+    "sched_setparam": attempt(lambda: os.sched_setparam(0, os.sched_param(0))),
+    "ioprio_set": attempt(lambda: sys_(L(251), L(1), L(0), L(IOPRIO_BE4))),
+}
+rec["self_cpu_limit"] = list(resource.getrlimit(resource.RLIMIT_CPU))
+print(json.dumps(rec))
+"""
+
+# The host and a sibling stand-in: note its own state, (the host) run the hijacked child, then burn
+# 1.5 s of CPU, past an RLIMIT_CPU of {1, 1} had the child set one, and note its state again.
+VICTIM = r"""
+import ctypes, json, os, resource, subprocess, sys, time
+libc = ctypes.CDLL(None)
+libc.syscall.restype = ctypes.c_long
+def state():
+    return {"nice": os.getpriority(os.PRIO_PROCESS, 0), "policy": os.sched_getscheduler(0),
+            "affinity": sorted(os.sched_getaffinity(0)), "ioprio": libc.syscall(ctypes.c_long(252), ctypes.c_long(1), ctypes.c_long(0)),
+            "cpu_limit": list(resource.getrlimit(resource.RLIMIT_CPU))}
+out = {"before": state()}
+if len(sys.argv) > 1:
+    child = subprocess.run([sys.executable, "-I", "-c", sys.argv[1], *sys.argv[2:]], capture_output=True, timeout=60)
+    out["child_rc"], out["child"], out["child_err"] = child.returncode, child.stdout.decode(), child.stderr.decode()[-3000:]
+else:
+    sys.stdin.readline()
+start = time.process_time()
+while time.process_time() - start < 1.5:
+    pass
+out["after"] = state()
+print(json.dumps(out))
+"""
+
+
+def test_a_hijacked_child_cannot_change_another_processs_limits_or_scheduling(tmp_path):
+    """Recheck CHK-5 and CHK-6: prlimit64 at the host (getppid()) set RLIMIT_CPU {1, 1} and the
+    kernel killed the host; setpriority, sched_setaffinity and sched_setscheduler slowed another
+    process for good. Each, with sched_setparam, sched_setattr, ioprio_set, the process group and
+    user forms and the other calls that reach another process, is refused at the host and a
+    sibling, and both burn past one second of CPU and live with their state unchanged; the child
+    still changes its own limits and scheduling (setrlimit is prlimit64 at pid 0)."""
+    if not _seccomp_available():
+        pytest.skip("SKIPPED LOUDLY: this environment refuses a seccomp filter, so the reader reports no seccomp layer")
+    out = tmp_path / "out"
+    out.mkdir()
+    sibling = subprocess.Popen([sys.executable, "-I", "-c", VICTIM], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               start_new_session=True)
+    try:
+        # The host stand-in leads its own session and process group, as the host's detached spawn does.
+        host = subprocess.run([sys.executable, "-I", "-c", VICTIM, HIJACK_LIMITS, str(SCRIPT), str(out), str(sibling.pid)],
+                              capture_output=True, env=_env(tmp_path), cwd=tmp_path, timeout=120, start_new_session=True)
+        sib_out, _ = sibling.communicate(b"\n", timeout=60)
+    finally:
+        sibling.kill()
+        sibling.wait()
+    assert host.returncode == 0, f"the host stand-in died: rc {host.returncode} {host.stderr.decode()[-2000:]}"
+    assert sibling.returncode == 0, f"the sibling died: rc {sibling.returncode}"
+    host_out, sib_out = json.loads(host.stdout), json.loads(sib_out)
+    assert host_out["child_rc"] == 0, host_out["child_err"]
+    rec = json.loads(host_out["child"])
+    print(json.dumps(rec, indent=1))
+    assert "seccomp" in rec.pop("sandbox")
+    for name in ("parent", "sibling", "group"):
+        refused = {key: value for key, value in rec[name].items() if value != "EPERM"}
+        assert not refused, (name, refused)
+    assert set(rec["self"].values()) == {"ok"}, rec["self"]
+    assert rec["self_cpu_limit"] == [19, 22]
+    for who, victim in (("host", host_out), ("sibling", sib_out)):
+        assert victim["after"] == victim["before"], (who, victim)
+
+
 def test_the_seccomp_filter_is_well_formed():
     module = _load_module()
     program = module.seccomp_program(4242)

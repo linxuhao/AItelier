@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index ec6c930..b7e6bfc 100644
+index ec6c930..768d869 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -9,14 +9,21 @@ use std::{
@@ -316,7 +316,7 @@ index ec6c930..b7e6bfc 100644
  fn options() -> NativeOptions {
      NativeOptions {
          timeout: Duration::from_secs(10),
-@@ -284,6 +525,247 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -284,6 +525,251 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
                  account.request_blocking(|request| request.send_text(&destination, &text, &send))
              }))
          }
@@ -426,23 +426,27 @@ index ec6c930..b7e6bfc 100644
 +            // full-size picture, `Standard` 2 and `Thumbnail` 3 for the two smaller ones,
 +            // `File` 5, `LargeFile` 7 beyond 25 MiB), so this addon cannot fall behind a
 +            // variant upstream adds.
-+            // The profiles one download may try, in order. An image is asked for as the
-+            // full-size picture first; a refusal moves through the crate's two smaller
-+            // profiles on the *same* id, because a message carries only one of WeChat's
-+            // picture ids in practice (measured 2026-11-23: the retry that swapped in a
-+            // second id never ran, the arriving payload carried no `cdnmidimgurl`). A file
-+            // keeps its one attempt: the CDN serves it, so a retry would only repeat a
-+            // request that already worked.
++            // The attempts one download may make, in order. Measured on a live bridge
++            // (2026-11-23 09:59:11Z, one 194-character image id): the full-size profile
++            // (`filetype=1`) was refused by the CDN after 2.81 s with `CDN HTTP status 400`,
++            // and the same id at `filetype=2`, the crate's `Standard`, served the picture in
++            // 5.97 s. So an image asks for `Standard` first and reaches `Original` only when
++            // that attempt was refused; a second id the payload carried, when it differs
++            // from the first, is the last resort at `Standard`. The thumbnail profile is not
++            // asked for at all: no measurement covers it. A file keeps its one attempt: the
++            // CDN serves it, so a retry would only repeat a request that already worked.
 +            let is_image = quality == MediaQuality::Original;
-+            let mut candidates = vec![(file_id.clone(), quality, "primary")];
++            let mut candidates = Vec::new();
 +            if is_image {
 +                candidates.push((file_id.clone(), MediaQuality::Standard, "primary-standard"));
-+                candidates.push((file_id.clone(), MediaQuality::Thumbnail, "primary-thumbnail"));
++                candidates.push((file_id.clone(), MediaQuality::Original, "primary-original"));
 +                if let Some(other) = fallback_file_id.clone() {
 +                    if other != file_id {
 +                        candidates.push((other, MediaQuality::Standard, "mid"));
 +                    }
 +                }
++            } else {
++                candidates.push((file_id.clone(), quality, "primary"));
 +            }
 +            let mut last_refusal = None;
 +            let mut downloaded = None;
@@ -483,8 +487,8 @@ index ec6c930..b7e6bfc 100644
 +                    Err(err) => last_refusal = Some(err),
 +                }
 +            }
-+            // Every image profile of this id was refused: answer with the last refusal, which
-+            // is what the bridge's own log line reports.
++            // Every candidate was refused: answer with the last refusal, which is what the
++            // bridge's own log line reports.
 +            let Some(downloaded) = downloaded else {
 +                return Err(last_refusal.expect("a download runs at least one attempt"));
 +            };
@@ -564,7 +568,7 @@ index ec6c930..b7e6bfc 100644
          Operation::LookupSelf => lookup_self(session),
          Operation::Logout => {
              session.incoming = None;
-@@ -324,7 +806,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
+@@ -324,7 +810,7 @@ fn sync(session: &mut Session, scene: u32) -> Result<Value> {
          .own_username;
      let cursor = session.received_cursor.clone();
      let batch = connection(session)?.sync(&cursor, scene)?;
@@ -573,7 +577,7 @@ index ec6c930..b7e6bfc 100644
      session.received_cursor = batch.cursor;
      Ok(json!({ "messages": messages, "continuation": batch.continuation }))
  }
-@@ -451,15 +933,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
+@@ -451,15 +937,148 @@ fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      }
  }
  
@@ -724,7 +728,7 @@ index ec6c930..b7e6bfc 100644
  /// Incoming text with a server message ID. A group message names its member
  /// sender in the content; one without a valid sender is skipped, never credited
  /// to the group.
-@@ -558,7 +1173,7 @@ mod tests {
+@@ -558,7 +1177,7 @@ mod tests {
          );
          let error = result.unwrap_err();
          assert!(error.is::<SessionEnded>());
@@ -733,7 +737,7 @@ index ec6c930..b7e6bfc 100644
          assert_eq!(steps, ["attempt", "reconnect", "attempt", "renew"]);
      }
  
-@@ -611,7 +1226,7 @@ mod tests {
+@@ -611,7 +1230,7 @@ mod tests {
          let error = result.unwrap_err();
          assert!(!error.is::<SessionEnded>());
          assert_eq!(
@@ -742,7 +746,7 @@ index ec6c930..b7e6bfc 100644
              "Neo could not read a sync page: Sync service returned -1"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -619,7 +1234,7 @@ mod tests {
+@@ -619,7 +1238,7 @@ mod tests {
          let stopped = anyhow::Error::new(AccountInterrupted::Stopped).context("Account is stopped");
          let (result, steps) = scripted_recovery(vec![Err(stopped)], Ok(()));
          assert_eq!(
@@ -751,7 +755,7 @@ index ec6c930..b7e6bfc 100644
              "Neo could not read a sync page: Account stopped"
          );
          assert_eq!(steps, ["attempt"]);
-@@ -632,7 +1247,7 @@ mod tests {
+@@ -632,7 +1251,7 @@ mod tests {
              Ok(()),
          );
          assert_eq!(
@@ -760,7 +764,7 @@ index ec6c930..b7e6bfc 100644
              "Neo could not read a sync page"
          );
          assert_eq!(steps, ["attempt", "reconnect", "attempt"]);
-@@ -742,6 +1357,162 @@ mod tests {
+@@ -742,6 +1361,162 @@ mod tests {
          assert_eq!(incoming_text(image), None);
      }
  
@@ -923,7 +927,7 @@ index ec6c930..b7e6bfc 100644
      #[test]
      fn closing_without_a_session_resets_state() {
          let mut session = Session {
-@@ -756,7 +1527,7 @@ mod tests {
+@@ -756,7 +1531,7 @@ mod tests {
  
      #[test]
      fn unhandled_sync_commands_are_skipped() {
@@ -932,7 +936,7 @@ index ec6c930..b7e6bfc 100644
              vec![wire::SyncCommand {
                  id: 9999,
                  payload: vec![42],
-@@ -765,4 +1536,35 @@ mod tests {
+@@ -765,4 +1540,35 @@ mod tests {
          );
          assert!(messages.is_empty());
      }

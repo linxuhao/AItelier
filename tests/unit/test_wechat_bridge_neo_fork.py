@@ -153,6 +153,7 @@ DOWNLOAD_FIELDS = {"file_id", "fallback_file_id", "aes_key", "quality", "expecte
 # The fields the fix's design note documents for the attempt's request line, and no others.
 DIAGNOSTIC_FIELDS = {
     "variant", "quality", "filetype", "downpicformat", "size_class", "file_id_len", "has_slash", "has_query",
+    "has_amp", "has_equals", "all_hex",
 }
 
 
@@ -286,6 +287,49 @@ def download_media_handler(rust: str) -> str:
     )
     _, end = balanced_slice(rust, handlers[0].end() - 1)
     return rust[handlers[0].end() : end]
+
+
+CANDIDATE_PUSH = re.compile(
+    r"candidates\.push\(\((?P<id>[^,]+?),\s*(?P<profile>MediaQuality::[A-Za-z]+|quality),"
+    r'\s*"(?P<variant>[a-z-]+)"\)\);'
+)
+
+
+def candidate_arms(handler: str) -> tuple[str, str]:
+    """The candidate list's two arms: an image's ladder, and the one attempt every other
+    profile gets."""
+    at = handler.index("let mut candidates = Vec::new();")
+    image_open = handler.index("{", handler.index("if is_image", at))
+    _, image_end = balanced_slice(handler, image_open)
+    else_open = handler.index("{", handler.index("else", image_end))
+    _, else_end = balanced_slice(handler, else_open)
+    return handler[image_open + 1 : image_end - 1], handler[else_open + 1 : else_end - 1]
+
+
+def candidate_pushes(arm: str) -> list[tuple[str, str, str]]:
+    """The attempts one arm queues, in the order it queues them: id, profile, log label."""
+    return [
+        (push["id"].strip(), push["profile"], push["variant"])
+        for push in CANDIDATE_PUSH.finditer(arm)
+    ]
+
+
+def distinct_second_id_guard(image_arm: str) -> str:
+    """The body of the `other != file_id` test a payload's second id has to pass."""
+    at = image_arm.index("if let Some(other) = fallback_file_id.clone() {")
+    outer_open = image_arm.index("{", at)
+    _, outer_end = balanced_slice(image_arm, outer_open)
+    outer = image_arm[outer_open + 1 : outer_end - 1]
+    inner_open = outer.index("{", outer.index("if other != file_id {"))
+    _, inner_end = balanced_slice(outer, inner_open)
+    return outer[inner_open + 1 : inner_end - 1]
+
+
+def download_loop(handler: str) -> str:
+    """The body of the loop that walks the candidates, one download per turn."""
+    loop_open = handler.index("{", handler.index("for (this_id, this_quality, variant) in candidates {"))
+    _, loop_end = balanced_slice(handler, loop_open)
+    return handler[loop_open + 1 : loop_end - 1]
 
 
 def test_the_pin_names_a_commit_and_the_snapshot_says_which(tmp_path: Path, pin: dict) -> None:
@@ -482,7 +526,7 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     # And carried by the two calls that use it: the image path hands the second id to
     # downloadMedia, the file path still takes four arguments, and the napi wrapper forwards
     # it to the addon. Without these the types above can stay while the argument is dropped,
-    # the retry the handler implements never fires, and this file stays green.
+    # the last-resort attempt the handler implements never fires, and this file stays green.
     image_call = (
         "session.downloadMedia(media.fileId, media.aesKey, media.quality, media.size, "
         "media.fallbackFileId)"
@@ -503,58 +547,39 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     )
 
     handler = download_media_handler(rust)
+    image_arm, _ = candidate_arms(handler)
 
-    # Exactly one retry on the second id, and it is the id the retry's download uses: the
-    # descriptor is built from `file_id`, which only the retry reassigns, and the retry's
-    # `continue;` is the loop's only way back to the download that failed.
-    assert "let mut file_id = file_id;" in handler, "the first id is not the one the loop starts from"
+    # The second id is the image ladder's last resort, and only a payload carrying a
+    # different one queues it: the push sits behind the `other != file_id` test, so a
+    # payload with no second id never reaches a `variant=mid` line.
+    guard = distinct_second_id_guard(image_arm)
+    assert guard.strip() == 'candidates.push((other, MediaQuality::Standard, "mid"));', (
+        f"the second id's attempt is not the one the distinct-id test guards: {guard!r}"
+    )
+    assert handler.count("fallback_file_id") == 1, (
+        "the second id is read somewhere the distinct-id test does not see"
+    )
+    mid_labels = handler.count('"mid"')
+    assert mid_labels == 1, (
+        f"the handler names the mid variant {mid_labels} times, so a payload carrying no "
+        "second id could still produce its line"
+    )
+    pushes = candidate_pushes(image_arm)
+    assert pushes[-1] == ("other", "MediaQuality::Standard", "mid"), (
+        f"the second id is not the last candidate the download walks: {pushes}"
+    )
+    assert pushes.count(("other", "MediaQuality::Standard", "mid")) == 1, (
+        f"the second id is tried more than once: {pushes}"
+    )
+
+    # One attempt per turn, and the line before it: these two lines are the instrument the
+    # measurement came from, and the answered line sits where the bytes are.
     assert handler.count(DOWNLOAD_CALL) == 1, (
-        f"the handler downloads {handler.count(DOWNLOAD_CALL)} times, the fix documents one attempt per turn"
+        f"the handler downloads {handler.count(DOWNLOAD_CALL)} times, the ladder is not one attempt per turn"
     )
     assert handler.index(RUST_EPRINTLN) < handler.index(DOWNLOAD_CALL), "the diagnostic follows the download"
-    descriptor_open = handler.index("{", handler.index("let descriptor = MediaDescriptor {"))
-    _, descriptor_end = balanced_slice(handler, descriptor_open)
-    descriptor = handler[descriptor_open:descriptor_end]
-    assert "file_id: file_id.clone()," in descriptor, "the download is not made with the current file id"
-    assert "fallback_file_id" not in descriptor, "the download bypasses the id the retry assigns"
-
-    assert handler.count("let downloaded = loop {") == 1, "the retry is not one bounded loop"
-    loop_open = handler.index("{", handler.index("let downloaded = loop {"))
-    _, loop_end = balanced_slice(handler, loop_open)
-    loop_body = handler[loop_open:loop_end]
-    download_at = loop_body.index(DOWNLOAD_CALL)
-    succeeded_at = loop_body.index("Ok(downloaded) => {")
-    failed_at = loop_body.index("Err(err) =>")
-    assert download_at < succeeded_at < failed_at
-    # A second download happens only after the first one returned Err: the single `continue;`
-    # in the loop sits inside the Err arm, behind the guard.
-    assert loop_body.count("continue;") == 1, (
-        f"the loop has {loop_body.count('continue;')} back edges, the retry is not the only one"
-    )
-    err_open = loop_body.index("{", failed_at)
-    _, err_end = balanced_slice(loop_body, err_open)
-    err_arm = loop_body[err_open + 1 : err_end - 1]
-    assert err_arm.count("continue;") == 1, "the retry leaves the Err arm somewhere else"
-    assert "return Err(err);" in err_arm, "a refused attempt is not returned"
-
-    guard = re.search(
-        r"if\s+is_image\s*&&\s*!attempted_fallback\s*&&\s*fallback_file_id\.as_ref\(\)"
-        r"\.map\(\|other\|\s*other\s*!=\s*&file_id\)\.unwrap_or\(false\)\s*\{",
-        err_arm,
-    )
-    assert guard, "the retry is not one attempt on a distinct fallback id, for an image only"
-    guard_open = guard.end() - 1
-    _, guard_end = balanced_slice(err_arm, guard_open)
-    retry = err_arm[guard_open + 1 : guard_end - 1]
-    assert "attempted_fallback = true;" in retry, "the retry does not record that it ran"
-    assignments = re.findall(r"^[ \t]*file_id = (?P<rhs>[^;]+);[ \t]*$", retry, re.MULTILINE)
-    assert assignments == ["fallback_file_id.clone().unwrap()"], (
-        f"the retry reassigns file_id to {assignments}, so it does not download the second id"
-    )
-    assert retry.index("attempted_fallback = true;") < retry.index(assignments[0])
-    assert retry.rstrip().endswith("continue;"), "the retry does not go back for a second attempt"
-    assert err_arm[guard_end:].strip() == "return Err(err);", (
-        "the Err arm does more than retry once and otherwise return the error"
+    assert handler.index(DOWNLOAD_CALL) < handler.index("neo cdn download served:") < handler.index("break;"), (
+        "the answered line is not emitted between the download and the attempt that ends the ladder"
     )
 
     # The attempt's line names the request fields and the id's shape, never an id, an AES
@@ -567,33 +592,42 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     )
     assert dict(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=\{([^{}]*)\}", template)) == {
         "variant": "variant",
-        "quality": "quality:?",
+        "quality": "this_quality:?",
         "filetype": "filetype",
         "size_class": "size_class",
         "file_id_len": "",
         "has_slash": "shape_slash",
         "has_query": "shape_query",
+        "has_amp": "shape_amp",
+        "has_equals": "shape_equals",
+        "all_hex": "shape_hex",
     }, "the diagnostic does not format the documented values"
     assert "downpicformat=1" in template, "the diagnostic does not pin the download format it asks for"
     assert "file_id_len={}" in template, "the diagnostic does not measure the id's length"
     placeholders, anonymous = format_placeholders(template)
     assert anonymous == 1 and placeholders == {
-        "variant", "quality", "filetype", "size_class", "shape_slash", "shape_query",
+        "variant", "this_quality", "filetype", "size_class",
+        "shape_slash", "shape_query", "shape_amp", "shape_equals", "shape_hex",
     }, (
         f"the diagnostic formats {sorted(placeholders)} and {anonymous} anonymous values"
     )
-    assert split_arguments(diagnostic[template_end : diagnostic.rindex(")")]) == ["file_id.len()"], (
+    assert split_arguments(diagnostic[template_end : diagnostic.rindex(")")]) == ["this_id.len()"], (
         "the diagnostic formats more than the id's length"
     )
-    for forbidden in ("{file_id}", "{aes_key}", "{body}", "{bytes}", "aes_key", "body", "bytes"):
+    for forbidden in ("{this_id}", "{file_id}", "{aes_key}", "{body}", "{bytes}", "aes_key", "body", "bytes"):
         assert forbidden not in diagnostic, f"the diagnostic line carries {forbidden!r}"
-    # ...and the two booleans it reports are predicates over the id, not the id.
-    assert "let shape_slash = file_id.contains('/');" in handler
-    assert "let shape_query = file_id.contains('?');" in handler
+    # ...and the shape it reports is a set of predicates over the id, not the id.
+    loop_body = download_loop(handler)
+    for predicate in ("contains('/')", "contains('?')", "contains('&')", "contains('=')"):
+        assert f"this_id.{predicate}" in loop_body, f"the diagnostic does not report {predicate}"
+    assert "this_id.bytes().all(|b| b.is_ascii_hexdigit());" in loop_body, (
+        "the diagnostic does not report whether the id is plain hexadecimal"
+    )
 
 
 def test_a_refused_image_retries_the_mid_id_as_the_crates_standard_profile(tmp_path: Path, pin: dict) -> None:
-    """The one retry sends `cdnmidimgurl` with filetype 2, and the log says which answered."""
+    """An image asks for the standard profile first, reaches the original one only after that
+    attempt was refused, and a payload's distinct second id is the last resort, also standard."""
     snapshot = applied_snapshot(tmp_path, pin, "fallback")
     rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
     handler = download_media_handler(rust)
@@ -602,7 +636,7 @@ def test_a_refused_image_retries_the_mid_id_as_the_crates_standard_profile(tmp_p
     # No list of `MediaQuality` arms is written here: the local match this replaces made the
     # native stage's `cargo build` fail the moment upstream added a variant (E0004), and a
     # test that only reads text cannot see that, so what is pinned is the absence of a list.
-    assert "let filetype = quality.filetype();" in handler, (
+    assert "let filetype = this_quality.filetype();" in handler, (
         "the filetype is not read from the crate's own MediaQuality mapping"
     )
     local_arms = re.findall(
@@ -613,42 +647,67 @@ def test_a_refused_image_retries_the_mid_id_as_the_crates_standard_profile(tmp_p
     )
 
     # ...and it is read per attempt, inside the loop: a filetype fixed once per medium could
-    # not change for the retry, which would repeat the pairing the CDN already refused.
-    loop_open = handler.index("{", handler.index("let downloaded = loop {"))
-    _, loop_end = balanced_slice(handler, loop_open)
-    loop_body = handler[loop_open:loop_end]
-    assert "let filetype = quality.filetype();" in loop_body, (
-        "the filetype is chosen once per medium, so the retry sends the refused one again"
+    # not tell the ladder's attempts apart.
+    loop_body = download_loop(handler)
+    assert "let filetype = this_quality.filetype();" in loop_body, (
+        "the filetype is chosen once per medium, so every attempt would ask for the same profile"
+    )
+    assert (
+        loop_body.index("let filetype = this_quality.filetype();")
+        < loop_body.index(RUST_EPRINTLN)
+        < loop_body.index(DOWNLOAD_CALL)
+    ), "the request line does not report the profile the attempt is about to send"
+
+    # The ladder is the measured order. The first request is the same id at `Standard`, which
+    # the crate maps to `filetype` 2 (the profile that served in 5.97 s); the full-size
+    # `Original` profile (filetype 1, refused after 2.81 s) is second; a payload's distinct
+    # second id is the last resort, at the profile that answered. The never-measured
+    # `Thumbnail` profile is not a candidate at all.
+    image_arm, _ = candidate_arms(handler)
+    pushes = candidate_pushes(image_arm)
+    assert pushes == [
+        ("file_id.clone()", "MediaQuality::Standard", "primary-standard"),
+        ("file_id.clone()", "MediaQuality::Original", "primary-original"),
+        ("other", "MediaQuality::Standard", "mid"),
+    ], f"the image download walks {pushes}"
+    first_id, first_profile, first_variant = pushes[0]
+    assert (first_id, first_profile) == ("file_id.clone()", "MediaQuality::Standard"), (
+        f"an image's first request is {first_profile} on {first_id}, not the standard profile"
+    )
+    assert "standard" in first_variant, (
+        f"the first attempt's log label {first_variant!r} does not name the standard profile"
+    )
+    assert "MediaQuality::Thumbnail" not in handler, "the handler still asks for the thumbnail profile"
+    assert "primary-thumbnail" not in handler, "the never-measured third profile is still a candidate"
+
+    # A refusal moves to the next candidate: only a download that answered ends the ladder,
+    # a refusal is recorded and the next turn runs. So the `Original` request can only be
+    # sent after the `Standard` one was refused, not before it.
+    download_at = loop_body.index(DOWNLOAD_CALL)
+    ok_at = loop_body.index("Ok(ok) => {")
+    ok_open = loop_body.index("{", ok_at)
+    _, ok_end = balanced_slice(loop_body, ok_open)
+    ok_arm = loop_body[ok_open + 1 : ok_end - 1]
+    assert download_at < ok_at, "the success arm counts before the download it answers"
+    assert "downloaded = Some(ok);" in ok_arm and "break;" in ok_arm, (
+        "a download that answered does not end the candidates"
+    )
+    assert "Err(err) => last_refusal = Some(err)," in loop_body, (
+        "a refused attempt does not record the refusal for the next candidate"
+    )
+    assert "continue" not in loop_body and "return" not in loop_body, (
+        "the loop leaves through the refusal instead of walking to the next candidate"
     )
 
-    # The retry is one, and it swaps both halves of the request: the id, and the profile the
-    # crate maps to filetype 2 (`Standard`) for a mid-size image - the pair design/
-    # wechat-image-cdn-diagnosis.md section 6.3 names for `cdnmidimgurl`.
-    assert handler.count("attempted_fallback = true;") == 1, (
-        "the handler does not make exactly one retry on the second id"
-    )
-    retry_at = handler.index("attempted_fallback = true;")
-    retry = handler[retry_at : handler.index("continue;", retry_at)]
-    assert "mid_size = true;" in retry, "the retry swaps the id but not the variant the log names"
-    assert "quality = MediaQuality::Standard;" in retry, (
-        "the retry sends the mid-size id as the full-size profile, so its filetype is 1 again"
-    )
-    assert "file_id = fallback_file_id.clone().unwrap();" in retry, (
-        "the retry does not download the second id"
-    )
-    assert handler.count("quality = MediaQuality::Standard;") == 1, (
-        "the mid-size profile is set somewhere other than the one retry"
-    )
-
-    # The descriptor carries the loop's profile, so the request itself asks for filetype 2,
-    # not only the log line.
+    # The descriptor carries the attempt's profile, so the first request really asks for
+    # filetype 2 and the second for filetype 1 - not only the log line says so.
     descriptor_open = handler.index("{", handler.index("let descriptor = MediaDescriptor {"))
     _, descriptor_end = balanced_slice(handler, descriptor_open)
     descriptor = handler[descriptor_open:descriptor_end]
-    assert re.search(r"^\s*quality,$", descriptor, re.MULTILINE), (
-        "the descriptor pins one profile, so the retry's profile never reaches the request"
+    assert re.search(r"^\s*quality: this_quality,$", descriptor, re.MULTILINE), (
+        "the descriptor pins one profile, so a later attempt would repeat the first one's request"
     )
-    for pinned in ("MediaQuality::Original", "MediaQuality::Standard"):
+    for pinned in ("MediaQuality::Original", "MediaQuality::Standard", "MediaQuality::Thumbnail"):
         assert pinned not in descriptor, f"the descriptor pins {pinned}, not the attempt's profile"
 
     # And the answer names which variant produced the bytes: same redacted shape summary as
@@ -658,23 +717,16 @@ def test_a_refused_image_retries_the_mid_id_as_the_crates_standard_profile(tmp_p
     assert "variant={variant}" in served and "filetype={filetype}" in served, (
         "the line for a download that worked does not name the variant the CDN served"
     )
-    assert 'let variant = if mid_size { "mid" } else { "primary" };' in handler, (
-        "the variant the diagnostics print is not the one the retry switches"
-    )
-    assert handler.index("let variant = if mid_size") < handler.index(RUST_EPRINTLN), (
-        "the variant is chosen after the line that prints it"
-    )
-    # It reports the attempt's own numbers, not a second request's.
     served_template, served_end = rust_string_literal(served)
     assert format_labels(served_template) == ["variant", "filetype", "file_id_len", "has_slash", "has_query"]
     assert format_placeholders(served_template) == ({"variant", "filetype", "shape_slash", "shape_query"}, 1)
-    assert split_arguments(served[served_end : served.rindex(")")]) == ["file_id.len()"], (
+    assert split_arguments(served[served_end : served.rindex(")")]) == ["this_id.len()"], (
         "the served line formats more than the id's length"
     )
-    for forbidden in ("{file_id}", "{aes_key}", "{body}", "{bytes}", "aes_key", "body", "bytes"):
+    for forbidden in ("{this_id}", "{file_id}", "{aes_key}", "{body}", "{bytes}", "aes_key", "body", "bytes"):
         assert forbidden not in served, f"the served line carries {forbidden!r}"
     # Emitted where the bytes are: inside the Ok arm, after the download that produced them.
-    assert handler.index(DOWNLOAD_CALL) < handler.index(served) < handler.index("break downloaded;")
+    assert handler.index(DOWNLOAD_CALL) < handler.index(served) < handler.index("break;")
 
 
 def test_the_file_branch_keeps_one_request_and_its_own_profile(tmp_path: Path, pin: dict) -> None:
@@ -683,23 +735,33 @@ def test_the_file_branch_keeps_one_request_and_its_own_profile(tmp_path: Path, p
     rust = (snapshot / "native/src/lib.rs").read_text(encoding="utf-8")
     handler = download_media_handler(rust)
 
-    # The retry is an image's, and the addon says so itself rather than relying on the
+    # The ladder is an image's, and the addon says so itself rather than relying on the
     # caller that happens to pass no second id for a file: a file handed one is still one
-    # request. (The shape of the guard is pinned by the retry test above; here the gate it
-    # reads is.)
+    # request.
     bound = re.search(r"let is_image = (?P<expression>[^;]+);", handler)
-    assert bound, "the retry is not gated on a named image flag"
+    assert bound, "the ladder is not gated on a named image flag"
     expression = bound["expression"].strip()
     assert expression in {"quality == MediaQuality::Original", "MediaQuality::Original == quality"}, (
-        f"the retry is gated on {expression!r}, so a file would be retried as a mid-size image"
+        f"the ladder is gated on {expression!r}, so a file would be retried as a mid-size image"
+    )
+
+    # Every other profile gets exactly one attempt, carrying the profile the caller asked
+    # for and the label the log has always printed; the second id is not reachable there.
+    _, file_arm = candidate_arms(handler)
+    assert candidate_pushes(file_arm) == [("file_id.clone()", "quality", "primary")], (
+        f"a file's request walks {candidate_pushes(file_arm)}"
+    )
+    assert "fallback_file_id" not in file_arm, "a file's request can reach the image's second id"
+    assert not re.search(r"MediaQuality::(?:Standard|Original|Thumbnail)", file_arm), (
+        "something in the file branch asks for a size other than the one the caller named"
     )
 
     # A file's own filetype: the descriptor carries the profile the caller asked for, the
     # crate maps `File` to 5 (`LargeFile` 7 beyond 25 MiB), and no line here can turn a file
-    # into another size - the only profile the handler ever forces is the image's mid one.
+    # into another size - the profiles the handler names are inside the image's ladder.
     descriptor_open = handler.index("{", handler.index("let descriptor = MediaDescriptor {"))
     _, descriptor_end = balanced_slice(handler, descriptor_open)
-    assert re.search(r"^\s*quality,$", handler[descriptor_open:descriptor_end], re.MULTILINE), (
+    assert re.search(r"^\s*quality: this_quality,$", handler[descriptor_open:descriptor_end], re.MULTILINE), (
         "a file's request does not carry the profile it was asked for"
     )
     parsed = re.search(r"let quality = match quality\.as_str\(\) \{(?P<arms>[^}]*)\}", handler)
@@ -709,17 +771,13 @@ def test_the_file_branch_keeps_one_request_and_its_own_profile(tmp_path: Path, p
         "file": "File",
         "large_file": "LargeFile",
     }, "the profile a caller asks for is not the one the request carries"
-    reassignments = re.findall(r"^[ \t]*quality = MediaQuality::(\w+);[ \t]*$", handler, re.MULTILINE)
-    assert set(reassignments) <= {"Standard"}, (
-        f"the handler reassigns the request's profile to {reassignments}, so a file can be "
-        "asked for as another size than the one it was sent as"
+    assert re.findall(r"^[ \t]*quality = MediaQuality::(\w+);[ \t]*$", handler, re.MULTILINE) == [], (
+        "the handler reassigns the caller's profile, so a file can be asked for as another size"
     )
 
     # One request per attempt: the handler has one download call, inside the loop, and the
-    # loop's only back edge is the image's retry (pinned in the retry test).
-    loop_open = handler.index("{", handler.index("let downloaded = loop {"))
-    _, loop_end = balanced_slice(handler, loop_open)
-    loop_body = handler[loop_open:loop_end]
+    # loop walks the candidates the arms above queue.
+    loop_body = download_loop(handler)
     assert handler.count(DOWNLOAD_CALL) == 1, (
         f"the handler downloads {handler.count(DOWNLOAD_CALL)} times, so a file is asked for twice"
     )

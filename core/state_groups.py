@@ -1528,13 +1528,14 @@ class StateGroups:
     def list_group_recent(self, channel, group_ref, limit=6):
         """The steward's host: the group's last answered questions and the replies that went
         out (a withheld reply as the sentence the group saw), oldest first - a group wake's
-        `recent`, which is data. Also this group's inbound messages that carry attachments and
-        were never answered: a medium the group kept without calling the steward (design
-        steward-group-media.md) is relayed as a question and opens no turn, so the pairs can
-        never show it; it comes back as its own entry with the metadata that names it (kind,
-        ref and, when the library knew them, mime/size/durationMs - never a byte or a name),
-        in the place its time gives it among the pairs. Both parts keep their own last
-        `limit` rows, so a group full of kept media cannot push the answered pairs out."""
+        `recent`, which is data. Also this group's questions that carry attachments and were
+        never answered (an addressed medium), each as its own entry with the metadata that
+        names it (kind, ref and, when the library knew them, mime/size/durationMs - never a
+        byte or a name), in the place its time gives it among the pairs; both keep their own
+        last `limit` rows. And (design/steward-group-media.md section 7, owner 2026-11-23) this
+        group's kept media - files posted without calling the steward while its switch was on -
+        of the last kept_hours, at most kept_recent_items whatever `limit` is, each
+        {at, sender, kept: true, attachments}."""
         with self.store.transaction() as conn:
             self.steward._steward(conn)
             bound = max(1, min(int(limit), 20))

@@ -5,7 +5,9 @@ Status: design delta for the owner's ruling of 2026-11-22, answering
 owner's rulings of 2026-11-23 (section "Owner rulings 2026-11-23" below): storage is now
 behind a per-group switch that is off by default, an un-mentioned medium is kept one day,
 and the owner's own turns cannot use it. Where the older text below disagrees with that
-section, the section wins; the older text is marked where it does.
+section, the section wins; the older text is marked where it does. The rulings are built on
+branch `claude/group-media-switch` (not merged); where the build differs from what this
+section first said, the text below says what was built, and section 16 lists those points.
 
 The ruling, in the owner's words: media that arrives in a group **without** calling the
 steward must still be kept, so a later question can read it. The use case he gave is an
@@ -75,6 +77,8 @@ added with `add_column_if_missing`, the way `attachments_json` was (`:251`):
 | `media_keep_attempts` | `INTEGER NOT NULL DEFAULT 0` | failed SENDS for this epoch (refusals made before sending are not counted) |
 | `media_keep_note` | `TEXT` | why the switch is waiting or why it fell back, shown on the dashboard (`group_send_budget`, `group_quota_account`, `channel_down`, `purge_owed`, `notice_not_sent`) |
 | `media_purged_at` | `TEXT` | the epoch whose purge receipt was last recorded (section 6) |
+| `media_purge_reason` | `TEXT` | the purge still owed: `off`, `unbind` or `rebind`, from the transition that made it owed; NULL once its receipt is recorded at the current epoch |
+| `media_purge_rows` | `INTEGER NOT NULL DEFAULT 0` | the backend `kept_media` rows those transitions deleted, which the receipt's ledger row reports as `backend_rows` |
 
 The four states. Only `on` stores anything; for the store gate, the other three all mean off:
 
@@ -96,8 +100,8 @@ The transitions, each in one write transaction that also sets `media_keep_at=now
 | on-notice committed (`group_media_notice phase=sent`) | `on_pending` -> `on` | the outbound row (section 2) |
 | off-notice committed | `off_notice` -> `off` | the outbound row |
 | third failed send | `on_pending` -> `off`; `off_notice` -> `off` | note `notice_not_sent` (an off already took effect, so only its line is lost) |
-| unbind (`unbind_owner_group`, `:467`) | any -> `off` | the group's rows are deleted there already (`:485-487`); the revoked row keeps `media_keep_at`, so its purge is owed |
-| rebind (`_bind` upsert, `:645-650`) | any -> `off` | the `ON CONFLICT ... DO UPDATE` also writes `media_keep='off'`, `media_keep_at=moment`, attempts 0, note NULL |
+| unbind (`unbind_owner_group`, `:467`) | any -> `off` | only when the switch was ever used (`media_keep_at` set): a new epoch and a purge owed (`unbind`); the group's rows are deleted there already (`:485-487`) |
+| rebind (`_bind`, after its upsert, `:645-650`) | any -> `off` | the same, with `rebind`; a group whose switch was never used stays as it is (off, no epoch) |
 | new bind | (INSERT) -> `off` | the column default |
 
 A turn-on or turn-off that does not change the state (on while `on_pending` or `on`; off
@@ -108,12 +112,12 @@ Who reads the switch:
 * `list_owner_groups` (`:1214-1225`), which the plugin already calls through
   `host.groups.list()` for the bridge's whitelist, the wake's label and `servesGroup`, adds
   to each live group `media_keep` (`'on'` only in state `on`, otherwise `'off'`) and, when
-  the host owes it work, `media_notice: {phase: 'on'|'off', epoch}`. The answer also gains a
-  top-level `media_purges: [{channel, group_ref, epoch}]` for every group, live or revoked,
-  whose `media_keep_at` is set, whose state is not `on`, and whose `media_purged_at` differs
-  from `media_keep_at`.
+  the host owes it work, `media_notice: {phase: 'on'|'off', epoch, attempts}`. The answer also
+  gains a top-level `media_purges: [{channel, group_ref, epoch}]` for every group, live or
+  revoked, that owes a purge (`media_purge_reason` set) and whose state is not `on`; the epoch
+  is `media_keep_at`.
 * `owner_view` (`:604-636`) adds to each group card `media_keep: {state, since, note,
-  attempts, kept_24h, last_purge}` (section 9).
+  attempts, purge_owed, kept_24h, last_purge}` (section 9).
 
 ### 2. The notice: post path and the on-after-sent invariant
 
@@ -135,16 +139,17 @@ added to `GROUP_SEND_KINDS` (`:138`). It is therefore judged by `send_refusal`
 `group_sends_per_hour` (20) and every outbound line to `account_out_per_hour` (120). It is
 sent by the host's existing `sendGroupLine` (`integrations/dsh-director/lib/channels.mjs:827-837`).
 There is one new host-only command, `group_media_notice {request_key, channel, group_ref,
-epoch, phase}`. It is registered where `post_group_media` is (`core/state_commands.py:1745`,
+epoch, notice: 'on'|'off', phase, channel_down?}`. It is registered where `post_group_media` is (`core/state_commands.py:1745`,
 `:2134`, the steward-only set at `:2293-2311`):
 
 * `phase: 'check'` is a dry run, like `post_group_media`'s `check_only` (`:1025-1072`): no row,
   no budget, nothing recorded for the key (the key is random, `group-media-notice-check:` +
   uuid). It answers `{may_post: true, text}` only when all of these hold: the group is live,
-  its state is `on_pending` or `off_notice`, `epoch == media_keep_at`, an `off_notice`'s purge
-  is recorded (`media_purged_at == media_keep_at`, else `purge_owed`), and `send_refusal` is
-  None (else `group_send_budget` or `group_quota_account`). Otherwise it answers
-  `{refused}`. A refusal is written to `media_keep_note` and does NOT touch
+  its state is the one this notice is owed in (`on_pending` for `on`, `off_notice` for `off`),
+  `epoch == media_keep_at`, no purge is owed (else `purge_owed` - for either notice, so a
+  turn-on during `off_notice` cannot turn on before the earlier kept copies are purged), and
+  `send_refusal` is None (else `group_send_budget` or `group_quota_account`). Otherwise it
+  answers `{refused}` (`superseded` when the group, state or epoch no longer match). A refusal is written to `media_keep_note` and does NOT touch
   `media_keep_attempts`.
 * `phase: 'sent'` is the commit. The host calls it only after `sendGroupLine` returned true.
   The key is `group-media-notice:<channel>:<digest(group_ref)>:<epoch>:sent`, recorded through
@@ -153,12 +158,14 @@ epoch, phase}`. It is registered where `post_group_media` is (`core/state_comman
   * it writes the outbound row (`kind='media_notice'`, the constant as body). The line went
     out, so the record says so, and it counts toward the budget even if the epoch has moved
     on since;
-  * if `epoch == media_keep_at`, then `on_pending -> on` or `off_notice -> off`;
+  * if `epoch == media_keep_at`, then `on_pending -> on` (a new epoch: the dashboard's "since")
+    or `off_notice -> off` (the epoch kept, so the purge recorded for it stays settled);
+  * a group no longer bound writes no row and answers `superseded`;
   * if the epoch moved because the owner turned the switch off while an ON line was being
     sent (the state is now `off`), the group has read "on" and must read "off": the state
     becomes `off_notice` with a new epoch. That purge removes nothing and its receipt says 0;
   * any other mismatch answers `superseded` and changes no state.
-* `phase: 'failed'` (key `...:<epoch>:failed:<attempts>`) is called only when a send was
+* `phase: 'failed'` (key `...:<epoch>:failed:<attempts>`, the attempts the list named) is called only when a send was
   actually attempted and `sendGroupLine` returned false or timed out. It adds one to
   `media_keep_attempts`; the third failure transitions as in the table in section 1.
 
@@ -208,7 +215,9 @@ records the message.
    `group_not_bound`), every ref of this message that the library marks `kept` is taken
    back at once through `media.withdraw(ref)` (section 4), and the message ends
    `{accepted: false, reason}`. That answer is final for the plugin, because none of those
-   reasons is in its `RETRY_REASONS`. A `duplicate` answer takes nothing back.
+   reasons is in its `RETRY_REASONS`. A `duplicate` answer takes nothing back. An
+   un-mentioned message that carries no file has nothing to keep and is not relayed at all
+   (`{accepted: false, reason: 'nothing_kept'}`).
 4. **`relay_group_message`** (`core/state_groups.py:708-815`) takes `kept` (request model
    `RelayGroupMessage`, `core/state_commands.py:1743`; the adapter's `relay` in
    `integrations/dsh-driver/steward-host.mjs:860-863` passes it through). With `kept=True`
@@ -315,20 +324,27 @@ and refuses a batch whose counters do not close.
    4. answers the receipt.
 
    A receipt that does not close (`rows_after > 0`, or an unlinked file still present) throws
-   `purge_incomplete`. Nothing is recorded, and the next pass tries again.
+   `purge_incomplete`; the rows of a file that could not be unlinked are put back, so the next
+   pass tries again. Nothing is recorded. The library also answers `keptAudiences()`, the
+   audiences holding kept rows, which is the sweep's list.
 2. **The sweep** runs in the host's pass after a `groups.list()` that SUCCEEDED and is
    well-formed. A failed or empty read is never taken as "every group is off" (the r44z
    lesson about `refreshRooms` swallowing errors, `channels.mjs:846-857`). Every audience
    that has kept rows and is not a listed group in state `on` is purged. This one rule covers
-   off, unbind, rebind and late stores (the race in section 3), and it is idempotent.
+   off, unbind, rebind and late stores (the race in section 3), and it is idempotent. The
+   sweep runs before the notices in the same pass, so an owed off-notice can go out in the
+   pass that recorded its receipt. A receipt whose record got no answer is kept in memory and
+   added to the next purge of the same epoch, so the counts that reach the ledger are what was
+   really deleted.
 3. **The witness**: for each `media_purges` entry the host calls the new host-only
    `record_group_media_purge {request_key, channel, group_ref, epoch, receipt}`. The backend
    refuses a receipt with `rows_after != 0` (`purge_incomplete`). It APPENDS one row to the new
    table `state_group_media_purges(purge_id, channel, group_ref, epoch, reason, backend_rows,
    rows_before, rows_after, files_unlinked, files_shared, bytes_freed, at)`, with reason `off`,
    `unbind` or `rebind` copied from the transition. It sets `media_purged_at = epoch` when the
-   epoch is still current, and only then does the off-notice check stop answering
-   `purge_owed`. The ledger rows are kept 30 days (`_retain`). They hold counts only, never a
+   epoch is still current (and clears `media_purge_reason`), and only then does the check stop
+   answering `purge_owed`. A receipt for an older epoch is appended with reason `superseded`
+   and settles nothing. The ledger rows are kept 30 days (`_retain`). They hold counts only, never a
    ref, a sha or a name.
 
 The dashboard shows the last receipt (section 9). Until it arrives the switch reads 「正在删除」,
@@ -388,7 +404,7 @@ into that group discloses nothing. The library header comment (`:38-45`) and the
   It calls `service.groups.set_group_media_keep(channel, group_ref, on)` and answers `{state,
   backend_rows_deleted?}`. An unbound group answers 404 `group_not_bound`.
 * **`GET /api/steward/groups`** (`owner_view`): each card gains `media_keep: {state, since,
-  note, attempts, kept_24h, last_purge: {at, reason, backend_rows, rows_before,
+  note, attempts, purge_owed, kept_24h, last_purge: {at, reason, backend_rows, rows_before,
   files_unlinked, files_shared, bytes_freed} | null}`. In the one-group view, `kept_media`
   rows from the last day appear in `messages` with their `sender_label`, the placeholder
   body and no ref. `messages_30d` does not count them.
@@ -403,7 +419,8 @@ into that group discloses nothing. The library header comment (`:38-45`) and the
   * `off_notice`: 已关，正在删除 / 正在通知群里, then 已删除 N 件（M 件文件另有记录引用，未删）
     from `last_purge`.
 
-  A fallback (`notice_not_sent`) reads 通知没发出去，没有打开. The switch is disabled while
+  A fallback (`notice_not_sent`) reads 关 · 通知没发出去（开关仍是关）- one text for both notices,
+  since a failed off-notice leaves the switch off too. The switch is disabled while
   the group is not bound. Changing the SPA means rebuilding the backend image.
 
 ### 10. `steward.md`
@@ -643,6 +660,22 @@ The on-notice says the file is handed to an external model service when read.
   * the API route test;
   * `web/src/__tests__/views/StewardGroups.test.ts`.
 * This file.
+
+### 16. As built (branch `claude/group-media-switch`)
+
+Where the build differs from what sections 1-15 first said (the text above now says what was
+built):
+
+* Two more columns, `media_purge_reason` and `media_purge_rows`: the owed purge is "reason
+  set", not "`media_purged_at` differs from `media_keep_at`", and the ledger row's reason and
+  `backend_rows` come from them.
+* `group_media_notice` names the notice (`on`/`off`); `media_notice` in the list carries
+  `attempts` (the failed key). The check refuses `purge_owed` for the on-notice too.
+* Unbind and rebind move the switch only when it was ever used.
+* `owner_view` adds `purge_owed` (the SPA's 正在删除 / 正在通知群里).
+* The library adds `keptAudiences()`; a purge that cannot unlink puts the rows back.
+* An un-mentioned message without files is not relayed (`nothing_kept`).
+* `messages_30d` and `last_message_at` both leave kept rows out.
 
 ## What the shipped code already settles
 

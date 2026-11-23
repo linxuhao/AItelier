@@ -1617,7 +1617,7 @@ test('media: a client that goes away releases the lock at once: the next GET /me
   } finally { await s.bridge.close(); }
 });
 
-test('media: a passing puppet error is 503 (held, asked again); a local tmpfs error is 503 and never asks the puppet; repeated failures end as 410', async () => {
+test('media: a passing puppet error is 503 (held, asked again); a local tmpfs error is 503 and never asks the puppet; repeated failures never end as 410', async () => {
   const s = await mediaBridge({ fetchLimits: { ...MEDIA_FETCH, attempts: 3 } });
   try {
     const bot = await s.login();
@@ -1630,11 +1630,11 @@ test('media: a passing puppet error is 503 (held, asked again); a local tmpfs er
     assert.deepEqual(await s.json('/media/' + onceId), [503, { error: 'unavailable' }]);
     const [status, bytes] = await fetchMedia(s, onceId);
     assert.deepEqual([status, bytes.toString()], [200, 'LATER'], 'asked again, it is served');
-    assert.deepEqual(await s.json('/media/' + alwaysId), [503, { error: 'unavailable' }]);
-    assert.deepEqual(await s.json('/media/' + alwaysId), [503, { error: 'unavailable' }]);
-    assert.deepEqual(await s.json('/media/' + alwaysId), [410, { error: 'gone' }], 'the third failure: gone');
-    assert.deepEqual(await s.json('/media/' + alwaysId), [410, { error: 'gone' }]);
-    assert.equal(always.fetched.count, 3, 'once gone, the puppet is not asked again');
+    // Past fetchLimits.attempts the answer is still the transient one: the count is a log fact,
+    // never a verdict that these bytes are unreachable.
+    for (let attempt = 1; attempt <= 5; attempt++)
+      assert.deepEqual(await s.json('/media/' + alwaysId), [503, { error: 'unavailable' }], `failure ${attempt}`);
+    assert.equal(always.fetched.count, 5, 'the puppet is still asked: a failure count never made it gone');
     assert.ok(s.tmpEmpty());
   } finally { await s.bridge.close(); }
   // tmpfs cannot take the file (here: no such directory): the bridge's fault, not the media's.
@@ -1649,6 +1649,38 @@ test('media: a passing puppet error is 503 (held, asked again); a local tmpfs er
     assert.deepEqual(await broken.json('/media/' + id), [503, { error: 'unavailable' }], 'never counted against the media');
     assert.equal(photo.fetched.count, 0, 'the puppet was not asked');
   } finally { await broken.bridge.close(); }
+});
+
+test('media: the count-exhausted transient class (five "no first byte in 30000 ms") stays retryable; the sixth fetch serves it', async () => {
+  // The owner's use case: an un-mentioned group image has to be readable when the owner asks
+  // about it a message later. A media that failed the fetch deadline five times in a row is
+  // still the same media - the bytes were never declared unreachable - so the answer stays
+  // 503 and the next attempt is served. What ends it is its event leaving its ring, not a count.
+  const logs = [];
+  const s = await mediaBridge({ ringSize: 2, log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    const photo = mediaMessage({ kind: 'image', id: 'late-photo', bytes: Buffer.from('JPEGDATA'),
+      fail: `media store timed out: no first byte in ${MEDIA_FETCH.firstByteMs} ms`, fails: MEDIA_FETCH.attempts });
+    bot.emit('message', photo);
+    const [, body] = await s.json('/events?after=0');
+    const id = body.events[0].attachments[0].media_id;
+    for (let attempt = 1; attempt <= MEDIA_FETCH.attempts; attempt++)
+      assert.deepEqual(await s.json('/media/' + id), [503, { error: 'unavailable' }], `attempt ${attempt} is transient`);
+    assert.equal(photo.fetched.count, MEDIA_FETCH.attempts, 'every attempt asked the puppet');
+    assert.ok(!logs.some(line => line.includes('not fetched (gone)')), logs.join('\n'));
+    assert.ok(logs.some(line => line.includes(`held after ${MEDIA_FETCH.attempts} failures`)), logs.join('\n'));
+    const [status, bytes] = await fetchMedia(s, id);
+    assert.deepEqual([status, bytes.toString()], [200, 'JPEGDATA'], 'the bytes are served; nothing was declared gone');
+    assert.equal(photo.fetched.count, MEDIA_FETCH.attempts + 1);
+    assert.ok(s.tmpEmpty());
+    // The bound that does end it: its event leaves the ring (RING_SIZE later messages push it
+    // out), and then the id is 404 - never a 410 from a failure count.
+    bot.emit('message', message({ id: 'later-1', text: 'later' }));
+    bot.emit('message', message({ id: 'later-2', text: 'later again' }));
+    await s.json('/events?after=0');
+    assert.deepEqual(await s.json('/media/' + id), [404, { error: 'not_found' }], 'its event left the ring');
+  } finally { await s.bridge.close(); }
 });
 
 test('media: a media_id that is not \'<seq>.<index>\' is 404, a malformed escape included', async () => {
@@ -1673,6 +1705,8 @@ test('media: a puppet refusal is 410 gone; after a new login an old media_id is 
     const [, body] = await s.json('/events?after=0');
     const [refusedId, oldId] = body.events.map(e => e.attachments[0].media_id);
     assert.deepEqual(await s.json('/media/' + refusedId), [410, { error: 'gone' }]);
+    assert.deepEqual(await s.json('/media/' + refusedId), [410, { error: 'gone' }], 'a recognised refusal ends it for good');
+    assert.equal(refused.fetched.count, 1, 'and the puppet is not asked again');
     assert.ok(s.tmpEmpty());
     // The delivered fork's own refusals of a message it will never hand over are gone too; its
     // "not logged in" is not (a new login makes the media_id 410 anyway).
@@ -2748,7 +2782,9 @@ test('saved login: a media download that fails (400, Err) never resumes, asks fo
     assert.deepEqual(await s.json('/media/' + id), [503, { error: 'unavailable' }]);
     // Wechaty reports a failed download as an error event too.
     bot.emit('error', new Error('download failed: HTTP 400 Err'));
-    assert.deepEqual(await s.json('/media/' + id), [410, { error: 'gone' }]);
+    // A failed download is transient, however many times it has now failed: nothing about it
+    // makes the bytes unreachable, so the answer is still the retryable one.
+    assert.deepEqual(await s.json('/media/' + id), [503, { error: 'unavailable' }]);
     await s.bridge.settled();
     await sleepMs(150);
     const after = (await s.json('/status'))[1];

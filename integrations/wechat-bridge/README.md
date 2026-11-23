@@ -332,11 +332,16 @@ Hz 16-bit named `<durationMs>ms.wav`, an image named `<messageId>.jpg|.png` by i
   `audio/wav`, with its length in `x-voice-duration-ms`: the milliseconds the fork's
   `<durationMs>ms.wav` name states, else the WAV header's byte rate), fetched from WeChat now
   and held in `/tmp` only while answering. `404
-  not_found` (its event left the ring, or never was), `410 gone` (another login's message,
+  not_found` (its event left the ring, or never was), `410 gone` (another login's message, or
   a puppet refusal the bridge recognises - `observed peer`, `expired`, `not found`, `no longer
-  cached`, a message of another WeChat type - or the 5th failed fetch of the same media_id), `503 busy` (another fetch is running), `503
+  cached`, a message of another WeChat type: those bytes are never handed over again), `503 busy` (another fetch is running), `503
   unavailable` (any other failure: the puppet, `/tmp`, no first byte in 30 s, not whole in
-  120 s, or the client went away - the lock is released and the partial deleted), `413
+  120 s, or the client went away - the lock is released and the partial deleted). A failure of
+  that second kind stays `503` however often it repeats: its count is a log fact, never a
+  verdict that the bytes are unreachable, so a media that failed the fetch deadline five times
+  is still served when the puppet answers later. What ends it is its event leaving the ring -
+  `RING_SIZE` later messages (200 for a group, 50 for a stranger) - and that answer is the
+  `404 not_found` above. `413
   too_large` (more bytes than the bound; a voice over 2 min 5 s of WAV by its header's rate).
 - `POST /send-file?to=<wxid>|room=<room>&kind=image|voice|file&mime=&name=` with the
   file's bytes as the body (at most 25 MiB, `413 body_too_large`) → `{ref, sent_as}`. The

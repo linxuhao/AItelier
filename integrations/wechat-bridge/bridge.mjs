@@ -77,9 +77,16 @@ const WAV_HEADER_SLACK = 4096;
 /** GET /media/:media_id's own deadlines, the host's (design 7.8.12 "入库的时限"): the puppet must
  *  hand over a first byte within firstByteMs and the whole file within totalMs, or the fetch is
  *  abandoned (the lock released, the partial deleted) and answered 503; so is one whose client
- *  went away. A failure that is not a recognised refusal is transient (503), until a media_id has
- *  failed `attempts` times: then it is gone (410), so one file never holds the owner's later
- *  messages forever. */
+ *  went away. A failure that is not a recognised refusal stays transient (503) however often it
+ *  repeats: `attempts` is the count at which the log says out loud that this media has failed
+ *  that many times, never a point at which the bytes are declared unreachable. It answered 410
+ *  gone for good in an earlier edition, which made one transient blip - the live
+ *  case: four `no first byte in 30000 ms` in one second - leave a photo the owner could never
+ *  read again, although the same bytes were still fetchable. What actually bounds a media that
+ *  keeps failing is its event's place in its ring: once RING_SIZE (200 group, 50 stranger) later
+ *  messages push that event out, the id is 404 and it is over; and one fetch at a time, each
+ *  ending at its own deadline (firstByteMs, then totalMs), so a failing file never holds another
+ *  fetch. */
 export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
 /** The bytes of described attachments kept on disk, so a process whose live map holds no entry
  *  for an id answers GET /media for it from the copy instead of asking its puppet. The bound is
@@ -1233,11 +1240,12 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out (a
    *  voice with its length in `x-voice-duration-ms` when known), or, when this process has no
    *  live entry, the bounded store's copy of a media_id described by an earlier process. 404:
-   *  held by neither; 410 gone: another login's message, a refusal `isGone` recognises, or one
-   *  that failed fetchLimits.attempts times; 503: another fetch is running (busy, one at a
-   *  time), or this one failed, ran out of time or lost its client (unavailable, transient);
-   *  413 too_large: more bytes than its bound. A live answer's tmpfs file exists only while it
-   *  runs; the store's bounded copy is on disk. */
+   *  held by neither; 410 gone: another login's message, or a refusal `isGone` recognises (the
+   *  only permanent endings a failed fetch has); 503: another fetch is running (busy, one at a
+   *  time), or this one failed, ran out of time or lost its client (unavailable - transient
+   *  however many times it repeats, never a count that makes the media gone); 413 too_large:
+   *  more bytes than its bound. A live answer's tmpfs file exists only while it runs; the
+   *  store's bounded copy is on disk. */
   async function serveMedia(mediaId, response) {
     const entry = live.get(mediaId);
     if (entry && (entry.generation !== generation || !bot || entry.gone)) return reply(response, 410, { error: 'gone' });
@@ -1269,14 +1277,21 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       try { spooled = await spool(entry, file, abandon.signal, () => clearTimeout(firstTimer)); }
       catch (error) {
         release();
-        let status = 503;
-        if (!error?.local && (isGone(error) || (entry.failures = (entry.failures ?? 0) + 1) >= fetchLimits.attempts)) {
-          entry.gone = true;
-          status = 410;
-        }
-        log(`media ${entry.kind} not fetched (${status === 410 ? 'gone' : 'held'}): ${short(error)}`);
+        // A refusal `isGone` recognises is the one permanent ending here: those bytes are not
+        // handed over again. Everything else - the first-byte/total deadline, a dropped puppet
+        // answer, a CDN blip - stays transient (503) however often it repeats. The failure count
+        // is a log fact, never a verdict: it must not make the entry `gone`, because the same
+        // bytes may still be fetched, and the owner asking about a photo a message later is
+        // exactly that later attempt. The count the log names at fetchLimits.attempts is where
+        // an earlier edition answered 410 for good.
+        const permanent = !error?.local && isGone(error);
+        if (permanent) entry.gone = true;
+        // A local tmpfs failure is the bridge's own, so never counted against the media.
+        else if (!error?.local) entry.failures = (entry.failures ?? 0) + 1;
+        const counted = `held${(entry.failures ?? 0) >= fetchLimits.attempts ? ` after ${entry.failures} failures` : ''}`;
+        log(`media ${entry.kind} not fetched (${permanent ? 'gone' : counted}): ${short(error)}`);
         if (response.destroyed) return;
-        return reply(response, status, { error: status === 410 ? 'gone' : 'unavailable' });
+        return reply(response, permanent ? 410 : 503, { error: permanent ? 'gone' : 'unavailable' });
       } finally {
         clearTimeout(firstTimer);
         clearTimeout(totalTimer);

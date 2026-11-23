@@ -74,8 +74,8 @@ asks the crate for it (`let filetype = quality.filetype();`, 437), and the crate
 mapping is `Original` 1, `Standard` 2, `Thumbnail` 3, `Video` 4, `File` 5, `LargeFile` 7,
 so a variant added upstream cannot silently escape it. What this handler can send is 1 on
 a full-size image attempt, 2 on the mid-size retry, and 5 or 7 for a file; it never asks
-for 3 or 4. Neither line ever contains the id value, the AES key, or any message/file
-bytes.
+for 3 or 4. Neither line ever contains the id value, the AES key, any message/file bytes, or
+a full URL.
 
 ## Surfaces touched
 

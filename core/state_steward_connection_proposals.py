@@ -222,6 +222,7 @@ def _current(conn, payload):
     if op == "add":
         if row is not None:
             raise StateGraphError(f"connection_exists: {conn_id}")
+        sc.check_visibility(payload["url"], payload["visibility"])
         _label_confusable(conn, payload["label"], conn_id)
         _conn_id_confusable(conn, conn_id)
         return None, {}
@@ -229,6 +230,7 @@ def _current(conn, payload):
         raise StateGraphError(f"unknown_connection: {conn_id}")
     if row["conn_uid"] != payload["conn_uid"] or row["config_version"] != payload["expect_config_version"]:
         raise StateGraphError(f"connection_changed: {conn_id} changed since it was read - read it again")
+    sc.check_visibility(row["url"], payload.get("visibility"))
     if "label" in payload and payload["label"] != row["label"]:
         _label_confusable(conn, payload["label"], conn_id)
     tools = {}

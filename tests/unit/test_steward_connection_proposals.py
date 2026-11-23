@@ -166,6 +166,17 @@ def test_an_oauth_connection_goes_public_on_the_dashboard_only(world):
         propose(world, "update", "mailme", **version(world, "mailme"), visibility="public")
 
 
+def test_the_stewards_own_browser_is_never_made_public_by_a_proposal(world):
+    browser = {**ADD, "label": "Browser", "url": "http://steward-pwmcp:8921/mcp"}
+    with pytest.raises(StateGraphError, match="private_only"):
+        propose(world, "add", "browser", **browser)
+    pid = propose(world, "add", "browser", **{**browser, "visibility": "private"})["proposal_id"]
+    assert approve(world, pid)["status"] == "done"
+    with pytest.raises(StateGraphError, match="private_only"):
+        propose(world, "update", "browser", **version(world, "browser"), visibility="public")
+    assert facts(world, "browser")["visibility"] == "private"
+
+
 def test_egress_is_never_taken_off_by_a_proposal(world):
     ready(world)
     with pytest.raises(StateGraphError, match="egress_required"):

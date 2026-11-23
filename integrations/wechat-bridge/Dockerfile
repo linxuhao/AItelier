@@ -42,9 +42,11 @@ RUN node --input-type=module -e " \
         const bytes = readFileSync(file.path); \
         if (bytes.length !== file.size) throw new Error(file.path + ': ' + bytes.length + ' bytes, not the pinned ' + file.size); \
         if (sha256(bytes) !== file.sha256) throw new Error(file.path + ' is not the pinned blob'); } \
+      const patch = readFileSync('/fork-input/0001-incoming-message-types.patch'); \
+      if (sha256(patch) !== pin.patches[0].sha256) throw new Error('the patch is not the pinned patch'); \
       for (const p of pin.patches) { \
-        const patch = readFileSync('/fork-input/' + p.path.split('/').pop()); \
-        if (sha256(patch) !== p.sha256) throw new Error(p.path + ' is not the pinned patch'); } \
+        const patch2 = readFileSync('/fork-input/' + p.path.split('/').pop()); \
+        if (sha256(patch2) !== p.sha256) throw new Error(p.path + ' is not the pinned patch'); } \
       console.log('neo-fork: ' + pin.files.length + ' pinned blobs match ' + pin.upstream.commit);" \
     && git apply --check /fork-input/0001-incoming-message-types.patch \
     && git apply /fork-input/0001-incoming-message-types.patch \

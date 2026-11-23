@@ -754,21 +754,25 @@ test('group: the bridge keeps the group bounds as code constants', async () => {
   assert.deepEqual([GROUP_RING_SIZE, STRANGER_RING_SIZE], [200, 50]);
 });
 
-test('group: a bound room passes only messages that call the bot, without the prefix; the rest is dropped', async () => {
+test('group: a bound room\'s text passes only when it calls the bot, without the prefix; the rest is dropped', async () => {
   const s = await started();
   const bot = await s.login();
   await withRooms(s);
   bot.emit('message', roomMessage({ id: 'g1', text: '@管家 武侠那个项目做到哪了' }));
   bot.emit('message', roomMessage({ id: 'g2', text: '今天吃什么' }));
   bot.emit('message', roomMessage({ id: 'g3', text: '@管家 hi', self: true }));
-  bot.emit('message', roomMessage({ id: 'g4', text: '@管家 hi', type: types.Message.Image }));
+  // A non-text message that is no describable medium (a video) is still dropped; the kinds
+  // `mediaOf` takes are kept without a mention since design/steward-group-media.md §1 (below).
+  bot.emit('message', roomMessage({ id: 'g4', text: '@管家 hi', type: types.Message.Video }));
   bot.emit('message', roomMessage({ id: 'g5', text: '@管家 hi', date: null }));
+  bot.emit('message', roomMessage({ id: 'g6', text: '@别人 hi' }));
   const [, body] = await s.json('/events?after=0');
   await s.bridge.close();
-  assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.text, e.at ?? null]),
-    [['group_message', 'g1', '武侠那个项目做到哪了', '2026-11-18T10:00:00.000Z'], ['group_message', 'g5', 'hi', null]]);
+  assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.text, e.at ?? null, e.asked]),
+    [['group_message', 'g1', '武侠那个项目做到哪了', '2026-11-18T10:00:00.000Z', true], ['group_message', 'g5', 'hi', null, true]]);
   assert.equal(body.events[0].room_ref, ROOM);
   assert.equal(body.events[0].sender_ref, 'wxid_m1');
+  assert.equal(body.events[0].attachments, undefined, 'a text message carries no attachments');
   await s.bridge.close();
 });
 
@@ -872,12 +876,12 @@ const wav = (rate, dataBytes, { channels = 1, bits = 16 } = {}) => {
 /** A JPEG's first bytes (FF D8 FF E0) padded to `size` bytes. */
 const jpeg = size => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(size - 4, 7)]);
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
-/** A 1:1 (or `roomId`) media message: its payload as the fork carries it, and the FileBox its
- *  fetch hands over (`bytes` in `chunk`-sized parts; `gate` holds the stream until resolved;
- *  `fail` makes the first `fails` fetches throw it; `hang` makes them never answer; `stall`
- *  makes the stream stop after its first part, never ending). `fetches` counts the fetches;
- *  `destroyed` counts the streams the bridge stopped. */
-function mediaMessage({ kind, id = 'p1', from = 'wxid_owner', xml, raw, bytes = Buffer.from('JPEGDATA'), chunk = 4096,
+/** A 1:1 (or `roomId`) media message: its payload as the fork carries it, its text (`text`, a
+ *  caption in a group), and the FileBox its fetch hands over (`bytes` in `chunk`-sized parts;
+ *  `gate` holds the stream until resolved; `fail` makes the first `fails` fetches throw it;
+ *  `hang` makes them never answer; `stall` makes the stream stop after its first part, never
+ *  ending). `fetches` counts the fetches; `destroyed` counts the streams the bridge stopped. */
+function mediaMessage({ kind, id = 'p1', from = 'wxid_owner', text = '', xml, raw, bytes = Buffer.from('JPEGDATA'), chunk = 4096,
   gate, fail, fails = Infinity, hang, stall, roomId, name = 'x.jpg', type } = {}) {
   const [wechatyType, wechatType] = KIND_TYPE[kind] ?? [type, raw];
   const fetched = { count: 0, via: [], destroyed: 0 };
@@ -895,7 +899,7 @@ function mediaMessage({ kind, id = 'p1', from = 'wxid_owner', xml, raw, bytes = 
     if (fail && fetched.count <= fails) throw new Error(fail);
     return box();
   };
-  const base = message({ id, from, text: '', type: type ?? wechatyType, roomId });
+  const base = message({ id, from, text, type: type ?? wechatyType, roomId });
   return Object.assign(base, { fetched, payload: { ...base.payload, messageType: raw ?? wechatType, ...(xml ? { content: b64(xml) } : {}) },
     toFileBox: fetch('messageFile'), toImage: () => ({ hd: fetch('messageImage') }) });
 }
@@ -999,14 +1003,97 @@ test('media: quoted replies (49/57), other app messages, videos and stickers are
   } finally { await s.bridge.close(); }
 });
 
-test('media: a group\'s non-text messages are dropped, bound room or not', async () => {
+// design/steward-group-media.md §1 (the owner's ruling of 2026-11-22): a medium that arrives
+// in a bound group WITHOUT calling the steward is still described and kept, so a later
+// question can read it; only an unbound room keeps refusing everything but a group code.
+test('group media: an un-mentioned image in a bound room is one group_message with its attachment, text "" and asked false', async () => {
   const s = await mediaBridge();
   try {
     const bot = await s.login();
     await withRooms(s);
-    for (const kind of ['image', 'voice', 'file'])
-      for (const roomId of [ROOM, 'r9@chatroom'])
-        bot.emit('message', mediaMessage({ kind, id: `${kind}-${roomId}`, roomId, xml: kind === 'file' ? XML.file(10) : undefined }));
+    const bytes = Buffer.from('PHOTO');
+    const photo = mediaMessage({ kind: 'image', id: 'un-asked', roomId: ROOM, from: 'wxid_m1', xml: XML.image(5), bytes });
+    bot.emit('message', photo);
+    const [, body] = await s.json('/events?after=0');
+    const [event] = body.events;
+    assert.equal(body.events.length, 1, 'one event, one message');
+    assert.deepEqual([event.type, event.room_ref, event.sender_ref, event.message_ref, event.text, event.asked],
+      ['group_message', ROOM, 'wxid_m1', 'un-asked', '', false]);
+    // The attachment is the 1:1 description, registered in `live` under this event's own media_id.
+    assert.deepEqual(event.attachments, [{ media_id: `${event.seq}.0`, kind: 'image', size: 5 }]);
+    assert.equal(photo.fetched.count, 0, 'nothing is fetched on arrival');
+    assert.ok(s.tmpEmpty(), 'tmpfs is empty');
+    const [status, got, type] = await fetchMedia(s, event.attachments[0].media_id);
+    assert.deepEqual([status, got.equals(bytes), type], [200, true, 'image/jpeg']);
+    assert.deepEqual(photo.fetched.via, ['messageImage']);
+    assert.ok(s.tmpEmpty());
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: a mention with a caption keeps the attachment and carries the stripped text, asked true', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    const bytes = Buffer.from('CAPTIONED');
+    const photo = mediaMessage({ kind: 'image', id: 'asked-with-photo', roomId: ROOM, from: 'wxid_m1',
+      text: '@管家 这个图上是什么', bytes });
+    bot.emit('message', photo);
+    const [, body] = await s.json('/events?after=0');
+    const [event] = body.events;
+    assert.equal(body.events.length, 1);
+    assert.deepEqual([event.text, event.asked, event.attachments.map(a => a.kind)], ['这个图上是什么', true, ['image']]);
+    const [status, got] = await fetchMedia(s, event.attachments[0].media_id);
+    assert.deepEqual([status, got.equals(bytes)], [200, true]);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: a bound room\'s voice and file are described exactly as 1:1 ones are', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    bot.emit('message', mediaMessage({ kind: 'voice', id: 'v', roomId: ROOM, from: 'wxid_m1', xml: XML.voice(3000) }));
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'f', roomId: ROOM, from: 'wxid_m1', xml: XML.file(5000) }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.text, e.asked, e.attachments]), [
+      ['group_message', 'v', '', false, [{ media_id: `${body.events[0].seq}.0`, kind: 'voice', mime: 'audio/wav', size: 3000 }]],
+      ['group_message', 'f', '', false, [{ media_id: `${body.events[1].seq}.0`, kind: 'file', name: '报告 & 附录.pdf', size: 5000 }]],
+    ]);
+    assert.equal(s.bridge.live, 2);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: over the bound keeps the 1:1 shape (too_large, no media_id), and the group ring evicts its own', async () => {
+  const s = await mediaBridge({ groupRingSize: 2 });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'huge', roomId: ROOM, from: 'wxid_m1', xml: XML.image(20 * 1048576 + 1) }));
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'keep', roomId: ROOM, from: 'wxid_m1', bytes: Buffer.from('KEEP') }));
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.message_ref, e.attachments[0].too_large ?? false, 'media_id' in e.attachments[0]]),
+      [['huge', true, false], ['keep', false, true]]);
+    assert.equal(s.bridge.live, 1, 'a too_large one is never live');
+    const kept = body.events[1].attachments[0].media_id;
+    assert.deepEqual((await fetchMedia(s, kept)).slice(0, 1), [200]);
+    // Two more group messages push 'keep' off the group ring; its media_id leaves `live` with it.
+    bot.emit('message', roomMessage({ id: 'later-1', text: '@管家 q1' }));
+    bot.emit('message', roomMessage({ id: 'later-2', text: '@管家 q2' }));
+    assert.equal(s.bridge.live, 0);
+    assert.deepEqual(await s.json('/media/' + kept), [404, { error: 'not_found' }]);
+  } finally { await s.bridge.close(); }
+});
+
+test('group media: an unbound room\'s image still yields nothing, mentioned or not', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const bytes = Buffer.from('A ROOM THIS HOST DOES NOT SERVE');
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'unbound-plain', roomId: 'r9@chatroom', from: 'wxid_m1', bytes }));
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'unbound-captioned', roomId: 'r9@chatroom', from: 'wxid_m1',
+      text: '@管家 看这个', bytes }));
+    bot.emit('message', mediaMessage({ kind: 'file', id: 'unbound-file', roomId: 'r9@chatroom', from: 'wxid_m1', xml: XML.file(10) }));
     const [, body] = await s.json('/events?after=0');
     assert.deepEqual(body.events, []);
     assert.equal(s.bridge.live, 0);

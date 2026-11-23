@@ -459,6 +459,29 @@ def test_image_download_carries_both_ids_with_one_retry_and_redacted_diagnostic(
     assert "fallbackFileId?: string" in native_ts
     assert "fallback_file_id: Option<String>" in rust
 
+    # And carried by the two calls that use it: the image path hands the second id to
+    # downloadMedia, the file path still takes four arguments, and the napi wrapper forwards
+    # it to the addon. Without these the types above can stay while the argument is dropped,
+    # the retry the handler implements never fires, and this file stays green.
+    image_call = (
+        "session.downloadMedia(media.fileId, media.aesKey, media.quality, media.size, "
+        "media.fallbackFileId)"
+    )
+    file_call = "session.downloadMedia(media.fileId, media.aesKey, media.quality, media.size)"
+    assert puppet.count(image_call) == 1, (
+        f"the image path calls downloadMedia with the second id {puppet.count(image_call)} times, "
+        "the fix documents one attempt that hands it over"
+    )
+    assert puppet.count(file_call) == 1, (
+        f"the file path's four-argument downloadMedia call appears {puppet.count(file_call)} times, "
+        "so the five-argument call above is not pinned to the image path"
+    )
+    addon_call = "addon.downloadMedia(fileId, aesKey, quality, expectedBytes, fallbackFileId)"
+    assert native_ts.count(addon_call) == 1, (
+        f"the napi wrapper forwards the second id {native_ts.count(addon_call)} times, "
+        "so the id never reaches the addon"
+    )
+
     handler = download_media_handler(rust)
 
     # Exactly one retry on the second id, and it is the id the retry's download uses: the

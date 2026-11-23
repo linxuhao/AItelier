@@ -361,15 +361,22 @@ export interface DirectorHost {
    *    omitted): {may_post: true} or {refused}, no budget used and no row written.
    *  - setProtected (optional): refs the library must not clean (a relay not committed yet).
    *  - withdraw (optional): take back the `generated` row a fetch for send_media just stored when
-   *    the send is then refused (a kind the channel cannot send, the group's post refused) - the
-   *    row, and its file once no other row points at it; anything else is left alone. */
+   *    the send is then refused (a kind the channel cannot send, the group's post refused), or a
+   *    `kept` row the group's relay then refused (design/steward-group-media.md section 3) - the
+   *    row, and its file once no other row points at it; anything else is left alone.
+   *  - kept (design/steward-group-media.md, owner 2026-11-23): `ingest`'s meta.kept marks a
+   *    group's un-mentioned file (a group audience and source 'in' only) - that group's turns
+   *    alone cover it, and it lives limits.kept_hours. keptAudiences (optional) names the
+   *    audiences holding kept rows; purgeKept (optional) deletes one audience's kept rows and the
+   *    files no other row names, under the ingest lane, and answers the receipt (counts only),
+   *    throwing purge_incomplete when rows are left or an unlinked file is still there. */
   media?: {
-    ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
+    ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated'; kept?: true },
       open: (options: { signal: AbortSignal }) => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>,
       options?: { signal?: AbortSignal }): Promise<{ ref: string; kind: 'image' | 'voice' | 'file';
       mime: string; size: number; durationMs?: number; duplicate?: boolean } | { refused: string; duplicate?: boolean }>;
     resolve(ref: string): Promise<undefined | { ref: string; path: string; kind: 'image' | 'voice' | 'file'; ext: string; mime: string;
-      size: number; durationMs?: number; audience: string; sha256: string; file: string }>;
+      size: number; durationMs?: number; audience: string; sha256: string; file: string; kept?: true }>;
     read(ref: string): Promise<undefined | { row: object; bytes: Uint8Array }>;
     fetch(request: { connId: string; url: string; audience: string }, signal?: AbortSignal): Promise<{ ref: string } | { refused: string; reason?: string }>;
     postGroup?(request: { turn: string; kind?: 'image' | 'voice' | 'file'; caption?: string; checkOnly?: boolean }, signal?: AbortSignal):
@@ -377,6 +384,9 @@ export interface DirectorHost {
         | { refused: string; reason?: string }>;
     setProtected?(refs: () => Iterable<string>): void;
     withdraw?(ref: string): { removed: number } | Promise<{ removed: number }>;
+    keptAudiences?(): Promise<string[]>;
+    purgeKept?(audience: string): Promise<{ rows_before: number; rows_after: number; files_unlinked: number; files_shared: number;
+      bytes_freed: number }>;
   };
   channels?: {
     /** Step 24.2: `attachments` - the files' metadata the plugin checked (each a kind and exactly
@@ -433,12 +443,29 @@ export interface DirectorHost {
  *  question's group: {text, channel, group_ref, withheld}); recent: that group's last exchanges;
  *  audience: record whose turn this is before its first step; ownerSpokeSince: an owner message
  *  newer than `since` is among a turn's input (lifts the pause); familyNote / familyShow: the
- *  family memory tools, accepted by the host only from a group turn. */
+ *  family memory tools, accepted by the host only from a group turn.
+ *
+ *  The media switch (design/steward-group-media.md, owner rulings 2026-11-23): list's groups
+ *  carry `media_keep` ('on' only while the switch is on - nothing else stores an un-mentioned
+ *  file) and `media_notice` when a notice is owed; `media_purges` names the groups (live or not)
+ *  whose kept media still owe a purge receipt. relay's `kept`: an un-mentioned message, recorded
+ *  only while the switch is on ({refused: 'media_keep_off'} otherwise). mediaNotice (optional):
+ *  a notice's check (a dry run; channelDown when the channel is not connected - no send), sent
+ *  (only after the channel took the line; the switch turns on only then) or failed. recordPurge
+ *  (optional): the purge's receipt. expireMedia (optional): the hourly sweep of kept rows. */
 export interface GroupsHost {
-  list(signal?: AbortSignal): Promise<{ owner_refs: Record<string, string>; groups: Array<{ channel: string; group_ref: string; label: string | null; mention_prefix: string }> }>;
+  list(signal?: AbortSignal): Promise<{ owner_refs: Record<string, string>; groups: Array<{ channel: string; group_ref: string; label: string | null; mention_prefix: string;
+    media_keep?: 'on' | 'off'; media_notice?: { phase: 'on' | 'off'; epoch: string; attempts: number } }>;
+    media_purges?: Array<{ channel: string; group_ref: string; epoch: string }> }>;
   bind(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; prefix: string; code: string }, signal?: AbortSignal): Promise<unknown>;
   relay(a: { channel: string; groupRef: string; senderRef: string; messageRef: string; text: string; at?: string;
-    attachments?: object[] }, signal?: AbortSignal): Promise<unknown>;
+    attachments?: object[]; kept?: boolean }, signal?: AbortSignal): Promise<unknown>;
+  mediaNotice?(a: { channel: string; groupRef: string; epoch: string; notice: 'on' | 'off'; phase: 'check' | 'sent' | 'failed';
+    channelDown?: boolean; attempts?: number }, signal?: AbortSignal): Promise<{ may_post: true; text: string } | { refused: string }
+      | { sent: true; state: string } | { attempts: number; state: string } | { superseded: true }>;
+  recordPurge?(a: { channel: string; groupRef: string; epoch: string; receipt: { rows_before: number; rows_after: number;
+    files_unlinked: number; files_shared: number; bytes_freed: number } }, signal?: AbortSignal): Promise<unknown>;
+  expireMedia?(signal?: AbortSignal): Promise<{ deleted: number }>;
   /** `turn` (step 23.1): the group turn that ended; the host answers only a question it took. */
   reply(a: { questionId: string; alsoAnswers: string[]; body: string; turn: string }, signal?: AbortSignal): Promise<unknown>;
   recent(a: { channel: string; groupRef: string }, signal?: AbortSignal): Promise<{ recent: unknown[] }>;
@@ -554,9 +581,13 @@ export interface OwnerChannels {
    *  and the bridge's whitelist use - asked BEFORE `open`, and a room it does not serve is
    *  refused `unsupported` with nothing fetched (a host without a media library or without
    *  groups answers the same). The row is ingested with the audience
-   *  `group:<channel>:<conversationRef>`, so that room's turns cover it and no other's. */
+   *  `group:<channel>:<conversationRef>`, so that room's turns cover it and no other's.
+   *  `asked` (a group's file; never invented when the bridge did not say): false for a message
+   *  that did not call the steward - then the group's media switch must be on (its notice sent)
+   *  instead, else `unsupported` with nothing fetched, and the row is stored `kept`
+   *  (design/steward-group-media.md section 3). */
   storeMedia(meta: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; index: number; kind: 'image' | 'voice' | 'file';
-    mime?: string; name?: string; conversationRef?: string }, open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>):
+    mime?: string; name?: string; conversationRef?: string; asked?: boolean }, open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>):
     Promise<{ ref: string; kind: string; mime: string; size: number; durationMs?: number } | { refused: string }>;
 }
 

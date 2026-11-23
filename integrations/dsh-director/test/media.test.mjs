@@ -819,3 +819,104 @@ test('step 23.1 (7.7.16, review P5): group B\'s turn refuses group A\'s media re
   const fromB = await t.library.ingest({ channel: 'generated', audience: 'group:wechat:r2', source: 'generated' }, async () => png(12, 12));
   assert.deepEqual(await t.run('media_call', { name: OCR, media: { image_base64: fromB.ref } }), { text: 'OCR: 你好' });
 });
+
+// --- design/steward-group-media.md, owner rulings 2026-11-23: kept media (a group's files sent
+// without mentioning the steward, while that group's switch is on) ------------------------------
+
+const HOUR = 3600 * 1000;
+const keptIn = (room, messageRef, extra = {}) => ({ channel: 'wechat', messageRef, index: 0, audience: `group:wechat:${room}`,
+  source: 'in', kept: true, ...extra });
+
+test('covers (R4): a kept medium is its own group\'s alone - not an owner turn\'s, not another group\'s; addressed and owner rows as before', () => {
+  const r1 = { kind: 'group', channel: 'wechat', group_ref: 'r1' }, r2 = { kind: 'group', channel: 'wechat', group_ref: 'r2' };
+  const kept = { audience: 'group:wechat:r1', kept: true }, addressed = { audience: 'group:wechat:r1' }, own = { audience: 'owner' };
+  assert.ok(covers(r1, kept), 'its group\'s turn uses it');
+  assert.ok(!covers({ kind: 'owner' }, kept), 'the owner\'s private turn does not');
+  assert.ok(!covers(r2, kept), 'another group\'s turn does not');
+  assert.ok(covers({ kind: 'owner' }, addressed), 'an addressed group medium is still the owner\'s to use (R5)');
+  assert.ok(covers({ kind: 'owner' }, own) && !covers(r1, own));
+});
+
+test('kept: only with a group audience and source in; the row carries kept, an addressed one never', async () => {
+  const lib = createMediaLibrary({ root: root() });
+  assert.deepEqual(await lib.ingest({ ...owner, messageRef: 'o', index: 0, kept: true }, async () => png()), { refused: 'invalid_media' });
+  assert.deepEqual(await lib.ingest({ channel: 'wechat', audience: 'project:alpha', source: 'in', kept: true }, async () => png()),
+    { refused: 'invalid_media' });
+  assert.deepEqual(await lib.ingest({ channel: 'generated', audience: 'group:wechat:r1', source: 'generated', kept: true }, async () => png()),
+    { refused: 'invalid_media' });
+  assert.deepEqual(await lib.ingest(keptIn('r1', 'k', { kept: 'yes' }), async () => png()), { refused: 'invalid_media' });
+  const kept = await lib.ingest(keptIn('r1', 'k1'), async () => png());
+  const addressed = await lib.ingest({ ...keptIn('r1', 'a1'), kept: undefined }, async () => png(2, 2));
+  assert.equal(lib.lookup(kept.ref).kept, true);
+  assert.equal(lib.lookup(addressed.ref).kept, undefined);
+  assert.deepEqual(lib.keptAudiences(), ['group:wechat:r1']);
+});
+
+test('kept (R3): one day, exact at read time - resolves at 23h59m, not at 24h+1s before any sweep; cleanup drops it and keeps an addressed row of the same age', async () => {
+  let now = Date.parse('2026-11-23T00:00:00Z');
+  const lib = createMediaLibrary({ root: root(), now: () => now });
+  const kept = await lib.ingest(keptIn('r1', 'k1'), async () => png());
+  const addressed = await lib.ingest({ ...keptIn('r1', 'a1'), kept: undefined }, async () => png(3, 3));
+  const file = lib.lookup(kept.ref).path;
+  now += 23 * HOUR + 59 * 60 * 1000;
+  assert.ok(lib.lookup(kept.ref), 'still there at 23h59m');
+  now += 61 * 1000;
+  assert.equal(lib.lookup(kept.ref), undefined, 'gone from the first second past the day, whatever the sweep did');
+  assert.ok(existsSync(file), 'the sweep has not run yet');
+  assert.equal(lib.cleanup().removed, 1);
+  assert.ok(!existsSync(file));
+  assert.ok(lib.lookup(addressed.ref), 'an addressed medium keeps its 30 days');
+  assert.equal(MEDIA_LIMITS.kept_hours, 24);
+});
+
+test('(b)(i) the same bytes in two groups and the owner\'s chat: one file, one row each; A\'s day leaves B\'s and the owner\'s, the file goes with the last row', async () => {
+  let now = Date.parse('2026-11-23T00:00:00Z');
+  const lib = createMediaLibrary({ root: root(), now: () => now });
+  const a = await lib.ingest(keptIn('A', 'a'), async () => png());
+  now += 2 * HOUR;
+  const b = await lib.ingest(keptIn('B', 'b'), async () => png());
+  const mine = await lib.ingest({ ...owner, messageRef: 'o', index: 0 }, async () => png());
+  const file = lib.lookup(a.ref).path;
+  assert.equal(new Set([a, b, mine].map(x => lib.lookup(x.ref).path)).size, 1, 'one file');
+  assert.equal(lib.rows.length, 3, 'three rows');
+  now = Date.parse('2026-11-23T00:00:00Z') + 24 * HOUR + 1000;
+  lib.cleanup();
+  assert.equal(lib.lookup(a.ref), undefined, 'A\'s ref answers nothing');
+  assert.ok(existsSync(file), 'the file stays while other rows name it');
+  assert.ok(lib.lookup(b.ref) && lib.lookup(mine.ref), 'B\'s and the owner\'s still resolve');
+  now += 31 * 24 * HOUR;
+  lib.cleanup();
+  assert.deepEqual(lib.rows, []);
+  assert.ok(!existsSync(file), 'unlinked once no row names it');
+});
+
+test('(b)(ii) purgeKept: only that audience\'s kept rows go; the receipt closes and counts shared and unlinked files; withdraw takes a kept row, never an addressed one', async () => {
+  const r = root();
+  const lib = createMediaLibrary({ root: r });
+  const k1 = await lib.ingest(keptIn('A', 'k1'), async () => png());
+  const k2 = await lib.ingest(keptIn('A', 'k2'), async () => png(5, 5, 100));
+  const addressedA = await lib.ingest({ ...keptIn('A', 'aa'), kept: undefined }, async () => png(6, 6));
+  const keptB = await lib.ingest(keptIn('B', 'kb'), async () => png());
+  const receipt = await lib.purgeKept('group:wechat:A');
+  assert.deepEqual(receipt, { rows_before: 2, rows_after: 0, files_unlinked: 1, files_shared: 1, bytes_freed: 133 });
+  assert.equal(lib.lookup(k1.ref), undefined); assert.equal(lib.lookup(k2.ref), undefined);
+  assert.ok(lib.lookup(addressedA.ref), 'A\'s addressed medium stays (R5)');
+  assert.ok(lib.lookup(keptB.ref), 'B\'s kept copy of the same bytes stays, and so does its file');
+  assert.deepEqual(await lib.purgeKept('group:wechat:A'), { rows_before: 0, rows_after: 0, files_unlinked: 0, files_shared: 0, bytes_freed: 0 },
+    'idempotent');
+  assert.deepEqual(createMediaLibrary({ root: r }).rows.map(x => x.ref).sort(), [addressedA.ref, keptB.ref].sort(), 'the index says the same');
+  assert.deepEqual(lib.withdraw(addressedA.ref), { removed: 0 }, 'an addressed inbound row is never withdrawn');
+  assert.deepEqual(lib.withdraw(keptB.ref), { removed: 1 }, 'a kept row is');
+});
+
+test('(b)(ii) purgeKept: a file whose unlink fails throws purge_incomplete and keeps its rows for the next purge', { skip: process.getuid?.() === 0 && 'root ignores directory modes' }, async () => {
+  const lib = createMediaLibrary({ root: root() });
+  const kept = await lib.ingest(keptIn('A', 'k1'), async () => png());
+  const month = join(lib.lookup(kept.ref).path, '..');
+  chmodSync(month, 0o500);
+  try {
+    await assert.rejects(lib.purgeKept('group:wechat:A'), error => error.code === 'purge_incomplete' && error.receipt.rows_after === 1);
+    assert.ok(existsSync(lib.lookup(kept.ref).path), 'the file is still there, and so is its row');
+  } finally { chmodSync(month, 0o700); }
+  assert.deepEqual(await lib.purgeKept('group:wechat:A'), { rows_before: 1, rows_after: 0, files_unlinked: 1, files_shared: 0, bytes_freed: 33 });
+});

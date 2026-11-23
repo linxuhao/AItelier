@@ -527,23 +527,34 @@ export interface OwnerChannels {
    *  cannot fetch, a file the source no longer has). A message whose storeMedia answered
    *  channel_sender_not_bound comes WITHOUT attachments. Anything outside that closed set
    *  refuses the message invalid_inbound. The placeholder lines are written by the director
-   *  (lib/channels.mjs), never by a channel; the text may be empty when files came. */
+   *  (lib/channels.mjs), never by a channel; the text may be empty when files came.
+   *  `asked` (optional, a group message's; the owner's ruling of 2026-11-22) - whether the
+   *  message calls the steward, as the bridge measured it. Storage is not gated on it: a group
+   *  message is recorded either way (its files were stored first, against its room), but only
+   *  `asked === true` opens a turn and is ever answered. Omitting it is "asked": every group
+   *  message a channel handed in before this field existed was one that called the steward. */
   inbound(message: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; text: string; at?: string;
+    asked?: boolean;
     attachments?: Array<{ kind: 'image' | 'voice' | 'file'; ref?: string; refused?: 'too_large' | 'type' | 'unsupported' | 'gone';
       mime?: string; size?: number; name?: string; durationMs?: number }> }):
     Promise<{ accepted: boolean; reason?: string }>;
   /** Step 24.2: store attachment `index` of message `messageRef` BEFORE inbound. In order: (1)
-   *  the sender is the channel's current binding (host.channels.senderBound; unreachable:
-   *  `unavailable`, transient - hold the message and ask again), else channel_sender_not_bound
-   *  and `open` is never called; (2) a stored (channel, messageRef, index) answers its ref
-   *  without calling `open`; (3) `open()` streams the bytes, held to the limits and the type
-   *  table. {ref, kind, mime, size, durationMs?} or {refused: too_large | type | unsupported |
-   *  gone | unavailable | channel_sender_not_bound | invalid_media}. `open` may throw
-   *  {refused: 'too_large' | 'gone'} (a bridge's 413 / 410); any other throw is `unavailable`.
-   *  `conversationRef`: the group the message came in (the room, the same field a group
-   *  message carries to inbound, step 23); a channel MUST pass it for a group's file. A group
-   *  message has no media in 24.2: it is refused `unsupported` before the binding check and
-   *  `open` - nothing fetched, nothing stored, whoever sent it. */
+   *  the message comes from somewhere this host serves - a 1:1 sender that is the channel's
+   *  current binding (host.channels.senderBound; unreachable: `unavailable`, transient - hold
+   *  the message and ask again), else channel_sender_not_bound and `open` is never called; (2)
+   *  a stored (channel, messageRef, index) answers its ref without calling `open`; (3) `open()`
+   *  streams the bytes, held to the limits and the type table. {ref, kind, mime, size,
+   *  durationMs?} or {refused: too_large | type | unsupported | gone | unavailable |
+   *  channel_sender_not_bound | invalid_media}. `open` may throw {refused: 'too_large' |
+   *  'gone'} (a bridge's 413 / 410); any other throw is `unavailable`.
+   *  `conversationRef`: the group the message came in (the room, the same field a group message
+   *  carries to inbound, step 23); a channel MUST pass it for a group's file. It then replaces
+   *  the 1:1 binding check (a member is never the bound account): the group must be one this
+   *  host serves - `host.groups.list` (`lib/channels.mjs: servesGroup`), the same read the wake
+   *  and the bridge's whitelist use - asked BEFORE `open`, and a room it does not serve is
+   *  refused `unsupported` with nothing fetched (a host without a media library or without
+   *  groups answers the same). The row is ingested with the audience
+   *  `group:<channel>:<conversationRef>`, so that room's turns cover it and no other's. */
   storeMedia(meta: { channel: 'slack' | 'wechat'; senderRef: string; messageRef: string; index: number; kind: 'image' | 'voice' | 'file';
     mime?: string; name?: string; conversationRef?: string }, open: () => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>):
     Promise<{ ref: string; kind: string; mime: string; size: number; durationMs?: number } | { refused: string }>;

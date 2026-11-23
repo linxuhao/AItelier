@@ -153,7 +153,7 @@ test('xlsx cells: whitelisted formulas are formulas, numbers numbers, everything
   for (const f of ['=SUM(B2:B9)', '=AVERAGE(A1,A2,3)', '=ROUND(C3,2)', '=COUNT($A$1:$A$100)', '=MAX(A1:B2,C3)', '=MIN()'])
     assert.deepEqual(sheetCell(f), { f }, f);
   for (const s of ['=HYPERLINK("http://x","y")', "=1+cmd|' /C calc'!A0", '+SUM(A1)', '@SUM(A1)', '-2+3', '=sum(A1)', '=SUM(A1) ', '=WEBSERVICE("http://x")',
-    '=SUM(A1:B2)+1', '007', '0123', '1e5', '', '3.', 'abc'])
+    '=SUM(A1:B2)+1', '=INDIRECT(A1)', '=HYPERLINK(A1,B1)', '=DDE(1,2)', '007', '0123', '1e5', '', '3.', 'abc'])
     assert.deepEqual(sheetCell(s), { s }, s);
   assert.deepEqual(sheetCell('-2'), { n: -2 });
   assert.deepEqual(sheetCell('3.5'), { n: 3.5 });

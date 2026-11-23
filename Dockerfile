@@ -95,6 +95,15 @@ COPY --from=frontend-build /app/web/node_modules /opt/aitelier-web/node_modules
 # every directory other-traversable, since the gate runs as uid 1000. `a+rX` is a
 # no-op where npm already wrote 0644/0755, so this layer normally changes nothing.
 RUN chmod -R a+rX /opt/aitelier-web
+# The steward's PDF reader (integrations/dsh-director/pdf_read.py) needs
+# pypdfium2. It is installed from requirements-pdf.txt, one line pinned by
+# sha256, and kept out of pyproject.toml and requirements.lock: only the
+# reader subprocess imports it, and the project install below never sees it.
+# --require-hashes refuses any wheel whose bytes differ, --only-binary=:all:
+# refuses a source build, and --no-deps keeps the resolver from pulling
+# anything the hash file does not name, so this install cannot float.
+# `COPY . /app` above already carries the file into the build context.
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: --no-deps -r requirements-pdf.txt
 # Install the exact reviewed public engine from PyPI, not a mutable host
 # checkout or an old image layer.
 # The versions come from requirements.lock, through `-c` (constraints), not

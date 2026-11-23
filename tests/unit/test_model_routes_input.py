@@ -222,6 +222,17 @@ def test_input_summary_says_whether_input_is_measured(tmp_path):
     assert "unlisted (text-only): gamma/txt-2" in line
 
 
+def test_an_empty_input_table_is_not_reported_as_measured(tmp_path):
+    """Dashboard review (director 677): `"_input": {}` declares every candidate
+    text-only; the startup line must not say `_input measured`, because that is
+    the line a deploy reads to confirm the table took effect."""
+    table = _table(tmp_path, {**ROUTES, "_input": {}})
+    line = table.input_summary()
+    assert "_input measured" not in line
+    assert line.startswith("model routes: _input present but empty: nothing measured")
+    assert all(not table.accepts_image(r) for r in table.names())
+
+
 def test_a_hand_edit_of_the_table_needs_a_restart_or_reset_cache(tmp_path):
     """F1: get_routes() parses the file once per process. Adding `_input` to the
     live file by hand changes nothing in a running backend until it restarts

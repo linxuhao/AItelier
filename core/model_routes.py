@@ -232,6 +232,12 @@ class ModelRoutes:
                     "refused nor declared away)")
         text_only = [r for r in self.names() if not self.accepts_image(r)]
         unlisted = self.unlisted_input()
+        if not self._input:
+            # An empty table is an explicit "every candidate text-only", not a
+            # measurement: say so, so a deploy cannot read it as `_input` live.
+            return ("model routes: _input present but empty: nothing measured "
+                    "(every candidate unlisted, text-only); text-only routes: "
+                    f"{', '.join(text_only) or 'none'}")
         return (f"model routes: _input measured, {len(self._input)} candidates "
                 f"listed; text-only routes: {', '.join(text_only) or 'none'}; "
                 f"unlisted (text-only): {', '.join(unlisted) or 'none'}")

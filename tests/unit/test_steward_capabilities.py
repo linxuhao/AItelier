@@ -190,7 +190,9 @@ def test_a_ticked_connection_tool_is_mcp_and_names_that_connection_and_tool(clie
 
 def test_no_connection_names_nobody(client, world, deployment_facts):
     table = rows(client)
-    assert len(table) == 19
+    assert len(table) == 18
+    # The owner's list is fixed and translation is not on it ("everyone does that").
+    assert "translate" not in table
     # The only rows with a deployment fact in this fixture are vision and pdf.
     assert [cap_id for cap_id, row in table.items() if row["provider"] == "native"] == ["vision", "pdf"]
     for cap_id, row in table.items():

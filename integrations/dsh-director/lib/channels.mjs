@@ -1061,7 +1061,14 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     } catch (error) { log('group_media_pass_failed', { error: short(error) }); }
     finally { mediaPassing = false; }
   };
-  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments, asked }) => {
+  // `senderName` (the owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」): the name
+  // the channel carried for this sender, which the host records as the member's label so the
+  // group's recent/kept rows name them. The sender's WeChat id is `senderRef`, already there.
+  // Handed on only when the channel named someone (never a placeholder, never the id, never a
+  // name this side invents); absent, the backend keeps the 成员X alias - and it is not a log
+  // field: `seen` leaves it out.
+  const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind,
+    attachments, asked, senderName }) => {
     const seen = { channel, group_ref: groupRef, sender_ref: senderRef, length: body.length };
     if (!groups || !text(groupRef)) return { accepted: false, reason: 'no_groups' };
     // design/steward-group-media.md item 5 (the owner's ruling of 2026-11-22): STORAGE is not
@@ -1084,7 +1091,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       result = groupBind
         ? await groups.bind({ channel, groupRef, senderRef, messageRef, prefix: groupBind.prefix, code: groupBind.code })
         : await groups.relay({ channel, groupRef, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}),
-          ...(attachments?.length ? { attachments } : {}), ...(mentioned ? {} : { kept: true }) });
+          ...(attachments?.length ? { attachments } : {}), ...(mentioned ? {} : { kept: true }),
+          ...(text(senderName) ? { senderName } : {}) });
     } catch (error) {
       log('group_inbound_failed', { ...seen, error: short(error) });
       return { accepted: false, reason: 'unavailable' };

@@ -137,6 +137,9 @@ def test_upgrade_legacy_row_preserves_hash_duplicate_and_historical_event(ready)
         service.store._event(conn, "p", "n", "evidence_recorded",
                              old_payload | {"evidence_id": "historical-fixture"})
     before = invoke(service, 'events', project_id='p')
+    # The upgraded process: schema setup runs once per handle and file.
+    from core import state_schema_setup
+    state_schema_setup.forget()
     upgraded = StateService(service.db, actor=service.actor, project_read_trusted=True)
     assert invoke(upgraded, 'record_evidence', **args) == legacy
     assert invoke(upgraded, 'events', project_id='p') == before

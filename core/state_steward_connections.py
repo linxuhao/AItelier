@@ -463,10 +463,13 @@ def _resolve(host: str, resolver) -> set[str]:
         return set()
 
 
+_NUMERIC_LABEL = re.compile(r"0x[0-9a-f]*|[0-9]+")
+
+
 def check_url(url: str) -> tuple[str, str, int]:
     """The shape a connection address may have (7.8.4, 7.8.10a): `https://`, or `http://`
     to a container name the backend reaches directly; no user info, query or fragment,
-    an ASCII host. Returns (scheme, host, port)."""
+    an ASCII host that is not a numeric alias of an address. Returns (scheme, host, port)."""
     if not isinstance(url, str) or len(url) > 500 or any(c.isspace() for c in url):
         raise StateGraphError("invalid_url")
     try:
@@ -479,12 +482,16 @@ def check_url(url: str) -> tuple[str, str, int]:
             or parts.password is not None or parts.query or parts.fragment or "@" in parts.netloc
             or not host.isascii()):
         raise StateGraphError("invalid_url")
+    try:
+        ipaddress.ip_address(host)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    # A host the resolver reads as an address although it is not written as one (3232235777,
+    # 0xc0a80101, 0300.0250.1.1, 192.168.257): a name check (private_only) would not see it.
+    if not is_ip and all(_NUMERIC_LABEL.fullmatch(label) for label in host.rstrip(".").split(".")):
+        raise StateGraphError("invalid_url: a numeric host - write an address as a plain IP")
     if parts.scheme == "http":
-        try:
-            ipaddress.ip_address(host)
-            is_ip = True
-        except ValueError:
-            is_ip = False
         if is_ip or "." in host:
             raise StateGraphError("invalid_url: http only to a container name the backend reaches directly")
     return parts.scheme, host, port or (443 if parts.scheme == "https" else 80)
@@ -493,6 +500,9 @@ def check_url(url: str) -> tuple[str, str, int]:
 # Step 24.3 (design-steward 7.8.13): the steward's own browser keeps its login state, and a
 # click or a typed word in it can act for the owner. A connection to it is private, whoever
 # writes the change (dashboard or an approved proposal), so a group turn never reaches it.
+# It is judged by the written name; check_url refuses numeric aliases of an address. The
+# browser itself is on its own docker network (steward-browser) with the backend alone, so
+# no other container reaches it around this gateway (deploy/pwmcp/run-pwmcp.sh).
 PRIVATE_ONLY_HOSTS = ("steward-pwmcp",)
 
 

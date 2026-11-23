@@ -182,6 +182,11 @@ services:
       # for why that one missing word is what keeps a clean checkout working.
       - default
       - edge
+      # Step 24.3 (design-steward 7.8.13): the steward's own browser
+      # (deploy/pwmcp/run-pwmcp.sh steward) is on this network and no other, so
+      # only the backend's gateway reaches http://steward-pwmcp:8921/mcp. The
+      # browser has no auth of its own: NO other service may join this network.
+      - steward-browser
     ports:
       # Loopback-only: the host CLI uses localhost:4444; the public path is via
       # cloudflared over the 'edge' network (aitelier:4444). Binding to 0.0.0.0
@@ -437,3 +442,11 @@ networks:
   # path is dark while localhost answers.
   edge:
     name: ${AITELIER_EDGE_NETWORK:-aitelier_edge_unused}
+  # The steward's own browser's network (step 24.3, design-steward 7.8.13), shared
+  # with deploy/pwmcp/run-pwmcp.sh steward: one name, STEWARD_BROWSER_NETWORK,
+  # default steward-browser. Whichever comes first creates it (the script with
+  # `docker network create`, an `up` here like `edge` above); not `external:`,
+  # for the reason above, and not `internal:`, because the browser browses the web.
+  # Only the aitelier service joins it (tests/unit/test_compose_steward_browser_network.py).
+  steward-browser:
+    name: ${STEWARD_BROWSER_NETWORK:-steward-browser}

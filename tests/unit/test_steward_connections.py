@@ -51,7 +51,8 @@ PEPPER = "steward-connections-pepper-" * 3
 ADDRESSES = {"mcp_server": "172.30.0.5", "postkeep": "172.30.0.6", "steward-pwmcp": "172.40.0.2",
              "aitelier": "172.30.0.2", "dev_mcp": "172.30.0.9", "zvec-grep": "172.24.0.4",
              "aitelier-zg": "172.24.0.4", "alias-of-backend": "172.30.0.2", "localhost": "127.0.0.1",
-             "lanhost": "192.168.1.119", "example.com": "93.184.216.34", "good.example": "93.184.216.35"}
+             "lanhost": "192.168.1.119", "example.com": "93.184.216.34", "good.example": "93.184.216.35",
+             "2888302594": "172.40.0.2"}  # steward-pwmcp's address written as one number
 
 
 def resolver(host, port):
@@ -215,6 +216,23 @@ def test_an_ip_written_with_http_is_not_a_container_name(world):
         add(world, url="http://172.30.0.2:4444/mcp")
     with pytest.raises(StateGraphError, match="reserved_endpoint"):
         add(world, url="https://172.30.0.2:4444/mcp")
+
+
+@pytest.mark.parametrize("url", [
+    "http://2888302594:8921/mcp", "http://3232235777:8921/mcp", "http://0xc0a80101:8921/mcp", "http://0XAC1E0002:8921/mcp",
+    "https://3232235777/mcp", "https://0300.0250.1.1/mcp", "https://0xc0.0xa8.1.1/mcp", "https://192.168.257/mcp",
+    "https://010.0.0.1/mcp", "https://192.168.1.1./mcp", "https://0x/mcp"])
+def test_a_numeric_alias_of_an_address_is_refused(world, url):
+    # The resolver reads these as addresses (3232235777 = 192.168.1.1); a check by name, like
+    # private_only, would not see the steward's own browser behind its container address.
+    for visibility in ("public", "private"):
+        with pytest.raises(StateGraphError, match="invalid_url: a numeric host"):
+            add(world, conn_id="numeric", url=url, visibility=visibility)
+    assert listed(world)["connections"] == []
+
+
+def test_a_name_with_digits_is_not_a_numeric_host(world):
+    assert add(world, conn_id="digits", url="https://1password.example/mcp")["conn_id"] == "digits"
 
 
 @pytest.mark.parametrize("url", ["https://u:p@good.example/mcp", "https://good.example/mcp?x=1",

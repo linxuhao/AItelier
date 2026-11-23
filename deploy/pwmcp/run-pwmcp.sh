@@ -22,19 +22,25 @@ if [ "$DRIVER" = steward ]; then
   # The steward's own instance: same image, package and config as the drivers', its own container,
   # profile and port; the one client is the backend's steward gateway (a `browser` connection the
   # owner adds on the dashboard, private only). Differences from a driver's, each for that client:
-  #   - on the backend's docker network (STEWARD_BROWSER_NETWORK, default aitelier_default), not the
-  #     host's: the gateway refuses loopback and host addresses, so it dials http://steward-pwmcp:PORT/mcp.
-  #     No published port. --shm-size instead of --ipc=host (no host namespace left).
+  #   - on its own docker network (STEWARD_BROWSER_NETWORK, default steward-browser, created here
+  #     when missing), not the host's: the gateway refuses loopback and host addresses, so it dials
+  #     http://steward-pwmcp:PORT/mcp. Only steward-pwmcp and the backend (`aitelier`, which joins it
+  #     in docker-compose.yml) are on it. Not aitelier_default: the browser listens on 0.0.0.0 with
+  #     no auth (--allowed-hosts only checks the Host header), so any container sharing its network
+  #     (aitelier-zg, aitelier-godot, ...) could drive it and skip the gateway's owner-only audience.
+  #     Not --internal: the browser must reach the web. No published port. --shm-size instead of
+  #     --ipc=host (no host namespace left).
   #   - no autoshot proxy (it listens on 127.0.0.1 only), playwright directly on PORT.
   #   - no --allowed-origins (the steward browses the web), no --caps vision, default text snapshots
   #     (the drivers' vision + no-snapshot mode is for canvas games), no --save-session logs.
   #   - profile (login state) under STEWARD_BROWSER_DIR, outside ~/.AItelier, which dev_mcp mounts.
   #     The package and config are mounted read-only.
-  # Accepted (owner 2026-11-23): like the drivers' browser, its pages can reach the LAN and the
-  # backend's network; nothing proxies or filters its traffic.
+  # Accepted (owner 2026-11-23): like the drivers' browser, its pages can reach the LAN (and the
+  # backend, its one neighbour on steward-browser); nothing proxies or filters its traffic.
   D=${STEWARD_BROWSER_DIR:-$HOME/.local/share/aitelier/steward-browser}
-  PROFILE=$D/profile; OUT=$D/out; HOMED=$D/home; NET=${STEWARD_BROWSER_NETWORK:-aitelier_default}
+  PROFILE=$D/profile; OUT=$D/out; HOMED=$D/home; NET=${STEWARD_BROWSER_NETWORK:-steward-browser}
   (umask 077; mkdir -p "$PROFILE" "$OUT" "$HOMED")
+  docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
   PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --headless --browser chromium --no-sandbox \
  --executable-path /ms-playwright/chromium-1254/chrome-linux64/chrome \

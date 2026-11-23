@@ -204,6 +204,38 @@ class ModelRoutes:
         """What this concrete candidate can be sent; unlisted means text only."""
         return list(self._input.get(candidate, _DEFAULT_INPUT))
 
+    def unlisted_input(self) -> list[str]:
+        """Every candidate of every route that `_input` does not list, sorted.
+
+        Once the table has an `_input`, each of these is text-only (input_for)
+        and so is every route that names one, even only in its fallback tail
+        (accepts_image). A project row whose `model` names such a route gives
+        its director a text-only root. An `_input` written for a few routes
+        therefore turns every other route text-only, so the `_input` must list
+        every candidate in the table. Empty while there is no `_input`, because
+        nothing has been measured yet.
+        """
+        if not self.measures_input:
+            return []
+        return sorted({c for cands in self._routes.values() for c in cands}
+                      - set(self._input))
+
+    def input_summary(self) -> str:
+        """One line for the backend's startup log: what this process read.
+
+        The table is cached per process (get_routes), so this line is how a
+        deploy checks that an `_input` it added has actually taken effect.
+        """
+        if not self.measures_input:
+            return ("model routes: no _input, image input unmeasured "
+                    "(route-input says measured:false; images are neither "
+                    "refused nor declared away)")
+        text_only = [r for r in self.names() if not self.accepts_image(r)]
+        unlisted = self.unlisted_input()
+        return (f"model routes: _input measured, {len(self._input)} candidates "
+                f"listed; text-only routes: {', '.join(text_only) or 'none'}; "
+                f"unlisted (text-only): {', '.join(unlisted) or 'none'}")
+
     def accepts_image(self, model_name: str) -> bool:
         """True only when EVERY candidate `model_name` resolves to takes images.
 
@@ -283,5 +315,12 @@ def get_routes(path: str | os.PathLike | None = None) -> ModelRoutes:
 
 
 def reset_cache() -> None:
-    """Test hook: drop the cached tables so a new file is picked up."""
+    """Drop the cached tables so a new file is picked up.
+
+    A test hook, and the only way a running backend sees a changed file: the
+    model-routes API calls it after each save. A hand edit of the live
+    `model_routes.json` (for example adding `_input`) changes nothing until the
+    backend restarts or such a save happens. The startup line (input_summary)
+    shows what the new process read.
+    """
     _CACHE.clear()

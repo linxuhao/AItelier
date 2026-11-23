@@ -188,3 +188,58 @@ def test_a_registry_write_onto_a_bad_input_table_is_refused(tables):
     with pytest.raises(reg.RegistryError, match="_input"):
         reg.map_model("fast", "beta/m-2")
     assert json.loads(path.read_text())["fast"] == ["alpha/m-1", "beta/m-1"]
+
+
+# ── F2: every candidate `_input` does not list counts as text-only ──────────
+
+def test_every_candidate_missing_from_input_is_text_only_and_named(tmp_path):
+    """Once the table HAS an `_input`, a candidate it does not list is text-only,
+    and so is EVERY route that names one (the whole-route rule): `gamma/txt-2`
+    is only `rotating`'s fallback tail, and it still makes `rotating` text-only.
+    `unlisted_input` names each such candidate once, so a deploy can check that
+    the `_input` it writes covers the whole table before it takes effect."""
+    t = _table(tmp_path, {**ROUTES, "_input": INPUT})
+    assert t.unlisted_input() == ["gamma/txt-2"]
+    assert t.input_for("gamma/txt-2") == ["text"]
+    assert t.accepts_image("rotating") is False
+    covered = _table(tmp_path, {**ROUTES, "_input": {**INPUT, "gamma/txt-2": ["text", "image"]}})
+    assert covered.unlisted_input() == []
+    assert covered.accepts_image("rotating") is True
+    # Without an `_input` nothing was measured: nothing is "unlisted" either.
+    assert _table(tmp_path, ROUTES).unlisted_input() == []
+
+
+# ── F1: the table is read once per process; the startup line says what it read ─
+
+def test_input_summary_says_whether_input_is_measured(tmp_path):
+    """The backend prints this line at startup (api/main.py lifespan): with no
+    `_input` it says the routes are unmeasured; with one it names the text-only
+    routes and every unlisted candidate."""
+    assert "no _input" in _table(tmp_path, ROUTES).input_summary()
+    line = _table(tmp_path, {**ROUTES, "_input": INPUT}).input_summary()
+    assert line.startswith("model routes: _input measured")
+    assert "text-only routes: mixed, rotating" in line
+    assert "unlisted (text-only): gamma/txt-2" in line
+
+
+def test_a_hand_edit_of_the_table_needs_a_restart_or_reset_cache(tmp_path):
+    """F1: get_routes() parses the file once per process. Adding `_input` to the
+    live file by hand changes nothing in a running backend until it restarts
+    (or a model-routes API save calls reset_cache)."""
+    p = tmp_path / "model_routes.json"
+    p.write_text(json.dumps(ROUTES), encoding="utf-8")
+    model_routes.reset_cache()
+    try:
+        assert model_routes.get_routes(p).measures_input is False
+        p.write_text(json.dumps({**ROUTES, "_input": INPUT}), encoding="utf-8")
+        assert model_routes.get_routes(p).measures_input is False, "cached: the hand edit is not seen"
+        model_routes.reset_cache()
+        assert model_routes.get_routes(p).measures_input is True
+    finally:
+        model_routes.reset_cache()
+
+
+def test_the_backend_prints_the_input_summary_at_startup():
+    """The deploy step depends on reading this line after the restart."""
+    src = (ROOT / "api" / "main.py").read_text(encoding="utf-8")
+    assert "input_summary()" in src

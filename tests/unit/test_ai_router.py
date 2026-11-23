@@ -777,6 +777,48 @@ class TestARefusedInjectedParameterIsDroppedByName:
         assert len(seen) == 1, "not our parameter, not our retry"
         assert gw._dropped_injected_param is None
 
+    def test_the_next_turn_does_not_resend_the_refused_key(self):
+        """The refusal is remembered per endpoint, not just for one call.
+
+        Measured 2026-11-22 on the worker route: `_apply_binding` writes
+        `extra_body.thinking` afresh on EVERY turn of a session, while the drop
+        was budgeted once per gateway. So a child that drew an
+        `opencodego*/beam-free` endpoint survived the turn that dropped the key
+        and died on the next one with the same 400 — the client saw a truncated
+        SSE body (`Unexpected end of JSON input`), not a refusal. Four children
+        of this project's director ended that way in twelve minutes.
+        """
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        seen = self._stub(gw, litellm.exceptions.BadRequestError(
+            self.REFUSAL, "m", "p"))
+        gw._complete_prebuilt(gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(seen) == 2, "turn 1: one drop, one retry"
+        later = self._stub(gw)                       # no refusal queued
+        gw._complete_prebuilt(gw._build_kwargs([{"role": "user", "content": "y"}]))
+        assert len(later) == 1, (
+            "turn 2 must not need a retry: the key was already refused here")
+        assert "thinking" not in (later[0].get("extra_body") or {}), (
+            "and must not carry the refused key at all")
+        assert "thinking" not in later[0], "nor as a top-level key"
+
+    def test_another_endpoint_still_gets_the_key(self):
+        """A refusal belongs to the endpoint that made it, not to the gateway.
+
+        The remembered key is what a FAILOVER must not inherit: the next
+        endpoint down the list never refused anything, and withholding a
+        reasoning switch from it would silently turn a reasoning role into a
+        non-reasoning one.
+        """
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        self._stub(gw, litellm.exceptions.BadRequestError(self.REFUSAL, "m", "p"))
+        gw._complete_prebuilt(gw._build_kwargs([{"role": "user", "content": "x"}]))
+        refused_endpoint = gw.active_model
+        assert gw._refused_params == {refused_endpoint: "thinking"}
+        gw._bind("someother/deepseek-v4.1-flash")    # a failover moved the binding
+        moved = gw._build_kwargs([{"role": "user", "content": "y"}])
+        assert "thinking" in (moved.get("extra_body") or {}), (
+            "an endpoint that never refused the key still gets it")
+
 
 class TestFailoverNeverRevisitsADeadEndpoint:
     """A route may name one endpoint twice on purpose.

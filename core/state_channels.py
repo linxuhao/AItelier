@@ -1532,7 +1532,7 @@ class StateChannels:
         return {"default_channel": channel}
 
     def send_owner_message(self, request_key, project_id, body, subject=None, reply_to_message_id=None,
-                           target_driver_id=None, answers=None):
+                           target_driver_id=None, answers=None, attachments=None):
         """`send_user_conversation_message`: the inbox writes the dashboard message; an
         owner session's exact phrase in the steward's conversation then decides a
         proposal like a relayed one (the owner's terminal, CLI_OWNER_ACTOR, may talk
@@ -1562,7 +1562,7 @@ class StateChannels:
 
         result = self.inbox.send_user_conversation_message(
             request_key, project_id, body, subject=subject, reply_to_message_id=reply_to_message_id,
-            target_driver_id=target_driver_id, answers=answers, _written=written)
+            target_driver_id=target_driver_id, answers=answers, attachments=attachments, _written=written)
         if matched:
             record = {"phrase": matched["phrase"], "message_id": matched["message_id"]}
             result = {**result, "approval": self._decide(matched, self.actor, record)}

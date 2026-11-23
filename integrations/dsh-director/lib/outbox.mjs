@@ -3,7 +3,9 @@
  *  Two kinds of wake reach the director:
  *  - the host's events (work changed, a message arrived, an owner's answer). The host
  *    owns their source and replays from its own cursor, so the director only needs to
- *    recognise one it already delivered: `deliverOnce(id, text)`.
+ *    recognise one it already delivered: `deliverOnce(id, text)`. Step 24.2b: an
+ *    event may carry images (`deliverOnce(id, text, {images})`); they are passed to
+ *    `deliver` and never enter the key, so the text must name what is new.
  *  - the runtime's own notices (a watched job ended, a child handed a plan back, a
  *    batch is ready, a worker slot freed, workers were resumed). Nobody else holds
  *    them, so they are written to the outbox BEFORE delivery and replayed after a
@@ -39,7 +41,8 @@ const lines = async file => {
 export const wakeKey = (id, text) => `${id}#${createHash('sha256').update(text).digest('hex').slice(0, 40)}`;
 
 export class Outbox {
-  /** @param dir - the state directory; @param deliver - async text => void (the raw steer). */
+  /** @param dir - the state directory; @param deliver - async (text, images?) => void (the
+   *  raw steer; `images` only for a host event that carries them). */
   constructor({ dir, deliver, keep = 1000, maxReplays = 3, log = () => {} }) {
     Object.assign(this, { dir, deliver, keep, maxReplays, log });
     this.outboxFile = join(dir, 'outbox.jsonl');
@@ -79,12 +82,13 @@ export class Outbox {
     await appendFile(this.deliveredFile, key + '\n', { mode: 0o600 });
     if (++this.writes % this.keep === 0) await this.compact();
   }
-  /** A host event: delivered unless the same id with the same text was delivered before. */
-  async deliverOnce(id, text) {
-    if (!id) { await this.deliver(text); return { delivered: true }; }
+  /** A host event: delivered unless the same id with the same text was delivered before.
+   *  `images` (24.2b) go to `deliver` with the text; the key is still id#sha(text) alone. */
+  async deliverOnce(id, text, { images } = {}) {
+    if (!id) { await this.deliver(text, images); return { delivered: true }; }
     const key = wakeKey(id, text);
     if (this.delivered.has(key)) { this.log(`wake ${key} already delivered; not delivered again`); return { duplicate: true }; }
-    await this.deliver(text);
+    await this.deliver(text, images);
     await this.#mark(key);
     return { delivered: true };
   }

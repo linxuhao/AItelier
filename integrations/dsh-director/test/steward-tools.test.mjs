@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../lib/portfolio.mjs';
 import { PROPOSAL_KINDS, registerProposalTools } from '../lib/proposals.mjs';
 import { registerChannelTools } from '../lib/channel-tools.mjs';
+import { registerMediaTools } from '../lib/media-tools.mjs';
+import { validateHost } from '../lib/host.mjs';
 import { readFileSync } from 'node:fs';
 
 const collect = (register, options) => {
@@ -180,4 +182,93 @@ test('steward.md (step 23.1, design-steward 7.7.15 r44v): several groups - each 
   for (const words of ['may bind a group chat of', 'the family has two lists', 'visible to the whole family group',
     'say that your owner sets those'])
     assert.ok(!flat.includes(words), `steward.md still says: ${words}`);
+});
+
+// --- step 24.2b (design-steward 7.8.12a "出站", 7.8.12 "发到哪里"): an owner turn's send_media ---------
+
+const REF = 'm_' + '1'.repeat(16), FETCHED = 'm_' + '2'.repeat(16);
+const DRAWN = 'http://mcp_server:9003/files/cat.png?sig=1';
+
+/** send_media with a fake host: the library knows REF (owner) and, once fetched, FETCHED; the
+ *  channels handle throws on any use, so an owner turn that touched a channel fails loudly. */
+function sendMediaWorld({ audience = { kind: 'owner' }, requester, sendToOwner, channels } = {}) {
+  const calls = { owner: [], withdrawn: [], fetched: [], posted: [], files: [] };
+  const rows = new Map([[REF, { ref: REF, kind: 'image', mime: 'image/png', ext: 'png', path: '/media/owner/a.png', audience: 'owner' }]]);
+  const media = { resolve: async ref => rows.get(ref), read: async () => undefined,
+    fetch: async request => { calls.fetched.push(request);
+      rows.set(FETCHED, { ref: FETCHED, kind: 'image', mime: 'image/png', ext: 'png', path: '/media/owner/b.png', audience: request.audience });
+      return { ref: FETCHED }; },
+    withdraw: async ref => { calls.withdrawn.push(ref); return { removed: 1 }; },
+    postGroup: async request => { calls.posted.push(request);
+      return request.checkOnly ? { may_post: true } : { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1' }; },
+    ...(sendToOwner === null ? {} : { sendToOwner: sendToOwner ?? (async request => { calls.owner.push(request);
+      return { message_id: 'sm-1', mirror: { mirrored: false, reason: 'dashboard' } }; }) }) };
+  const untouchable = new Proxy({}, { get: (_, name) => { throw new Error(`an owner turn used the channels handle: ${String(name)}`); } });
+  const tools = collect(registerMediaTools, { ctx: {}, HarnessError: Error, media,
+    catalog: { rootSession: 'root', requester, catalog: () => new Set(), outward: () => false },
+    turns: { audience: () => audience, open: () => ({ audience, turn: 't1' }) },
+    channels: channels === null ? undefined : channels ?? untouchable, ledger: { lookup: url => (url === DRAWN ? 'media' : undefined) } });
+  const run = args => tools.get('send_media').execute(args, { agent: { session: { id: 'root' } }, callId: 'c1', token: 'tok', signal: exec.signal });
+  return { calls, media, run, tools };
+}
+
+test('24.2b send_media, owner turn: one host.media.sendToOwner with the ref, the caption and the turn\'s owner message - no channel, no dashboard_no_media', async () => {
+  const dashboard = sendMediaWorld({ requester: 'dash-1' });
+  assert.deepEqual(await dashboard.run({ ref: REF, caption: '猫' }),
+    { sent: true, ref: REF, kind: 'image', message_id: 'sm-1', mirror: { mirrored: false, reason: 'dashboard' } });
+  assert.deepEqual(dashboard.calls.owner, [{ ref: REF, caption: '猫', replyTo: 'dash-1' }]);
+  // The same without a channels handle at all (a host without channels): still a message.
+  const bare = sendMediaWorld({ requester: 'dash-1', channels: null });
+  assert.equal((await bare.run({ ref: REF })).sent, true);
+  assert.deepEqual(bare.calls.owner, [{ ref: REF, replyTo: 'dash-1' }], 'no caption: none sent');
+  // The model cannot name where it goes: no such parameter.
+  assert.deepEqual(Object.keys(dashboard.tools.get('send_media').parameters), ['ref', 'url', 'caption']);
+  assert.doesNotMatch(dashboard.tools.get('send_media').description, /Not on the dashboard/);
+});
+
+test('24.2b send_media, an owner turn no owner message opened (reminder, letter): sent without replyTo - not no_requester', async () => {
+  const w = sendMediaWorld({ requester: undefined });
+  assert.equal((await w.run({ ref: REF })).sent, true);
+  assert.deepEqual(w.calls.owner, [{ ref: REF }]);
+  assert.ok(!('replyTo' in w.calls.owner[0]));
+});
+
+test('24.2b send_media, owner turn: a url is fetched (audience owner) and sent; a refused message takes back what the call stored', async () => {
+  const ok = sendMediaWorld({ requester: 'msg-w' });
+  assert.equal((await ok.run({ url: DRAWN })).ref, FETCHED);
+  assert.deepEqual(ok.calls.fetched, [{ connId: 'media', url: DRAWN, audience: 'owner' }]);
+  assert.deepEqual(ok.calls.owner, [{ ref: FETCHED, replyTo: 'msg-w' }]);
+  assert.deepEqual(ok.calls.withdrawn, []);
+  const refused = sendMediaWorld({ requester: 'msg-w', sendToOwner: async () => ({ refused: 'invalid_attachment', reason: 'r' }) });
+  assert.deepEqual(await refused.run({ url: DRAWN }), { refused: 'invalid_attachment', reason: 'r' });
+  assert.deepEqual(refused.calls.withdrawn, [FETCHED], 'the row this call stored is withdrawn');
+  // A ref the library already held is never withdrawn.
+  const held = sendMediaWorld({ requester: 'msg-w', sendToOwner: async () => ({ refused: 'unavailable' }) });
+  assert.deepEqual(await held.run({ ref: REF }), { refused: 'unavailable' });
+  assert.deepEqual(held.calls.withdrawn, []);
+  // A host without sendToOwner cannot send its owner a file: unsupported, nothing fetched.
+  const none = sendMediaWorld({ requester: 'msg-w', sendToOwner: null });
+  assert.equal((await none.run({ url: DRAWN })).refused, 'unsupported');
+  assert.equal(none.calls.fetched.length, 0);
+});
+
+test('24.2b send_media, group turn: unchanged - postGroup and the group\'s sendFile, never sendToOwner', async () => {
+  const files = [];
+  const channels = { canSendFile: () => true, sendFile: async (channel, file) => { files.push([channel, file]); return { sent: true, channel }; } };
+  const w = sendMediaWorld({ audience: { kind: 'group', channel: 'wechat', group_ref: 'r1' }, requester: 'msg-w', channels });
+  const groupRef = 'm_' + '3'.repeat(16);
+  w.media.resolve = async ref => ref === groupRef ? { ref, kind: 'image', mime: 'image/png', ext: 'png', path: '/p', audience: 'group:wechat:r1' } : undefined;
+  assert.deepEqual(await w.run({ ref: groupRef }), { sent: true, ref: groupRef, kind: 'image', channel: 'wechat' });
+  assert.deepEqual(w.calls.posted.map(p => p.checkOnly === true), [true, false]);
+  assert.equal(files.length, 1); assert.equal(files[0][1].groupRef, 'r1');
+  assert.equal(w.calls.owner.length, 0);
+});
+
+test('24.2b host contract: media.sendToOwner is optional, and given it must be a function', () => {
+  const host = media => ({ version: '1.0.0', capabilities: ['media'], config: {}, context: async () => '', events: async () => ({}),
+    media: { ingest() {}, resolve() {}, read() {}, fetch() {}, ...media } });
+  const problems = media => { try { validateHost(host(media)); return ''; } catch (error) { return error.message; } };
+  assert.doesNotMatch(problems({}), /sendToOwner/);
+  assert.doesNotMatch(problems({ sendToOwner: async () => ({}) }), /sendToOwner/);
+  assert.match(problems({ sendToOwner: 'yes' }), /media\.sendToOwner, when given, must be a function/);
 });

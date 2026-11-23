@@ -13,6 +13,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { readHistory, fullReadHistory } from './history.mjs';
 import { stateInjectionSource } from './runtime.mjs';
+import { DIRECTOR_ATTACHMENTS_SENTENCE } from './steward-host.mjs';
 import { watchProgress } from './progress.mjs';
 
 const effective = aitelierRoles(loadRoles());
@@ -26,7 +27,7 @@ const shared = ['bash', 'call_tool', 'create_goal', 'edit', 'get_goal', 'glob', 
   'mcp__aitelier__state_graph_write', 'read', 'read_image', 'read_mcp_resource', 'search_tools', 'send_message', 'skill', 'subagent',
   'todo_begin', 'todo_done', 'todo_report', 'todo_status', 'update_goal', 'web_fetch', 'web_search', 'working_directory', 'write'];
 const hostRegistered = {
-  director: [...shared, 'ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
+  director: [...shared, 'ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'media_call', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
     'todo_finish', 'todo_plan', 'todo_rebind', 'todo_templates', 'watch_process'].sort(),
   worker: [...shared, 'mcp__aitelier__state_graph_read', 'mcp__aitelier__wait_for_driver_inbox', 'mcp__aitelier__wait_for_run'].sort(),
 };
@@ -199,6 +200,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_TEST_CHILD_CWD: childDirectory,
       AITELIER_TEST_OUTSIDE_CWD: outsideDirectory,
+      // Step 24.2b: the DSH host gives every driver a media root; the director then has its own
+      // library, media_call and send_user_message's attachments (presented by roles.json).
+      AITELIER_MEDIA_ROOT: join(scratch, 'media'),
     };
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
@@ -316,6 +320,13 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       if (r.child) for (const name of ['subagent', 'workflow', 'todo_plan']) assert.ok(!names.includes(name), 'child request lists ' + name);
     }
     assert.ok(listed.some(r => !r.child) && listed.some(r => r.child), 'tiers were not observed for both root and child');
+    // Step 24.2b (7.8.12a "导演给业主发媒体" item 1): the director's send_user_message, as the pinned
+    // DSH sends it to the model, has `attachments` (absolute paths) and the one sentence about them.
+    const userMessage = listed.find(r => !r.child && r.options.tools.some(t => t.name === 'send_user_message'))
+      .options.tools.find(t => t.name === 'send_user_message');
+    assert.ok(userMessage.description.endsWith(DIRECTOR_ATTACHMENTS_SENTENCE), userMessage.description);
+    assert.deepEqual(userMessage.parameters.properties?.attachments, { type: 'array', items: { type: 'string' } }, JSON.stringify(userMessage.parameters));
+    assert.ok(!userMessage.parameters.required?.includes('attachments'), 'attachments is optional');
     for (const child of [false,true]) {
       const relevant = requests.filter(r=>r.child===child && !r.summary);
       assert.ok(relevant.some(r=>JSON.stringify(r.options).includes('agentmcp image')), 'root or child did not receive tool-search usage instructions');
@@ -591,4 +602,97 @@ test('real pinned DSH default host adapter calls the authenticated completion br
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+// Step 24.2b (design-steward 7.8.12a "路线能力"; 7.8.18 适配器与插件): the real pinned DSH, the
+// real host adapter and its file tool. DSH's read_image asks the adapter's resolveModel, whose
+// inputModalities is the intersection of the backend's route-input {root, child}: a root route
+// that takes images under a text-only child route refuses read_image; both image routes let it
+// through, and the next completion carries the picture as image_url.
+const ONE_PIXEL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+
+async function readImageThroughRoutes(t, routes) {
+  const entry = await measuredEntryForTest(t);
+  if (!entry) return null;
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-route-input-'));
+  const here = dirname(fileURLToPath(import.meta.url));
+  const picture = join(directory, 'shot.png');
+  await writeFile(picture, Buffer.from(ONE_PIXEL_PNG, 'base64'));
+  const completions = [], routeReads = [], parked = [];
+  let output = '', proc;
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks)) : {};
+    const send = value => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(value)); };
+    if (req.url === '/api/drivers/me') return send({ driver_id: 'route-fixture' });
+    if (req.url === '/api/state/schema') return send({ operations: {} });
+    if (req.url === '/api/dsh-drivers/alpha/route-input') {
+      routeReads.push({ method: req.method, token: req.headers['x-aitelier-driver-token'] });
+      return send(routes);
+    }
+    if (req.url.endsWith('/context')) return send({ nodes: [], project_note: {}, private_note: {}, event_seq: 1 });
+    if (req.url.endsWith('/activity') || req.url.endsWith('/heartbeat')) return send({ ok: true });
+    if (req.url.endsWith('/list_director_messages')) return send({ items: [] });
+    if (req.url.endsWith('/wait_for_state_change')) { parked.push(res); return; }
+    if (req.url.endsWith('/completion')) {
+      completions.push(body);
+      const root = body.tools?.some(tool => tool.function.name === 'state_read');
+      const answered = body.messages.some(message => message.role === 'tool' && message.tool_call_id === 'img-call');
+      const usage = { prompt_tokens: 100, completion_tokens: 10 };
+      if (root && !answered) return send({ text: '', reasoning_content: 'look', truncated: false, usage,
+        tool_calls: [{ id: 'img-call', function: { name: 'read_image', arguments: JSON.stringify({ file_path: picture }) } }] });
+      return send({ text: root ? 'Idle director.' : 'Fixture title', reasoning_content: '', truncated: false, tool_calls: [], usage });
+    }
+    res.statusCode = 404; send({ error: req.url });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
+    await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([{ id: 'hmr', disabled: true }, { insert: [{ id: 'director', name: join(here, '../dsh-director/index.mjs') }, { id: 'driver', name: join(here, 'runtime.mjs') }] }]));
+    const token = join(directory, 'token'); await writeFile(token, 'fixture-only', { mode: 0o600 });
+    proc = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...withoutHostWiring(process.env),
+      DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
+      AITELIER_DRIVER_ID: 'route-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'route-root',
+      AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
+    } });
+    proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
+    const toolMessage = () => completions.map(c => c.messages.find(m => m.role === 'tool' && m.tool_call_id === 'img-call')).find(Boolean);
+    const watched = await watchProgress({ what: 'the director to call read_image and send its result back', running: () => proc.exitCode === null, milestones: [
+      { name: 'the root completion offered read_image', met: () => completions.some(c => c.tools?.some(tool => tool.function.name === 'read_image')) },
+      { name: 'the read_image result reached the next completion', met: () => Boolean(toolMessage()) },
+    ] });
+    assert.ok(watched.done, `${watched.message}\n${output}`);
+    return { tool: toolMessage(), completions, routeReads, output };
+  } finally {
+    if (proc?.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
+    for (const response of parked) response.destroy();
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test('real pinned DSH: read_image is refused when the child route is text-only, even though the root route takes images', async (t) => {
+  const seen = await readImageThroughRoutes(t, { root: ['text', 'image'], child: ['text'] });
+  if (!seen) return;
+  const text = JSON.stringify(seen.tool.content);
+  assert.match(text, /does not declare image input/, 'the file tool refused the call: ' + text);
+  assert.ok(!seen.completions.some(c => JSON.stringify(c.messages).includes('image_url')), 'no image reached the provider');
+  assert.ok(seen.routeReads.length >= 1 && seen.routeReads.every(r => r.method === 'GET' && r.token === 'fixture-only'),
+    'route-input was read with the driver token: ' + JSON.stringify(seen.routeReads));
+});
+
+test('real pinned DSH: a table with no `_input` (measured: false) keeps read_image as before 24.2b', async (t) => {
+  const seen = await readImageThroughRoutes(t, { root: ['text'], child: ['text'], measured: false });
+  if (!seen) return;
+  assert.ok(Array.isArray(seen.tool.content) && seen.tool.content.some(part => part.type === 'image_url'),
+    'not refused, and the picture went out as image_url: ' + JSON.stringify(seen.tool.content).slice(0, 600));
+});
+
+test('real pinned DSH: with image routes for root and child, read_image succeeds and the next completion carries image_url', async (t) => {
+  const seen = await readImageThroughRoutes(t, { root: ['text', 'image'], child: ['text', 'image'] });
+  if (!seen) return;
+  assert.ok(Array.isArray(seen.tool.content) && seen.tool.content.some(part => part.type === 'image_url'
+    && part.image_url.url.startsWith('data:image/png;base64,')), 'the picture went out as image_url: ' + JSON.stringify(seen.tool.content).slice(0, 600));
 });

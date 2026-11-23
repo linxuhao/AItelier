@@ -187,6 +187,22 @@
   "vision": [
     "localqwen/qwen3"
   ],
+  "_input_note": [
+    "What each CONCRETE candidate can be sent: `text`, or `text` and `image`.",
+    "A candidate missing here takes text only. A route takes images only when",
+    "EVERY candidate it resolves to lists `image`, because a bad request is not",
+    "failed over: a failover onto a text-only candidate would make that turn a",
+    "400. A project whose `model` is a concrete provider/model is looked up the",
+    "same way. Fill an entry only after that candidate was seen reading the text",
+    "in an image sent through AIGateway (the path /completion uses); a vendor",
+    "page saying 'vision supported' is not a measurement. The one entry below",
+    "is the vision judge, which reads screenshots on every run. Every other",
+    "candidate in this example is unmeasured, so `driver` and `worker` are",
+    "text-only here: images reach them as placeholder lines and media tools."
+  ],
+  "_input": {
+    "localqwen/qwen3": ["text", "image"]
+  },
   "driver": [
     "opencodego/deepseek-v4.1-flash",
     "deepseek/deepseek-flash"

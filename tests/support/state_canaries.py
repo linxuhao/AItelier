@@ -44,6 +44,7 @@ STEWARD_SCHEDULE = "sch-canary"
 CHANNEL_MESSAGE = "message-source-canary"
 STEWARD_CONNECTION = "canaryconn"
 STEWARD_CONFIRMATION = "KCNRY"
+CONVERSATION_UPLOAD = "u_0000000000c0ffee"
 
 
 def canary(table: str) -> str:
@@ -264,6 +265,12 @@ def _plan():
         "state_pending_groups": (
             ("INSERT INTO state_pending_groups(channel,room_ref,mention_prefix,code_hash,at) VALUES('wechat',?,?,?,?)"),
             (c("state_pending_groups"), c("state_pending_groups"), c("state_pending_groups"), now)),
+        # design/steward-group-media.md section 6: one purge receipt, the canary in its ids and reason.
+        "state_group_media_purges": (
+            ("INSERT INTO state_group_media_purges(purge_id,channel,group_ref,epoch,reason,backend_rows,rows_before,"
+             "rows_after,files_unlinked,files_shared,bytes_freed,at) VALUES(?,'wechat',?,?,?,0,0,0,0,0,0,?)"),
+            (c("state_group_media_purges"), c("state_owner_groups"), c("state_group_media_purges"),
+             c("state_group_media_purges"), "2999-01-01T00:00:00+00:00")),
         # Step 25 C4 (core/state_lists.py): one family list item, the canary in its text and names.
         "state_steward_list_items": (
             ("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_by_ref,added_by_label,"
@@ -323,6 +330,12 @@ def _plan():
         "state_steward_dashboard_messages": (
             "INSERT INTO state_steward_dashboard_messages(message_id,at) VALUES(?,?)",
             (c("state_steward_dashboard_messages"), now)),
+        # Step 24.2b: a staged dashboard upload into the OPENED project (the canary as its
+        # user and its file name).
+        "state_conversation_uploads": (
+            ("INSERT INTO state_conversation_uploads(upload_id,project_id,user,kind,mime,size,name,state,"
+             "created_at) VALUES(?,?,?,'image','image/png',1,?,'staged',?)"),
+            (CONVERSATION_UPLOAD, OPEN, c("state_conversation_uploads"), c("state_conversation_uploads"), now)),
     }
 
 

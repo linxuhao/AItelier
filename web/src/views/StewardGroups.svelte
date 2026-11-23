@@ -4,10 +4,12 @@
   // reason), member names, family note, family memory, clear and unbind, every action naming that
   // group; below them 「添加群」 (a named group code the owner posts in the group) until the
   // channel has groups_per_channel groups. What a group may see is decided once for everything
-  // (public projects), never here.
+  // (public projects), never here. Each group also has its media switch (design/steward-group-media.md
+  // section 9, owner 2026-11-23): files posted without @ are kept one day only while it is on, and it
+  // is on only once the group was told; the backend decides every state, this shows it.
   import { onMount } from 'svelte';
   import { clearGroupRecords, createGroupCode, deleteFamilyMemory, listOwnerGroups, nameGroupMember, setFamilyNote,
-    unbindOwnerGroup, type OwnerChannelName, type OwnerGroup } from '../lib/api';
+    setGroupMediaKeep, unbindOwnerGroup, type GroupMediaKeep, type OwnerChannelName, type OwnerGroup } from '../lib/api';
   import { GROUP_REFUSALS } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
 
@@ -50,6 +52,18 @@
     const name = window.prompt(t('steward.groupNameMember'), current);
     if (name && name.trim()) await act(() => nameGroupMember(channel, groupRef, senderRef, name.trim()));
   }
+  // The switch's words: its state, why it waits or fell back, what it kept today, the last deletion.
+  function keepStatus(keep: GroupMediaKeep): string[] {
+    const note = keep.note ? t('steward.groupMediaKeepNote.' + keep.note) : '';
+    if (keep.state === 'on') return [t('steward.groupMediaKeepOn').replace('{time}', keep.since
+      ? new Date(keep.since).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : ''),
+      t('steward.groupMediaKeepCount').replace('{n}', String(keep.kept_24h))];
+    if (keep.state === 'on_pending') return [t('steward.groupMediaKeepPending'), ...(note ? [note] : [])];
+    if (keep.state === 'off_notice') return [keep.purge_owed ? t('steward.groupMediaKeepDeleting') : t('steward.groupMediaKeepTelling'),
+      ...(note && !keep.purge_owed ? [note] : [])];
+    return [t('steward.groupMediaKeepOff'), ...(keep.note === 'notice_not_sent' ? [note] : [])];
+  }
+  const keeping = (keep?: GroupMediaKeep) => keep?.state === 'on' || keep?.state === 'on_pending';
   const full = $derived(groups.length >= cap);
   onMount(load);
 </script>
@@ -61,6 +75,18 @@
       <p data-group-bound><strong>{t('steward.groupTitle')}</strong> {group.label ?? group.group_ref.slice(-6)}
         · {t('steward.groupCount').replace('{n}', String(group.messages_30d))}
         {#if group.last_message_at}· <small>{new Date(group.last_message_at).toLocaleString()}</small>{/if}</p>
+      {#if group.media_keep}
+        <div class="keep" data-media-keep-box={group.group_ref}>
+          <label><input type="checkbox" role="switch" data-media-keep={group.group_ref} checked={keeping(group.media_keep)}
+            disabled={!bound} onchange={() => void act(() => setGroupMediaKeep(channel, group.group_ref, !keeping(group.media_keep)))} />
+            {t('steward.groupMediaKeep')}</label>
+          <small data-media-keep-status>{keepStatus(group.media_keep).join(' · ')}</small>
+          {#if group.media_keep.last_purge && (group.media_keep.state === 'off' || group.media_keep.state === 'off_notice')}
+            <small data-media-purge>{t('steward.groupMediaKeepPurged').replace('{n}', String(group.media_keep.last_purge.rows_before))
+              .replace('{m}', String(group.media_keep.last_purge.files_shared))}</small>
+          {/if}
+        </div>
+      {/if}
       <div class="actions">
         <button type="button" class="outline" data-group-records={group.group_ref}
           onclick={() => void toggle(group.group_ref)}>{openRef === group.group_ref ? t('steward.groupHide') : t('steward.groupRecords')}</button>
@@ -124,5 +150,7 @@
   .code{margin:0 0 8px;padding:8px 10px;border-radius:6px;background:var(--pico-code-background-color);}
   .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}.error{color:var(--pico-del-color);}
   .muted{color:var(--pico-muted-color);font-size:12px;}
+  .keep{display:flex;flex-direction:column;gap:2px;margin:4px 0 6px;font-size:12px;}.keep label{font-size:12px;margin:0;}
+  .keep small{color:var(--pico-muted-color);}
   h4{font-size:13px;margin:8px 0 4px;}
 </style>

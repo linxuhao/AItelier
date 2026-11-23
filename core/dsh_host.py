@@ -11,10 +11,12 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import time
+from pathlib import Path
 
-from core.dsh_driver import DshDrivers, fallback_restart
+from core.dsh_driver import DshDrivers, fallback_restart, media_root, role_for_project
 
 # How long a child must stay up before its start counts as a successful one.
 #
@@ -94,6 +96,103 @@ _BEARER = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{6,}")
 _LABELLED_SECRET = re.compile(
     r"(?i)(\b(?:token|secret|password|passwd|passphrase|api[_-]?key|apikey|authorization)"
     r"\s*[=:]\s*[\"']?)[A-Za-z0-9._~+/:@=-]{6,}")
+
+
+# Step 24.2b (design-steward 7.8.12a "一个写者一个子目录" 清理): the media library keeps one
+# subdirectory per writer, and a director's is `<media root>/d-<driver_id>`. A running driver
+# cleans its own every day; a director that is NOT running (stopped, archived, deleted) has no
+# host of its own, so this supervisor runs the same cleanup on it, through the plugin's own CLI
+# (integrations/dsh-director/media-gc.mjs: 30 days, then 1 GiB oldest first) - once a day per
+# subdirectory, only while the project has no child, and before that project's next spawn, so
+# there is still one writer at a time. A `d-<driver_id>` whose driver row is gone is removed
+# whole. The steward's subdirectory (STEWARD_MEMORY_USER) is never touched here: the steward
+# row is skipped and the sweep only looks at `d-` names.
+MEDIA_GC_INTERVAL_SECONDS = 24 * 3600
+# A cleanup is a directory listing and some unlinks; one that hangs must not hold every other
+# project's supervision, so it is killed (and the spawn goes ahead) after this long.
+MEDIA_GC_TIMEOUT_SECONDS = 120
+MEDIA_GC_COMMAND = ("node", str(Path(__file__).resolve().parents[1]
+                                / "integrations" / "dsh-director" / "media-gc.mjs"))
+# The media library's own userId rule (lib/media.mjs), behind the `d-` of a director.
+_DIRECTOR_SUBDIR = re.compile(r"^d-[A-Za-z0-9_.-]+$")
+_ORPHAN_SWEEP = "*orphans*"  # the sweep's own entry in the once-a-day ledger
+
+
+def director_media_dir(media, row):
+    """`<media>/d-<driver_id>` for a director's row; None for the steward's (its library is
+    `<media>/<STEWARD_MEMORY_USER>`, cleaned by its own host or the panel's clear only)."""
+    if role_for_project(row["project_id"]) != "director":
+        return None
+    name = "d-" + row["driver_id"]
+    return Path(media) / name if _DIRECTOR_SUBDIR.match(name) else None
+
+
+async def run_media_gc(directory):
+    """`node media-gc.mjs <directory>`, waited for. Raises with the CLI's own words when it
+    fails or hangs; a hung one is killed and reaped first, so no second writer outlives it."""
+    proc = await asyncio.create_subprocess_exec(
+        *MEDIA_GC_COMMAND, str(directory),
+        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE)
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=MEDIA_GC_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(f"media cleanup timed out after {MEDIA_GC_TIMEOUT_SECONDS}s") from None
+    if proc.returncode:
+        tail = stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(f"media cleanup exited {proc.returncode}: {tail[-1] if tail else ''}")
+
+
+async def media_gc(runtime, row, media, ledger, now):
+    """The day's cleanup of one stopped director's subdirectory, if it is due. Never for a
+    project with a live child; a failure is logged and counts as the day's run, so it neither
+    stops the loop nor delays the spawn it precedes."""
+    if media is None or runtime.running(row["project_id"]):
+        return
+    directory = director_media_dir(media, row)
+    if directory is None:
+        return
+    last = ledger.get(directory.name)
+    if last is not None and now - last < MEDIA_GC_INTERVAL_SECONDS:
+        return
+    ledger[directory.name] = now
+    try:
+        if not directory.is_dir():
+            return  # nothing was ever stored: nothing to clean, and nothing is created
+        await run_media_gc(directory)
+    except Exception as exc:
+        print(f"DSH host {row['project_id']}: {directory.name}: {_bounded(str(exc))}", flush=True)
+
+
+def sweep_orphan_media(runtime, media, ledger, now):
+    """Once a day: remove every `d-<driver_id>` subdirectory whose driver row is gone. The rows
+    are read here, fresh; when they cannot be read nothing is removed (an unreadable database
+    is not an empty one)."""
+    if media is None:
+        return
+    last = ledger.get(_ORPHAN_SWEEP)
+    if last is not None and now - last < MEDIA_GC_INTERVAL_SECONDS:
+        return
+    ledger[_ORPHAN_SWEEP] = now
+    try:
+        known = {"d-" + row["driver_id"] for row in runtime.rows()}
+        entries = list(os.scandir(media))
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        print(f"DSH host: media sweep skipped: {_bounded(str(exc))}", flush=True)
+        return
+    for entry in entries:
+        if (not _DIRECTOR_SUBDIR.match(entry.name) or entry.name in known
+                or not entry.is_dir(follow_symlinks=False)):
+            continue
+        try:
+            shutil.rmtree(entry.path)
+            print(f"DSH host: removed {entry.name}: its driver row is gone", flush=True)
+        except OSError as exc:
+            print(f"DSH host: cannot remove {entry.name}: {_bounded(str(exc))}", flush=True)
 
 
 def publish(runtime, row):
@@ -456,7 +555,8 @@ def record_exit(runtime, row, watched, uptime, *, supervisor_stopped):
     return True
 
 
-async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WINDOW_SECONDS):
+async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WINDOW_SECONDS,
+                    media=None):
     """One controller per installation; systemd owns its entire process group.
 
     One project's failure must not stop the others. This loop is the only thing
@@ -486,6 +586,11 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
     event of its session log, redacted and bounded). It changes nothing about the
     failed-start machinery above - a serving death still counts nothing, writes no
     record and stamps no row text.
+
+    `media` is the media library's root (step 24.2b): when given, a director with no
+    child gets its subdirectory cleaned once a day, before its next spawn, and the
+    subdirectories of drivers whose row is gone are removed (`media_gc`,
+    `sweep_orphan_media`). None - every caller but `main()` - leaves the media alone.
     """
     runtime.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (runtime.root / "host-supervisor.lock").open("a") as lock:
@@ -509,6 +614,9 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
         # they stop watching the child entirely - and the death worth a record is
         # the one after that point, of a driver that had been serving for minutes.
         children = {}
+        # subdirectory name (or the orphan sweep's key) -> the monotonic instant of
+        # its last media cleanup: at most one a day each.
+        media_ledger = {}
         try:
             while not stopped.is_set():
                 try:
@@ -516,6 +624,10 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                 except Exception as exc:  # a locked database must not end supervision
                     print(f"DSH host: cannot read drivers: {exc}", flush=True)
                     rows = []
+                try:
+                    sweep_orphan_media(runtime, media, media_ledger, time.monotonic())
+                except Exception as exc:  # the media must never cost supervision
+                    print(f"DSH host: media sweep failed: {_bounded(str(exc))}", flush=True)
                 for row in rows:
                     project = row["project_id"]
                     try:
@@ -546,6 +658,8 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                     record_exit(runtime, row, child,
                                                 time.monotonic() - child["started"],
                                                 supervisor_stopped=True)
+                            # A stopped director: its own host cleans nothing now.
+                            await media_gc(runtime, row, media, media_ledger, time.monotonic())
                         else:
                             # Step 24.1a (design-steward 7.8.10a): a due fallback-restart
                             # marker is executed here, by the spawner. The stop is this
@@ -649,6 +763,10 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 # all must not be respawned every interval forever.
                                 delay = min(300, 15 * 2 ** failures.get(project, 0))
                                 retry_at[project] = time.monotonic() + delay
+                                # The day's cleanup of a director's media goes FIRST and
+                                # is waited for, so the child never shares its library
+                                # with it; a failed cleanup is logged and the spawn goes on.
+                                await media_gc(runtime, row, media, media_ledger, time.monotonic())
                                 try:
                                     await runtime.start(project, actor="dsh-host-recovery")
                                 except Exception as exc:
@@ -707,7 +825,7 @@ async def main():
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stopped.set)
-    await supervise(runtime, stopped)
+    await supervise(runtime, stopped, media=Path(media_root()))
 
 
 if __name__ == "__main__":

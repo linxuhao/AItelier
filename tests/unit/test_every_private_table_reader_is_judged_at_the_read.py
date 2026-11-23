@@ -773,6 +773,17 @@ def _steward_calls(svc):
         "list_connection_tools": lambda: svc.steward_connections.list_connection_tools(C.STEWARD_CONNECTION),
         "execute list_pushed_owner_questions": lambda: execute(svc, "list_pushed_owner_questions", {}),
         "list_pushed": lambda: svc.owner_questions.list_pushed(),
+        # Step 24.2b: the hosts' ack of a dashboard upload (refused before any read: no driver).
+        "execute ack_conversation_upload": lambda: execute(svc, "ack_conversation_upload", {
+            "project_id": C.OPEN, "upload_id": C.CONVERSATION_UPLOAD, "ref": "m_0123456789abcdef"},
+            allow_write=True),
+        "ack_conversation_upload": lambda: svc_uploads(svc).ack_conversation_upload(
+            C.OPEN, C.CONVERSATION_UPLOAD, refused="gone"),
+        "fetch open_for_target": lambda: _uploads().open_for_target(
+            svc.store, C.OPEN, C.CONVERSATION_UPLOAD, "canary-sender", "/nonexistent-staging"),
+        # Step 24.2b P6: the panel's display of a conversation attachment.
+        "display open_for_display": lambda: _uploads().open_for_display(
+            svc, C.OPEN, C.CONVERSATION_UPLOAD, "/nonexistent-staging"),
         "wake list_driver_messages": lambda: execute(svc, "list_driver_messages", {}),
         "wake wait_for_state_change": lambda: _run(execute(svc, "wait_for_state_change", {
             "project_id": steward_project(), "include_driver_inbox": True, "timeout_seconds": 0})),
@@ -794,8 +805,12 @@ class TestTheStewardReadersRefuseTheAnonymous:
         for name, result in sorted(results.items()):
             print(f"STEWARD in-process reader={name} outcome={result}")
         assert results["read_memory_request"][0] == "StateGraphError: owner_session_required"
+        # Step 24.2b: the ack refuses a caller with no driver before it reads a row.
+        for name in ("execute ack_conversation_upload", "ack_conversation_upload"):
+            assert results[name][0].startswith("StateGraphError: driver_identity_required"), results[name]
+        own_word = {"read_memory_request", "execute ack_conversation_upload", "ack_conversation_upload"}
         wrong = {k: v for k, v in results.items() if v[1] or (
-            k != "read_memory_request" and v[0] != "REFUSED")}
+            k not in own_word and v[0] != "REFUSED")}
         assert not wrong, wrong
 
     @pytest.mark.parametrize("mode", ["main"])
@@ -906,6 +921,11 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("GET", f"/api/steward/connections/oauth/callback?state={C.STEWARD_CONNECTION}.x&code=c", None),
             ("POST", f"/api/steward/connections/{C.STEWARD_CONNECTION}/identity", {"identity": "x"}),
             ("POST", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/signout", None),
+            # Step 24.2b: the hosts' fetch of a staged upload and their ack.
+            ("GET", f"/api/dsh-drivers/{C.OPEN}/uploads/{C.CONVERSATION_UPLOAD}", None),
+            ("POST", "/api/state/commands/ack_conversation_upload",
+             {"project_id": C.OPEN, "upload_id": C.CONVERSATION_UPLOAD, "ref": "m_0123456789abcdef"}),
+            ("GET", f"/api/dsh-drivers/{C.OPEN}/conversation/media/{C.CONVERSATION_UPLOAD}", None),
             ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/client", {"client_id": "c"}),
         ]
         results = {}
@@ -948,6 +968,15 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert [tuple(r) for r in conn.execute("SELECT code_no, closed_at FROM state_owner_question_pushes")] \
                 == [(7, None)]
             assert conn.execute("SELECT COUNT(*) FROM state_owner_question_answers").fetchone()[0] == 1
+
+
+def _uploads():
+    from core import state_conversation_uploads
+    return state_conversation_uploads
+
+
+def svc_uploads(svc):
+    return _uploads().ConversationUploads(svc.store, getattr(svc, "driver_id", None))
 
 
 def _trusted_db(anonymous):

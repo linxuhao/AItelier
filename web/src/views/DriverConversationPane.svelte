@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { st } from '../lib/stateI18n.svelte';
   import { readLastProject, rememberProject } from '../lib/navigation.svelte';
   import { startDshDriver, stopDshDriver, type DriverStatusResponse } from '../lib/api';
@@ -39,7 +40,9 @@
   let busy = $state(false), controlError = $state('');
   // Session-local: switching projects retains text and exact reply citations;
   // nothing from these private conversations is written to browser storage.
-  const drafts = new Map<string, ConversationDraft>();
+  // A SvelteMap (step 24.2b): the composer keeps its attachments only in this entry,
+  // and an upload that finishes after a switch writes back here, so it must re-render.
+  const drafts = new SvelteMap<string, ConversationDraft>();
   const current = $derived(projects.find(p => p.project_id === selected));
   const driver = $derived(selected ? status?.projects[selected]?.managed : undefined);
   $effect(() => {

@@ -14,7 +14,8 @@
  *   runtime.smoke.test.mjs;
  * - the adapter's own (runtime.mjs: state_read, project_work, schedule_*, reply_to_director,
  *   relay_answer, send_user_message): runtime.channels.test.mjs, runtime.group.test.mjs and
- *   runtime.smoke.test.mjs
+ *   runtime.smoke.test.mjs (which also boots a director with a media root: its send_user_message
+ *   with `attachments`, step 24.2b)
  *   (runtime.steward.test.mjs does not install them all);
  * - dsh-director/hosts/local.mjs (work_update, note_write): runtime.local-host.test.mjs, which
  *   boots the director with that host and no adapter. */
@@ -30,7 +31,8 @@ import { registerConnectionTools } from '../dsh-director/lib/connections.mjs';
 import { registerProposalTools } from '../dsh-director/lib/proposals.mjs';
 import { registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { installToolDiscovery } from '../dsh-director/lib/tool-discovery.mjs';
-import { registerMediaTools } from '../dsh-director/lib/media-tools.mjs';
+import { registerDirectorMediaCall, registerMediaTools } from '../dsh-director/lib/media-tools.mjs';
+import { DIRECTOR_MEDIA_TOOLS } from '../dsh-director/index.mjs';
 
 const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
 const nothing = async () => ({});
@@ -40,14 +42,14 @@ test('every tool registrar of the steward and the director is accepted by the pi
   const entry = await measuredEntryForTest(t);
   if (!entry) return;
   const { defineTool } = await import(createRequire(entry).resolve('@deepseek-ai/dsh-tools'));
-  const registered = new Map();
+  const registered = [];
   // Each registrar gets this defineTool: a refused schema throws here, naming the registrar and the tool.
-  const scopeOf = registrar => ({ tools: { register: tool => { registered.set(tool.name, registrar); } } });
+  const scopeOf = registrar => ({ tools: { register: tool => { registered.push([tool.name, registrar]); } } });
   const checked = registrar => definition => {
     try { return defineTool(definition); }
     catch (error) { throw new Error(`${registrar}: ${definition?.name}: ${error?.message ?? error}`); }
   };
-  const ctx = { tools: { register: tool => { registered.set(tool.name, 'tool-discovery'); }, guard() {}, schemas: () => [] },
+  const ctx = { tools: { register: tool => { registered.push([tool.name, 'tool-discovery']); }, guard() {}, schemas: () => [] },
     on() {}, systemPrompt: { section() {} } };
   const groups = { familyNote: nothing, familyShow: nothing, listShow: nothing, listAdd: nothing, listCheck: nothing,
     listRemove: nothing, reminderSet: nothing };
@@ -70,8 +72,11 @@ test('every tool registrar of the steward and the director is accepted by the pi
       roles: { director: role, steward: { ...role, catalog: 'host' }, worker: role }, catalog: () => new Set() });
   registerMediaTools(scopeOf('media'), { ctx, defineTool: checked('media'), jsonOutput, HarnessError: Error,
     media: {}, catalog, turns, channels: undefined, ledger: {} });
+  // Step 24.2b: a director's media_call (no catalog, its own few tools).
+  registerDirectorMediaCall(scopeOf('director-media'), { ctx, defineTool: checked('director-media'), jsonOutput, HarnessError: Error,
+    media: {}, rootSession: 's', projectId: 'p', names: DIRECTOR_MEDIA_TOOLS });
 
-  const by = registrar => [...registered].filter(([, r]) => r === registrar).map(([name]) => name).sort();
+  const by = registrar => [...new Set(registered.filter(([, r]) => r === registrar).map(([name]) => name))].sort();
   assert.deepEqual(by('memory'), ['memory_forget', 'memory_note', 'memory_profile_update', 'memory_read', 'memory_search']);
   assert.deepEqual(by('channel-tools'), ['request_wechat_qr']);
   assert.deepEqual(by('group-tools'), ['family_memory_note', 'family_memory_show', 'group_reminder_set', 'list_add', 'list_check',
@@ -83,4 +88,5 @@ test('every tool registrar of the steward and the director is accepted by the pi
     'portfolio_projects', 'private_inbox', 'private_inbox_acknowledge']);
   assert.deepEqual(by('tool-discovery'), ['call_tool', 'search_tools']);
   assert.deepEqual(by('media'), ['media_call', 'send_media']);
+  assert.deepEqual(by('director-media'), ['media_call']);
 });

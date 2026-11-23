@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { withoutLeadingClockLines, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
-import { attachmentLine } from '../dsh-director/lib/media.mjs';
+import { attachmentLine, MEDIA_LIMITS, sniff } from '../dsh-director/lib/media.mjs';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, isAbsolute } from 'node:path';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -338,14 +340,23 @@ export async function acknowledgePrivateLetter({ request, project, me, deliveryI
 // ---- every owner message gets an answer (owner 2026-11-17: 管家需要事事有回应) ----
 
 /** The owner's messages after the steward's last message in its own conversation: the ones
- *  not answered yet, oldest first (the newest page; a reply answers what came before it). */
-export async function unansweredOwnerMessages({ request, project, me, signal }) {
+ *  not answered yet, oldest first (the newest page; a reply answers what came before it).
+ *  `mediaAnswers` (default true): a send_media message with a non-empty caption counts as a
+ *  reply, so a turn whose only answer is a captioned file leaves nothing open. forwardFinalText
+ *  passes false: the turn's final text still goes out after the file (C1). */
+export async function unansweredOwnerMessages({ request, project, me, signal, mediaAnswers = true }) {
   const listed = await request('/api/state/query/list_user_conversation', { project_id: project, limit: 30 }, signal);
   const newest = [...((listed.result ?? listed).messages ?? [])].sort(older).reverse();
   const unanswered = [];
   for (const m of newest) {
     // A push is written by the host with no owner message in view: it answers nothing.
     if (isPush(m)) continue;
+    // Step 24.2b (C1): a steward message carrying files is an owner turn's send_media
+    // (sendMediaToOwner; the steward's text replies never carry attachments). For forwardFinalText
+    // the file is not the turn's answer, so the turn's final words still go out as the reply. For
+    // everyone else (F4) a captioned file is an answer; an uncaptioned one answers nothing.
+    if (m.sender_kind === 'driver' && m.sender_driver_id === me && Array.isArray(m.attachments) && m.attachments.length
+      && !(mediaAnswers && String(m.body ?? '').trim())) continue;
     if (m.sender_kind === 'driver' && m.sender_driver_id === me) break;
     if (m.sender_kind === 'user') unanswered.push(m);
   }
@@ -388,7 +399,7 @@ export const autoReplyBody = text => {
  *  retry after a lost answer is State's replay and a second, different text is refused
  *  (idempotency_conflict) instead of becoming a second reply. */
 export async function forwardFinalText({ request, project, me, text, input = '', signal }) {
-  const waiting = (await unansweredOwnerMessages({ request, project, me, signal }))
+  const waiting = (await unansweredOwnerMessages({ request, project, me, signal, mediaAnswers: false }))
     .filter(m => input.includes(m.message_id));
   if (!waiting.length) return { forwarded: false };
   // Checked after `waiting`: the reason means an owner was left without the reply.
@@ -857,10 +868,27 @@ export function groupOps({ request, toolRequest = request, project, me }) {
     bind: ({ channel, groupRef, senderRef, messageRef, prefix, code }, signal) => request('/api/state/commands/bind_owner_group', {
       request_key: `group-bind:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       code, mention_prefix: prefix, channel_message_ref: messageRef }, signal).then(result, refused),
-    relay: ({ channel, groupRef, senderRef, messageRef, text, at, attachments }, signal) => request('/api/state/commands/relay_group_message', {
+    // design/steward-group-media.md section 3: `kept` - the message did not call the steward;
+    // the backend records it only while the group's media switch is on.
+    relay: ({ channel, groupRef, senderRef, messageRef, text, at, attachments, kept }, signal) => request('/api/state/commands/relay_group_message', {
       request_key: `group:${channel}:${digest(groupRef + '\n' + messageRef)}`, channel, group_ref: groupRef, sender_ref: senderRef,
       channel_message_ref: messageRef, body: text, ...(at ? { channel_at: at } : {}),
-      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}) }, signal).then(result, refused),
+      ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}), ...(kept === true ? { kept: true } : {}) },
+    signal).then(result, refused),
+    // design/steward-group-media.md section 2: a media-switch notice's check (a dry run: a fresh
+    // key, nothing recorded), sent (after the channel took the line: one key per epoch, so a
+    // commit retried after a lost answer is State's replay) or failed (one key per attempt).
+    mediaNotice: ({ channel, groupRef, epoch, notice, phase, channelDown, attempts = 0 }, signal) => request('/api/state/commands/group_media_notice', {
+      request_key: phase === 'check' ? `group-media-notice-check:${randomUUID()}`
+        : `group-media-notice:${channel}:${digest(groupRef)}:${epoch}:${phase}${phase === 'failed' ? `:${attempts}` : ''}`,
+      channel, group_ref: groupRef, epoch, notice, phase, ...(channelDown === true ? { channel_down: true } : {}) }, signal)
+      .then(result, refused),
+    // Section 6: the witness of a purge of a group's kept media (counts only).
+    recordPurge: ({ channel, groupRef, epoch, receipt }, signal) => request('/api/state/commands/record_group_media_purge', {
+      request_key: `group-media-purge:${channel}:${digest(groupRef)}:${epoch}:${digest(JSON.stringify(receipt))}`,
+      channel, group_ref: groupRef, epoch, receipt }, signal).then(result, refused),
+    // Section 4: the hourly sweep of kept media rows past their day.
+    expireMedia: signal => request('/api/state/commands/expire_group_media', {}, signal).then(result),
     // Step 23.1 (7.7.7): the turn that ended is named; the backend answers only a question it took.
     reply: ({ questionId, alsoAnswers = [], body, turn }, signal) => request('/api/state/commands/post_group_reply', {
       request_key: `group-reply:${questionId}`, question_id: questionId, body, turn: String(turn ?? ''),
@@ -912,13 +940,25 @@ export function groupOps({ request, toolRequest = request, project, me }) {
  *  `gatewayFetch(connId, url, signal)` is the HTTP GET of the backend's
  *  /api/steward/mcp/{conn_id}/fetch with the steward's token (runtime.mjs); the bytes it
  *  answers are stored as `generated` under the turn's audience. A refusal is {refused}. */
-export function mediaOps({ request, library, gatewayFetch }) {
+/** Step 24.2b (design-steward 7.8.12a "出站"): the subject of the steward message that carries
+ *  one send_media file (the model names none; the caption is the body). */
+const OWNER_MEDIA_SUBJECTS = { image: 'Image', voice: 'Voice message', file: 'File' };
+
+/** `owner` (the steward only, step 24.2b): {request, project, mirror} - State's
+ *  send_user_message as the turn's tool request and the plugin's ownerMessageSent. With it
+ *  the ops have sendToOwner; a director's have none. */
+export function mediaOps({ request, library, gatewayFetch, owner }) {
   return {
+    ...(owner ? { sendToOwner: (file, signal) => sendMediaToOwner({ ...owner, library }, file, signal) } : {}),
     ingest: (meta, open, options) => library.ingest(meta, open, options),
     resolve: async ref => library.lookup(ref),
     read: ref => library.read(ref),
     setProtected: fn => library.setProtected(fn),
     withdraw: ref => library.withdraw(ref),
+    // design/steward-group-media.md section 6: the audiences that hold kept media, and the purge
+    // of one of them with its receipt (throws purge_incomplete when it does not close).
+    keptAudiences: async () => library.keptAudiences(),
+    purgeKept: audience => library.purgeKept(audience),
     async fetch({ connId, url, audience }, signal) {
       let response;
       try { response = await gatewayFetch(connId, url, signal); }
@@ -938,6 +978,34 @@ export function mediaOps({ request, library, gatewayFetch }) {
   };
 }
 
+/** Step 24.2b (design-steward 7.8.12a "出站：管家的媒体也在面板上"): an owner turn's send_media
+ *  file as ONE steward message - send_user_message with the library ref as its attachment (the
+ *  backend checks it is in the steward's own subdirectory, audience owner or a group), the caption as its
+ *  body, replying to `replyTo` (the turn's owner message; none for a reminder's turn) - then the
+ *  plugin's mirror with the file, as a text reply is mirrored: back to the channel that message
+ *  came from, nowhere for a dashboard message, the default channel without one. The mirror is
+ *  awaited so the tool's answer says where else it went; it never throws, and a channel that
+ *  could not take the file leaves the message standing. {message_id, mirror} or {refused}. */
+export async function sendMediaToOwner({ request, project, mirror, library }, { ref, caption, replyTo }, signal) {
+  const row = library.lookup(ref);
+  if (!row) return { refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' };
+  const body = typeof caption === 'string' ? caption : '';
+  let sent;
+  try {
+    sent = await request('/api/state/commands/send_user_message', { request_key: `send-media:${randomUUID()}`, project_id: project,
+      subject: OWNER_MEDIA_SUBJECTS[row.kind] ?? 'File', body, attachments: [ref],
+      ...(typeof replyTo === 'string' && replyTo ? { reply_to_message_id: replyTo } : {}) }, signal);
+  } catch (error) { return stateRefusal(error); }
+  const messageId = (sent?.result ?? sent)?.message_id;
+  if (typeof messageId !== 'string' || !messageId) return { refused: 'not_sent' };
+  const file = { kind: row.kind, mime: row.mime, name: `${row.kind}-${row.ref.slice(2, 10)}.${row.ext}`, path: row.path };
+  let mirrored;
+  try { mirrored = await mirror?.(messageId, body, replyTo || undefined, { attachments: [file] }); } catch { mirrored = undefined; }
+  return { message_id: messageId, mirror: mirrored && typeof mirrored === 'object'
+    ? { mirrored: mirrored.mirrored === true, ...(mirrored.channel ? { channel: mirrored.channel } : {}), ...(mirrored.reason ? { reason: mirrored.reason } : {}) }
+    : { mirrored: false, reason: 'no_channels' } };
+}
+
 /** Step 24.2 (design-steward 7.8.12a piece 3): the media root the DSH host gives every driver
  *  process (AITELIER_MEDIA_ROOT, core/dsh_driver.py), absolute; else undefined - then the steward
  *  has no media library and no media tool. Never the process's own `~` (DSH_HOME is under
@@ -949,18 +1017,221 @@ export function mediaRootFrom(env = process.env) {
 
 /** Step 24.2 (7.8.12 "模型怎么用"): a wake shows each owner message's attachments as one line
  *  each ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB]) - read from the message's source row,
- *  never from its text. A failed read leaves the wake as it was (its body has the placeholders). */
-export async function withAttachmentLines(request, result, signal) {
-  const ids = (result?.driver_inbox ?? []).filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string').map(m => m.message_id);
-  if (!ids.length) return result;
-  let sources;
-  try { const listed = await request('/api/state/query/message_sources', { message_ids: ids.slice(0, 200) }, signal); sources = (listed?.result ?? listed)?.sources; }
-  catch { return result; }
-  if (!sources) return result;
-  return { ...result, driver_inbox: result.driver_inbox.map(m => {
-    const files = sources?.[m?.message_id]?.attachments;
-    return Array.isArray(files) && files.length ? { ...m, attachments: files.map(attachmentLine) } : m;
-  }) };
+ *  never from its text. A failed read leaves the wake as it was (its body has the placeholders).
+ *  Step 24.2b (7.8.12a): `dashboard` (ingestDashboardAttachments' answer, message_id -> its
+ *  uploads as stored or refused) is used for those messages instead of a source row; `sources`
+ *  false reads no source row (a director has no channel messages); `line` writes one line (sync
+ *  or async, called in order - wakeMedia's attaches the image it names). */
+export async function withAttachmentLines(request, result, signal, { dashboard = new Map(), sources: readSources = true, line = attachmentLine } = {}) {
+  const users = (result?.driver_inbox ?? []).filter(m => m?.sender_kind === 'user' && typeof m.message_id === 'string');
+  const ids = readSources ? users.map(m => m.message_id).filter(id => !dashboard.has(id)) : [];
+  if (!ids.length && !users.some(m => dashboard.has(m.message_id))) return result;
+  let sources = {};
+  if (ids.length) {
+    try { const listed = await request('/api/state/query/message_sources', { message_ids: ids.slice(0, 200) }, signal); sources = (listed?.result ?? listed)?.sources ?? {}; }
+    catch { sources = {}; }
+  }
+  let changed = false;
+  const driver_inbox = [];
+  for (const m of result.driver_inbox) {
+    const files = m?.sender_kind === 'user' && typeof m.message_id === 'string'
+      ? (dashboard.get(m.message_id) ?? sources?.[m.message_id]?.attachments) : undefined;
+    if (!Array.isArray(files) || !files.length) { driver_inbox.push(m); continue; }
+    const lines = [];
+    for (const file of files) lines.push(await line(file));
+    driver_inbox.push({ ...m, attachments: lines });
+    changed = true;
+  }
+  return changed ? { ...result, driver_inbox } : result;
+}
+
+/** The library refusals ack_conversation_upload records (core/state_commands.py
+ *  AckConversationUpload.refused). Any other answer of `ingest` is not the upload's verdict. */
+const ACK_REFUSALS = new Set(['too_large', 'type', 'unsupported', 'gone']);
+
+/** The bytes of one staged upload from the backend's GET /api/dsh-drivers/{pid}/uploads/{id}
+ *  (`response`): the body when it answered them; 404 or 410 (swept after 7 days, or not this
+ *  driver's delivery) is the permanent `gone`, thrown as the library's own refusal so the key
+ *  keeps it; anything else is thrown as an error, which the library answers `unavailable`. */
+export async function uploadBody(response) {
+  if (response.ok) return response.body;
+  await response.body?.cancel?.().catch(() => {});
+  if (response.status === 404 || response.status === 410) throw Object.assign(new Error('gone'), { refused: 'gone' });
+  throw Object.assign(new Error(`staged upload: HTTP ${response.status}`), { status: response.status });
+}
+
+const SEND_USER_MESSAGE_DESCRIPTION = 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).';
+/** Step 24.2b (design-steward 7.8.12a "导演给业主发媒体" items 1 and 7): the one sentence a director's
+ *  send_user_message adds, with its `attachments` parameter. */
+export const DIRECTOR_ATTACHMENTS_SENTENCE = ' attachments: up to 10 absolute paths of files on this machine (images, audio, PDF) sent with the message; they expire after 30 days, only this project\'s readers can see them, and they are never sent to WeChat or Slack.';
+const DIRECTOR_ATTACHMENTS_MAX = 10;
+
+/** send_user_message's description and parameters. Only a director with a media library gets
+ *  `attachments` and its sentence (7.8.12a "导演给业主发媒体" item 1, checked r43): the steward's
+ *  files go with send_media as library refs, never as paths, and a director without a library
+ *  could never store one. */
+export function sendUserMessageTool({ steward, library }) {
+  const attachments = !steward && Boolean(library);
+  return { attachments, description: SEND_USER_MESSAGE_DESCRIPTION + (attachments ? DIRECTOR_ATTACHMENTS_SENTENCE : ''),
+    parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
+      body: { type: 'string', required: true }, node_key: { type: 'string' },
+      segments: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
+        kind: { type: 'string', required: true }, text: { type: 'string', required: true },
+        id: { type: 'string' } } } },
+      reply_to_message_id: { type: 'string' },
+      ...(attachments ? { attachments: { type: 'array', items: { type: 'string' } } } : {}) } };
+}
+
+/** One path a director attaches, judged before anything is stored (7.8.12a "导演给业主发媒体" item
+ *  2): an absolute path to a regular file (else not_found / not_a_file), whose first bytes name a
+ *  type of the shared table (else `type`: text, a key file, an office document never come in),
+ *  within that kind's single-file bound (image 20 MiB, file and voice 25 MiB; else too_large).
+ *  {type, sha256, name} or {refused}. Not bounded to the workspace: a director has the whole
+ *  machine already (pending 12). */
+async function checkDirectorAttachment(path) {
+  if (typeof path !== 'string' || !isAbsolute(path)) return { refused: 'not_found' };
+  let info;
+  try { info = await stat(path); } catch { return { refused: 'not_found' }; }
+  if (!info.isFile()) return { refused: 'not_a_file' };
+  if (info.size > Math.max(MEDIA_LIMITS.image_bytes, MEDIA_LIMITS.file_bytes, MEDIA_LIMITS.voice_bytes)) return { refused: 'too_large' };
+  let bytes;
+  try { bytes = await readFile(path); } catch { return { refused: 'not_found' }; }
+  const type = sniff(bytes.subarray(0, 64));
+  if (!type) return { refused: 'type' };
+  const cap = type.kind === 'image' ? MEDIA_LIMITS.image_bytes : type.kind === 'voice' ? MEDIA_LIMITS.voice_bytes : MEDIA_LIMITS.file_bytes;
+  if (bytes.length > cap) return { refused: 'too_large' };
+  return { type, sha256: createHash('sha256').update(bytes).digest('hex'), name: basename(path) };
+}
+
+/** Step 24.2b (design-steward 7.8.12a "导演给业主发媒体" items 2, 6, 7): a director's attached paths
+ *  into its own library (`d-<driver_id>/`) BEFORE its message is sent. Every path is checked
+ *  first; any refusal refuses the whole message, listing each refused path, and nothing is
+ *  stored. Then one ingest per path, in order: channel 'director', keyed by (request_key, index)
+ *  with the sha256 just read - the same key with the same file answers the same ref (the
+ *  backend then replays the same message), with another file idempotency_conflict; the
+ *  library refuses the 21st in an hour (rate_limited, retry_after; counted from its index, so a
+ *  restart keeps it), a file over 40 MP (too_large), a write the disk cannot take
+ *  (store_failed). The first ingest refused refuses the whole message; files stored before it
+ *  stay out of every message and go with the 30-day cleanup.
+ *  {attachments: [{ref, kind, mime, size, name}]} or {refused: 'attachment_refused',
+ *  attachments: [{path, refused, retry_after?}]} or {refused: 'invalid_request', reason}. */
+/** The refusal codes a director's send_user_message documents (7.8.12a item 7). The library's
+ *  own `unsupported` (an image whose size cannot be read, a voice without ffprobe) is `type`; any
+ *  other code it has (`unavailable`: a write error such as EACCES) is `store_failed` (nit C6). */
+const DIRECTOR_REFUSALS = new Set(['not_found', 'not_a_file', 'type', 'too_large', 'rate_limited', 'store_failed', 'idempotency_conflict']);
+const directorRefusal = code => DIRECTOR_REFUSALS.has(code) ? code : code === 'unsupported' ? 'type' : 'store_failed';
+
+export async function ingestDirectorAttachments({ library, project, requestKey, paths, signal }) {
+  if (!Array.isArray(paths) || paths.length > DIRECTOR_ATTACHMENTS_MAX)
+    return { refused: 'invalid_request', reason: `attachments is a list of at most ${DIRECTOR_ATTACHMENTS_MAX} absolute paths` };
+  if (typeof requestKey !== 'string' || !requestKey) return { refused: 'invalid_request', reason: 'attachments need a request_key' };
+  const checked = [];
+  for (const path of paths) checked.push({ path, ...(await checkDirectorAttachment(path)) });
+  const refused = checked.filter(file => file.refused).map(({ path, refused: code }) => ({ path, refused: code }));
+  if (refused.length) return { refused: 'attachment_refused', attachments: refused };
+  const stored = [];
+  for (const [index, file] of checked.entries()) {
+    const answer = await library.ingest({ channel: 'director', messageRef: requestKey, index, audience: `project:${project}`,
+      source: 'generated', sha256: file.sha256, name: file.name }, () => readFile(file.path), { signal });
+    if (typeof answer?.ref !== 'string') return { refused: 'attachment_refused', attachments: [{ path: file.path,
+      refused: directorRefusal(answer?.refused), ...(answer?.retry_after !== undefined ? { retry_after: answer.retry_after } : {}) }] };
+    stored.push({ ref: answer.ref, kind: answer.kind, mime: answer.mime, size: answer.size, name: file.name });
+  }
+  return { attachments: stored };
+}
+
+/** Step 24.2b (design-steward 7.8.12a "宿主入库"): the owner's dashboard uploads in one wake,
+ *  stored into this host's own library before the wake goes out ("先存后送") and acknowledged.
+ *  Each `u_` attachment of an owner message is ingested under (`dashboard`, message_id, its
+ *  index) - so a tick delivered again stores nothing twice - with `audience` ('owner' for the
+ *  steward, 'project:<pid>' for a director) and source 'in'; `fetchUpload(upload_id, signal)`
+ *  streams the staged bytes (uploadBody). Then `ack(upload_id, {ref} | {refused})`.
+ *
+ *  Failures (失败怎么算): only a TRANSIENT one is thrown - the fetch answered 5xx, the network
+ *  failed, the disk did not take the file (all `unavailable` from the library), or the ack's
+ *  request failed - so the runtime does not consume the tick and the next one tries again. A
+ *  verdict (gone, too_large, type, unsupported) is acknowledged and shown; an ack the backend
+ *  answers 404 (this driver is not a target) cannot succeed later, so it is logged, not thrown.
+ *  An attachment the backend already refused (swept, or the first target's ack refused it - the
+ *  backend then waits for no other target) is shown as refused and not fetched.
+ *  @returns Map message_id -> one entry per attachment: {ref, kind, mime, size, durationMs?}
+ *    or {kind, refused}. */
+export async function ingestDashboardAttachments({ inbox, library, audience, fetchUpload, ack, log = () => {} }) {
+  const results = new Map();
+  for (const message of inbox ?? []) {
+    if (message?.sender_kind !== 'user' || typeof message.message_id !== 'string' || !Array.isArray(message.attachments) || !message.attachments.length) continue;
+    const files = [];
+    for (const [index, item] of message.attachments.entries()) {
+      if (typeof item?.id !== 'string' || !item.id.startsWith('u_') || item.refused) {
+        files.push({ kind: item?.kind, refused: item?.refused ?? 'gone' });
+        continue;
+      }
+      const stored = await library.ingest({ channel: 'dashboard', messageRef: message.message_id, index, audience, source: 'in',
+        ...(typeof item.name === 'string' ? { name: item.name } : {}) },
+        ({ signal }) => fetchUpload(item.id, signal));
+      if (stored.refused && !ACK_REFUSALS.has(stored.refused)) throw new Error(`dashboard upload ${item.id} not stored: ${stored.refused}`);
+      try { await ack(item.id, stored.refused ? { refused: stored.refused } : { ref: stored.ref }); }
+      catch (error) {
+        if (error?.status !== 404) throw error;
+        log(`ack_conversation_upload ${item.id}: ${String(error?.message ?? error).slice(0, 200)}`);
+      }
+      files.push(stored.refused ? { kind: item.kind, refused: stored.refused }
+        : { ref: stored.ref, kind: stored.kind, mime: stored.mime, size: stored.size,
+          ...(stored.durationMs !== undefined ? { durationMs: stored.durationMs } : {}) });
+    }
+    results.set(message.message_id, files);
+  }
+  return results;
+}
+
+/** What a model is told to do with a file it cannot see (7.8.12a "不收图的路线", "语音与文件"). */
+const MEDIA_HINTS = Object.freeze({ image: '用 media_call 调 ocr_image 或 vision_critique',
+  voice: '用 media_call 调 transcribe_audio 转写', file: '用 media_call 调 ocr_pdf 读' });
+
+/** Step 24.2b (7.8.12a): one attachment's wake line. An image sent as a native block says so
+ *  ([图片 m_…，image/jpeg，1.2 MB，原图已附]); any other file says how to read it - an image on a
+ *  route without images ("；本路线不收图：用 media_call 调 ocr_image 或 vision_critique"), a voice
+ *  (transcribe_audio), a file (ocr_pdf; a director's native file tools). A director's line also
+ *  names the library file's absolute path (`path`, "；文件 /…"). A refused one is its refusal line.
+ *  `declared`: the route is declared image-capable but this wake carries no native block (the
+ *  routes are not measured yet, measured:false): the line says 原图未附, not 本路线不收图, and a
+ *  director's line names read_image on that file. */
+export function mediaLine(attachment, { attached = false, imageRoute = false, declared = false, path, director = false } = {}) {
+  const line = attachmentLine(attachment);
+  if (!attachment?.ref) return line;
+  const kind = attachment.kind;
+  const sees = imageRoute || declared;
+  const note = attached ? '，原图已附'
+    : kind === 'image' ? `；${sees ? '原图未附' : '本路线不收图'}：${sees && director && path ? '用 read_image 读该文件，或' : ''}${MEDIA_HINTS.image}`
+      : kind === 'file' && director ? '；用原生文件工具读'
+        : `；${MEDIA_HINTS[kind] ?? MEDIA_HINTS.file}`;
+  return line.slice(0, -1) + note + (path ? `；文件 ${path}` : '') + ']';
+}
+
+/** Step 24.2b (7.8.12a "收图的路线"): the `line` for withAttachmentLines and the image blocks of
+ *  one wake. On an image route (`imageRoute`, the root session's) each image this host's library
+ *  holds is read and saved into DSH's attachment store (`attachments`, ctx.get('attachments')),
+ *  and its ImageAttachmentRef joins `images` for notify. An image that could not be saved keeps
+ *  its line with the media_call hint: an image is never dropped silently. `director`: the lines
+ *  carry the library file's absolute path. `declared`: see mediaLine. */
+export function wakeMedia({ library, imageRoute = false, declared = false, attachments, director = false, log = () => {} }) {
+  const images = [];
+  const line = async attachment => {
+    if (!attachment?.ref) return attachmentLine(attachment);
+    const found = library.lookup(attachment.ref);
+    let attached = false;
+    if (imageRoute && attachment.kind === 'image' && found && typeof attachments?.saveImage === 'function') {
+      try {
+        const data = (await library.read(attachment.ref))?.bytes;
+        if (data) {
+          images.push(await attachments.saveImage({ data: new Uint8Array(data), mediaType: found.mime, name: `${attachment.ref}.${found.ext}` }));
+          attached = true;
+        }
+      } catch (error) { log(`image ${attachment.ref} not attached: ${String(error?.message ?? error).slice(0, 200)}`); }
+    }
+    return mediaLine(attachment, { attached, imageRoute, declared, director, path: director ? found?.path : undefined });
+  };
+  return { line, images };
 }
 
 /** One State batch's wake (plugin step 7; step 24.2): its text - `shown`, the batch with its

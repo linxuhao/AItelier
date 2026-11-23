@@ -396,6 +396,8 @@ _ARGUMENT_SEEDS = {
     "take_over_claim": {"reason": "mutation sentinel takeover reason"},
     # A payload hash is 64 hex characters, or pydantic refuses before the handler runs.
     "retire_context_run_protection": {"expected_payload_hash": "0" * 64},
+    # Step 24.2b: an upload_id and a ref match their patterns, and exactly one outcome is given.
+    "ack_conversation_upload": {"upload_id": "u_0000000000000001", "ref": "m_0000000000000001"},
 }
 
 

@@ -189,7 +189,15 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "create_steward_confirmation", "get_steward_confirmation", "cancel_steward_confirmation",
         # Step 24.2 (design-steward 7.8.12): the host records one send_media file into the group of
         # the turn it recorded (group_send_budget, caption exit-checked; tests/unit/test_steward_media.py).
-        "post_group_media"}
+        "post_group_media",
+        # Step 24.2b (design-steward 7.8.12a, 7.8.18 "名单"): the host acknowledges one dashboard
+        # upload it fetched and stored; the store comes from its token
+        # (tests/unit/test_conversation_upload_ack.py).
+        "ack_conversation_upload",
+        # design/steward-group-media.md (owner 2026-11-23): the host's media-switch commands, called in
+        # code only - a notice's check/sent/failed, a purge's receipt, the hourly expiry of kept rows
+        # (tests/unit/test_steward_groups.py).
+        "group_media_notice", "record_group_media_purge", "expire_group_media"}
     assert "acknowledge_director_message" in STEWARD_WRITE_ACTIONS
     assert "acknowledge_driver_message" in STEWARD_WRITE_ACTIONS
     assert not {"resolve_driver_message", "resolve_director_message"} & STEWARD_WRITE_ACTIONS

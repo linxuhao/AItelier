@@ -12,9 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from api import authz
 from api.dependencies import get_db_manager, get_skillflow
 from api.state_graph_routers import get_service
-from core import ai_router
+from core import ai_router, media_library
+from core import state_conversation_uploads as uploads
 from core.datadir import aitelier_home
-from core.dsh_driver import DshDrivers, completion_route
+from core.dsh_driver import DshDrivers, completion_route, input_measured, route_input, route_modalities
 from core.state_commands import ProjectPrivate, execute
 from core.state_graph import CLOSED_STATUSES, StateGraphError, StateNotFound, StateWriteBusy
 from core.state_driver_guide import STATE_DRIVER_GUIDE_INDEX
@@ -151,6 +152,133 @@ def conversation(project_id: str, limit: int = Query(default=30, ge=1, le=200),
         raise HTTPException(422, str(exc)) from exc
 
 
+UPLOAD_HEADER = "X-AItelier-Upload"
+# The file's display name, percent-encoded UTF-8 (nit PRIV-2): in a header, not the query
+# string, so the access log and the tunnel's request log never carry it.
+UPLOAD_NAME_HEADER = "X-AItelier-Upload-Name"
+
+
+def _upload_name(request) -> str | None:
+    from urllib.parse import unquote
+    raw = request.headers.get(UPLOAD_NAME_HEADER)
+    if raw is None or len(raw) > 3 * 4 * 255:
+        return None
+    try:
+        return unquote(raw, errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+
+@router.post("/{project_id}/conversation/uploads", dependencies=[Depends(authz.require_writer)])
+async def conversation_upload(project_id: str, request: Request, service=Depends(get_service)):
+    """Step 24.2b (design-steward 7.8.12a "上传"): one file for the conversation, as the raw
+    request body (no multipart), staged until a message carries it and the hosts store it.
+    The display name is the `X-AItelier-Upload-Name` header, percent-encoded UTF-8 (never the
+    query string: the access log writes the path with its query).
+
+    Who: the write gate and `require_writer` as for every write (a steward token is refused
+    by the gate: this is not one of its runtime endpoints), then the project-user check
+    `send_user_conversation_message` makes (`user_identity_required` for a driver token).
+    Cross-site: the custom `X-AItelier-Upload: 1` header forces a browser preflight, which
+    fails (no CORS middleware), and a present `Sec-Fetch-Site` other than `same-origin` is 403.
+    The kind and mime come from the first bytes (415 `type`), never from `Content-Type` or
+    the name; the kind's cap is enforced while the body arrives (413 `too_large`, nothing
+    left in staging); 20 uploads per project per hour counted from the table (429
+    `rate_limited`, `Retry-After`); staging total (507 `staging_full`). Answers
+    {upload_id, kind, mime, size, name}; the file is `<staging>/<upload_id>`, 0600."""
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site != "same-origin":
+        raise HTTPException(403, "cross_site")
+    if request.headers.get(UPLOAD_HEADER) != "1":
+        raise HTTPException(400, "upload_header_required")
+    name = _upload_name(request)
+    if not uploads.valid_name(name):
+        raise HTTPException(422, "invalid_name")
+    if not service.driver_inbox._project_user():
+        raise HTTPException(403, "user_identity_required")
+    directory = media_library.staging_dir()
+    upload_id = uploads.new_upload_id()
+    try:
+        base = await asyncio.to_thread(uploads.admit, service.store, project_id, directory)
+        entry, size, partial = await uploads.receive(request.stream(), directory, upload_id, base)
+        return await asyncio.to_thread(uploads.commit, service.store, project_id=project_id,
+                                       user=service.actor, upload_id=upload_id, entry=entry,
+                                       size=size, name=name, partial=partial, directory=directory)
+    except uploads.UploadRefused as exc:
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after is not None else None
+        raise HTTPException(exc.status, exc.code, headers=headers) from exc
+    except ProjectPrivate as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{project_id}/uploads/{upload_id}", dependencies=[Depends(authz.require_reader)])
+async def staged_upload(project_id: str, upload_id: str, service=Depends(get_service)):
+    """Step 24.2b (design-steward 7.8.12a "宿主入库"): a host takes the staged bytes of one
+    dashboard upload with its driver token, streamed, before storing them in its own library
+    and acknowledging (`ack_conversation_upload`).
+
+    Only a driver that is a delivery target of the message carrying this project's upload gets
+    the bytes; anyone else - and an unknown id, another project's upload or one no message
+    carries - gets the same 404. A target whose file was already removed (every target
+    acknowledged, or nobody came for 7 days) gets 410 `gone`."""
+    from fastapi.responses import StreamingResponse
+    try:
+        handle, mime, size = await asyncio.to_thread(
+            uploads.open_for_target, service.store, project_id, upload_id,
+            getattr(service, "driver_id", None), media_library.staging_dir())
+    except LookupError as exc:
+        raise HTTPException(404, uploads.NOT_FOUND) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(410, "gone") from exc
+
+    def chunks():
+        with handle:
+            while data := handle.read(1024 * 1024):
+                yield data
+
+    return StreamingResponse(chunks(), media_type=mime, headers={
+        "Content-Length": str(size), "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+
+
+@router.get("/{project_id}/conversation/media/{media_id}", dependencies=[Depends(authz.require_reader)])
+async def conversation_media(project_id: str, media_id: str, service=Depends(get_service)):
+    """Step 24.2b (design-steward 7.8.12a "显示"): the bytes of one attachment of this project's
+    conversation, for the panel's thumbnails, voice player and file downloads.
+
+    Who: `require_reader` and the conversation read's own verdict, so an anonymous request and
+    one carrying `X-AItelier-Read-As` are 403 even on a public project; a driver token is 403 on
+    every project (hosts read their own libraries), and on the steward's project only the owner
+    gets the bytes. Which: `u_...` (a
+    dashboard upload: staging, then the library after the first ack), `m_...` named by this
+    conversation (core.state_conversation_uploads.open_for_display); anything else is 404, a
+    file that was cleaned is 410 `gone`. Headers as workspace_raw: the type the magic bytes
+    decided, nosniff, `default-src 'none'` (security_headers only setdefaults), private
+    caching, inline for images and voice and attachment otherwise."""
+    from fastapi.responses import StreamingResponse
+    try:
+        handle, mime, kind, size = await asyncio.to_thread(
+            uploads.open_for_display, service, project_id, media_id, media_library.staging_dir())
+    except StateNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(404, uploads.UNKNOWN_MEDIA) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(410, "gone") from exc
+
+    def chunks():
+        with handle:
+            while data := handle.read(1024 * 1024):
+                yield data
+
+    return StreamingResponse(chunks(), media_type=mime, headers={
+        "Content-Length": str(size), "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+        "Cache-Control": "private",
+        "Content-Disposition": "inline" if kind in ("image", "voice") else "attachment"})
+
+
 @router.post("/{project_id}/start", dependencies=[Depends(authz.require_writer)])
 async def start(project_id: str, body: Start, request: Request, runtime=Depends(manager)):
     try:
@@ -241,6 +369,14 @@ def model_sessions(project_id: str, request: Request, runtime=Depends(manager)):
     return {"project_id": project_id, "sessions": runtime.session_models(project_id)}
 
 
+@router.get("/{project_id}/route-input", dependencies=[Depends(authz.require_reader)])
+def route_input_read(project_id: str, request: Request, runtime=Depends(manager)):
+    """Step 24.2b (design-steward 7.8.12a "路线能力"): what this driver's root
+    session and its child sessions may each be sent, `{root, child}`, by the
+    route `/completion` uses for them. Driver-scoped like `model-sessions`."""
+    return route_input(owned(project_id, request, runtime))
+
+
 @router.post("/{project_id}/activity", dependencies=[Depends(authz.require_writer)])
 async def activity(project_id: str, body: Activity, request: Request, runtime=Depends(manager)):
     row = await owned_off_loop(project_id, request, runtime)
@@ -304,6 +440,13 @@ class Completion(BaseModel):
     tools: list[dict] | None = None
     max_tokens: int = Field(default=32768, ge=1, le=262144)
     reasoning_effort: str = Field(default="high", pattern="^(off|low|high|max)$")
+
+
+def _carries_image(messages):
+    """True when any message has an OpenAI `image_url` content part."""
+    return any(isinstance(part, dict) and part.get("type") == "image_url"
+               for m in messages if isinstance(m, dict) and isinstance(m.get("content"), list)
+               for part in m["content"])
 
 
 class ProjectWork(BaseModel):
@@ -376,6 +519,12 @@ async def completion(project_id: str, body: Completion, request: Request, runtim
     # every turn, not just the binding one, so the record always states the
     # route the call was made under.
     route = completion_route(row, body.session_id)
+    # Step 24.2b backstop (7.8.12a): an image on a route that does not take
+    # images is refused here, before any gateway exists, so nothing reaches a
+    # provider. The adapter normally rewrites such images to a text line first.
+    # A table with no `_input` measured nothing: no refusal, as before 24.2b.
+    if _carries_image(body.messages) and input_measured() and "image" not in route_modalities(route):
+        raise HTTPException(422, "route_no_image")
     if body.session_id not in sessions:
         # Native children (including resumed old children) have their own session.
         # Bind once per child: rotate across workers, keep tool turns sticky.

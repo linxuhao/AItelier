@@ -199,7 +199,9 @@ def test_everything_compose_bind_mounts_is_provisioned(tmp_path, monkeypatch):
     for v in homed:
         src = v.split(":")[0]
         name = re.sub(r"^\$\{HOME\}/", "", src)
-        assert name in (".AItelier", ".aitelier-secrets"), (
+        assert name in (".AItelier", ".aitelier-secrets",
+                        ".local/share/dsh-director/media",
+                        ".local/share/aitelier/media-staging"), (
             f"{src} is bind-mounted but nothing creates it — Docker will, as "
             f"root, and the container (host uid) will not be able to write it.")
 

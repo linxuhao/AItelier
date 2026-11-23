@@ -330,8 +330,9 @@ async def lifespan(app: FastAPI):
         _restart_task = _asyncio.create_task(fallback_restart_loop(dsh_runtime))
     print("DPE APScheduler started. skillflow NotificationBus → SSE bridge active.")
     # Step 24.2b: the route table is read once per process, so a hand edit that
-    # adds `_input` takes effect only at a restart (or a model-routes API save).
-    # This line says whether the process that just started has image input measured.
+    # adds `_input` takes effect only at a restart (or a model-routes API save,
+    # which calls reset_cache and prints nothing). This line, printed only here at
+    # startup, says whether the process that just started has image input measured.
     try:
         from core.model_routes import get_routes as _get_routes
         print(_get_routes().input_summary(), flush=True)

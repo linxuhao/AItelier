@@ -320,7 +320,8 @@ def reset_cache() -> None:
     A test hook, and the only way a running backend sees a changed file: the
     model-routes API calls it after each save. A hand edit of the live
     `model_routes.json` (for example adding `_input`) changes nothing until the
-    backend restarts or such a save happens. The startup line (input_summary)
-    shows what the new process read.
+    backend restarts or such a save happens. Only a restart prints the startup
+    line (input_summary); a save drops the cache here and prints nothing, so
+    after a save the new reading shows only in route-input and in behaviour.
     """
     _CACHE.clear()

@@ -21,8 +21,7 @@ COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 # npm run scripts call `npm` by name; the package's own `npm test` needs it on PATH.
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-COPY --chmod=0444 neo-fork/pin.json neo-fork/0001-incoming-message-types.patch /fork-input/
-WORKDIR /fork/repo
+COPY --chmod=0444 neo-fork/pin.json neo-fork/0001-incoming-message-types.patch neo-fork/0002-saved-login.patch /fork-input/WORKDIR /fork/repo
 # The pin is fetched by commit, never by branch, and what arrived is checked against the
 # commit pin.json names before anything is read out of it.
 RUN git init -q . \
@@ -42,11 +41,14 @@ RUN node --input-type=module -e " \
         const bytes = readFileSync(file.path); \
         if (bytes.length !== file.size) throw new Error(file.path + ': ' + bytes.length + ' bytes, not the pinned ' + file.size); \
         if (sha256(bytes) !== file.sha256) throw new Error(file.path + ' is not the pinned blob'); } \
-      const patch = readFileSync('/fork-input/0001-incoming-message-types.patch'); \
-      if (sha256(patch) !== pin.patch.sha256) throw new Error('the patch is not the pinned patch'); \
+      for (const p of pin.patches) { \
+        const patch = readFileSync('/fork-input/' + p.path.split('/').pop()); \
+        if (sha256(patch) !== p.sha256) throw new Error(p.path + ' is not the pinned patch'); } \
       console.log('neo-fork: ' + pin.files.length + ' pinned blobs match ' + pin.upstream.commit);" \
     && git apply --check /fork-input/0001-incoming-message-types.patch \
-    && git apply /fork-input/0001-incoming-message-types.patch
+    && git apply /fork-input/0001-incoming-message-types.patch \
+    && git apply --check /fork-input/0002-saved-login.patch \
+    && git apply /fork-input/0002-saved-login.patch
 # The Rust test target is built and run here too: the patch changes this crate's own
 # signatures, and a build-only stage cannot notice a test that no longer compiles
 # (2026-11-22: four call sites sat at the old arity and nothing ever compiled them).

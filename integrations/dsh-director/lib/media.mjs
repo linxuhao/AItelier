@@ -437,15 +437,11 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   let lane = Promise.resolve();
   const AUDIENCE = /^(owner|group:.+|project:.+)$/s;
   /** @param meta {channel, messageRef?, index?, audience: 'owner' | 'group:<channel>:<ref>' |
-<<<<<<< HEAD
-   *    'project:<project_id>', source: 'in' | 'generated', sha256?, name?} (sha256: the bytes the
-   *    caller read, for a keyed replay's idempotency_conflict; name: the file's display name,
-   *    kept on the row when it is 1-255 characters without a control character - the name the
-   *    backend shows on a message carrying the ref) @param open ({signal}) => a byte
-=======
-   *    'project:<project_id>', source: 'in' | 'generated', kept?: true (a group's un-mentioned
-   *    file, only with a group audience and source 'in')} @param open ({signal}) => a byte
->>>>>>> 0512b105a8
+   *    'project:<project_id>', source: 'in' | 'generated', sha256?, name?, kept?: true} (sha256:
+   *    the bytes the caller read, for a keyed replay's idempotency_conflict; name: the file's
+   *    display name, kept on the row when it is 1-255 characters without a control character -
+   *    the name the backend shows on a message carrying the ref; kept: a group's un-mentioned
+   *    file, only with a group audience and source 'in') @param open ({signal}) => a byte
    *    stream (async iterable, web stream or Buffer); throwing {refused: <closed set>} passes
    *    that refusal on. @param signal the caller's: aborted while this waits for the lane, the
    *    answer is `unavailable` at once and nothing is fetched; aborted while it reads, the

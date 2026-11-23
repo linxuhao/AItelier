@@ -808,7 +808,10 @@ class DshDrivers:
                    AITELIER_DSH_MAX_ACTIVE_SUBAGENTS=str(MAX_ACTIVE_SUBAGENTS),
                    # Step 24.2 (design-steward 7.8.12a piece 3): the media root, given by this host to
                    # every driver process - a driver's own `~` is DSH_HOME's world under ~/.AItelier.
-                   AITELIER_MEDIA_ROOT=media_root())
+                   AITELIER_MEDIA_ROOT=media_root(),
+                   # Step 24.2c (design-steward 7.8.12b "三"): the python that runs the steward's
+                   # PDF reader (integrations/dsh-director/pdf_read.py) - this venv's, with pypdfium2.
+                   AITELIER_MEDIA_PYTHON=sys.executable)
         if role == "steward":
             # The plugin's root role (HostConfig.rootRole); a director gets no
             # variable at all. The memory owner is the one owner for now.

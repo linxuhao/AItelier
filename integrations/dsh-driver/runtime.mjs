@@ -20,7 +20,7 @@ import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, wakeMedia } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, wakeMedia, createPdfReader } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -604,6 +604,14 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let routeLog = () => {};
   const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
     undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
+  // Step 24.2c (design-steward 7.8.12b "三", "七", "十一"): the steward's PDF reader - the host
+  // venv's python (AITELIER_MEDIA_PYTHON, core/dsh_driver.py) running the plugin's pdf_read.py in
+  // <state dir>/pdf-tmp; install() wipes that directory and starts the self-check.
+  let pdfLog = () => {};
+  const stateDir = env.AITELIER_DSH_STATE_DIR;
+  const pdfReader = steward && library ? createPdfReader({ python: env.AITELIER_MEDIA_PYTHON,
+    tmpRoot: typeof stateDir === 'string' && stateDir.startsWith('/') ? join(stateDir, 'pdf-tmp') : undefined,
+    attachments: () => attachmentStore(), log: line => pdfLog(line) }) : undefined;
   // Step 24.2b (7.8.12a "宿主入库"): one staged dashboard upload, streamed with this driver's token
   // (the backend answers only a delivery target of the message carrying it), and its ack.
   const fetchUpload = async (uploadId, signal) => uploadBody(await fetch(new URL(
@@ -657,6 +665,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
       attachmentStore = () => ctx.get('attachments');
       routeLog = line => ctx.logger.warn(line);
+      pdfLog = line => (line.startsWith('pdf_reader_unavailable') ? ctx.logger.warn(line) : ctx.logger.info(line));
+      pdfReader?.start().catch(error => ctx.logger.warn(`pdf_reader_unavailable: ${String(error?.code ?? 'error')}`));
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
       const sendRequest = async (path, body, signal, readAs) => {
@@ -1149,7 +1159,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // Step 24.2: the media library behind storeMedia, media_call and send_media. 24.2b: an owner
   // turn's send_media is a steward message with the file (State, then the plugin's mirror).
   library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch,
-    owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) } }) } : {});
+    owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) },
+    reader: pdfReader, routeInput }) } : {});
   // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
   else if (library) {
     const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,

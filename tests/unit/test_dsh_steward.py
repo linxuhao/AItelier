@@ -251,6 +251,17 @@ def test_start_passes_the_role_only_to_the_steward(runtime, roles_file, monkeypa
                 "AITELIER_STEWARD_GATEWAY_URL": runtime.steward_gateway_url})
 
 
+def test_every_driver_gets_this_venv_python_for_the_pdf_reader(runtime, roles_file, monkeypatch):
+    # Step 24.2c (design-steward 7.8.12b "三"): AITELIER_MEDIA_PYTHON is this host's own python
+    # (the venv with pypdfium2), beside AITELIER_MEDIA_ROOT; a leaked value never wins.
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", "/elsewhere/python")
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    for env in (runtime._environment(steward), runtime._environment(director)):
+        assert env["AITELIER_MEDIA_PYTHON"] == sys.executable
+        assert env["AITELIER_MEDIA_ROOT"]
+
+
 def test_start_defaults_the_steward_to_its_own_route_and_directors_to_theirs(runtime, roles_file):
     async def go():
         try:

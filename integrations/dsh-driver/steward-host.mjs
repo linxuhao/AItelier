@@ -1,8 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { withoutLeadingClockLines, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
 import { attachmentLine, MEDIA_LIMITS, sniff } from '../dsh-director/lib/media.mjs';
-import { readFile, stat } from 'node:fs/promises';
-import { basename, isAbsolute } from 'node:path';
+import { chmod, lstat, mkdir, mkdtemp, open as openFile, readFile, rm, stat } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { spawn as spawnChild } from 'node:child_process';
+import { basename, isAbsolute, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { wakeTakesImages } from './model.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -929,10 +933,16 @@ const OWNER_MEDIA_SUBJECTS = { image: 'Image', voice: 'Voice message', file: 'Fi
 
 /** `owner` (the steward only, step 24.2b): {request, project, mirror} - State's
  *  send_user_message as the turn's tool request and the plugin's ownerMessageSent. With it
- *  the ops have sendToOwner; a director's have none. */
-export function mediaOps({ request, library, gatewayFetch, owner }) {
+ *  the ops have sendToOwner; a director's have none.
+ *  Step 24.2c (design-steward 7.8.12b, the steward only): `reader` (createPdfReader) gives
+ *  readDocument(ref, {pages, images, maxPages}, signal); `routeInput` (the adapter's
+ *  route-input cache) gives takesImages(signal) - whether read_document renders page images,
+ *  the same judgement as a wake's native images (the plugin has no route input of its own). */
+export function mediaOps({ request, library, gatewayFetch, owner, reader, routeInput }) {
   return {
     ...(owner ? { sendToOwner: (file, signal) => sendMediaToOwner({ ...owner, library }, file, signal) } : {}),
+    ...(reader ? { readDocument: (ref, options, signal) => reader.readDocument(library, ref, options, signal) } : {}),
+    ...(routeInput ? { takesImages: async signal => wakeTakesImages(await routeInput(signal)) } : {}),
     ingest: (meta, open, options) => library.ingest(meta, open, options),
     resolve: async ref => library.lookup(ref),
     read: ref => library.read(ref),
@@ -955,6 +965,275 @@ export function mediaOps({ request, library, gatewayFetch, owner }) {
       ...(caption ? { caption } : {}), ...(checkOnly ? { check_only: true } : {}) }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };
+}
+
+/** Step 24.2c (design-steward 7.8.12b "六", "七", "十一"): the host side of read_document. Each
+ *  limit is enforced here, at the layer that runs the reader; the child (pdf_read.py) clamps its
+ *  own copies too, and the plugin holds the per-call and per-turn page counts. */
+export const PDF_READER_LIMITS = Object.freeze({
+  wallMs: 30000, // the child's wall clock; then SIGKILL to its whole process group
+  queueWaitMs: 30000, // one child per host; a call that waits longer answers busy
+  retryMs: 10 * 60 * 1000, // a failed self-check is tried again by a call at most this often
+  stdoutBytes: 256 * 1024, stderrBytes: 4096, // stdout over the cap is broken; stderr keeps its tail
+  imageBytes: 4 * 1024 * 1024, // one page image (readImageRequest's 4 MiB)
+  charsPage: 4000, charsCall: 8000, pagesWithImages: 4, pagesTextOnly: 30,
+});
+/** The reader child, beside lib/media.mjs in the plugin's directory. */
+export const PDF_READ_SCRIPT = fileURLToPath(new URL('../dsh-director/pdf_read.py', import.meta.url));
+/** The child's whole environment: nothing of the host's (its driver token among them). */
+export const pdfReaderEnv = home => ({ PATH: '/usr/bin:/bin', LC_ALL: 'C.UTF-8', HOME: home });
+// The refusals a reader's {error} JSON may carry; any other is broken.
+const PDF_ERRORS = new Set(['encrypted', 'unsupported_security', 'broken', 'page_out_of_range', 'too_many_pages', 'invalid_request']);
+const SELFCHECK_ERRORS = new Set(['selfcheck_failed']);
+const PAGES_SPEC = /^([1-9]\d{0,5})(?:-([1-9]\d{0,5}))?$/;
+const SANDBOXES = new Set(['landlock', 'landlock_fs', 'none']);
+const sandboxOf = value => (SANDBOXES.has(value) ? value : 'unknown');
+
+/** The reader: `python` (AITELIER_MEDIA_PYTHON) runs `script` with `-I`, one child at a time, in a
+ *  fresh 0700 directory under `tmpRoot` (<state dir>/pdf-tmp, outside the media root) removed when
+ *  the call ends. `attachments()` is DSH's attachment store (ctx.get('attachments')), read at call
+ *  time. `log(line)` gets only mime, size, page count, the pages chosen, elapsed time, a refusal
+ *  code and the sandbox state - never text, a name, a ref or stderr. `start()` wipes `tmpRoot` and
+ *  runs the self-check; until a self-check passes every PDF read answers pdf_reader_unavailable,
+ *  and a call tries the self-check again at most once per `retryMs`. A refusal is {refused, page_count?}. */
+export function createPdfReader({ python, script = PDF_READ_SCRIPT, tmpRoot, attachments = () => undefined,
+  log = () => {}, now = Date.now, limits: overrides, spawn = spawnChild } = {}) {
+  const limits = { ...PDF_READER_LIMITS, ...(overrides ?? {}) };
+  const rooted = typeof tmpRoot === 'string' && isAbsolute(tmpRoot);
+  let tail = Promise.resolve();
+  let status = { state: 'pending', checkedAt: -Infinity };
+
+  /** The host's one slot: its release, or undefined after queueWaitMs (busy). */
+  async function acquire() {
+    const previous = tail;
+    let release, timer;
+    const mine = new Promise(resolve => { release = resolve; });
+    tail = previous.then(() => mine);
+    const turn = await Promise.race([previous.then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), limits.queueWaitMs); })]);
+    clearTimeout(timer);
+    if (!turn) { release(); return undefined; }
+    return release;
+  }
+
+  /** One child: its own process group, stdin closed, cwd and HOME the call's directory. */
+  function runChild(args, cwd, signal) {
+    return new Promise(resolve => {
+      let child, done = false, killedByUs = false, overflow = false, outBytes = 0, exit;
+      const out = [];
+      let errTail = Buffer.alloc(0);
+      try {
+        child = spawn(python, ['-I', script, ...args], { cwd, env: pdfReaderEnv(cwd), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch { resolve({ spawnError: true }); return; }
+      const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } };
+      const ours = () => { killedByUs = true; killGroup(); };
+      const wall = setTimeout(ours, limits.wallMs);
+      signal?.addEventListener?.('abort', ours, { once: true });
+      const finish = fields => {
+        if (done) return;
+        done = true;
+        clearTimeout(wall);
+        signal?.removeEventListener?.('abort', ours);
+        resolve({ ...fields, killedByUs, overflow, stdout: Buffer.concat(out), stderrTail: errTail });
+      };
+      child.on('error', () => { if (child.pid === undefined) finish({ spawnError: true }); });
+      child.stdout.on('data', chunk => {
+        if (overflow) return;
+        outBytes += chunk.length;
+        if (outBytes > limits.stdoutBytes) { overflow = true; out.length = 0; killGroup(); return; }
+        out.push(chunk);
+      });
+      // Drained always (a full pipe would stall the child); only the tail is kept, never logged.
+      child.stderr.on('data', chunk => {
+        const joined = Buffer.concat([errTail, chunk]);
+        errTail = Buffer.from(joined.subarray(Math.max(0, joined.length - limits.stderrBytes)));
+      });
+      // The leader's exit takes whatever it left behind in its group with it.
+      child.on('exit', (code, sig) => { exit = { code, signal: sig }; killGroup(); });
+      child.on('close', (code, sig) => finish({ code: exit?.code ?? code, signal: exit?.signal ?? sig }));
+      if (signal?.aborted) ours();
+    });
+  }
+
+  /** The exit mapping (7.8.12b "七"): {result} or {refused, page_count?}. */
+  function outcome(run, errors) {
+    if (run.spawnError || run.overflow) return { refused: 'broken' };
+    if (run.killedByUs || run.signal === 'SIGXCPU') return { refused: 'timeout' };
+    if (run.signal) return { refused: 'broken' };
+    const text = run.stdout.toString('utf8').trim();
+    let parsed;
+    if (text && !text.includes('\n')) { try { parsed = JSON.parse(text); } catch { parsed = undefined; } }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { refused: 'broken' };
+    if (parsed.error !== undefined) {
+      if (run.code === 0 || !errors.has(parsed.error)) return { refused: 'broken' };
+      const count = parsed.page_count;
+      return { refused: parsed.error, ...(parsed.error === 'page_out_of_range' && Number.isSafeInteger(count) && count >= 0 ? { page_count: count } : {}) };
+    }
+    if (run.code !== 0 || !Number.isSafeInteger(parsed.page_count) || parsed.page_count < 0 || !Array.isArray(parsed.pages)) return { refused: 'broken' };
+    return { result: parsed };
+  }
+
+  /** The bytes of `<dir>/p<n>.jpg` - the one name the host chose - or undefined: opened with
+   *  O_NOFOLLOW, a regular file (lstat, and the same inode once open), within the cap, JPEG magic. */
+  async function pageImage(dir, n) {
+    const path = join(dir, `p${n}.jpg`);
+    let handle;
+    try {
+      const before = await lstat(path);
+      if (!before.isFile() || before.size > limits.imageBytes) return undefined;
+      handle = await openFile(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.ino !== before.ino || opened.dev !== before.dev || opened.size > limits.imageBytes) return undefined;
+      const data = await handle.readFile();
+      if (data.length > limits.imageBytes || data.length < 3 || data[0] !== 0xff || data[1] !== 0xd8 || data[2] !== 0xff) return undefined;
+      return new Uint8Array(data);
+    } catch { return undefined; } finally { await handle?.close().catch(() => {}); }
+  }
+
+  async function freshDir(prefix) {
+    await mkdir(tmpRoot, { recursive: true, mode: 0o700 });
+    await chmod(tmpRoot, 0o700);
+    const dir = await mkdtemp(join(tmpRoot, prefix));
+    await chmod(dir, 0o700);
+    return dir;
+  }
+
+  /** The self-check (7.8.12b "七"), run while holding the slot. */
+  async function selfcheck() {
+    const started = now();
+    let reason, sandbox, dir;
+    try {
+      if (typeof python !== 'string' || !python) reason = 'no_python';
+      else if (!rooted) reason = 'no_state_dir';
+      else {
+        dir = await freshDir('s-');
+        const run = await runChild(['--selfcheck', dir], dir);
+        const out = outcome(run, SELFCHECK_ERRORS);
+        if (run.spawnError) reason = 'spawn_failed';
+        else if (out.refused) reason = out.refused;
+        else if (out.result.selfcheck !== true) reason = 'selfcheck_failed';
+        else if (!(await pageImage(dir, 1))) reason = 'no_page_image';
+        else sandbox = sandboxOf(out.result.sandbox);
+      }
+    } catch (error) { reason = /^E[A-Z]+$/.test(error?.code ?? '') ? error.code : 'error'; } finally {
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+    status = { state: reason ? 'unavailable' : 'ready', reason, sandbox, checkedAt: now() };
+    if (reason) log(`pdf_reader_unavailable: ${reason}`);
+    else log('pdf_reader_ready ' + JSON.stringify({ sandbox, elapsed_ms: now() - started }));
+  }
+
+  async function available() {
+    if (status.state === 'ready') return true;
+    if (status.state === 'unavailable' && now() - status.checkedAt < limits.retryMs) return false;
+    await selfcheck();
+    return status.state === 'ready';
+  }
+
+  /** The child's pages, checked again: only pages of the asked range, each once, in order; text
+   *  cut again to the per-page and per-call caps; each image read from the name the host chose. */
+  async function collect(ref, result, first, last, images, dir) {
+    const entries = result.pages.filter(e => Number.isSafeInteger(e?.n) && e.n >= first && e.n <= last)
+      .filter((e, i, all) => all.findIndex(o => o.n === e.n) === i).sort((a, b) => a.n - b.n);
+    let left = limits.charsCall;
+    const pages = [];
+    for (const entry of entries) {
+      const raw = typeof entry.text === 'string' ? entry.text : '';
+      const text = raw.slice(0, Math.max(0, Math.min(limits.charsPage, left)));
+      left -= text.length;
+      const page = { n: entry.n, text, chars: Number.isSafeInteger(entry.chars) && entry.chars >= text.length ? entry.chars : raw.length,
+        truncated: entry.truncated === true || text.length < raw.length, no_text_layer: entry.no_text_layer === true };
+      if (entry.error !== undefined) page.error = 'broken';
+      if (images && entry.image === true) {
+        const data = await pageImage(dir, entry.n);
+        const store = attachments();
+        if (!data) page.image_error = 'broken';
+        else if (typeof store?.saveImage !== 'function') page.image_error = 'not_saved';
+        else {
+          try { page.image = await store.saveImage({ data, mediaType: 'image/jpeg', name: `${ref}#p${entry.n}.jpg` }); }
+          catch { page.image_error = 'not_saved'; }
+        }
+      }
+      pages.push(page);
+    }
+    return pages;
+  }
+
+  /** An image ref: the library's bytes as one image, named `<ref>.<ext>` (the wake's name). */
+  async function readImage(library, row, ref) {
+    const started = now();
+    const done = answer => {
+      log('pdf_read ' + JSON.stringify({ mime: row.mime, size: row.size, pages: '1', images: true,
+        elapsed_ms: now() - started, ...(answer.refused ? { refused: answer.refused } : { page_count: 1 }) }));
+      return answer;
+    };
+    const store = attachments();
+    if (typeof store?.saveImage !== 'function') return done({ refused: 'broken' });
+    try {
+      const data = (await library.read(ref))?.bytes;
+      if (!data) return done({ refused: 'unknown_ref' });
+      const image = await store.saveImage({ data: new Uint8Array(data), mediaType: row.mime, name: `${ref}.${row.ext}` });
+      return done({ kind: 'image', page_count: 1, pages: [{ n: 1, text: '', chars: 0, truncated: false, no_text_layer: true, image }] });
+    } catch { return done({ refused: 'broken' }); }
+  }
+
+  /** read_document's host half: {kind, page_count, sandbox?, pages:[{n, text, chars, truncated,
+   *  no_text_layer, image?, image_error?, error?}]} or {refused, page_count?}. `pages` is "n" or
+   *  "a-b" (default the first `maxPages`, at most 4 with images and 30 without). */
+  async function readDocument(library, ref, { pages, images = true, maxPages } = {}, signal) {
+    const row = library?.lookup?.(ref);
+    if (!row) return { refused: 'unknown_ref' };
+    if (row.kind === 'image') return readImage(library, row, ref);
+    if (row.mime !== 'application/pdf') return { refused: 'not_a_document' };
+    const withImages = images !== false;
+    const cap = withImages ? limits.pagesWithImages : limits.pagesTextOnly;
+    const most = Number.isSafeInteger(maxPages) && maxPages >= 1 ? Math.min(maxPages, cap) : cap;
+    let first = 1, last = most;
+    if (pages !== undefined) {
+      const match = typeof pages === 'string' ? PAGES_SPEC.exec(pages) : null;
+      if (!match) return { refused: 'invalid_request' };
+      first = Number(match[1]); last = match[2] === undefined ? first : Number(match[2]);
+      if (last < first) return { refused: 'invalid_request' };
+      if (last - first + 1 > most) return { refused: 'too_many_pages' };
+    }
+    const started = now();
+    let sandbox;
+    const done = answer => {
+      log('pdf_read ' + JSON.stringify({ mime: row.mime, size: row.size, pages: `${first}-${last}`, images: withImages,
+        elapsed_ms: now() - started, ...(answer.refused ? { refused: answer.refused } : { page_count: answer.page_count }),
+        ...(sandbox ? { sandbox } : {}) }));
+      return answer;
+    };
+    const release = await acquire();
+    if (!release) return done({ refused: 'busy' });
+    let dir;
+    try {
+      if (!(await available())) return done({ refused: 'pdf_reader_unavailable' });
+      sandbox = status.sandbox;
+      if (typeof row.path !== 'string' || !isAbsolute(row.path)) return done({ refused: 'broken' });
+      dir = await freshDir('r-');
+      const run = await runChild([row.path, dir, '--pages', `${first}-${last}`, '--images', withImages ? '1' : '0',
+        '--chars-page', String(limits.charsPage), '--chars-call', String(limits.charsCall)], dir, signal);
+      const out = outcome(run, PDF_ERRORS);
+      if (out.refused) return done(out);
+      sandbox = sandboxOf(out.result.sandbox);
+      return done({ kind: 'pdf', page_count: out.result.page_count, sandbox,
+        pages: await collect(ref, out.result, first, last, withImages, dir) });
+    } catch { return done({ refused: 'broken' }); } finally {
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+      release();
+    }
+  }
+
+  /** Startup: clear `tmpRoot` (whatever an earlier process left), then the self-check. */
+  async function start() {
+    if (rooted) await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+    const release = await acquire();
+    if (!release) return;
+    try { await selfcheck(); } finally { release(); }
+  }
+
+  return { readDocument, start, status: () => ({ ...status }) };
 }
 
 /** Step 24.2b (design-steward 7.8.12a "出站：管家的媒体也在面板上"): an owner turn's send_media

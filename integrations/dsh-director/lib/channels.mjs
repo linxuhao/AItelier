@@ -1181,7 +1181,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       }
     }
   };
-  const mirror = async (messageId, body, replyTo, exact = false) => {
+  const mirror = async (messageId, body, replyTo, exact = false, files = []) => {
     await hostReady();
     // Once per message, also across a restart: a delivery row means it was sent (or failed) before.
     if (mirroring.has(messageId) || await host.sourceOf(messageId)) return { mirrored: false, reason: 'already_mirrored' };
@@ -1205,14 +1205,24 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     let ref, error;
     if (!entry) error = 'channel_not_connected';
     else {
-      // A confirmation the requester must read whole (step 24.1b) goes exactly as written:
-      // never shaped for a phone, never cut (the host bounds its length).
-      const sent = exact ? body : channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
-      if (sent.endsWith(MORE) && !body.endsWith(MORE)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
-      try {
-        ref = (await within(entry.send(sent, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
-        receipts.delete(channel);  // the steward has answered here: the next owner message is news again
-      } catch (failure) { error = short(failure); }
+      if (body.trim()) {
+        // A confirmation the requester must read whole (step 24.1b) goes exactly as written:
+        // never shaped for a phone, never cut (the host bounds its length).
+        const sent = exact ? body : channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
+        if (sent.endsWith(MORE) && !body.endsWith(MORE)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
+        try {
+          ref = (await within(entry.send(sent, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
+          receipts.delete(channel);  // the steward has answered here: the next owner message is news again
+        } catch (failure) { error = short(failure); }
+      }
+      // Step 24.2b (7.8.12a): the message's files follow its text, one sendFile each, to the
+      // same person - each tried whatever happened before it. The first failure (a kind this
+      // channel cannot send included) is what the one delivery row records.
+      for (const file of files) {
+        const sent = await sendFileVia(channel, { ...file, to, ...(replyToRef ? { replyToRef } : {}) });
+        if (sent.sent) { ref ??= sent.ref; receipts.delete(channel); }
+        else error ??= sent.refused === 'send_failed' && sent.reason ? `send_failed: ${sent.reason}` : String(sent.refused);
+      }
     }
     // Recorded once, success or failure (the record retried, a failed send never).
     let recorded, failed = false;
@@ -1226,10 +1236,16 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
 
   /** The root wrote `body` to its owner as message `messageId` (a reply to `replyTo` when
    *  given): send the same text where the owner is listening - shaped for a phone chat by
-   *  channelText (a long one cut, ending in MORE). Never throws. */
-  const ownerMessageSent = (messageId, body, replyTo, { exact = false } = {}) => {
-    if (!text(messageId) || typeof body !== 'string' || !body.trim()) return Promise.resolve({ mirrored: false, reason: 'nothing_to_send' });
-    const run = queue.then(() => mirror(messageId, body, text(replyTo) ? replyTo : undefined, exact === true)).catch(error => {
+   *  channelText (a long one cut, ending in MORE). Step 24.2b: `attachments` are the
+   *  message's files ({kind, mime, name, path}, what sendFile takes), sent after the text -
+   *  a message of files alone is sent too. Still one delivery row per message. Never throws. */
+  const ownerMessageSent = (messageId, body, replyTo, { exact = false, attachments = [] } = {}) => {
+    if (!Array.isArray(attachments) || attachments.some(file => !file || typeof file !== 'object'
+      || !MEDIA_KINDS.includes(file.kind) || !text(file.mime) || !text(file.name) || !text(file.path)))
+      return Promise.resolve({ mirrored: false, reason: 'invalid_attachments' });
+    const files = attachments.map(({ kind, mime, name, path }) => ({ kind, mime, name, path }));
+    if (!text(messageId) || typeof body !== 'string' || (!body.trim() && !files.length)) return Promise.resolve({ mirrored: false, reason: 'nothing_to_send' });
+    const run = queue.then(() => mirror(messageId, body, text(replyTo) ? replyTo : undefined, exact === true, files)).catch(error => {
       log('channel_mirror_failed', { message_id: messageId, error: short(error) });
       return { mirrored: false, reason: 'unavailable' };
     });

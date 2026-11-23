@@ -42,8 +42,14 @@
       "size": 12384
     }
   ],
-  "patch": {
-    "path": "integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch",
-    "sha256": "1fe0c8c9479caa5dc749b3101da98ddb46759fc60b25db8a1638664d4822df50"
-  }
+  "patches": [
+    {
+      "path": "integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch",
+      "sha256": "ca932b16e52e9f99f61f7796001dcd9a52780909804466e5962d8df5f4974600"
+    },
+    {
+      "path": "integrations/wechat-bridge/neo-fork/0002-saved-login.patch",
+      "sha256": "32adc9c565a91db75452722e14744cab942748859ead1e73027d15fb677251a3"
+    }
+  ]
 }

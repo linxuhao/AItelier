@@ -254,6 +254,24 @@ test('status follows the bridge\'s phase: idle with its reason, starting, the QR
   assert.deepEqual(statusFromBridge({ logged_in: false }), { connected: false, detail: 'scan needed' });
 });
 
+test('status, step 19.1: resuming the saved login, and each resume idle reason said with its meaning (the first 80 characters carry it)', () => {
+  assert.deepEqual(statusFromBridge({ phase: 'resuming', logged_in: false, resumable: true }), { connected: false, detail: 'resuming saved login' });
+  const said = {
+    resume_rejected: 'no QR (resume_rejected: WeChat ended the saved login) - request one on the dashboard',
+    resume_unreadable: 'no QR (resume_unreadable: the saved login cannot be read) - request one on the dashboard',
+    resume_throttled: 'no QR (resume_throttled: too many resumes lately) - request one on the dashboard',
+    resume_failed: 'no QR (resume_failed: the saved login was not resumed) - request one on the dashboard',
+    resume_account_mismatch: 'no QR (resume_account_mismatch: the saved login was another account, deleted) - request one on the dashboard',
+  };
+  for (const [reason, detail] of Object.entries(said)) {
+    assert.deepEqual(statusFromBridge({ phase: 'idle', idle_reason: reason, logged_in: false, resumable: false }), { connected: false, detail });
+    assert.ok(detail.indexOf(')') < 80, `${reason}: the meaning fits the alert's 80 characters`);
+  }
+  // Other reasons, and names that only look like a key of the table, are said as before.
+  assert.equal(statusFromBridge({ phase: 'idle', idle_reason: 'boot', logged_in: false }).detail, 'no QR (boot) - request one on the dashboard');
+  assert.equal(statusFromBridge({ phase: 'idle', idle_reason: 'toString', logged_in: false }).detail, 'no QR (toString) - request one on the dashboard');
+});
+
 test('login asks the bridge for a QR, answers without it, and reads the status quickly for a while', async () => {
   const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M4 4.5h7"/></svg>';
   const bridge = await fakeBridge({ status: { phase: 'idle', idle_reason: 'boot', logged_in: false, since: 'x' } });

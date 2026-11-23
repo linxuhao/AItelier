@@ -675,7 +675,7 @@ const OCR = 'mcp__sw__media__ocr_image', DRAW = 'mcp__sw__media__generate_image'
 function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels, mediaKinds, sendFile } = {}) {
   const w = channelWorld({ ...(mediaKinds ? { mediaKinds } : {}), ...(sendFile === false ? { sendFile } : {}) });
   const turn = { audience, turn: 't1' };
-  const executed = [], fetched = [], posted = [], checked = [];
+  const executed = [], fetched = [], posted = [], checked = [], messages = [];
   let out;
   const ledger = new UrlLedger();
   const catalog = { rootSession: 'root', requester,
@@ -684,14 +684,24 @@ function toolWorld({ audience = { kind: 'owner' }, requester = 'msg-1', channels
     fetch: async request => { fetched.push(request); return w.library.ingest({ channel: 'generated', audience: request.audience, source: 'generated' }, async () => png(64, 64)); },
     postGroup: async request => {
       if (request.checkOnly) { checked.push(request); return out?.postAnswer?.refused ? out.postAnswer : { may_post: true }; }
-      posted.push(request); return out?.postAnswer ?? { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1', ...(request.caption ? { caption: request.caption } : {}) }; } };
+      posted.push(request); return out?.postAnswer ?? { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1', ...(request.caption ? { caption: request.caption } : {}) }; },
+    // Step 24.2b: the steward host's half (steward-host.mjs sendMediaToOwner) - one message with
+    // the ref, then the plugin's own mirror with the file. ownerAnswer: the backend refused it.
+    sendToOwner: async request => {
+      if (out?.ownerAnswer) return out.ownerAnswer;
+      const row = w.library.lookup(request.ref), message_id = `sm-${messages.length + 1}`;
+      messages.push({ ...request, message_id });
+      const mirror = await w.handle.ownerMessageSent(message_id, request.caption ?? '', request.replyTo,
+        { attachments: [{ kind: row.kind, mime: row.mime, name: `${row.kind}.${row.ext}`, path: row.path }] });
+      return { message_id, mirror };
+    } };
   const tools = new Map();
   const ctx = { tools: { execute: async request => { executed.push(request); return { value: { text: 'OCR: 你好' }, content: [{ type: 'text', text: 'OCR: 你好' }] }; } } };
   class HarnessError extends Error {}
   registerMediaTools({ tools: { register: t => tools.set(t.name, t) } }, { ctx, defineTool: t => t, jsonOutput: {}, HarnessError,
     media, catalog, turns: { audience: () => turn.audience, open: () => turn }, channels: channels ?? w.handle, ledger });
   const run = (name, args, session = 'root') => tools.get(name).execute(args, { agent: { session: { id: session } }, callId: 'c1', rootCallId: 'r1', token: 'tok' });
-  out = { ...w, media, turn, executed, fetched, posted, checked, ledger, tools, run };
+  out = { ...w, media, turn, executed, fetched, posted, checked, messages, ledger, tools, run };
   return out;
 }
 
@@ -771,7 +781,7 @@ test('media_call: the bound counts the other arguments as JSON (escaping include
   assert.equal(t.executed.length, 1);
 });
 
-test('send_media(url): only a url a connection tool returned in this turn, fetched through that connection, sent to this turn\'s requester', async () => {
+test('send_media(url): only a url a connection tool returned in this turn, fetched through that connection, sent as a reply to this turn\'s requester', async () => {
   const t = toolWorld();
   await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
   const url = 'http://mcp_server:9003/files/cat.png?sig=1&exp=2';
@@ -783,52 +793,48 @@ test('send_media(url): only a url a connection tool returned in this turn, fetch
   const sent = await t.run('send_media', { url, caption: '一只猫' });
   assert.equal(sent.sent, true);
   assert.deepEqual(t.fetched, [{ connId: 'media', url, audience: 'owner' }]);
+  // 24.2b: one message replying to the turn's owner message, the caption its body; the mirror
+  // sends that text, then the file, to the same person.
+  assert.deepEqual(t.messages.map(({ caption, replyTo }) => ({ caption, replyTo })), [{ caption: '一只猫', replyTo: 'msg-1' }]);
+  assert.deepEqual(t.calls.sent.at(-1), ['一只猫', { replyToRef: 'q1', to: 'wxid_owner' }]);
   const file = t.calls.files.at(-1);
   assert.equal(file.to, 'wxid_owner'); assert.equal(file.replyToRef, 'q1'); assert.equal(file.kind, 'image');
-  assert.equal(file.caption, '一只猫');
+  assert.equal(file.caption, undefined, 'the caption went as the message\'s text');
   assert.deepEqual(readFileSync(file.path), png(64, 64));
   assert.equal(t.library.rows.at(-1).source, 'generated');
   t.ledger.reset();
   assert.equal((await t.run('send_media', { url })).refused, 'url_not_seen', 'a new turn forgets the last turn\'s urls');
 });
 
-test('send_media(url) in an owner turn: a channel that cannot send the file is refused before anything is fetched or stored', async () => {
-  // Review F3: the owner's channel is judged with the kind before the fetch - no sendFile or no
-  // kinds at all refuses any url; a kind its name says (cat.png) that the channel lacks refuses it.
-  const url = 'http://mcp_server:9003/files/cat.png?sig=1', unnamed = 'http://mcp_server:9003/files/7f3a?sig=1';
+test('send_media in an owner turn (24.2b): a channel that cannot send the file is no refusal - the message stands, the mirror records the failure', async () => {
+  // Superseded 24.2 review F3 (the owner's channel judged before the fetch): the file is a
+  // message the dashboard shows whatever the channel can take; only the mirror's record fails.
+  const url = 'http://mcp_server:9003/files/cat.png?sig=1';
   for (const shape of [{ sendFile: false }, { mediaKinds: [] }, { mediaKinds: ['file'] }]) {
     const t = toolWorld(shape);
     await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
-    t.ledger.record(DRAW, { value: { url, unnamed } });
-    assert.deepEqual(await t.run('send_media', { url }), { refused: 'channel_no_media' }, JSON.stringify(shape));
-    if (!shape.mediaKinds?.length) assert.deepEqual(await t.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
-    assert.equal(t.fetched.length, 0, `nothing fetched: ${JSON.stringify(shape)}`);
-    assert.equal(t.library.rows.length, 0, 'nothing stored');
+    t.ledger.record(DRAW, { value: { url } });
+    const sent = await t.run('send_media', { url });
+    assert.equal(sent.sent, true, JSON.stringify(shape));
+    assert.deepEqual(sent.mirror, { mirrored: false, reason: 'send_failed', channel: 'wechat' }, JSON.stringify(shape));
+    assert.equal(t.messages.length, 1);
+    assert.equal(t.fetched.length, 1);
+    assert.equal(t.library.rows.length, 1, 'kept: the message carries it');
     assert.equal(t.calls.files.length, 0);
   }
-  // A url whose name says nothing, on a file-only channel: its kind is known once fetched -
-  // fetched and stored, then refused without sending, and the file taken back (review MF3).
-  const t = toolWorld({ mediaKinds: ['file'] });
-  await t.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
-  t.ledger.record(DRAW, { value: { unnamed } });
-  assert.deepEqual(await t.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
-  assert.equal(t.fetched.length, 1);
-  assert.equal(t.calls.files.length, 0, 'not sent');
-  assert.deepEqual(t.library.rows, [], 'the row this call stored is withdrawn');
-  assert.deepEqual(files(t), [], 'and its file');
-  assert.deepEqual(await t.handle.ownerMediaTarget('msg-1', 'image'), { refused: 'channel_no_media' }, 'the kind branch is live');
 });
 
 test('send_media(url) refused after its fetch takes back only what that call stored: a row stored before (same bytes) and its file stay', async () => {
-  // Review MF3: the owner's url without a kind in its name on a file-only channel, and a
+  // Review MF3: the owner's message refused by the backend (24.2b; was: a file-only channel), and a
   // group's post refused at send time (its dry run allowed it) - each leaves the library as it was.
   const unnamed = 'http://mcp_server:9003/files/7f3a?sig=1';
-  const mine = toolWorld({ mediaKinds: ['file'] });
+  const mine = toolWorld();
+  mine.ownerAnswer = { refused: 'invalid_attachment' };
   await mine.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
   const before = await mine.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => png(64, 64));
   const rows = mine.library.rows, stored = files(mine);
   mine.ledger.record(DRAW, { value: { unnamed } });
-  assert.deepEqual(await mine.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
+  assert.deepEqual(await mine.run('send_media', { url: unnamed }), { refused: 'invalid_attachment' });
   assert.equal(mine.fetched.length, 1);
   assert.deepEqual(mine.library.rows, rows, 'the earlier row (same sha256) is untouched');
   assert.deepEqual(files(mine), stored, 'and so is the file it shares');
@@ -847,12 +853,13 @@ test('send_media(url) refused after its fetch takes back only what that call sto
     assert.equal(t.calls.files.length, 0);
   }
   // A fetch answering a row the library already held (a duplicate) did not create it: kept.
-  const held = toolWorld({ mediaKinds: ['file'] });
+  const held = toolWorld();
+  held.ownerAnswer = { refused: 'invalid_attachment' };
   await held.service.inbound({ channel: 'wechat', senderRef: 'wxid_owner', messageRef: 'q1', text: '画一只猫' });
   const earlier = await held.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => png(64, 64));
   held.media.fetch = async request => { held.fetched.push(request); return { ...earlier, duplicate: true }; };
   held.ledger.record(DRAW, { value: { unnamed } });
-  assert.deepEqual(await held.run('send_media', { url: unnamed }), { refused: 'channel_no_media' });
+  assert.deepEqual(await held.run('send_media', { url: unnamed }), { refused: 'invalid_attachment' });
   assert.equal(held.fetched.length, 1);
   assert.ok(held.library.lookup(earlier.ref), 'a duplicate answer is never withdrawn');
   // The library's withdraw leaves an inbound row alone.
@@ -861,15 +868,23 @@ test('send_media(url) refused after its fetch takes back only what that call sto
   assert.ok(mine.library.lookup(kept.ref));
 });
 
-test('send_media: a dashboard turn is dashboard_no_media; no requester is no_requester; exactly one of ref and url', async () => {
+test('send_media (24.2b): a dashboard turn is a message the mirror keeps on the dashboard; no requester goes to the default channel; exactly one of ref and url', async () => {
   const t = toolWorld({ requester: 'dash-msg' });
   const { ref } = await t.library.ingest({ ...owner, messageRef: 'p', index: 0 }, async () => png());
-  assert.equal((await t.run('send_media', { ref })).refused, 'dashboard_no_media');
+  const dashboard = await t.run('send_media', { ref });
+  assert.equal(dashboard.sent, true);
+  assert.deepEqual(dashboard.mirror, { mirrored: false, reason: 'dashboard' });
+  assert.deepEqual(t.messages.map(m => m.replyTo), ['dash-msg']);
+  assert.equal(t.calls.files.length + t.calls.sent.length, 0, 'nothing on a channel');
   assert.equal((await t.run('send_media', { ref, url: 'http://x/y' })).refused, 'invalid_request');
   assert.equal((await t.run('send_media', {})).refused, 'invalid_request');
   const none = toolWorld({ requester: null });
-  assert.equal((await none.run('send_media', { ref })).refused, 'no_requester');
-  assert.equal(t.calls.files.length + none.calls.files.length, 0);
+  const { ref: theirs } = await none.library.ingest({ ...owner, messageRef: 'p', index: 0 }, async () => png());
+  const unprompted = await none.run('send_media', { ref: theirs });
+  assert.equal(unprompted.sent, true);
+  assert.deepEqual(none.messages.map(m => 'replyTo' in m), [false]);
+  assert.equal(none.calls.files.length, 1, 'the default channel gets the file');
+  assert.equal(none.calls.files[0].to, 'wxid_owner'); assert.equal(none.calls.files[0].replyToRef, undefined);
 });
 
 test('send_media in a group turn: only this group, through the backend\'s budget, and never the owner\'s ref', async () => {
@@ -925,7 +940,7 @@ test('GROUP_TOOLS holds media_call and send_media (7.8.8)', () => {
   assert.ok(GROUP_TOOLS.has('media_call') && GROUP_TOOLS.has('send_media'));
 });
 
-test('a fake channel end to end: storeMedia for each file, then inbound with the refs; the steward\'s file goes back through sendFile', async () => {
+test('a fake channel end to end: storeMedia for each file, then inbound with the refs; the steward\'s file goes back as a message mirrored through sendFile', async () => {
   // A channel plugin as 24.2 wants one (WeChat's, once its bridge can fetch media): it reports
   // a message with two files, stores each BEFORE inbound, writes `refused` itself for what it
   // knows it cannot take, and registers sendFile for what it can send.
@@ -950,6 +965,7 @@ test('a fake channel end to end: storeMedia for each file, then inbound with the
   assert.equal(t.executed[0].arguments.image_base64, jpeg(800, 600).toString('base64'));
   const sent = await t.run('send_media', { ref });
   assert.equal(sent.sent, true);
+  assert.deepEqual(t.messages.map(m => [m.ref, m.replyTo]), [[ref, 'msg-1']]);
   assert.deepEqual(readFileSync(t.calls.files.at(-1).path), jpeg(800, 600));
   assert.equal(t.calls.files.at(-1).replyToRef, 'wx-77');
 });

@@ -1135,8 +1135,10 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // 24.1b: and confirmations of outward actions, the text sent back to the requester.
   { catalog: catalogOps((...args) => request(...args), { confirm: confirmOps((...args) => request(...args), { project,
     mirror: (...args) => mirrorOwnerMessage?.(...args), groupSend: (...args) => sendToGroup ? sendToGroup(...args) : false }) }) },
-  // Step 24.2: the media library behind storeMedia, media_call and send_media.
-  library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch }) } : {});
+  // Step 24.2: the media library behind storeMedia, media_call and send_media. 24.2b: an owner
+  // turn's send_media is a steward message with the file (State, then the plugin's mirror).
+  library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch,
+    owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) } }) } : {});
   // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
   else if (library) {
     const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,

@@ -115,8 +115,11 @@ export interface DirectorApi {
    *  the host must take once; a refusal is not retried. A record that fails every try is
    *  logged (channel_record_failed): within the process the message is still not sent
    *  again, but after a restart a replay of the same message id would send it a second
-   *  time. Never rejects; without channels it resolves {mirrored: false}. */
-  ownerMessageSent(messageId: string, text: string, replyTo?: string): Promise<object>;
+   *  time. Never rejects; without channels it resolves {mirrored: false}. `exact` sends the
+   *  text as written (a confirmation, step 24.1b); `attachments` (step 24.2b) are the message's
+   *  files ({kind, mime, name, path}, what a channel's sendFile takes), each sent after the text
+   *  with sendFile - a message of files alone is sent too - still one delivery record. */
+  ownerMessageSent(messageId: string, text: string, replyTo?: string, options?: { exact?: boolean; attachments?: object[] }): Promise<object>;
   /** v1.2, capability `channels` (step 19, on-demand QR): ask channel `channel` for a new
    *  login (the WeChat QR), for the owner's dashboard request the host runs in code. Answers
    *  {requested: true} or {refused, retry_after_s?} (OwnerChannelsHandle.login), never the
@@ -365,8 +368,17 @@ export interface DirectorHost {
    *    omitted): {may_post: true} or {refused}, no budget used and no row written.
    *  - setProtected (optional): refs the library must not clean (a relay not committed yet).
    *  - withdraw (optional): take back the `generated` row a fetch for send_media just stored when
-   *    the send is then refused (a kind the channel cannot send, the group's post refused) - the
-   *    row, and its file once no other row points at it; anything else is left alone. */
+   *    the send is then refused (a kind the channel cannot send, the group's post refused, the
+   *    owner's message refused) - the row, and its file once no other row points at it; anything
+   *    else is left alone.
+   *  - sendToOwner (optional; step 24.2b, design-steward 7.8.12a "出站"): an owner turn's
+   *    send_media - ONE message from the root to its owner with library ref `ref` attached and
+   *    `caption` (or nothing) as its body, a reply to `replyTo` (the turn's owner message, which
+   *    the plugin gives - none for a turn no owner message opened); the host then mirrors it
+   *    with the file (DirectorApi.ownerMessageSent's `attachments`), so the dashboard shows it
+   *    and the owner's channel gets it as it gets a text reply. {message_id, mirror: {mirrored,
+   *    channel?, reason?}} or {refused, reason?} (nothing written). Absent: an owner turn's
+   *    send_media is refused `unsupported`. */
   media?: {
     ingest(meta: { channel: string; messageRef?: string; index?: number; audience: string; source: 'in' | 'generated' },
       open: (options: { signal: AbortSignal }) => Promise<AsyncIterable<Uint8Array> | ReadableStream | Uint8Array>,
@@ -381,6 +393,8 @@ export interface DirectorHost {
         | { refused: string; reason?: string }>;
     setProtected?(refs: () => Iterable<string>): void;
     withdraw?(ref: string): { removed: number } | Promise<{ removed: number }>;
+    sendToOwner?(file: { ref: string; caption?: string; replyTo?: string }, signal?: AbortSignal):
+      Promise<{ message_id: string; mirror: { mirrored: boolean; channel?: string; reason?: string } } | { refused: string; reason?: string }>;
   };
   channels?: {
     /** Step 24.2: `attachments` - the files' metadata the plugin checked (each a kind and exactly
@@ -560,7 +574,9 @@ export interface OwnerChannels {
  *  `ownerMessageSent` mirrors the root's message to the owner; `stop()` ends both timers. */
 export interface OwnerChannelsHandle {
   service: OwnerChannels;
-  ownerMessageSent(messageId: string, body: string, replyTo?: string): Promise<{ mirrored: boolean; reason?: string }>;
+  ownerMessageSent(messageId: string, body: string, replyTo?: string,
+    options?: { exact?: boolean; attachments?: Array<{ kind: 'image' | 'voice' | 'file'; mime: string; name: string; path: string }> }):
+    Promise<{ mirrored: boolean; reason?: string; channel?: string }>;
   /** A new login on a registered channel (its optional `login`): {requested: true} - then
    *  the status is reported every 5 s for 3 minutes so the QR shows up quickly - or
    *  {refused: not_registered | not_supported | unavailable | rate_limited (past
@@ -570,7 +586,8 @@ export interface OwnerChannelsHandle {
   login(channel: 'slack' | 'wechat'): Promise<ChannelLoginAnswer>;
   /** Step 24.2: where a file answering owner message `replyTo` goes ({channel, to, replyToRef?})
    *  or {refused: dashboard_no_media | not_bound | channel_not_connected | channel_no_media}; channel_no_media
-   *  when the channel cannot send `kind` - or, kind omitted, any kind. */
+   *  when the channel cannot send `kind` - or, kind omitted, any kind. Since 24.2b send_media no
+   *  longer asks it (an owner turn's file is a message, mirrored by ownerMessageSent). */
   ownerMediaTarget(replyTo: string, kind?: string): Promise<{ channel: string; to: string; replyToRef?: string } | { refused: string }>;
   /** Step 24.2: one file through `channel`'s sendFile: {sent, channel, ref?} or {refused}. */
   sendFile(channel: string, file: object): Promise<{ sent: true; channel: string; ref?: string } | { refused: string; reason?: string }>;

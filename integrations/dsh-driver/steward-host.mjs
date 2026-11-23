@@ -912,8 +912,16 @@ export function groupOps({ request, toolRequest = request, project, me }) {
  *  `gatewayFetch(connId, url, signal)` is the HTTP GET of the backend's
  *  /api/steward/mcp/{conn_id}/fetch with the steward's token (runtime.mjs); the bytes it
  *  answers are stored as `generated` under the turn's audience. A refusal is {refused}. */
-export function mediaOps({ request, library, gatewayFetch }) {
+/** Step 24.2b (design-steward 7.8.12a "出站"): the subject of the steward message that carries
+ *  one send_media file (the model names none; the caption is the body). */
+const OWNER_MEDIA_SUBJECTS = { image: 'Image', voice: 'Voice message', file: 'File' };
+
+/** `owner` (the steward only, step 24.2b): {request, project, mirror} - State's
+ *  send_user_message as the turn's tool request and the plugin's ownerMessageSent. With it
+ *  the ops have sendToOwner; a director's have none. */
+export function mediaOps({ request, library, gatewayFetch, owner }) {
   return {
+    ...(owner ? { sendToOwner: (file, signal) => sendMediaToOwner({ ...owner, library }, file, signal) } : {}),
     ingest: (meta, open, options) => library.ingest(meta, open, options),
     resolve: async ref => library.lookup(ref),
     read: ref => library.read(ref),
@@ -936,6 +944,34 @@ export function mediaOps({ request, library, gatewayFetch }) {
       ...(caption ? { caption } : {}), ...(checkOnly ? { check_only: true } : {}) }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };
+}
+
+/** Step 24.2b (design-steward 7.8.12a "出站：管家的媒体也在面板上"): an owner turn's send_media
+ *  file as ONE steward message - send_user_message with the library ref as its attachment (the
+ *  backend checks it is in the steward's own subdirectory, audience owner), the caption as its
+ *  body, replying to `replyTo` (the turn's owner message; none for a reminder's turn) - then the
+ *  plugin's mirror with the file, as a text reply is mirrored: back to the channel that message
+ *  came from, nowhere for a dashboard message, the default channel without one. The mirror is
+ *  awaited so the tool's answer says where else it went; it never throws, and a channel that
+ *  could not take the file leaves the message standing. {message_id, mirror} or {refused}. */
+export async function sendMediaToOwner({ request, project, mirror, library }, { ref, caption, replyTo }, signal) {
+  const row = library.lookup(ref);
+  if (!row) return { refused: 'unknown_ref', reason: 'not in the media library (kept 30 days)' };
+  const body = typeof caption === 'string' ? caption : '';
+  let sent;
+  try {
+    sent = await request('/api/state/commands/send_user_message', { request_key: `send-media:${randomUUID()}`, project_id: project,
+      subject: OWNER_MEDIA_SUBJECTS[row.kind] ?? 'File', body, attachments: [ref],
+      ...(typeof replyTo === 'string' && replyTo ? { reply_to_message_id: replyTo } : {}) }, signal);
+  } catch (error) { return stateRefusal(error); }
+  const messageId = (sent?.result ?? sent)?.message_id;
+  if (typeof messageId !== 'string' || !messageId) return { refused: 'not_sent' };
+  const file = { kind: row.kind, mime: row.mime, name: `${row.kind}-${row.ref.slice(2, 10)}.${row.ext}`, path: row.path };
+  let mirrored;
+  try { mirrored = await mirror?.(messageId, body, replyTo || undefined, { attachments: [file] }); } catch { mirrored = undefined; }
+  return { message_id: messageId, mirror: mirrored && typeof mirrored === 'object'
+    ? { mirrored: mirrored.mirrored === true, ...(mirrored.channel ? { channel: mirrored.channel } : {}), ...(mirrored.reason ? { reason: mirrored.reason } : {}) }
+    : { mirrored: false, reason: 'no_channels' } };
 }
 
 /** Step 24.2 (design-steward 7.8.12a piece 3): the media root the DSH host gives every driver

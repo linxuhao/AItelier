@@ -119,6 +119,9 @@ export function validateHost(host) {
       : op === 'texts' || op === 'labels' ? (!host[op] || typeof host[op] !== 'object') : typeof host[op] !== 'function')
       problems.push(`capability declared but not implemented: ${op}${OBJECT_OPS[op]?.length > 1 ? ` (${OBJECT_OPS[op].slice(0, -1).join(', ')} and ${OBJECT_OPS[op].at(-1)} must all be functions)` : ''}`);
   }
+  // Step 24.2b: media.sendToOwner is optional (an owner turn's send_media); given, a function.
+  if (declared.includes('media') && host.media && host.media.sendToOwner !== undefined && typeof host.media.sendToOwner !== 'function')
+    problems.push('media.sendToOwner, when given, must be a function');
   if (Array.isArray(host.capabilities))
     for (const op of OPTIONAL_OPS) if (host[op] !== undefined && !declared.includes(op)) problems.push(`implemented but not declared: ${op}`);
   if (problems.length) throw new Error('directorHost refused: ' + problems.join('; '));

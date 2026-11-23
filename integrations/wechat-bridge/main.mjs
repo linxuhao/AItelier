@@ -41,7 +41,9 @@ catch (error) { log(error.message); process.exit(78); }
 // No `name`: Wechaty then keeps its memory card in memory only and writes no file (the
 // container's root filesystem is read-only; the saved login is the fork's, not Wechaty's).
 // `options`: none for a QR login, {resume: true, expectUsername?} for a resume (step 19.1).
-const makeBot = options => WechatyBuilder.build({ puppet: new PuppetNeo(options) });
+// The bridge is the trusted local caller: after a saved-login resume the puppet has observed
+// nobody, so proactive pushes must reach destinations it has not seen in this process.
+const makeBot = options => WechatyBuilder.build({ puppet: new PuppetNeo({ ...options, allowUnobservedText: true }) });
 // Step 19.1: the fork's saved login - only its status ({present, off?, writes,
 // write_failures}, never the login itself; the bridge never deletes it) - and the account the
 // last QR login was with, which the bridge records in its own directory outside the fork's

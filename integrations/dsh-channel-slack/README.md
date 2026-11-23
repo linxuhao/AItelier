@@ -34,6 +34,25 @@ declares the `channels` capability). Design: step 19, §7.2.
   and, until the answer, keeps the message without its text: a stop in that window costs
   the sender one "send it again" line, never a live code on disk. Without a State dir the
   owe lives in memory only, so a restart loses it.
+- Files (step 24.3, design-steward §7.8.12): a DM with files - subtype `file_share` or no
+  subtype, both still sent by Slack - is taken the same way (a bot's never). Before
+  `inbound`, each of its first 10 files goes through `ownerChannels.storeMedia`, which checks
+  that the sender is the bound account BEFORE asking for a byte (a stranger's file is never
+  fetched; the message then goes in without attachments). The plugin itself refuses, without
+  storeMedia: a remote file (`is_external`, another service's), a deleted one (`gone`), a
+  download address that is not `https://files.slack.com/...` on the default port, and a
+  declared size over the media library's bound for its kind (`too_large`; the bounds are
+  `integrations/dsh-director/media-types.json`, the library's own table). A download carries
+  the bot token, never follows a redirect off `files.slack.com` (refused `unsupported`), and
+  treats 404/410 as `gone`, 401/403 or an HTML page (what Slack serves when the app lacks
+  `files:read`) as `unsupported`, anything else (429, 5xx, the network) as transient: the
+  message is held and the file fetched again. The real type is decided by the library from
+  the first bytes; the placeholder lines are the host's. Logs carry no file name.
+- `sendFile({to, kind, name, path, caption?})` → uploads one file from the host's library to
+  the DM of `to` with the SDK's `filesUploadV2` (`files.getUploadURLExternal`, the upload,
+  `files.completeUploadExternal`; the old `files.upload` was retired 2025-11-12), the caption
+  as its initial comment; at most the library's outbound bound (25 MiB). Kinds: image, voice,
+  file. A `groupRef` is refused `channel_no_media` (no Slack groups). The ref is the file id.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500
@@ -56,8 +75,9 @@ the owner's messages.
 ### A. From the manifest (recommended)
 
 [`slack-app-manifest.json`](slack-app-manifest.json) describes exactly the app this
-plugin needs: Socket Mode on, no Request URL, the bot scopes `chat:write`, `im:history`,
-`im:write`, the one bot event `message.im`, and a Messages tab people can write in. It
+plugin needs: Socket Mode on, no Request URL, the bot scopes `chat:write`, `files:read`
+(downloading the owner's files), `files:write` (sending files), `im:history`, `im:write`,
+the one bot event `message.im`, and a Messages tab people can write in. It
 holds no token and no URL.
 
 1. **Create the app.** At <https://api.slack.com/apps>: **Create New App → From a
@@ -89,8 +109,8 @@ Steward**, Messages tab) and write to it.
 ### B. By hand
 
 Create an app **From scratch**, then: enable **Socket Mode** and make an app-level token
-with `connections:write` (`xapp-`); bot token scopes `chat:write`, `im:history`,
-`im:write`; **Event Subscriptions** on, bot event `message.im`, no Request URL; **App
+with `connections:write` (`xapp-`); bot token scopes `chat:write`, `files:read`,
+`files:write`, `im:history`, `im:write`; **Event Subscriptions** on, bot event `message.im`, no Request URL; **App
 Home → Messages Tab** on, with "Allow users to send Slash commands and messages from the
 messages tab" ticked; do not turn on **Agents & AI Apps**. Install it to the workspace
 (`xoxb-`), then save the tokens and restart as in A.
@@ -111,6 +131,18 @@ It also renames the app and its bot to "AItelier Steward" (edit `name` and
 so; if the Bot User OAuth Token shown afterwards differs from the saved one, save only it
 again: run the `save_token` definition above, then `save_token xoxb- slack-bot-token`.
 The app-level token is kept. Then restart the steward.
+
+### Adding the file scopes to an app made before step 24.3
+
+An app installed with only `chat:write`, `im:history` and `im:write` cannot fetch or send
+files: Slack answers a download with a sign-in page (logged as `Slack answered a page`, the
+file shown as not received) and an upload with `missing_scope`. Open the app's **App
+Manifest** page, replace the manifest with `slack-app-manifest.json` (or add `files:read`
+and `files:write` under **OAuth & Permissions → Bot Token Scopes**), **Save Changes**, then
+**reinstall** the app (**Install App → Reinstall to Workspace → Allow**): new scopes take
+effect only on a reinstall. If the Bot User OAuth Token shown afterwards differs from the
+saved one, save it again (`save_token xoxb- slack-bot-token`, as above) and restart the
+steward. Files sent before the reinstall are not fetched again.
 
 ### Where the tokens live, and the restart
 
@@ -192,5 +224,6 @@ These hold for every owner channel (Slack and WeChat):
 network. Two tests load the real SDK from `integrations/dsh-driver/node_modules`, so
 run `npm ci` there first. The last test pins `slack-app-manifest.json` to the plugin:
 Socket Mode on, no Request URL and no token in it, bot scopes exactly those of every Web
-API method `index.mjs` calls plus `im:history` for its one event `message.im`, and no
-Agents & AI Apps feature.
+API method `index.mjs` calls (`filesUploadV2` as `files:write`) plus `files:read` for the
+file download and `im:history` for its one event `message.im`, and no Agents & AI Apps
+feature. The file tests use a fake fetch and a fake `storeMedia`: no Slack call.

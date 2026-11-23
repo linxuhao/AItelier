@@ -72,7 +72,8 @@ file). Host, port, path, headers, every other field, and the retry loop are shar
 2026-11-22T22:49:24.935768712Z media image not fetched (gone): … CDN HTTP status 400
 ```
 
-Spacings: 9.44 s, 14.11 s, 24.59 s, 45.13 s; the five span 92.26 s. The words are the bridge's
+Spacings: 9.44 s, 14.11 s, 24.59 s, 45.13 s; the five span 93.26 s (22:47:51.671749310Z to
+22:49:24.935768712Z). The words are the bridge's
 own (`bridge.mjs:727`): a failed fetch answers a transient `unavailable`, and once a medium's
 attempt budget is spent the entry is marked `gone` and later asks get `410`. So the ladder is
 one medium being asked five times, each time refused by the CDN, and then no longer offered.

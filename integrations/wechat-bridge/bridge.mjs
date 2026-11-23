@@ -27,8 +27,8 @@
  *  fork does (refused, ended by WeChat, or another account than expected). */
 import { createServer } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { closeSync, constants, createReadStream, fstatSync, fsyncSync, openSync, readFileSync, renameSync, rmSync,
-  writeSync } from 'node:fs';
+import { closeSync, constants, createReadStream, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync,
+  renameSync, rmSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -81,6 +81,18 @@ const WAV_HEADER_SLACK = 4096;
  *  failed `attempts` times: then it is gone (410), so one file never holds the owner's later
  *  messages forever. */
 export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
+/** The bytes of described attachments kept on disk, so a process whose live map holds no entry
+ *  for an id answers GET /media for it from the copy instead of asking its puppet. The bound is
+ *  64 MiB: the rings could hold RING_SIZE 500 + GROUP_RING_SIZE 200 + STRANGER_RING_SIZE 50 =
+ *  750 described attachments at MEDIA_LIMITS.file's 25 MiB, i.e. 18,750 MiB, so an eager copy of
+ *  a full ring is not acceptable; 64 MiB holds two 25 MiB files and smaller ones besides.
+ *  Eviction is oldest-described-first (the smallest media_id sequence number), and an id whose
+ *  event leaves a ring is removed at once. The bound is not the rings': it can evict the copy of
+ *  an id whose event is still live. That process still serves the id on demand (the live path),
+ *  but a later process, holding no live entry for it, answers 404 - the same answer as for an id
+ *  that was never copied. */
+export const MEDIA_STORE_BYTES = 64 * MiB;
+export const MEDIA_STORE_DIR = 'media';
 /** A puppet error that says this message will never be handed over (neo's refusal of a peer it
  *  has not observed, an expired or unknown message; the fork's "payload is no longer cached",
  *  its refusal of a message of another WeChat type, and its refusals of a payload that can
@@ -152,6 +164,7 @@ const ACCOUNT_FILE_MAX = 4096;
 export function accountRecord(dir) {
   const file = dir ? join(dir, ACCOUNT_FILE) : undefined;
   return {
+    dir,
     readAccount() {
       if (!file) return undefined;
       let fd;
@@ -178,6 +191,115 @@ export function accountRecord(dir) {
         throw error;
       }
     },
+  };
+}
+
+const MEDIA_ID = /^\d+\.\d+$/;
+const mediaSeq = id => Number(id.slice(0, id.indexOf('.')));
+
+/** The durable copy of described attachments, in its own subdirectory of the bridge's
+ *  account directory (the directory accountRecord is given). `bytes` bounds the SUM of the
+ *  stored payload sizes; `put(id, {file, size, mime, durationMs})` moves a spooled 0600 file
+ *  into it and publishes its metadata last, so an entry exists only once its metadata has
+ *  landed: the index is read from the metadata files alone, and a payload without one is not
+ *  an entry and is never served. `get(id)` opens a stored payload without following links (a
+ *  link at the payload path is refused and the id dropped), and `remove(id)` deletes both
+ *  files. The index is rebuilt from the metadata at construction, so the next process serves
+ *  the same ids. */
+export function mediaStore(dir, { bytes = MEDIA_STORE_BYTES, log = () => {} } = {}) {
+  const root = dir ? join(dir, MEDIA_STORE_DIR) : undefined;
+  const entries = new Map();
+  let total = 0;
+  const bin = id => join(root, `${id}.bin`);
+  const meta = id => join(root, `${id}.json`);
+  const discard = path => { try { rmSync(path, { force: true }); } catch (error) { log(`media store file not deleted: ${short(error)}`); } };
+  function remove(id) {
+    if (!root) return;
+    const old = entries.get(id);
+    if (old) { total -= old.size; entries.delete(id); }
+    discard(bin(id));
+    discard(meta(id));
+  }
+  if (root) {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const found = [];
+    for (const name of readdirSync(root)) {
+      const id = /^(\d+\.\d+)\.json$/.exec(name)?.[1];
+      if (!id) {
+        if (name.startsWith('tmp-')) discard(join(root, name));
+        continue;
+      }
+      let value;
+      try {
+        const fd = openSync(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try { value = JSON.parse(readFileSync(fd, 'utf8')); } finally { closeSync(fd); }
+        if (value?.v !== 1 || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > bytes
+          || (value.mime !== undefined && typeof value.mime !== 'string')
+          || (value.durationMs !== undefined && !Number.isFinite(value.durationMs))) throw new Error('bad media metadata');
+        const payload = openSync(bin(id), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const info = fstatSync(payload);
+          if (!info.isFile() || info.size !== value.size) throw new Error('stored media bytes changed');
+        } finally { closeSync(payload); }
+      } catch (error) {
+        log(`stored media ${id} ignored: ${short(error)}`);
+        discard(join(root, name));
+        discard(bin(id));
+        continue;
+      }
+      found.push([id, { size: value.size, mime: value.mime, durationMs: value.durationMs }]);
+    }
+    for (const [id, value] of found.sort((a, b) => mediaSeq(a[0]) - mediaSeq(b[0]))) {
+      entries.set(id, value);
+      total += value.size;
+    }
+    for (const id of [...entries.keys()]) { if (total <= bytes) break; remove(id); }
+  }
+  return {
+    dir: root,
+    temp: () => join(root, `tmp-${randomBytes(8).toString('hex')}`),
+    put(id, { file, size, mime, durationMs }) {
+      if (!root || !MEDIA_ID.test(id)) { discard(file); return false; }
+      try {
+        remove(id);
+        renameSync(file, bin(id));
+        const temporary = `${meta(id)}.tmp-${randomBytes(8).toString('hex')}`;
+        try {
+          const fd = openSync(temporary, 'wx', 0o600);
+          try { writeSync(fd, JSON.stringify({ v: 1, size, mime, durationMs })); fsyncSync(fd); } finally { closeSync(fd); }
+          renameSync(temporary, meta(id));
+        } catch (error) { discard(temporary); throw error; }
+        entries.set(id, { size, mime, durationMs });
+        total += size;
+        while (total > bytes && entries.size) remove(entries.keys().next().value);
+        return entries.has(id);
+      } catch (error) {
+        log(`media ${id} not stored: ${short(error)}`);
+        discard(bin(id));
+        discard(meta(id));
+        return false;
+      }
+    },
+    get(id) {
+      if (!root || !entries.has(id)) return undefined;
+      const value = entries.get(id);
+      let fd;
+      try {
+        fd = openSync(bin(id), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const info = fstatSync(fd);
+        if (!info.isFile() || info.size !== value.size) throw new Error('stored media bytes changed');
+        return { fd, size: value.size, mime: value.mime, durationMs: value.durationMs };
+      } catch (error) {
+        if (fd !== undefined) closeSync(fd);
+        log(`stored media ${id} unreadable: ${short(error)}`);
+        remove(id);
+        return undefined;
+      }
+    },
+    remove,
+    ids: () => [...entries.keys()],
+    get bytes() { return total; },
+    get count() { return entries.size; },
   };
 }
 
@@ -401,7 +523,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, fetchLimits = MEDIA_FETCH, isGone = isGoneError,
-  mediaSend = MEDIA_SEND, savedLogin, resumeLimits = RESUME_LIMITS }) {
+  mediaSend = MEDIA_SEND, savedLogin, resumeLimits = RESUME_LIMITS, mediaStoreBytes = MEDIA_STORE_BYTES }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
@@ -409,8 +531,12 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   /** Step 24.2 (design 7.8.12 "活消息存在哪"): media_id ('<seq>.<index>') -> {message, index,
    *  kind, generation} for each fetchable attachment of an event in a ring. An entry goes in
    *  just before its event is pushed and leaves when that event is cut off a ring's head
-   *  (`push`), so it never outlives its event; a restart empties both. */
+   *  (`push`), so it never outlives its event; a restart empties this map. The bytes described
+   *  here are also copied into `store` (when the account directory is available), so a later
+   *  process whose live map holds no entry for the media_id answers it from the copy, without
+   *  asking its own puppet. */
   const live = new Map();
+  const store = savedLogin?.dir ? mediaStore(savedLogin.dir, { bytes: mediaStoreBytes, log }) : undefined;
   let fetching = false;
   // Step 23: the host's whitelist (PUT /rooms), in memory only - a restart starts empty and
   // the host sets it again: the bound account and each bound room with its @ prefix.
@@ -719,7 +845,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     target.push({ seq: ++seq, ...event });
     if (target.length <= size) return;
     for (const dropped of target.splice(0, target.length - size))
-      for (const attachment of dropped.attachments ?? []) if (attachment.media_id) live.delete(attachment.media_id);
+      for (const attachment of dropped.attachments ?? []) if (attachment.media_id) {
+        live.delete(attachment.media_id);
+        store?.remove(attachment.media_id);
+      }
   };
 
   /** A group message (step 23): the account's own ones are dropped. In a BOUND room a text
@@ -748,6 +877,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       else {
         const mediaId = `${seq + 1}.0`;
         live.set(mediaId, { message, index: 0, kind: media.kind, generation });
+        archive(mediaId, { message, index: 0, kind: media.kind });
         event.attachments = [{ media_id: mediaId, ...described }];
       }
       push(groupRing, groupRingSize, event);
@@ -792,6 +922,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
           else {
             const mediaId = `${seq + 1}.0`;
             live.set(mediaId, { message, index: 0, kind: media.kind, generation });
+            archive(mediaId, { message, index: 0, kind: media.kind });
             event.attachments = [{ media_id: mediaId, ...described }];
           }
         }
@@ -926,17 +1057,64 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     }
   };
 
+  /** Side copy of a described attachment into the bounded store: the fetch runs while the
+   *  event is still in its ring, and an id whose event is cut before the copy lands is not kept.
+   *  GET /media keeps its own on-demand path for a live id, so the busy/gone/too_large/temporary
+   *  refusals below are unchanged; a stored copy is read only by a process that has no live
+   *  entry for that id. Nothing is stored for a stranger or an over-bound one. */
+  function archive(mediaId, entry) {
+    if (!store) return;
+    const file = store.temp();
+    const abandon = new AbortController();
+    const timeout = what => () => abandon.abort(new Error(`media store timed out: ${what}`));
+    const firstTimer = setTimeout(timeout(`no first byte in ${fetchLimits.firstByteMs} ms`), fetchLimits.firstByteMs);
+    const totalTimer = setTimeout(timeout(`not whole in ${fetchLimits.totalMs} ms`), fetchLimits.totalMs);
+    firstTimer.unref?.();
+    totalTimer.unref?.();
+    void (async () => {
+      try {
+        const saved = await spool(entry, file, abandon.signal, () => clearTimeout(firstTimer));
+        if (saved.too_large) return;
+        if (!live.has(mediaId)) return;
+        store.put(mediaId, { file, ...saved });
+      } catch (error) {
+        log(`media ${entry.kind} not stored: ${short(error)}`);
+      } finally {
+        clearTimeout(firstTimer);
+        clearTimeout(totalTimer);
+        rmSync(file, { force: true });
+      }
+    })();
+  }
+
+  /** A stored id from an earlier process: answer from the copy - this process holds no live
+   *  entry for it - with the headers a live answer carries (content-type, content-length,
+   *  cache-control, and x-voice-duration-ms for a voice), and without asking the puppet. */
+  function serveStored(stored, response) {
+    let bytes;
+    try { bytes = readFileSync(stored.fd); } finally { closeSync(stored.fd); }
+    response.writeHead(200, { 'content-type': typeof stored.mime === 'string' && stored.mime ? stored.mime : 'application/octet-stream',
+      'content-length': String(stored.size), 'cache-control': 'no-store',
+      ...(stored.durationMs === undefined ? {} : { 'x-voice-duration-ms': String(stored.durationMs) }) });
+    return response.end(bytes.length ? bytes : undefined);
+  }
+
   /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out (a
-   *  voice with its length in `x-voice-duration-ms` when known). 404:
-   *  not live (never was, or its event left the ring); 410 gone: another login's message, a
-   *  refusal `isGone` recognises, or one that failed fetchLimits.attempts times; 503: another
-   *  fetch is running (busy, one at a time), or this one failed, ran out of time or lost its
-   *  client (unavailable, transient); 413 too_large: more bytes than its bound. The bytes sit in
-   *  tmpfs only while this answer runs. */
+   *  voice with its length in `x-voice-duration-ms` when known), or, when this process has no
+   *  live entry, the bounded store's copy of a media_id described by an earlier process. 404:
+   *  held by neither; 410 gone: another login's message, a refusal `isGone` recognises, or one
+   *  that failed fetchLimits.attempts times; 503: another fetch is running (busy, one at a
+   *  time), or this one failed, ran out of time or lost its client (unavailable, transient);
+   *  413 too_large: more bytes than its bound. A live answer's tmpfs file exists only while it
+   *  runs; the store's bounded copy is on disk. */
   async function serveMedia(mediaId, response) {
     const entry = live.get(mediaId);
-    if (!entry) return reply(response, 404, { error: 'not_found' });
-    if (entry.generation !== generation || !bot || entry.gone) return reply(response, 410, { error: 'gone' });
+    if (entry && (entry.generation !== generation || !bot || entry.gone)) return reply(response, 410, { error: 'gone' });
+    if (!entry) {
+      const stored = store?.get(mediaId);
+      if (stored) return serveStored(stored, response);
+      return reply(response, 404, { error: 'not_found' });
+    }
     if (fetching) return reply(response, 503, { error: 'busy' });
     fetching = true;
     const file = join(tmpDir, `wechat-media-${randomBytes(8).toString('hex')}`);
@@ -1166,6 +1344,11 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     get waiting() { return waiters.size; },
     /** Live attachments (step 24.2): never more than the ring events that carry a media_id. */
     get live() { return live.size; },
+    /** The durable copy: the sum of its stored payload sizes and its entry count, for the
+     *  bound's measurement. */
+    get storeBytes() { return store?.bytes ?? 0; },
+    get storeCount() { return store?.count ?? 0; },
+    storedIds: () => store?.ids() ?? [],
     /** Settles once every bot start/stop asked for so far has run. */
     settled: settle,
     listen: (port = DEFAULT_PORT, host = HOST) => new Promise((resolve, reject) => {

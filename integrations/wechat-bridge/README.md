@@ -4,12 +4,15 @@ Keeps one WeChat login (Wechaty 1.20.2 + wechaty-puppet-neo 0.1.1) alive in its 
 process and serves the account's 1:1 text messages to the steward's channel plugin
 (`integrations/dsh-channel-wechat`) over loopback HTTP. Design: steward design §7.2.
 
-Why a separate process: puppet-neo keeps the login in memory only, so a restart means
-a new QR scan. Holding the login here means a steward or host restart does not log
-WeChat out.
+Why a separate process: puppet-neo keeps the login in memory, so whoever holds it must
+outlive steward and host restarts. Holding the login here means a steward or host restart
+does not log WeChat out. Since step 19.1 the puppet also keeps it encrypted on disk, so a
+restart of the bridge itself resumes it without a QR (see "Saved login" below).
 
 A login QR is asked of WeChat only on request, one at a time (owner, 2026-11-20: a
-button or the steward's tool, never a manual container restart): `POST /login`, which
+button or the steward's tool, never a manual container restart; owner, 2026-11-22: "桥启动就
+自动恢复，没有可以恢复的就等待手动调用二维码" - a start resumes the saved login by itself, and
+with nothing to resume it waits for a QR to be asked for): `POST /login`, which
 the channel plugin calls for the dashboard's "新二维码" button and for the steward's
 `request_wechat_qr` tool. Inside the running process the bridge builds a fresh Wechaty
 bot with a fresh puppet-neo for each request, which opens a new session and asks for a
@@ -17,10 +20,8 @@ new QR; an attempt that ends stops its own bot. No puppet state is shared betwee
 attempts: a slow stop of an old bot never holds up the next one, and whatever an old bot
 still emits (a late QR, a login, an error) is ignored. A QR nobody scans, a cancelled
 one, a logout and a puppet failure before a login leave the bridge `idle`: still
-running, no bot running, asking WeChat for nothing until the next request.
-(OpenClaw's WeChat channel needs no long-running process at all: it uses Tencent's iLink
-API and keeps the account token on disk. puppet-neo neither exports nor restores a login,
-so this bridge must stay up - but it never needs a restart for a new QR.)
+running, no bot running, asking WeChat for nothing until the next request. The bridge
+never asks for a QR by itself, whatever a resume answers.
 
 ## Image
 
@@ -124,13 +125,16 @@ phone`, `connected`, or why not).
   the default bridge every other container on `docker0` could reach it with only the
   token in the way. No other container shares its network. Processes on the host can
   still reach the container's own address on that network; the token guards that;
-- the token file read-only is the only host mount; outbound network is allowed (WeChat's
-  servers);
-- `--restart unless-stopped`: a start is `idle` and asks WeChat for nothing, so a
-  restart (a crash, a host reboot) is harmless and the bridge is back to wait for a
-  request. (`on-failure:N` would not bring it back after a host reboot. The cost: a
-  missing token or a refused bind address, exit 78, restarts under Docker's backoff
-  forever - log lines only, WeChat is never asked.)
+- three host mounts: the token file read-only, and the saved login's key file
+  (read-only) and directory (read-write), see "Saved login" (only the token with
+  `WECHAT_BRIDGE_SAVE_LOGIN=0`); outbound network is allowed
+  (WeChat's servers);
+- `--restart unless-stopped`: a start resumes the saved login, or with none is `idle` and
+  asks WeChat for nothing, so a restart (a crash, a host reboot) never asks for a QR. A
+  crash loop is held by the puppet's resume cap (6 an hour, 20 a day). (`on-failure:N`
+  would not bring it back after a host reboot. The cost: a missing token or a refused bind
+  address, exit 78, restarts under Docker's backoff forever - log lines only, WeChat is
+  never asked.)
 
 Then ask for a QR (the dashboard's Channels tab, "新二维码", or ask the steward) and scan
 it: `GET /status` carries it as `qr` and drawn as an SVG image as `qr_svg` (qr-svg.mjs,
@@ -139,17 +143,79 @@ channel plugin reports the image with its status, and the owner scans it on the
 dashboard's Channels tab - only there: the QR never goes over a chat channel. The QR is a
 live login token for this bridge: whatever shows or logs that status must not log it.
 The process ends only on SIGINT/SIGTERM (0), a missing token or a refused bind address
-(78), or a crash; exit 75 is no longer used. The login lives in the container's memory
-only: a restart means a new scan. Wechaty keeps no memory-card file (the bot has no
-`name`), so nothing is written to disk.
+(78), or a crash; exit 75 is no longer used. Wechaty keeps no memory-card file (the bot has
+no `name`); the only thing written to disk is the saved login, by the puppet.
+
+## Saved login (step 19.1)
+
+Design: steward design §7.2.1. The puppet (the fork's second patch) keeps the login
+encrypted on disk and, at the bridge's start, resumes it: a fresh bot built with
+`makeBot({resume: true})`, phase `resuming`, then `logged_in` - no QR, no phone prompt. With
+nothing to resume (or saving off) the start is `idle` (`boot`) exactly as before.
+
+Where it lives (all created by `run.sh`; none of it under `~/.aitelier-secrets`, which the
+backend container mounts whole):
+
+- `~/.local/share/aitelier/wechat-bridge-key/key` - 32 random bytes, 0600, made once when
+  missing and never printed; mounted read-only as the file `/home/bridge/saved-login-key`
+  (`PUPPET_NEO_STATE_KEY_FILE`).
+- `~/.local/share/aitelier/wechat-bridge-state/data/` - 0700, mounted read-write as the
+  directory `/home/bridge/state` (`PUPPET_NEO_STATE_DIR`): `account.v1` (the login,
+  AES-256-GCM, written and read by the puppet only - its bytes never reach JavaScript),
+  `resumes` (resume times, for the cap; not secret) and `account.user` (the account the last
+  QR login was with, written by the bridge).
+
+Who can read it: the bridge's container, and any process of uid 1000 on this host (both the
+key and the login) - the file is "this logged-in device": with it and the key, anyone can
+read the account's messages and send as it, from any machine, without the phone. No other
+container mounts these directories. Keep both out of backups and support bundles.
+
+What the bridge does with it:
+
+- A resume that comes back as another account than the one recorded at the last QR login
+  (or with none recorded) is deleted, its bot stopped, nothing sent, and the bridge stays
+  `idle` (`resume_account_mismatch`) until a QR is asked for.
+- A resume WeChat refuses (`resume_rejected`: the puppet has deleted the file), a file the
+  puppet cannot read (`resume_unreadable`: kept), one past the resume cap
+  (`resume_throttled`) or none after all (`boot`) leave the bridge `idle`, no retry. A
+  passing failure (the network, the puppet busy with another resume, no answer within 150
+  s) is `idle` (`resume_failed`) and tried again after 30 s, 2 min and 10 min, each on a new
+  bot once the last one has stopped; a QR asked for meanwhile cancels the retries.
+- A login that ends here (the network, a watchdog) while its saved login is still on disk
+  is resumed the same way; one WeChat ended (logged out on the phone, kicked, refused) took
+  the file with it and is not.
+- Until the steward's host has named the bound account and rooms (its first `PUT /rooms`,
+  at most 30 s after it starts), what arrives is held in memory: group messages at most 2
+  minutes after the start (then they pass the usual rules with no room bound, so their
+  content is dropped, never stored), 1:1 messages until that first `PUT` (each kind at most
+  its ring's size, the oldest dropped). What a login held is dropped when that login ends.
+- A failed write never turns saving off: the puppet counts writes and write failures, and
+  the bridge logs them at most once an hour, only when they changed (`saved login: n
+  writes, m write failures`). Saving is off only for a configuration error the puppet
+  names at the start (`saved login off (not_configured|key|dir)`).
+- If the process dies after the login was reported and before the puppet's first write,
+  that one QR scan is lost: the next start finds nothing to resume.
+
+Deleting it: logging this device out on the phone ("退出 Linux 微信") ends the login on
+WeChat's side, and the puppet deletes the file at once. The off switch is
+`WECHAT_BRIDGE_SAVE_LOGIN=0 sh run.sh` (after removing the container): neither mount nor
+variable, so the bridge behaves exactly as before 19.1 (the login in memory only, a restart
+means a new QR), and `run.sh` deletes `data/account.v1`, `data/account.user` and their
+temporary files (only deleted, never read; `resumes` and the key stay, so the cap holds
+when it is turned on again). A local delete does not sign the device out of WeChat: log it
+out on the phone for that. Neither way needs an image rebuild.
+
+After a silent restart the puppet knows no peer yet (it only writes to someone who has
+written to this login), so the owner has to send the steward a message first, as after a
+QR login.
 
 The host port is 18741 and not the container's 18731 because on this host
 `127.0.0.1:18731` is taken by an unrelated `python3 -m http.server 18731 --bind
 127.0.0.1` (running since 2026-11-06). To use another one, set `WECHAT_BRIDGE_PORT`
 for both `run.sh` and the steward's host (or the plugin's `url` config).
 
-Start check without a login: `WECHAT_BRIDGE_SKIP_LOGIN=1` serves the API and never
-builds a bot (`POST /login` answers `409 login_disabled`). With the `run.sh` flags, a throwaway token and host port 18741, on
+Start check without a login: `WECHAT_BRIDGE_SKIP_LOGIN=1` serves the API, resumes nothing
+and never builds a bot (`POST /login` answers `409 login_disabled`). With the `run.sh` flags, a throwaway token and host port 18741, on
 2026-11-18 `GET /status` answered `200 {"logged_in":false,...}`, without the token `401`,
 `/events` `200`, `/send` `409 not_logged_in`, and the root filesystem refused writes
 (log: `s19-wechat-image-startcheck.txt` next to the build log). The same check of
@@ -167,18 +233,23 @@ Listens on `127.0.0.1` (or `0.0.0.0` inside its container, published on the host
 Every request
 needs `Authorization: Bearer <token>`; anything else is `401 {error: "unauthorized"}`.
 
-- `GET /status` → `{phase, idle_reason?, logged_in, user_id?, qr?, qr_svg?, since}`.
-  `phase`: `idle` (no QR, not logged in, no bot running; `idle_reason` is `boot`,
-  `qr_expired`, `qr_cancelled`, `logged_out` or `login_failed`), `starting` (a QR was
-  requested and has not appeared yet), `waiting_qr`, `scanned` (to be confirmed on the
-  phone) or `logged_in`. `qr` (the payload) and `qr_svg` (it drawn as an SVG, absent if
-  it cannot be drawn within 64 KiB) only in `waiting_qr`; `since` is when the current
-  phase began.
+- `GET /status` → `{phase, idle_reason?, logged_in, user_id?, qr?, qr_svg?, since,
+  resumable}`. `phase`: `idle` (no QR, not logged in, no bot running; `idle_reason` is
+  `boot`, `qr_expired`, `qr_cancelled`, `logged_out`, `login_failed`, or for the saved
+  login `resume_rejected`, `resume_unreadable`, `resume_throttled`, `resume_failed`,
+  `resume_account_mismatch`), `starting` (a QR was requested and has not appeared yet),
+  `waiting_qr`, `scanned` (to be confirmed on the phone), `resuming` (the saved login is
+  being resumed, no QR) or `logged_in`. `qr` (the payload) and `qr_svg` (it drawn as an
+  SVG, absent if it cannot be drawn within 64 KiB) only in `waiting_qr`; `since` is when the
+  current phase began (a resume stuck in `resuming` shows here). `resumable`: a saved login
+  is on disk (the puppet's word, never a guess) for the recorded account; always `false`
+  with saving off.
 - `POST /login` (no body) → `202 {phase: "starting"}`: build and start a fresh bot, and
   a new QR follows in `/status` (usually within seconds). Taken only while `idle`;
   otherwise it changes nothing and answers `409 {refused}`: `already_logged_in` (log out
   on the phone first to change accounts), `qr_waiting` (a QR is waiting or was just
   scanned: scan that one), `login_starting` (the last request has not shown its QR yet),
+  `resuming` (the saved login is being resumed; also while a mismatched one is deleted),
   `login_disabled` (`WECHAT_BRIDGE_SKIP_LOGIN=1`); or `429 {refused: "rate_limited",
   retry_after_s}`: at least 2 minutes between two accepted requests, at most 5 in any
   hour and 12 in any 24 hours (`LOGIN_LIMITS`, kept in memory; the director's
@@ -270,7 +341,7 @@ Message texts are never logged.
 node --test bridge.test.mjs qr-svg.test.mjs
 ```
 
-Fake Wechaty bots; nothing loads the puppet or reaches WeChat. Fresh real bots started
+Fake Wechaty bots and a fake saved login; nothing loads the puppet or reaches WeChat. Fresh real bots started
 and stopped in one process are checked offline by the image build (above).
 
 The image build also runs this suite, in its `build` stage, after the sources are copied, and that

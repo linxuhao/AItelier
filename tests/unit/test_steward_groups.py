@@ -550,11 +550,14 @@ def test_a_withheld_reply_tells_the_owner_in_one_line_that_names_the_group_and_t
     # The owner: one steward message in the owner's conversation, this group's name and the kind.
     line = "家庭群里有一条回答没发出去：涉及私有项目。要问可以私聊我。"
     lines = owner_lines(world)
+    # What was stored and what the host is handed carry nothing of the reply (review F2 of r44w:
+    # the stored bodies and the answer's, not this test's literal).
+    for written in [b for _, b, *_ in lines] + [sent["owner_notice"]["body"]]:
+        for leaked in ("secret-plan", "家庭账本", "/srv/", "notes.md", "第 3 步"):
+            assert leaked not in written, (leaked, written)
     assert [(b, a, d, p, r) for _, b, a, d, p, r in lines] == \
         [(line, "user", world.steward.driver_id, "aitelier-home", None)]
     assert sent["owner_notice"] == {"message_id": lines[0][0], "body": line}
-    for leaked in ("secret-plan", "家庭账本", "/srv/", "notes.md", "第 3 步"):
-        assert leaked not in line
     # Never posted into the group: the only outbound rows are the bind notices and the reply.
     assert rows(world, "SELECT kind FROM state_group_messages WHERE direction='out' ORDER BY kind") == \
         [("bind_notice",), ("bind_notice",), ("reply",)]
@@ -603,6 +606,31 @@ def test_withheld_owner_lines_are_at_most_three_per_group_per_hour_and_each_grou
     again = reply(world, other["message_id"], "家庭账本还在做", turn="t-b0", stamp=False)
     assert again["duplicate"] is True and again["owner_notice"] == sent["owner_notice"]
     assert len(owner_lines(world)) == 4
+
+
+def test_the_withheld_owner_line_cap_is_a_rolling_hour_to_the_second(world, projects, monkeypatch):
+    """Review F1 of r44w (0a5b737e5d): the cap's clock edge. Three lines at T; at T+59m59s a fourth
+    withhold writes no owner line (the reply is withheld all the same); at T+1h+1s the hour has
+    rolled past the three and a withhold writes one again."""
+    bound_group(world)
+    start = state_channels._now()
+    at = lambda delta: monkeypatch.setattr(state_channels, "_now", lambda: start + delta)  # noqa: E731
+
+    def withhold(n):
+        question = ask(world, f"e{n}", f"问题{n}", sender=OWNER_WX)
+        sent = reply(world, question["message_id"], "secret-plan 的进度", turn=f"t-e{n}")
+        assert sent["withheld"] is True and sent["text"].endswith(state_groups.WITHHELD_TEXT), n
+        return sent
+
+    at(timedelta(0))
+    assert all("owner_notice" in withhold(n) for n in range(3))
+    at(timedelta(minutes=59, seconds=59))
+    assert "owner_notice" not in withhold(3)
+    at(timedelta(hours=1, seconds=1))
+    assert "owner_notice" in withhold(4)
+    assert len(owner_lines(world)) == 4
+    assert rows(world, "SELECT COUNT(*), COUNT(owner_notice) FROM state_group_messages WHERE kind='reply' AND "
+                       "withheld_reason='private_project'") == [(5, 4)]
 
 
 def test_exit_check_arm_two_a_body_with_only_a_public_project_id_goes_out_as_written(world, projects):

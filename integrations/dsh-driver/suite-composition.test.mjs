@@ -180,14 +180,16 @@ const scriptOf = async () => {
 // through. The repository gate runs this suite with two CPUs and a 600 s budget
 // (aitelier/tools/run_tests/impl.py: NODE_SCRIPT_TIMEOUT; it was 300 s until
 // 2026-11-23, when the gate's own arm measured 209 s and a repeat 245.2 s against
-// it). Every timing quoted in this file was measured while that OLD 300 s budget
-// was in force, and one of them was cut by it: the historical failure, where the
-// gate stopped the run at its own budget and reported the project failed - rc 124
-// at 300 s. The pin stays because 2 is the concurrency those timings were measured
-// at: moving it has to come with its own measurement, which the flag makes
-// possible. A flag this guard does not know is refused as well: an unobserved flag
-// can turn into a filter that runs a subset while the file list below still looks
-// complete.
+// it). Every timing quoted here was measured while that OLD 300 s budget was in
+// force, and the budget was smaller than the suite: at node's default a two-CPU
+// container gets concurrency 1 and the suite took 338 s
+// (tests/integration/test_driver_node_suite_runs.py), so a run that reached the
+// budget was cut there and became a `timed out after 300s: <suite command>` check,
+// which reports the project failed. The pin stays because 2 is the concurrency
+// those timings were measured at: moving it has to come with its own measurement,
+// which the flag makes possible. A flag this guard does not know is refused as
+// well: an unobserved flag can turn into a filter that runs a subset while the
+// file list below still looks complete.
 const TEST_CONCURRENCY = '2';
 
 const checkScriptShape = script => {

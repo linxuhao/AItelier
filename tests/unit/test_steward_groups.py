@@ -17,7 +17,7 @@ from core import state_channels, state_groups, state_schema_setup
 from core.state_commands import ProjectPrivate, _driver_defaults, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
-from tests.unit.test_steward_channels import (OWNER_HEADERS, bind, client, conversation, refused,  # noqa: F401
+from tests.unit.test_steward_channels import (HOME, OWNER_HEADERS, bind, client, conversation, refused,  # noqa: F401
                                               world)
 
 OWNER_WX, MEMBER, MEMBER2, ROOM, ROOM2 = "wxid_owner", "wxid_m1", "wxid_m2", "r1@chatroom", "r2@chatroom"
@@ -279,6 +279,58 @@ def test_two_live_groups_both_relay_and_unbinding_one_leaves_the_other_whole(wor
     assert rows(world, "SELECT text FROM state_family_memory") == [("B 的事",)]
     # Unbinding a group that is not bound changes nothing.
     assert world.owner.groups.unbind_owner_group("wechat", ROOM)["unbound"] is False
+
+
+def test_a_carried_sender_name_names_the_recent_rows_and_no_name_keeps_the_memberX_alias(world, caplog):
+    """The owner's ruling of 2026-11-23T20:48:25Z (「让微信桥带上发送者昵称/微信id」): the name the
+    channel carried for a member (the bridge's group event `sender_name`) becomes that member's
+    row label, so list_group_recent names the person; a message that carried no name keeps
+    exactly today's 成员X alias, byte for byte - the owner's safety net for members WeChat gives
+    no nickname to. The name, the ids and the bodies here are invented for this test."""
+    caplog.set_level(logging.WARNING, logger="core.state_groups")
+    bound_group(world)
+
+    def carried(ref, name, sender=MEMBER, body="问一句", **extra):
+        """The host's relay of a group message WITH the name its channel carried. The State
+        object is called directly: relay_group_message takes `sender_name`, which the HTTP
+        command model does not declare, so the wire cannot reach this parameter yet."""
+        return world.steward.groups.relay_group_message(
+            HOME, f"g-{ref}", "wechat", ROOM, sender, ref, body,
+            channel_at=state_channels._now().isoformat(), sender_name=name, **extra)
+
+    # The carried name (trimmed) is the member's label, and the group's recent pair says it.
+    named = carried("c1", "  阿蓝  ")
+    assert (named["sender_role"], named["sender_label"]) == ("member", "阿蓝")
+    reply(world, named["message_id"], "在家", turn="tc1")
+    # No name carried: the alias of that member's ordinal, exactly as before this field existed.
+    plain = ask(world, "c2", body="第二个问题", sender=MEMBER2)
+    assert plain["sender_label"] == "成员乙"
+    reply(world, plain["message_id"], "第二个答案", turn="tc2")
+    recent = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})["recent"]
+    assert [entry["sender"] for entry in recent] == ["阿蓝", "成员乙"]
+    assert [entry["q"] for entry in recent] == ["问一句", "第二个问题"]
+    assert rows(world, "SELECT sender_ref, label FROM state_group_members ORDER BY ordinal") == [
+        (MEMBER, "阿蓝"), (MEMBER2, None)]
+    # Labelling only: the row's body stays the message, and no log line names the member.
+    assert rows(world, "SELECT body FROM state_group_messages WHERE direction='in' AND kind='question' "
+                       "ORDER BY at, rowid") == [("问一句",), ("第二个问题",)]
+    assert "阿蓝" not in caplog.text
+    # A name the OWNER gave is never overwritten by one the channel carries later.
+    world.owner.groups.name_group_member("wechat", ROOM, MEMBER, "妈妈")
+    assert carried("c3", "别的名字")["sender_label"] == "妈妈"
+    assert rows(world, "SELECT label, named_at IS NOT NULL FROM state_group_members WHERE sender_ref=?",
+                (MEMBER,)) == [("妈妈", 1)]
+    # A blank name is no name: that member keeps the alias, and the row keeps no label.
+    assert carried("c4", "   ", sender=MEMBER2)["sender_label"] == "成员乙"
+    assert rows(world, "SELECT label FROM state_group_members WHERE sender_ref=?", (MEMBER2,)) == [(None,)]
+    # The kept path names its sender the same way (design/steward-group-media.md section 3):
+    # an un-mentioned medium is not a question, yet its row carries the name too. From the
+    # member whose row is still label-less (the blank above left it so, and the owner named
+    # the other one).
+    turn_on(world)
+    kept = carried("c5", "阿青", sender=MEMBER2, body="[图片]", kept=True,
+                   attachments=[{"kind": "image", "ref": "m_0000000000000123", "mime": "image/png", "size": 33}])
+    assert (kept.get("kept"), kept["sender_label"]) == (True, "阿青")
 
 
 def test_with_two_groups_a_reply_goes_only_to_its_questions_group_in_its_own_turn(world):

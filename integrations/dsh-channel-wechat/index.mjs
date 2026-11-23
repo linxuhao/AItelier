@@ -188,8 +188,14 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
     // steward (`asked`); the host records a group message either way but opens a turn only for
     // the mention. Not sent for 1:1 or a group code, and never invented when the bridge omits it.
     const asked = event.type === 'group_message' && typeof event.asked === 'boolean' ? { asked: event.asked } : {};
+    // The owner's ruling of 2026-11-23 (「让微信桥带上发送者昵称/微信id」): the bridge names the
+    // sender of a group event when the process has a name, and the host may label that member
+    // with it. Passed on untouched - never trimmed here, never invented, and absent when the
+    // bridge said nothing, which leaves the host's 成员X alias in place.
+    const senderName = event.type === 'group_message' && typeof event.sender_name === 'string' && event.sender_name
+      ? { senderName: event.sender_name } : {};
     const message = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref,
-      text: event.type === 'group_bind' ? event.code : event.text ?? '', at: event.at, ...room, ...asked };
+      text: event.type === 'group_bind' ? event.code : event.text ?? '', at: event.at, ...room, ...asked, ...senderName };
     let pause = retryMs;
     for (let attempt = 1; !stopping.signal.aborted; attempt++) {
       let reason;

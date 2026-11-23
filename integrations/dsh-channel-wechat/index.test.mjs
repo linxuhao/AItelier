@@ -535,6 +535,43 @@ test('end to end with the real bridge module and a fake Wechaty', async () => {
   } finally { await channel.stop(); await bridge.close(); }
 });
 
+test('the bridge\'s sender_name arrives as senderName; a group event without one adds no field', async () => {
+  // The owner's ruling of 2026-11-23 (「让微信桥带上发送者昵称/微信id」): the real bridge module
+  // with a fake Wechaty, so the whole wire is pinned - the name the talker's contact has
+  // reaches ownerChannels.inbound as senderName beside senderRef, and a group event the bridge
+  // sent no name on carries no such field (the host then keeps its 成员X alias). The names
+  // and ids are invented for this test.
+  const types = { Message: { Text: 7 }, Contact: { Official: 2 }, ScanStatus: { Waiting: 2 } };
+  const bot = new EventEmitter();
+  bot.start = async () => {};
+  bot.stop = async () => {};
+  bot.Contact = { find: async ({ id }) => ({ id, say: async () => {} }) };
+  const bridge = createBridge({ makeBot: () => bot, types, token: TOKEN, renderQr: () => '<svg/>' });
+  const address = await bridge.listen(0);
+  const channels = fakeChannels();
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet,
+    config: { tokenFile, url: `http://${address.address}:${address.port}` }, waitSeconds: 1, statusEveryMs: 20 });
+  try {
+    await until(() => channels.registered !== undefined);
+    assert.deepEqual(await channels.registered.login(), { requested: true });
+    bot.emit('login', { id: 'wxid_bot' });
+    await until(() => channels.registered.status().connected);
+    await channels.registered.setRooms({ ownerRef: 'wxid_owner', rooms: [{ room_ref: 'r1@chatroom', prefix: '@管家' }] });
+    const live = fields => ({ self: () => false, type: () => 7, date: () => new Date(),
+      room: () => { throw new TypeError('this.roomRawPayload is not a function'); }, ...fields });
+    bot.emit('message', live({ id: 'n1', payload: { roomId: 'r1@chatroom' }, text: () => '@管家 周六干嘛',
+      talker: () => ({ id: 'wxid_m1', type: () => 0, name: () => '阿蓝' }) }));
+    bot.emit('message', live({ id: 'n2', payload: { roomId: 'r1@chatroom' }, text: () => '@管家 又问',
+      talker: () => ({ id: 'wxid_m1', type: () => 0 }) }));
+    await until(() => channels.received.length === 2);
+    assert.deepEqual({ ...channels.received[0], at: undefined },
+      { channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'n1', text: '周六干嘛', at: undefined,
+        conversationRef: 'r1@chatroom', asked: true, senderName: '阿蓝' });
+    assert.equal(Object.hasOwn(channels.received[1], 'senderName'), false,
+      'no name from the bridge: the field is absent, not an empty one');
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
 // ---- step 24.2: media (design-steward 7.8.12 "微信" 交给宿主 / 发) ----
 
 /** fakeChannels plus a storeMedia that behaves like the host's (dsh-director channels.mjs):

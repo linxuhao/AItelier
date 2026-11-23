@@ -495,6 +495,28 @@ export function isOwnerCandidate(message, types, limits = MEDIA_LIMITS) {
   return talker.type() !== types.Contact.Official;
 }
 
+/** The name the process has for the person a group message is from, or undefined when it has
+ *  none: the owner's ruling of 2026-11-23 (`让微信桥带上发送者昵称/微信id`) wants a group's
+ *  recent/kept rows to name the member, so the bridge carries the name it holds instead of
+ *  letting the host fall back to 成员X for everyone.
+ *
+ *  Wechaty answers a contact's own name as `name` - a property on 1.20, a method on the older
+ *  shapes - and the neo fork names a contact it knows nothing else about by that person's id
+ *  (`puppet-neo.ts` rememberContact), so an answer equal to the id is the puppet's placeholder,
+ *  not a name. Trimmed; '' , whitespace, a non-string, a throw and the id itself all yield
+ *  undefined, so a talker with no name leaves the field ABSENT rather than sending a
+ *  placeholder - the host's 成员X alias is then the label, byte for byte as before. Nothing
+ *  here logs the name. */
+export function senderNameOf(talker) {
+  let answer;
+  try { answer = typeof talker?.name === 'function' ? talker.name() : talker?.name; }
+  catch { return undefined; }
+  if (typeof answer !== 'string') return undefined;
+  const name = answer.trim();
+  if (!name || name === talker?.id) return undefined;
+  return name;
+}
+
 /** `loginEnabled` false (WECHAT_BRIDGE_SKIP_LOGIN=1) answers every POST /login
  *  `login_disabled`: no bot is ever built or started. */
 /** A group message of a bound room that calls the bot: its text after `prefix` (NFKC, leading
@@ -950,9 +972,19 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
    *  only when it is exactly "@prefix group-code", text or not. Nothing else is kept or logged. */
   function relayGroup(message, roomRef, at) {
     if (message.self()) return false;
-    const senderRef = message.talker()?.id;
+    const talker = message.talker();
+    const senderRef = talker?.id;
     if (!roomRef || !senderRef) return false;
-    const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id), ...(at ? { at } : {}) };
+    // The owner's ruling of 2026-11-23 (「让微信桥带上发送者昵称/微信id」): the group event names
+    // its sender - `sender_name`, the name the process has (`senderNameOf`) - beside the
+    // `sender_ref` that is the member's WeChat id. Absent when the process has no name: the
+    // host then labels the member 成员X exactly as before. When the talker IS the room (the
+    // fork's shape for a non-text message whose wire named no sender) the room's own name is
+    // not the poster's, so nothing is said here; the media path derives that sender from the
+    // content and leaves it unnamed rather than borrowing the room's name.
+    const senderName = senderRef === roomRef ? undefined : senderNameOf(talker);
+    const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id),
+      ...(senderName ? { sender_name: senderName } : {}), ...(at ? { at } : {}) };
     // One read of the raw content for the whole message: the description and the probe get
     // this very value, so a puppet accessor that answers once still delivers its medium.
     const content = message.payload?.content;

@@ -518,6 +518,37 @@ export function groupBindAttempt(text) {
   return GROUP_CODE.test(code) && prefix.length > 1 ? { prefix, code } : undefined;
 }
 
+/** One redacted line for a group medium whose talker is the room: does its payload content
+ *  begin with the poster's wxid the way a group text's does? Only counts, a shape and a
+ *  truncated digest are logged - never the content or base64, a member id or a room id. */
+const BASE64_CONTENT = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+export function groupMediaSenderProbe(message, log = () => {}) {
+  const payload = message?.payload ?? {};
+  const value = message?.type?.();
+  const type = Number.isFinite(value) ? value : 0;
+  const senderIsRoom = Boolean(payload.roomId && message?.talker?.()?.id === payload.roomId);
+  const content = typeof payload.content === 'string' && BASE64_CONTENT.test(payload.content) ? payload.content : undefined;
+  const bytes = content ? Buffer.from(content, 'base64') : Buffer.alloc(0);
+  // The bytes before the XML are the text path's prefix; its digest covers all of them,
+  // while the shape reads only the token before the first ':' or newline inside them.
+  const at = bytes.indexOf(0x3c);
+  const prefixBytes = at > 0 ? at : 0;
+  let prefixShape = 'other';
+  if (!bytes.length) prefixShape = 'empty';
+  else if (prefixBytes) {
+    const token = bytes.toString('utf8', 0, prefixBytes).split(/[:\n]/)[0];
+    if (/^[A-Za-z0-9_-]{1,64}$/.test(token) && !token.endsWith('@chatroom')) prefixShape = 'wxid';
+  }
+  const prefixHash = prefixBytes
+    ? createHash('sha256').update(bytes.subarray(0, prefixBytes)).digest('hex').slice(0, 12) : '-';
+  const text = bytes.toString('utf8');
+  const wxidTokens = (text.match(/wxid_[A-Za-z0-9_-]+/g) ?? []).length;
+  const chatroomTokens = (text.match(/[0-9]+@chatroom/g) ?? []).length;
+  log(`group media sender probe: type=${type} senderIsRoom=${senderIsRoom} contentBytes=${bytes.length} `
+    + `prefixBytes=${prefixBytes} prefixShape=${prefixShape} prefixHash=${prefixHash} `
+    + `wxidTokens=${wxidTokens} chatroomTokens=${chatroomTokens}`);
+}
+
 export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
   log = () => {}, renderQr = () => undefined, loginEnabled = true, loginLimits = LOGIN_LIMITS,
   groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
@@ -867,6 +898,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     const media = rooms.has(roomRef) && message.type() !== types.Message.Text
       ? mediaOf(message, types, mediaLimits) : undefined;
     if (media) {
+      if (senderRef === roomRef) groupMediaSenderProbe(message, log);
       // The 1:1 path's own shape, unchanged: a description only - nothing is fetched until
       // GET /media/:media_id asks - and one over its bound has no media_id. The group ring
       // shares the one `seq`, so '<seq>.<index>' is unique across the rings.

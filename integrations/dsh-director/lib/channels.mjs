@@ -964,18 +964,29 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // adds to it, so the counts of what was really deleted are not lost to a lost answer.
   const unrecorded = new Map();
   const audienceOf = (channel, groupRef) => `group:${channel}:${groupRef}`;
+  // The skip report names the room, never a message body; a colon in a room ref stays part of it.
+  const roomOf = audience => {
+    const rest = String(audience).startsWith('group:') ? String(audience).slice(6) : '';
+    const cut = rest.indexOf(':');
+    return cut < 0 ? { channel: rest, group_ref: '' } : { channel: rest.slice(0, cut), group_ref: rest.slice(cut + 1) };
+  };
   const purgeSweep = async listed => {
     // Only a read that succeeded and is well-formed: a failed or partial read is never taken
     // for "every group is off".
     if (!Array.isArray(listed?.groups) || !Array.isArray(listed?.media_purges)) return;
     if (typeof media?.purgeKept !== 'function' || typeof media?.keptAudiences !== 'function') return;
-    // An on group is left alone unless it is listed as owing a purge (清空记录 while on).
     const on = new Set(listed.groups.filter(g => g?.media_keep === 'on').map(g => audienceOf(g.channel, g.group_ref)));
     const owed = new Map(listed.media_purges.filter(p => text(p?.channel) && text(p?.group_ref) && text(p?.epoch))
       .map(p => [audienceOf(p.channel, p.group_ref), p]));
-    const audiences = new Set([...(await media.keptAudiences()), ...owed.keys()]);
-    for (const audience of audiences) {
-      if (on.has(audience) && !owed.has(audience)) continue;
+    // State's purge debts are the only authority to delete kept rows: a room missing from this
+    // answer (or listed off) is NOT authority when State still advertises its rows as kept.
+    // Report every such room held back for want of a debt, so a later loss is attributable.
+    for (const audience of await media.keptAudiences()) {
+      if (owed.has(audience) || on.has(audience)) continue;
+      log('group_media_purge_skipped', { ...roomOf(audience), reason: 'no_state_debt' });
+    }
+    // A debt purges even while the switch is on (清空记录 while on); the receipt closes it.
+    for (const audience of owed.keys()) {
       let receipt;
       try { receipt = await media.purgeKept(audience); }
       catch (error) { log('group_media_purge_failed', { error: short(error) }); continue; }

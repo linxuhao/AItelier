@@ -2724,10 +2724,10 @@ test('switch: the library\'s protect set never holds a group\'s ref - neither th
 function switchWorld({ connected = true, sendGroup, limits } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-media-switch-'));
   const library = createMediaLibrary({ root: join(dir, 'media') });
+  const calls = [], logs = [], sent = [], purges = [];
   const media = { ingest: (meta, open) => library.ingest(meta, open), resolve: async ref => library.lookup(ref),
     setProtected: fn => library.setProtected(fn), withdraw: ref => library.withdraw(ref),
-    purgeKept: audience => library.purgeKept(audience), keptAudiences: async () => library.keptAudiences() };
-  const calls = [], logs = [], sent = [];
+    purgeKept: audience => { purges.push(audience); return library.purgeKept(audience); }, keptAudiences: async () => library.keptAudiences() };
   const state = { connected, sendFails: false, listFails: false, groups: [], media_purges: [], answers: {} };
   const answer = (name, a) => (state.answers[name] ?? (() => ({})))(a);
   const groups = {
@@ -2751,7 +2751,7 @@ function switchWorld({ connected = true, sendGroup, limits } = {}) {
   const keep = (ref, messageRef, bytes = png()) => library.ingest({ channel: 'wechat', messageRef, index: 0, audience: `group:wechat:${ref}`,
     source: 'in', kept: true }, async () => bytes);
   const named = name => calls.filter(([n]) => n === name).map(([, a]) => a);
-  return { dir, library, channels, calls, logs, sent, state, group, keep, named,
+  return { dir, library, channels, calls, logs, sent, purges, state, group, keep, named,
     settle: () => new Promise(resolve => setTimeout(resolve, 30)), pass: () => channels.mediaPass(), stop: () => channels.stop() };
 }
 
@@ -2952,7 +2952,7 @@ test('purge: an off group\'s kept rows are purged and the receipt recorded BEFOR
   w.stop();
 });
 
-test('purge: a failed or malformed groups.list() purges nothing; an unlisted group\'s kept rows are purged without a receipt', async () => {
+test('purge: a failed or malformed groups.list() purges nothing; an unlisted group owes no purge and keeps its rows', async () => {
   const w = switchWorld();
   const kept = await w.keep('r9', 'x1');
   await w.settle();
@@ -2965,8 +2965,42 @@ test('purge: a failed or malformed groups.list() purges nothing; an unlisted gro
   w.state.malformed = false;
   w.calls.length = 0;
   await w.pass();
-  assert.equal(w.library.lookup(kept.ref), undefined, 'r9 is listed by nobody: its kept rows go');
+  assert.ok(w.library.lookup(kept.ref), 'r9 is listed by nobody: that is not authority to delete what State still advertises as kept');
   assert.deepEqual(w.named('record'), [], 'no receipt is owed for it');
+  w.stop();
+});
+
+test('purge: a kept audience with no State debt is never purged and its skip is reported with the room only', async () => {
+  const w = switchWorld();
+  const kept = await w.keep('r9', 'x1');
+  await w.settle();
+  w.calls.length = 0; w.logs.length = 0;
+  // The listing omits the room entirely - the same shape as a group that went missing from the
+  // backend answer - and State owes no purge. Under the old sweep this silently deleted the row.
+  w.state.groups = [];
+  w.state.media_purges = [];
+  await w.pass();
+  assert.deepEqual(w.purges, [], 'purgeKept is not called for an audience with no State debt');
+  assert.ok(w.library.lookup(kept.ref), 'the kept row survives the pass');
+  assert.equal(w.library.rows.filter(row => row.kept && row.audience === 'group:wechat:r9').length, 1, 'still in the library index');
+  assert.deepEqual(w.logs.filter(([event]) => event === 'group_media_purge_skipped').map(([, fields]) => fields),
+    [{ channel: 'wechat', group_ref: 'r9', reason: 'no_state_debt' }], 'one attributable skip line, counts and room only');
+  assert.deepEqual(w.named('record'), [], 'no receipt is recorded without a debt');
+  w.stop();
+});
+
+test('purge: an audience State owes a purge for is purged once and its receipt is still recorded', async () => {
+  const w = switchWorld();
+  const kept = await w.keep('r9', 'x1');
+  await w.settle();
+  w.calls.length = 0; w.logs.length = 0;
+  w.state.groups = [];
+  w.state.media_purges = [{ channel: 'wechat', group_ref: 'r9', epoch: 'E1' }];
+  await w.pass();
+  assert.equal(w.library.lookup(kept.ref), undefined, 'the State debt purges the kept row');
+  assert.deepEqual(w.purges, ['group:wechat:r9'], 'purgeKept called once for the owed audience');
+  assert.deepEqual(w.named('record').map(a => [a.groupRef, a.epoch, a.receipt.rows_before]), [['r9', 'E1', 1]], 'the receipt is recorded');
+  assert.deepEqual(w.logs.filter(([event]) => event === 'group_media_purge_skipped'), [], 'an owed audience is not a skip');
   w.stop();
 });
 

@@ -368,7 +368,9 @@ or partial input fails without dropping the original data. Back up before a
 normal deployment and coordinate State writers. Do not run mixed old/new State
 writers after external attempts exist: old code does not understand these rows.
 Rolling back code is not permission to delete external evidence or blindly
-restore a database over later work. Development tests do not migrate production.
+restore a database over later work. Overwriting the database file in place
+requires a backend restart; otherwise structural repair (schema setup) will not
+run again. Development tests do not migrate production.
 
 ## Executable verification
 

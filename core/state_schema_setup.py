@@ -31,6 +31,8 @@ for a file whose CONTENT is replaced under a running process without a new inode
 (``cp backup.db aitelier.db``, ``sqlite3 .restore`` into the live path): its
 structural setup is not re-run until the backend restarts, so such a restore
 needs a restart. Before this module the next request repaired it.
+Overwriting the database file in place requires a backend restart; otherwise
+structural repair (schema setup) will not run again.
 
 ``:memory:`` and URI names have no file identity; they keep a per-call setup.
 """

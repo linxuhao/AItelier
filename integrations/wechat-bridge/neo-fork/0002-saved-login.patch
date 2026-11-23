@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index 768d869..69fbe5d 100644
+index 768d869..1bb8887 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -15,8 +15,9 @@ use wechat_protocol::{
@@ -23,12 +23,14 @@ index 768d869..69fbe5d 100644
      Heartbeat,
      PollIncoming,
      Sync { scene: u32 },
-@@ -182,6 +185,20 @@ impl NeoSession {
+@@ -182,6 +185,22 @@ impl NeoSession {
          self.task(Operation::PollLogin)
      }
  
-+    /// Try the login saved on disk. The answer is one of `none`, `unreadable`,
++    /// Try the login saved on disk. Every answer is one of `none`, `unreadable`,
 +    /// `throttled`, `busy` or `resumed`, and only `resumed` names the account.
++    /// The only error that leaves this call is the renewal request's own, i.e. a
++    /// transport fault on the one request a resume makes.
 +    #[napi]
 +    pub fn resume_login(&self) -> AsyncTask<NeoTask> {
 +        self.task(Operation::ResumeLogin)
@@ -44,7 +46,7 @@ index 768d869..69fbe5d 100644
      #[napi]
      pub fn heartbeat(&self) -> AsyncTask<NeoTask> {
          self.task(Operation::Heartbeat)
-@@ -351,6 +368,7 @@ impl Task for NeoTask {
+@@ -351,6 +370,7 @@ impl Task for NeoTask {
          let stage = match &operation {
              Operation::StartLogin => "start QR login",
              Operation::PollLogin => "check or complete QR login",
@@ -52,7 +54,7 @@ index 768d869..69fbe5d 100644
              Operation::Heartbeat => "check session heartbeat",
              Operation::PollIncoming => "wait for incoming message notifications",
              Operation::Sync { .. } => "read a sync page",
-@@ -377,8 +395,17 @@ impl Task for NeoTask {
+@@ -377,8 +397,17 @@ impl Task for NeoTask {
              &operation,
              Operation::DownloadMedia { .. } | Operation::DownloadVoice { .. }
          );
@@ -72,7 +74,7 @@ index 768d869..69fbe5d 100644
      }
  
      fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-@@ -472,12 +499,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -472,12 +501,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
              if status == LoginStatus::Approved {
                  let mut attempt = session.attempt.take().expect("issued challenge");
                  let state = client.complete_login(&mut attempt)?;
@@ -90,7 +92,7 @@ index 768d869..69fbe5d 100644
          Operation::Heartbeat => {
              let beat = read_session(session, heartbeat)?;
              Ok(
-@@ -776,6 +808,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -776,6 +810,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
              let account = session.account.take().context("No active session")?;
              // Reserving the logout stops new account requests before submission.
              let reply = account.prepare_logout()?.submit_blocking()?;
@@ -103,7 +105,7 @@ index 768d869..69fbe5d 100644
              Ok(json!({ "accepted": reply.accepted }))
          }
          Operation::Close => {
-@@ -820,15 +858,20 @@ fn read_session<T>(
+@@ -820,15 +860,20 @@ fn read_session<T>(
      session: &mut Session,
      operation: impl FnMut(&mut Session) -> Result<T>,
  ) -> Result<T> {
@@ -129,7 +131,7 @@ index 768d869..69fbe5d 100644
          },
          // A new socket is needed after a failure and after a renewal, because a
          // socket cannot adopt newer credentials.
-@@ -915,6 +958,84 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
+@@ -915,6 +960,105 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
      Ok(json!(profile))
  }
  
@@ -153,8 +155,16 @@ index 768d869..69fbe5d 100644
 +}
 +
 +/// Try the stored login instead of the QR path.
++///
++/// Every answer the caller can see is one of the five tokens; the store's own
++/// faults are answered as tokens too, and the only error that leaves here is a
++/// failed renewal, the one request to WeChat.
 +fn resume_login(session: &mut Session) -> Result<Value> {
-+    ensure!(session.account.is_none(), "A session is already active");
++    // A session is already live: its credentials are the current ones, so this is
++    // the design's `busy`, not a fault.
++    if session.account.is_some() {
++        return Ok(json!({ "status": "busy" }));
++    }
 +    let store = match stored_login::Store::from_env() {
 +        Ok(store) => store,
 +        // Saved logins are off. The answer is still one of the closed set, and it
@@ -162,10 +172,18 @@ index 768d869..69fbe5d 100644
 +        // is simply not there.
 +        Err(off) => return Ok(json!({ "status": "none", "off": off.as_str() })),
 +    };
-+    let answer =
-+        stored_login::resume(&store, now_seconds()?.into(), |state| {
-+            open_stored_login(&store, state)
-+        })?;
++    // A clock this build cannot read is a fault on this side, not WeChat's: answer
++    // the token that says nothing was contacted and nothing was spent.
++    let now = match now_seconds() {
++        Ok(now) => now,
++        Err(_) => return Ok(json!({ "status": "throttled" })),
++    };
++    let answer = stored_login::resume(
++        &store,
++        now.into(),
++        open_stored_login,
++        |account| renew_stored_login(&store, account),
++    )?;
 +    let status = resume_status(&answer);
 +    let stored_login::Answer::Resumed { accepted, .. } = answer else {
 +        return Ok(json!({ "status": status }));
@@ -174,47 +192,77 @@ index 768d869..69fbe5d 100644
 +    Ok(json!({ "status": status, "username": accepted.username }))
 +}
 +
-+/// Turn the bytes a stored login holds into a live account, and say how that
-+/// went. Bytes this build cannot use are `Unreadable`, which keeps the file: a
-+/// document from another version is evidence, not garbage. Credentials WeChat
-+/// refuses are `Rejected`, which drops it, because the login in it is not good
-+/// any more.
-+fn open_stored_login(
-+    store: &stored_login::Store,
-+    bytes: &[u8],
-+) -> Result<stored_login::Opened<AcceptedAccount>> {
++/// Turn the bytes a stored login holds into an account this build can use, without
++/// contacting anybody. Bytes this build cannot use are `Unreadable`, which keeps
++/// the file: a document from another version is evidence, not garbage.
++fn open_stored_login(bytes: &[u8]) -> stored_login::Readable<AcceptedAccount> {
 +    let Ok(state) = serde_json::from_slice::<AccountState>(bytes) else {
-+        return Ok(stored_login::Opened::Unreadable);
++        return stored_login::Readable::Unreadable;
 +    };
 +    // Constructing a client touches no network and no store, so a document that
 +    // fails here is unreadable rather than a failed resume.
-+    let Ok(client) = NativeClient::from_account(state, options()) else {
-+        return Ok(stored_login::Opened::Unreadable);
-+    };
-+    // The one request that decides it: WeChat either renews these credentials or
-+    // refuses them, and a refusal is the only answer that may delete the file.
-+    // The rotated credentials are written by `renew_and_persist`, which is how
-+    // this path saves them: because every renewal does, not on its own account.
++    match NativeClient::from_account(state, options()) {
++        // The name WeChat knows the account by arrives with the renewal, so it is
++        // empty until `renew_stored_login` fills it in.
++        Ok(client) => stored_login::Readable::Usable(AcceptedAccount {
++            client,
++            username: String::new(),
++        }),
++        Err(_) => stored_login::Readable::Unreadable,
++    }
++}
++
++/// Present those credentials to WeChat, once, and say how that went. A refusal is
++/// `Rejected`, which drops the file, because the login in it is not good any more;
++/// anything else is a failed renewal and leaves here as an error. The rotated
++/// credentials are written by `renew_and_persist`, which is how this path saves
++/// them: because every renewal does, not on its own account.
++fn renew_stored_login(
++    store: &stored_login::Store,
++    mut account: AcceptedAccount,
++) -> Result<stored_login::Opened<AcceptedAccount>> {
 +    let refreshed = match stored_login::renew_and_persist(
 +        store,
-+        || client.renew_session_blocking(DEVICE_NAME),
-+        || client.export_account_state(),
++        || account.client.renew_session_blocking(DEVICE_NAME),
++        || account.client.export_account_state(),
 +    ) {
 +        Ok(refreshed) => refreshed,
 +        Err(error) if is_session_rejected(&error) => return Ok(stored_login::Opened::Rejected),
 +        Err(error) => return Err(error),
 +    };
-+    let username = refreshed.own_username.clone();
-+    Ok(stored_login::Opened::Accepted(AcceptedAccount {
-+        client,
-+        username,
-+    }))
++    account.username = refreshed.own_username.clone();
++    Ok(stored_login::Opened::Accepted(account))
 +}
 +
  fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      match send() {
          Ok(result)
-@@ -1572,3 +1693,1604 @@ mod tests {
+@@ -1529,6 +1673,24 @@ mod tests {
+         assert!(run(&mut session, Operation::Logout).is_err());
+     }
+ 
++    #[test]
++    fn a_second_resume_while_a_session_is_live_answers_busy() {
++        // A live account is what a completed QR login leaves behind. Resuming a
++        // stored login on top of it would replace credentials that are current, and
++        // the design calls that answer `busy`, not an error.
++        let mut session = Session {
++            account: Some(NativeClient::new(options()).expect("a client that dials nothing")),
++            ..Default::default()
++        };
++        let answer = run(&mut session, Operation::ResumeLogin)
++            .expect("a live session is busy, not a failure");
++        assert_eq!(answer["status"], json!("busy"));
++        assert!(
++            session.account.is_some(),
++            "a busy answer dropped the live session"
++        );
++    }
++
+     #[test]
+     fn unhandled_sync_commands_are_skipped() {
+         let messages = incoming_messages(
+@@ -1572,3 +1734,1908 @@ mod tests {
          );
      }
  }
@@ -229,9 +277,10 @@ index 768d869..69fbe5d 100644
 +// and a read that fails never deletes the file it could not read.
 +// ---------------------------------------------------------------------------
 +mod stored_login {
-+    // The surface here is wider than this build's callers: `dir`, `Miss::as_str`
-+    // and `Allowance::as_str` are reached only from the tests at the bottom of
-+    // this file. Everything else has a non-test caller in lib.rs.
++    // The surface here is wider than this build's callers: `Miss::as_str` and
++    // `Allowance::as_str` are reached only from the tests at the bottom of this
++    // file, and `Answer::Resumed`'s `state` field is never read outside them.
++    // Everything else has a non-test caller in lib.rs.
 +    #![allow(dead_code)]
 +
 +    use anyhow::{anyhow, Result};
@@ -480,12 +529,20 @@ index 768d869..69fbe5d 100644
 +        }
 +    }
 +
-+    /// What turning a stored login into a live account answered.
++    /// What a stored login's bytes turn into before any request is made. The
++    /// split exists so that the throttle slot is spent only once there is an
++    /// account a renewal can actually be attempted with.
++    pub enum Readable<T> {
++        /// A login this build can put on the wire. Nothing has been sent yet.
++        Usable(T),
++        /// The bytes are not a login this build can use; the file is kept.
++        Unreadable,
++    }
++
++    /// What contacting WeChat answered.
 +    pub enum Opened<T> {
 +        /// WeChat accepted the credentials the stored bytes carry.
 +        Accepted(T),
-+        /// The bytes are not a login this build can use; the file is kept.
-+        Unreadable,
 +        /// WeChat refused these credentials; the file is deleted.
 +        Rejected,
 +    }
@@ -493,12 +550,15 @@ index 768d869..69fbe5d 100644
 +    /// One resume attempt's answer: the closed set a caller branches on.
 +    #[derive(Debug, PartialEq)]
 +    pub enum Answer<T> {
-+        /// No stored login, or the store is off.
++        /// There is no stored login to resume: none was stored, the store is off,
++        /// or WeChat refused the one that was and it has been deleted.
 +        None,
-+        /// A stored login is there and did not open. The file is kept.
++        /// A stored login is there and did not open: it will not decrypt, or the
++        /// document is not a login this build can use. The file is kept.
 +        Unreadable,
-+        /// The counters refused this attempt: the bytes were read, but `open` -
-+        /// and so every request to WeChat - never ran.
++        /// Nothing was contacted. Either the counters refused this attempt - the
++        /// bytes opened into a usable account, but the renewal never ran - or the
++        /// store could not be locked well enough to record an attempt at all.
 +        Throttled,
 +        /// Another resume holds the writer lock. Neither the envelope nor the
 +        /// counters were read, so a race costs nothing and records nothing.
@@ -518,9 +578,8 @@ index 768d869..69fbe5d 100644
 +    impl Lock {
 +        /// Take the lock, or answer `None` when somebody else holds it. The file
 +        /// is created with `create_new`, so the create itself has exactly one
-+        /// winner; the part that is not atomic is taking the lock away from a file
-+        /// `abandoned` judged stale, and the comment on the removal says how wide
-+        /// what is left of that window is.
++        /// winner; taking a file `abandoned` judged stale is serialised by `reap`,
++        /// and the comment there says why that is enough.
 +        ///
 +        /// The create is retried once after removing a stale file, and a second
 +        /// refusal means somebody else won that race - the same `busy`.
@@ -555,18 +614,19 @@ index 768d869..69fbe5d 100644
 +                        if !abandoned(&path, &judged, SystemTime::now()) {
 +                            return Ok(None);
 +                        }
-+                        // Read the file again immediately before unlinking it and
-+                        // remove it only if it still holds the bytes that were
-+                        // judged abandoned. What this closes is the whole span
-+                        // from a `stat` to a full write of another process's
-+                        // identity, during which the old check-and-unlink deleted a
-+                        // lock another process had just created. What is left is
-+                        // the gap between this read and the unlink: a create
-+                        // landing inside it is still removed with the stale file,
-+                        // and two resumes then renew at once. No POSIX call is an
-+                        // atomic compare-and-unlink, so that gap cannot be closed
-+                        // here; it is two syscalls wide, and the throttle counters
-+                        // are what bound the damage when it is hit.
++                        // Take the right to steal before reading again and
++                        // unlinking. `create_new` is the only way a lock is
++                        // created and only this steal unlinks a lock that exists,
++                        // so at most one attempt is inside this read-then-unlink.
++                        // For a fresh holder's lock to appear here the path would
++                        // have to be absent during the window, and the only thing
++                        // that could have removed the stale file is that same
++                        // exclusivity-protected steal. The unlink below is
++                        // therefore the file that was judged stale, never a lock
++                        // that landed in the meantime.
++                        let Some(_reap) = reap(store)? else {
++                            return Ok(None);
++                        };
 +                        if std::fs::read(&path).ok().as_deref() != Some(judged.as_slice()) {
 +                            return Ok(None);
 +                        }
@@ -577,6 +637,51 @@ index 768d869..69fbe5d 100644
 +            }
 +            Ok(None)
 +        }
++    }
++
++    /// The file the steal is serialised on, next to the lock it protects. It is
++    /// deliberately never removed: unlinking it would let a later attempt lock a
++    /// different inode at the same name, which is the race this closes.
++    const REAP_FILE: &str = "resume.lock.reap";
++
++    // `flock(2)`, declared here instead of taken from a crate this patch cannot
++    // add as a dependency.
++    #[cfg(unix)]
++    unsafe extern "C" {
++        fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
++    }
++
++    /// `LOCK_EX` and `LOCK_NB`: exclusive, and do not wait. The bits are the same
++    /// on every unix this addon builds for.
++    #[cfg(unix)]
++    const LOCK_EX: std::os::raw::c_int = 2;
++    #[cfg(unix)]
++    const LOCK_NB: std::os::raw::c_int = 4;
++
++    /// Take the right to steal a stale lock, or `None` when another attempt holds
++    /// it. The kernel drops this lock when the process exits, so a stealer that
++    /// dies half way cannot wedge every later attempt the way a lock file could.
++    #[cfg(unix)]
++    fn reap(store: &Store) -> Result<Option<File>> {
++        use std::os::unix::io::AsRawFd;
++        let file = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create(true)
++            .mode(0o600)
++            .open(store.dir().join(REAP_FILE))?;
++        // SAFETY: the descriptor is open for this whole call and `flock` neither
++        // reads the number after it returns nor keeps it.
++        let taken = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
++        Ok((taken == 0).then_some(file))
++    }
++
++    /// Without `flock(2)` there is no way to serialise the steal, so there is no
++    /// steal: the attempt answers `busy` and spends nothing rather than unlinking
++    /// a lock another process may have created in the meantime.
++    #[cfg(not(unix))]
++    fn reap(_store: &Store) -> Result<Option<File>> {
++        Ok(None)
 +    }
 +
 +    impl Drop for Lock {
@@ -683,18 +788,28 @@ index 768d869..69fbe5d 100644
 +    }
 +
 +    /// Try the stored login. In this order: take the writer lock, read the store,
-+    /// count the attempt, and only then contact WeChat - `open` is the caller's one
-+    /// request. A file that is not there and a file that will not read answer `none`
-+    /// and `unreadable` and spend no throttle slot, so an empty or broken store
-+    /// cannot exhaust the counters and turn the next real resume into a refusal.
-+    /// `busy` is the one answer that neither reads the envelope nor counts anything,
-+    /// so a second start racing the first costs nothing.
++    /// turn its bytes into a usable account, count the attempt, and only then
++    /// contact WeChat - `open` is the caller's one request, and the slot is spent
++    /// immediately before it. A file that is not there, a file that will not read
++    /// and a document this build cannot use answer `none` and `unreadable` and
++    /// spend no throttle slot, so an empty or broken store cannot exhaust the
++    /// counters and turn the next real resume into a refusal. `busy` is the one
++    /// answer that neither reads the envelope nor counts anything, so a second
++    /// start racing the first costs nothing. A lock or directory fault answers
++    /// `throttled`: a store that cannot record an attempt is not one to spend.
 +    pub fn resume<T>(
 +        store: &Store,
 +        now: u64,
-+        open: impl FnOnce(&[u8]) -> Result<Opened<T>>,
++        prepare: impl FnOnce(&[u8]) -> Readable<T>,
++        open: impl FnOnce(T) -> Result<Opened<T>>,
 +    ) -> Result<Answer<T>> {
-+        let Some(_lock) = Lock::take(store)? else {
++        let held = match Lock::take(store) {
++            Ok(held) => held,
++            // The lock cannot be created or read, so there is no way to record or
++            // bound this attempt: fail closed without contacting anybody.
++            Err(_) => return Ok(Answer::Throttled),
++        };
++        let Some(_lock) = held else {
 +            return Ok(Answer::Busy);
 +        };
 +        let state = match store.read() {
@@ -702,19 +817,26 @@ index 768d869..69fbe5d 100644
 +            Err(Miss::Absent) => return Ok(Answer::None),
 +            Err(Miss::Unreadable) => return Ok(Answer::Unreadable),
 +        };
-+        // The slot is spent only here: a stored login exists, so a renewal is
-+        // actually about to be attempted.
++        let usable = match prepare(&state) {
++            Readable::Usable(usable) => usable,
++            Readable::Unreadable => return Ok(Answer::Unreadable),
++        };
++        // The slot is spent only here: the bytes opened into an account, so the
++        // one request to WeChat is actually about to be made.
 +        if store.allow_resume(now) == Allowance::Throttled {
 +            return Ok(Answer::Throttled);
 +        }
-+        match open(&state)? {
++        match open(usable)? {
 +            Opened::Accepted(accepted) => Ok(Answer::Resumed { state, accepted }),
-+            Opened::Unreadable => Ok(Answer::Unreadable),
 +            Opened::Rejected => {
 +                // WeChat said this login is no longer good, so the file is not
 +                // evidence of anything: keeping it would make every start pay the
-+                // same rejected round trip.
-+                store.delete()?;
++                // same rejected round trip. A delete that fails is a failed write
++                // and still `none` - the login is not resumed either way, and the
++                // next start pays the same round trip rather than an error.
++                if store.delete().is_err() {
++                    WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
++                }
 +                Ok(Answer::None)
 +            }
 +        }
@@ -1249,6 +1371,25 @@ index 768d869..69fbe5d 100644
 +                .unwrap_or(0)
 +        }
 +
++        /// The two halves of a resume that goes all the way: the bytes are a login
++        /// this build can use, and WeChat accepts it. A test that scripts one half
++        /// names its own.
++        fn opens(state: &[u8]) -> Readable<Vec<u8>> {
++            Readable::Usable(state.to_vec())
++        }
++
++        fn accepts(state: Vec<u8>) -> Result<Opened<Vec<u8>>> {
++            Ok(Opened::Accepted(state))
++        }
++
++        fn usable(_: &[u8]) -> Readable<()> {
++            Readable::Usable(())
++        }
++
++        fn accepted(_: ()) -> Result<Opened<()>> {
++            Ok(Opened::Accepted(()))
++        }
++
 +        #[test]
 +        fn a_held_lock_answers_busy_without_spending_a_throttle_slot() {
 +            let _counting = counting();
@@ -1261,7 +1402,7 @@ index 768d869..69fbe5d 100644
 +                .expect("the writer lock opens")
 +                .expect("nobody else holds it");
 +
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++            let answer = resume(&store, seconds(), usable, accepted)
 +                .expect("a busy answer is not an error");
 +            assert_eq!(answer, Answer::Busy);
 +            assert_eq!(
@@ -1273,7 +1414,7 @@ index 768d869..69fbe5d 100644
 +            // The next attempt after the lock is released is allowed to look, and
 +            // finds nothing stored - which is a `none`, not a refusal.
 +            drop(held);
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++            let answer = resume(&store, seconds(), usable, accepted)
 +                .expect("a resumed answer is not an error");
 +            assert_eq!(
 +                answer,
@@ -1302,13 +1443,89 @@ index 768d869..69fbe5d 100644
 +            );
 +            std::fs::write(store.lock_path(), format!("{gone} 1234\n")).expect("a stale lock file");
 +
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++            let answer = resume(&store, seconds(), usable, accepted)
 +                .expect("a stale lock is not an error");
 +            assert_eq!(answer, Answer::None, "a stale lock answered busy");
 +            assert!(
 +                !store.lock_path().exists(),
 +                "the guard that took the stale lock left a file behind"
 +            );
++        }
++
++        #[test]
++        fn a_steal_that_cannot_take_the_reap_lock_leaves_the_stale_lock_alone() {
++            let _counting = counting();
++            let scratch = Scratch::new("reap-held");
++            let store = scratch.store();
++            // A pid no process has: what a crash leaves behind.
++            let gone = u32::MAX - 1;
++            assert_eq!(
++                start_time(gone),
++                None,
++                "the test pid names a running process"
++            );
++            let stale = format!("{gone} 1234\n");
++            std::fs::write(store.lock_path(), &stale).expect("a stale lock file");
++            // Another attempt is inside the steal. It opened the same file through
++            // its own descriptor, so this process conflicts with itself exactly as
++            // a second process would.
++            let held = reap(&store)
++                .expect("the steal can be serialised")
++                .expect("nobody else is stealing");
++
++            assert!(
++                Lock::take(&store)
++                    .expect("a busy answer is not an error")
++                    .is_none(),
++                "a lock was taken while another attempt held the steal"
++            );
++            assert_eq!(
++                std::fs::read_to_string(store.lock_path()).expect("the lock file"),
++                stale,
++                "an attempt that could not hold the steal removed the stale lock"
++            );
++
++            // Once the steal is free, the same stale lock is taken, and it names us.
++            drop(held);
++            let lead = Lock::take(&store)
++                .expect("the writer lock opens")
++                .expect("a stale lock is not a live holder");
++            assert_eq!(
++                Holder::parse(&std::fs::read(store.lock_path()).expect("the lock file")),
++                Some(Holder::current()),
++                "the stolen lock does not name this process"
++            );
++            drop(lead);
++        }
++
++        #[test]
++        fn a_stolen_lock_names_this_process_and_leaves_no_debris() {
++            let _counting = counting();
++            let scratch = Scratch::new("stolen");
++            let store = scratch.store();
++            let gone = u32::MAX - 1;
++            std::fs::write(store.lock_path(), format!("{gone} 1234\n")).expect("a stale lock file");
++
++            let held = Lock::take(&store)
++                .expect("the writer lock opens")
++                .expect("a stale lock is not a live holder");
++            assert_eq!(
++                Holder::parse(&std::fs::read(store.lock_path()).expect("the lock file")),
++                Some(Holder::current()),
++                "the lock this attempt stole does not name it"
++            );
++            assert_eq!(
++                directory_entries(&scratch.dir),
++                vec![LOCK_FILE.to_string(), REAP_FILE.to_string()],
++                "the steal left something else in the state directory"
++            );
++            drop(held);
++            // The reap file stays behind on purpose, and it is no obstacle: the next
++            // attempt takes the lock the same way.
++            let again = Lock::take(&store)
++                .expect("the writer lock opens")
++                .expect("the reap file left behind blocks the next attempt");
++            drop(again);
 +        }
 +
 +        #[test]
@@ -1326,7 +1543,7 @@ index 768d869..69fbe5d 100644
 +            )
 +            .expect("a reused pid's lock");
 +
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++            let answer = resume(&store, seconds(), usable, accepted)
 +                .expect("a stale lock is not an error");
 +            assert_eq!(
 +                answer,
@@ -1352,7 +1569,7 @@ index 768d869..69fbe5d 100644
 +                "the lock file does not name the process holding it"
 +            );
 +            assert_eq!(
-+                resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++                resume(&store, seconds(), usable, accepted)
 +                    .expect("a busy answer is not an error"),
 +                Answer::Busy,
 +                "the lock this process holds did not read as live"
@@ -1379,7 +1596,7 @@ index 768d869..69fbe5d 100644
 +                "a lock that has named nobody for the whole grace window is still not abandoned"
 +            );
 +
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++            let answer = resume(&store, seconds(), usable, accepted)
 +                .expect("a busy answer is not an error");
 +            assert_eq!(answer, Answer::Busy, "a fresh empty lock was stolen");
 +            assert!(
@@ -1398,7 +1615,7 @@ index 768d869..69fbe5d 100644
 +            // one of these would answer `throttled` instead of `none`.
 +            for attempt in 0..RESUMES_PER_HOUR * 2 {
 +                assert_eq!(
-+                    resume(&store, now, |_| Ok(Opened::Accepted(())))
++                    resume(&store, now, usable, accepted)
 +                        .expect("a none answer is not an error"),
 +                    Answer::None,
 +                    "attempt {attempt} against a store with no login"
@@ -1412,7 +1629,7 @@ index 768d869..69fbe5d 100644
 +            // A login stored now still resumes: the empty answers took nothing.
 +            let written = br#"{"schema":1,"own_username":"fixture-self"}"#.to_vec();
 +            store.save(&written).expect("store the login");
-+            let answer = resume(&store, now, |state| Ok(Opened::Accepted(state.to_vec())))
++            let answer = resume(&store, now, opens, accepts)
 +                .expect("a resumed answer is not an error");
 +            assert_eq!(
 +                answer,
@@ -1433,7 +1650,7 @@ index 768d869..69fbe5d 100644
 +            let now = seconds();
 +            for attempt in 0..RESUMES_PER_HOUR * 2 {
 +                assert_eq!(
-+                    resume(&store, now, |_| Ok(Opened::Accepted(())))
++                    resume(&store, now, usable, accepted)
 +                        .expect("an unreadable answer is not an error"),
 +                    Answer::Unreadable,
 +                    "attempt {attempt} against a corrupt store"
@@ -1446,12 +1663,147 @@ index 768d869..69fbe5d 100644
 +
 +            let written = br#"{"schema":1,"own_username":"fixture-self"}"#.to_vec();
 +            store.save(&written).expect("store a readable login");
-+            let answer = resume(&store, now, |state| Ok(Opened::Accepted(state.to_vec())))
++            let answer = resume(&store, now, opens, accepts)
 +                .expect("a resumed answer is not an error");
 +            assert!(
 +                matches!(answer, Answer::Resumed { .. }),
 +                "the first readable resume after the corrupt ones was refused"
 +            );
++        }
++
++        #[test]
++        fn a_login_that_will_not_open_answers_unreadable_and_spends_no_slot() {
++            let _counting = counting();
++            let scratch = Scratch::new("opens-never");
++            let store = scratch.store();
++            // These bytes decrypt - `save` wrote them through the same envelope -
++            // and then fail to open into an account, which is what a document from
++            // another version does.
++            store
++                .save(b"a document this build cannot use")
++                .expect("store the login");
++            let now = seconds();
++            for attempt in 0..RESUMES_PER_HOUR * 2 {
++                let answer = resume(&store, now, |_| Readable::<()>::Unreadable, accepted)
++                    .expect("an unreadable answer is not an error");
++                assert_eq!(
++                    answer,
++                    Answer::Unreadable,
++                    "attempt {attempt} against a login that will not open"
++                );
++            }
++            assert!(
++                !store.resumes_path().exists(),
++                "a login that will not open spent a throttle slot"
++            );
++            assert!(
++                store.present(),
++                "a login that will not open was deleted"
++            );
++        }
++
++        #[test]
++        fn a_resume_that_reaches_the_renewal_spends_exactly_one_slot() {
++            let _counting = counting();
++            let scratch = Scratch::new("one-slot");
++            let store = scratch.store();
++            store.save(b"an accepted login").expect("store the login");
++            let now = seconds();
++            let answer =
++                resume(&store, now, opens, accepts).expect("a resumed answer is not an error");
++            assert!(
++                matches!(answer, Answer::Resumed { .. }),
++                "a stored login did not resume"
++            );
++            assert_eq!(
++                std::fs::read_to_string(store.resumes_path()).expect("the counter file"),
++                format!("{now}\n"),
++                "a resume that reached the renewal spent more or less than one slot"
++            );
++        }
++
++        #[test]
++        fn a_lock_that_cannot_be_created_answers_throttled_and_contacts_nobody() {
++            let _counting = counting();
++            let scratch = Scratch::new("no-lock");
++            let store = scratch.store();
++            store.save(b"an accepted login").expect("store the login");
++            std::fs::set_permissions(&scratch.dir, std::fs::Permissions::from_mode(0o500))
++                .expect("make the state directory read-only");
++            // The test's own probe, so a run as a user the mode does not stop says
++            // so instead of failing on an assertion about somebody else's kernel.
++            let refuses_writes =
++                std::fs::write(scratch.dir.join(".the-test-probes-a-write"), b"x").is_err();
++            if refuses_writes {
++                let mut contacted = false;
++                let answer = resume(
++                    &store,
++                    seconds(),
++                    |state| {
++                        contacted = true;
++                        opens(state)
++                    },
++                    accepts,
++                )
++                .expect("a lock fault is answered, not raised");
++                assert_eq!(
++                    answer,
++                    Answer::Throttled,
++                    "a store whose lock cannot be created did not fail closed"
++                );
++                assert!(
++                    !contacted,
++                    "a store whose lock cannot be created contacted WeChat"
++                );
++                assert!(
++                    !store.resumes_path().exists(),
++                    "an attempt that could not take the lock wrote a counter"
++                );
++            }
++            std::fs::set_permissions(&scratch.dir, std::fs::Permissions::from_mode(0o700))
++                .expect("restore the state directory");
++        }
++
++        #[test]
++        fn a_rejected_login_whose_delete_fails_answers_none_and_counts_a_failed_write() {
++            let _counting = counting();
++            let scratch = Scratch::new("rejected-no-delete");
++            let store = scratch.store();
++            store
++                .save(b"credentials WeChat no longer accepts")
++                .expect("store the login");
++            let failures = status_of(scratch.configured())["write_failures"]
++                .as_u64()
++                .expect("a failure count");
++            // The refusal is real and the delete that follows it is not: the state
++            // directory stops accepting writes between the two, exactly where the
++            // opener answers.
++            let mut refused = false;
++            let answer = resume(&store, seconds(), usable, |_| {
++                std::fs::set_permissions(&scratch.dir, std::fs::Permissions::from_mode(0o500))
++                    .expect("make the state directory read-only");
++                refused = std::fs::write(scratch.dir.join(".the-test-probes-a-write"), b"x").is_err();
++                Ok(Opened::Rejected)
++            })
++            .expect("a rejection whose delete failed is not an error");
++            assert_eq!(
++                answer,
++                Answer::None,
++                "a rejected login whose file could not be deleted answered something else"
++            );
++            if refused {
++                assert_eq!(
++                    status_of(scratch.configured())["write_failures"],
++                    json!(failures + 1),
++                    "a delete that failed was not counted as a failed write"
++                );
++                assert!(
++                    store.present(),
++                    "the deletion failed and the file was gone anyway"
++                );
++            }
++            std::fs::set_permissions(&scratch.dir, std::fs::Permissions::from_mode(0o700))
++                .expect("restore the state directory");
 +        }
 +
 +        #[test]
@@ -1480,7 +1832,7 @@ index 768d869..69fbe5d 100644
 +            );
 +
 +            // A resume straight after presents those bytes, not the stale ones.
-+            let answer = resume(&store, seconds(), |state| Ok(Opened::Accepted(state.to_vec())))
++            let answer = resume(&store, seconds(), opens, accepts)
 +                .expect("a resumed answer is not an error");
 +            assert_eq!(
 +                answer,
@@ -1519,10 +1871,10 @@ index 768d869..69fbe5d 100644
 +            let rotated = json!({"schema": 1, "own_username": "fixture-self", "token": "fresh"});
 +            let rotated_bytes = serde_json::to_vec(&rotated).expect("a document");
 +
-+            // The opener renews and saves, exactly as `open_stored_login` does.
-+            let answer = resume(&store, seconds(), |state| {
++            // The opener renews and saves, exactly as `renew_stored_login` does.
++            let answer = resume(&store, seconds(), opens, |state| {
 +                renew_and_persist(&store, || Ok(()), || Ok(rotated.clone()))?;
-+                Ok(Opened::Accepted(state.to_vec()))
++                Ok(Opened::Accepted(state))
 +            })
 +            .expect("a resumed answer is not an error");
 +            assert_eq!(
@@ -1641,7 +1993,7 @@ index 768d869..69fbe5d 100644
 +        }
 +
 +        #[test]
-+        fn the_helpers_the_dead_code_allowance_hides_are_the_three_it_names() {
++        fn the_surface_the_dead_code_allowance_hides_is_the_two_it_names() {
 +            let scratch = Scratch::new("dead-code");
 +            let store = scratch.store();
 +            assert_eq!(store.dir(), scratch.dir.as_path());
@@ -1679,13 +2031,13 @@ index 768d869..69fbe5d 100644
 +            let written = br#"{"schema":1,"own_username":"fixture-self"}"#.to_vec();
 +            store.save(&written).expect("store the login");
 +
-+            let answer = resume(&store, seconds(), |state| Ok(Opened::Accepted(state.len())))
-+                .expect("a resumed answer is not an error");
++            let answer =
++                resume(&store, seconds(), opens, accepts).expect("a resumed answer is not an error");
 +            assert_eq!(
 +                answer,
 +                Answer::Resumed {
 +                    state: written.clone(),
-+                    accepted: written.len(),
++                    accepted: written,
 +                },
 +                "the answer does not carry the account state that was written"
 +            );
@@ -1699,7 +2051,7 @@ index 768d869..69fbe5d 100644
 +            store
 +                .save(b"credentials WeChat no longer accepts")
 +                .expect("store the login");
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::<()>::Rejected))
++            let answer = resume(&store, seconds(), usable, |_| Ok(Opened::Rejected))
 +                .expect("a rejection is not an error");
 +            assert_eq!(answer, Answer::None);
 +            assert!(
@@ -1712,7 +2064,7 @@ index 768d869..69fbe5d 100644
 +            let corrupt = Scratch::new("corrupt-envelope");
 +            let store = corrupt.store();
 +            std::fs::write(store.state_path(), b"not an envelope").expect("a corrupt login");
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::Accepted(())))
++            let answer = resume(&store, seconds(), usable, accepted)
 +                .expect("an unreadable answer is not an error");
 +            assert_eq!(answer, Answer::Unreadable);
 +            assert!(store.present(), "an unreadable store lost the file it had");
@@ -1724,7 +2076,7 @@ index 768d869..69fbe5d 100644
 +            store
 +                .save(b"a document from another schema")
 +                .expect("store the document");
-+            let answer = resume(&store, seconds(), |_| Ok(Opened::<()>::Unreadable))
++            let answer = resume(&store, seconds(), |_| Readable::<()>::Unreadable, accepted)
 +                .expect("an unreadable answer is not an error");
 +            assert_eq!(answer, Answer::Unreadable);
 +            assert!(

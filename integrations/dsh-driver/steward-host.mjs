@@ -7,6 +7,7 @@ import { spawn as spawnChild } from 'node:child_process';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wakeTakesImages } from './model.mjs';
+import { officeMediaOps } from './office.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -958,10 +959,14 @@ const OWNER_MEDIA_SUBJECTS = { image: 'Image', voice: 'Voice message', file: 'Fi
  *  readDocument(ref, {pages, images, maxPages}, signal); `routeInput` (the adapter's
  *  route-input cache) gives takesImages(signal) - whether read_document renders page images,
  *  the same judgement as a wake's native images (the plugin has no route input of its own). */
-export function mediaOps({ request, library, gatewayFetch, owner, reader, routeInput }) {
+export function mediaOps({ request, library, gatewayFetch, owner, reader, routeInput, office }) {
+  // Step 24.2d (design-steward 7.8.12c): with the office converter, readDocument also reads a docx,
+  // pptx or xlsx, and makeDocument makes one (office.mjs officeMediaOps).
+  const documents = reader || office ? officeMediaOps({ library, reader, office }) : undefined;
   return {
     ...(owner ? { sendToOwner: (file, signal) => sendMediaToOwner({ ...owner, library }, file, signal) } : {}),
-    ...(reader ? { readDocument: (ref, options, signal) => reader.readDocument(library, ref, options, signal) } : {}),
+    ...(documents ? { readDocument: documents.readDocument } : {}),
+    ...(office ? { makeDocument: documents.makeDocument } : {}),
     ...(routeInput ? { takesImages: async signal => wakeTakesImages(await routeInput(signal)) } : {}),
     ingest: (meta, open, options) => library.ingest(meta, open, options),
     resolve: async ref => library.lookup(ref),
@@ -984,9 +989,10 @@ export function mediaOps({ request, library, gatewayFetch, owner, reader, routeI
     },
     // checkOnly (review F2): the same judgement as a dry run before the file is fetched -
     // {may_post: true} or {refused}; no budget used, no row, nothing recorded for the key.
-    postGroup: ({ turn, kind, caption, checkOnly }, signal) => request('/api/state/commands/post_group_media', {
+    // text (step 24.2d, 7.8.12c "九"): a document's title and body, checked with checkOnly only.
+    postGroup: ({ turn, kind, caption, checkOnly, text }, signal) => request('/api/state/commands/post_group_media', {
       request_key: `group-media${checkOnly ? '-check' : ''}:${turn}:${randomUUID()}`, turn, ...(kind ? { kind } : {}),
-      ...(caption ? { caption } : {}), ...(checkOnly ? { check_only: true } : {}) }, signal)
+      ...(caption ? { caption } : {}), ...(checkOnly ? { check_only: true } : {}), ...(checkOnly && typeof text === 'string' ? { text } : {}) }, signal)
       .then(r => r?.result ?? r, stateRefusal),
   };
 }

@@ -101,11 +101,11 @@ const CODES = Object.keys(READ_DOCUMENT_REASONS);
 
 test('read_document: its parameters, and a refusal always carries a code of the closed set and its sentence', () => {
   const w = world();
-  assert.deepEqual(Object.keys(w.tool.parameters), ['ref', 'pages', 'images']);
+  assert.deepEqual(Object.keys(w.tool.parameters), ['ref', 'pages', 'images', 'rows']);
   assert.equal(w.tool.parameters.ref.required, true);
   assert.deepEqual([w.tool.parameters.pages.type, w.tool.parameters.images.type], ['string', 'boolean']);
   assert.deepEqual(CODES.sort(), ['broken', 'busy', 'encrypted', 'invalid_request', 'kept_not_readable', 'not_a_document',
-    'not_visible_in_this_turn', 'page_out_of_range', 'pdf_reader_unavailable', 'timeout', 'too_many_pages', 'turn_page_budget',
+    'not_visible_in_this_turn', 'office_unavailable', 'page_out_of_range', 'pdf_reader_unavailable', 'timeout', 'too_many_pages', 'turn_page_budget',
     'unknown_ref', 'unsupported_security']);
   // The sentences 7.8.12b writes out, word for word.
   assert.equal(READ_DOCUMENT_REASONS.encrypted, '这个 PDF 要密码，管家打不开：请对方发一份不带密码的');

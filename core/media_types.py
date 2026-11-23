@@ -46,14 +46,89 @@ def limits() -> dict:
 
 
 def sniff(head: bytes) -> dict | None:
-    """The type the first bytes name (the table's order), or None."""
+    """The type the first bytes name (the table's order), or None. A container row (an OOXML
+    file: its first bytes are any zip's) is never named by its first bytes: see identify."""
     for entry in table()["types"]:
+        if entry.get("container"):
+            continue
         for signature in entry["signatures"]:
             if all(len(head) >= part["offset"] + len(bytes.fromhex(part["hex"]))
                    and head[part["offset"]:part["offset"] + len(bytes.fromhex(part["hex"]))] == bytes.fromhex(part["hex"])
                    for part in signature):
                 return entry
     return None
+
+
+def is_zip(head: bytes) -> bool:
+    """Whether the first bytes are a zip's local file header (PK\\x03\\x04)."""
+    return head[:4] == b"PK\x03\x04"
+
+
+_EOCD, _CENTRAL, _ZIP64_LOCATOR = 0x06054B50, 0x02014B50, 0x07064B50
+
+
+def ooxml_type(data: bytes, bounds: dict | None = None) -> dict | None:
+    """Step 24.2d (design-steward 7.8.12c "六"): the OOXML row (docx, xlsx, pptx) of a whole zip
+    file, or None - the same judgement as lib/media.mjs ooxmlType, on the same container_samples.
+    Only the End of Central Directory and the central directory are read; nothing is unzipped."""
+    bounds = bounds or limits()
+    try:
+        if not is_zip(data) or len(data) < 22:
+            return None
+        eocd = -1
+        for at in range(len(data) - 22, max(0, len(data) - 22 - 65535) - 1, -1):
+            if (int.from_bytes(data[at:at + 4], "little") == _EOCD
+                    and at + 22 + int.from_bytes(data[at + 20:at + 22], "little") == len(data)):
+                eocd = at
+                break
+        if eocd < 0:
+            return None
+        if eocd >= 20 and int.from_bytes(data[eocd - 20:eocd - 16], "little") == _ZIP64_LOCATOR:
+            return None
+
+        def u16(at):
+            return int.from_bytes(data[at:at + 2], "little")
+
+        def u32(at):
+            return int.from_bytes(data[at:at + 4], "little")
+
+        disk, cd_disk, on_disk, count = u16(eocd + 4), u16(eocd + 6), u16(eocd + 8), u16(eocd + 10)
+        size, offset = u32(eocd + 12), u32(eocd + 16)
+        if disk or cd_disk or on_disk != count or count == 0xFFFF or size == 0xFFFFFFFF or offset == 0xFFFFFFFF:
+            return None
+        if count > bounds["office_zip_entries"] or offset + size > eocd:
+            return None
+        names, at, unzipped = set(), offset, 0
+        for _ in range(count):
+            if at + 46 > offset + size or u32(at) != _CENTRAL:
+                return None
+            flags, packed, plain = u16(at + 8), u32(at + 20), u32(at + 24)
+            end = at + 46 + u16(at + 28) + u16(at + 30) + u16(at + 32)
+            if end > offset + size:
+                return None
+            name = data[at + 46:at + 46 + u16(at + 28)].decode("utf-8", "replace")
+            if flags & 1 or name.startswith("/") or ".." in name or "\\" in name:
+                return None
+            if name.rsplit("/", 1)[-1].lower() == "vbaproject.bin":
+                return None
+            unzipped += plain
+            if unzipped > bounds["office_unzipped_bytes"]:
+                return None
+            if plain > bounds["office_zip_ratio_floor"] and plain > packed * bounds["office_zip_ratio"]:
+                return None
+            names.add(name)
+            at = end
+        if "[Content_Types].xml" not in names:
+            return None
+        found = [entry for entry in table()["types"] if entry.get("container") == "ooxml" and entry["main_part"] in names]
+        return found[0] if len(found) == 1 else None
+    except (IndexError, ValueError):
+        return None
+
+
+def identify(data: bytes) -> dict | None:
+    """The type of a whole file: its first bytes' (sniff), or - for a zip - its OOXML type."""
+    return sniff(data[:64]) or (ooxml_type(data) if is_zip(data) else None)
 
 
 def normalise_attachments(value) -> list[dict] | None:

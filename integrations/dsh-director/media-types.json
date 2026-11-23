@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). limits.call_body_bytes is the steward gateway's request body bound (api/steward_gateway.py MAX_BODY), which media_call checks its base64 against before calling. limits.kept_hours is how long a kept medium lives - a group file sent without mentioning the steward, stored only while that group's switch is on (design/steward-group-media.md section 4): lib/media.mjs stops resolving it and cleans it, and the backend stops listing and deletes its kept_media row. limits.kept_per_group_hour is the kept media's own hourly bound, per group (design/steward-group-media.md section 11): kept rows are not counted in inbound_per_channel_hour, which is the owner's. The pdf_* limits are read_document's (design-steward 7.8.12b, part 6): pages per call with page images and text-only, page images per turn (an owner turn, a group turn), and characters per page and per call. Office documents, archives and executables are deliberately absent (v1).",
+  "about": "Step 24.2 (design-steward 7.8.12, 7.8.12a piece 4): the one media-types table. A file's type is decided by its first bytes (the signatures below, in this order), never by a name or a declared mime; anything else is refused `type`. Read by the steward host's media library (lib/media.mjs) and by the backend (core/media_types.py). limits.call_body_bytes is the steward gateway's request body bound (api/steward_gateway.py MAX_BODY), which media_call checks its base64 against before calling. limits.kept_hours is how long a kept medium lives - a group file sent without mentioning the steward, stored only while that group's switch is on (design/steward-group-media.md section 4): lib/media.mjs stops resolving it and cleans it, and the backend stops listing and deletes its kept_media row. limits.kept_per_group_hour is the kept media's own hourly bound, per group (design/steward-group-media.md section 11): kept rows are not counted in inbound_per_channel_hour, which is the owner's. The pdf_* limits are read_document's (design-steward 7.8.12b, part 6): pages per call with page images and text-only, page images per turn (an owner turn, a group turn), and characters per page and per call. Step 24.2d (7.8.12c \"六\", \"七\"): docx, xlsx and pptx are the rows with `container: \"ooxml\"`; their first bytes are a zip's, which the first-byte signature alone never takes (sniff skips them): the whole file is judged by its zip central directory, read without unzipping anything (ooxmlType: at most office_zip_entries entries and office_unzipped_bytes declared unzipped, no entry past office_zip_ratio compressed 1:N once it declares more than office_zip_ratio_floor bytes, no encrypted entry, no absolute or `..` name, no vbaProject.bin, [Content_Types].xml and exactly one of the three `main_part`s); `container_samples` are the central directories both sides are tested on. The office_* generation limits are make_document's, and kept_mimes are the only types a group's un-mentioned file may be kept as (images, voice, PDF). Old OLE office files (doc, xls, ppt and encrypted OOXML), odf, rtf, csv, archives and executables are deliberately absent (v1).",
   "limits": {
     "image_bytes": 20971520,
     "file_bytes": 26214400,
@@ -19,7 +19,24 @@
     "pdf_turn_images_owner": 16,
     "pdf_turn_images_group": 8,
     "pdf_chars_page": 4000,
-    "pdf_chars_call": 8000
+    "pdf_chars_call": 8000,
+    "office_zip_entries": 2000,
+    "office_unzipped_bytes": 104857600,
+    "office_zip_ratio": 200,
+    "office_zip_ratio_floor": 1048576,
+    "office_body_chars": 20000,
+    "office_blocks": 400,
+    "office_table_rows": 200,
+    "office_rows": 2000,
+    "office_cols": 30,
+    "office_cell_chars": 500,
+    "office_sheet_chars": 80000,
+    "office_turn_docs_owner": 5,
+    "office_turn_docs_group": 2,
+    "office_read_sheets": 3,
+    "office_read_rows": 300,
+    "office_read_cell_chars": 200,
+    "kept_mimes": ["image/png", "image/jpeg", "image/gif", "image/webp", "audio/wav", "audio/ogg", "audio/flac", "audio/amr", "audio/webm", "audio/mp4", "audio/mpeg", "audio/aac", "application/pdf"]
   },
   "types": [
     { "mime": "image/png", "kind": "image", "ext": "png", "signatures": [[{ "offset": 0, "hex": "89504e470d0a1a0a" }]] },
@@ -34,7 +51,10 @@
     { "mime": "audio/webm", "kind": "voice", "ext": "webm", "signatures": [[{ "offset": 0, "hex": "1a45dfa3" }]] },
     { "mime": "audio/mp4", "kind": "voice", "ext": "m4a", "signatures": [[{ "offset": 4, "hex": "667479704d344120" }], [{ "offset": 4, "hex": "667479704d344220" }], [{ "offset": 4, "hex": "6674797069736f6d" }], [{ "offset": 4, "hex": "667479706d703432" }]] },
     { "mime": "audio/mpeg", "kind": "voice", "ext": "mp3", "signatures": [[{ "offset": 0, "hex": "494433" }], [{ "offset": 0, "hex": "fffb" }], [{ "offset": 0, "hex": "fff3" }], [{ "offset": 0, "hex": "fff2" }]] },
-    { "mime": "audio/aac", "kind": "voice", "ext": "aac", "signatures": [[{ "offset": 0, "hex": "fff1" }], [{ "offset": 0, "hex": "fff9" }]] }
+    { "mime": "audio/aac", "kind": "voice", "ext": "aac", "signatures": [[{ "offset": 0, "hex": "fff1" }], [{ "offset": 0, "hex": "fff9" }]] },
+    { "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "kind": "file", "ext": "docx", "container": "ooxml", "main_part": "word/document.xml", "signatures": [[{ "offset": 0, "hex": "504b0304" }]] },
+    { "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "kind": "file", "ext": "xlsx", "container": "ooxml", "main_part": "xl/workbook.xml", "signatures": [[{ "offset": 0, "hex": "504b0304" }]] },
+    { "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "kind": "file", "ext": "pptx", "container": "ooxml", "main_part": "ppt/presentation.xml", "signatures": [[{ "offset": 0, "hex": "504b0304" }]] }
   ],
   "samples": [
     { "hex": "89504e470d0a1a0a0000000d49484452", "mime": "image/png" },
@@ -50,5 +70,25 @@
     { "hex": "4d5a90000300000004", "mime": null },
     { "hex": "7f454c4602010100", "mime": null },
     { "hex": "52494646240000004156492020", "mime": null }
+  ],
+  "container_samples": [
+    { "about": "a docx", "entries": [["[Content_Types].xml", 1200, 400], ["_rels/.rels", 590, 240], ["word/document.xml", 5000, 1500], ["word/styles.xml", 30000, 3000]], "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { "about": "an xlsx", "entries": [["[Content_Types].xml", 1200, 400], ["xl/workbook.xml", 900, 400], ["xl/worksheets/sheet1.xml", 4000, 900]], "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
+    { "about": "a pptx", "entries": [["[Content_Types].xml", 1200, 400], ["ppt/presentation.xml", 3000, 900], ["ppt/slides/slide1.xml", 2000, 700]], "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation" },
+    { "about": "a docm: a macro project anywhere", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500], ["word/vbaProject.bin", 9000, 4000]], "mime": null },
+    { "about": "two main parts", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500], ["xl/workbook.xml", 900, 400]], "mime": null },
+    { "about": "no [Content_Types].xml", "entries": [["word/document.xml", 5000, 1500]], "mime": null },
+    { "about": "a plain zip", "entries": [["readme.txt", 100, 80], ["[Content_Types].xml", 1200, 400]], "mime": null },
+    { "about": "an encrypted entry", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500, 1]], "mime": null },
+    { "about": "a .. name", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500], ["word/../../evil.xml", 10, 10]], "mime": null },
+    { "about": "an absolute name", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500], ["/etc/evil.xml", 10, 10]], "mime": null },
+    { "about": "more entries than office_zip_entries", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "filler": 1999, "mime": null },
+    { "about": "exactly office_zip_entries entries", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "filler": 1998, "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { "about": "declared unzipped bytes over office_unzipped_bytes", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 60000000, 600000], ["word/media/a.bin", 50000000, 500000]], "mime": null },
+    { "about": "one entry compressed past office_zip_ratio", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 50000000, 100000]], "mime": null },
+    { "about": "a small entry past the ratio is under the floor", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 900000, 1000]], "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { "about": "zip64", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "eocd": "zip64", "mime": null },
+    { "about": "no end of central directory", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "eocd": "missing", "mime": null },
+    { "about": "a central directory past the end", "entries": [["[Content_Types].xml", 1200, 400], ["word/document.xml", 5000, 1500]], "eocd": "past_end", "mime": null }
   ]
 }

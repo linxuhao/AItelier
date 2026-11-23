@@ -156,8 +156,12 @@ async def receive(chunks, directory, upload_id: str, base: int):
     the first HEAD_BYTES decide the type by the shared table (415 type, before any file
     exists); the kind's cap (413 too_large) and the staging total (507 staging_full) are
     checked before each chunk is written. Any refusal or failure - the client going away
-    included - removes the partial. Answers (type entry, size, partial path)."""
-    head, entry, handle, size = b"", None, None, 0
+    included - removes the partial. Answers (type entry, size, partial path).
+
+    Step 24.2d (design-steward 7.8.12c "六"): a zip's first bytes name no type; the body is taken
+    as a file (its cap) and, once all of it is in, judged by its zip directory
+    (media_types.ooxml_type: a docx, xlsx or pptx, else 415 type and the partial goes)."""
+    head, entry, handle, size, zipped = b"", None, None, 0, False
     partial = os.path.join(os.fspath(directory), upload_id + ".part")
 
     def judge(data):
@@ -170,8 +174,10 @@ async def receive(chunks, directory, upload_id: str, base: int):
         size += len(data)
 
     def start():
-        nonlocal entry, handle
+        nonlocal entry, handle, zipped
         entry = media_types.sniff(head)
+        if entry is None and media_types.is_zip(head):
+            zipped, entry = True, {"kind": "file"}
         if entry is None:
             raise UploadRefused(415, "type")
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -192,6 +198,12 @@ async def receive(chunks, directory, upload_id: str, base: int):
         if entry is None:
             start()
         handle.close()
+        if zipped:
+            with open(partial, "rb") as whole:
+                entry = media_types.ooxml_type(whole.read())
+            if entry is None:
+                _drop(partial)
+                raise UploadRefused(415, "type")
     except OSError as exc:
         if handle is not None:
             handle.close()

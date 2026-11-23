@@ -1502,6 +1502,8 @@ class PostGroupMedia(Project):
     kind: Literal["image", "voice", "file"] | None = None
     caption: str | None = Field(default=None, max_length=1000)
     check_only: bool = False
+    # Step 24.2d (7.8.12c "九"): a document's title and body, exit-checked with check_only only.
+    text: str | None = Field(default=None, max_length=262144)
 
 
 class PostGroupReply(Project):

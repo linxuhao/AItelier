@@ -373,7 +373,7 @@ test('the media tools are accepted by the pinned DSH defineTool', async t => {
   const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
   registerMediaTools({ tools: { register: tool => names.push(tool.name) } }, { ctx: {}, defineTool, jsonOutput, HarnessError: Error,
     media: {}, catalog: {}, turns: {}, channels: undefined, ledger: {} });
-  assert.deepEqual(names, ['media_call', 'send_media', 'read_document']);
+  assert.deepEqual(names, ['media_call', 'send_media', 'read_document', 'make_document']);
 });
 
 // --- step 24.2b (design-steward 7.8.12a "出站", 7.8.18 适配器与插件): an owner turn's send_media is

@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 from api import authz
 from api.dependencies import get_db_manager
 from api.main import app
-from core import cf_access, dsh_driver, media_library
+from core import cf_access, dsh_driver, media_library, media_types
 from core import state_conversation_uploads as uploads
 from core.drivers import DriverRegistry
 from core.dsh_driver import DshDrivers, load_roles
@@ -324,6 +324,22 @@ def test_the_count_is_read_from_the_table_and_only_covers_the_last_hour(world, c
     r = upload(client, PNG)
     assert refusal(r) == (429, "rate_limited"), r.text
     assert 55 <= int(r.headers["Retry-After"]) <= 61
+
+
+def test_an_office_document_is_judged_by_its_zip_directory_once_all_of_it_is_in(world, client):
+    """Step 24.2d (design-steward 7.8.12c "六"): a docx, xlsx or pptx is a file of its own mime,
+    whatever it is named; a macro file, two main parts or an OLE file is 415 with nothing staged."""
+    from tests.unit.office_zips import ooxml, samples, zip_from
+    for ext, name in (("docx", "合同.docx"), ("xlsx", "x.png"), ("pptx", "slides.pptx")):
+        r = upload(client, chunked(ooxml(ext), 64), name=name)
+        assert r.status_code == 200, r.text
+        assert r.json()["kind"] == "file" and r.json()["mime"] == media_types.identify(ooxml(ext))["mime"], r.json()
+    before = staged(world)
+    for about in ("a docm: a macro project anywhere", "two main parts", "an encrypted entry"):
+        body = zip_from(next(s for s in samples() if s["about"] == about))
+        assert refusal(upload(client, chunked(body, 64), name="x.docx")) == (415, "type"), about
+    assert refusal(upload(client, bytes.fromhex("d0cf11e0a1b11ae1") + b"\0" * 600, name="old.doc")) == (415, "type")
+    assert staged(world) == before
 
 
 def test_a_refused_upload_is_not_counted(world, client):

@@ -139,6 +139,8 @@ GROUP_LIMITS = MappingProxyType({
 # A group's name (7.7.9): required, at most this many characters after NFKC, unlike every bound
 # group's on any channel; a group bound before names were required is given DEFAULT_GROUP_LABEL.
 GROUP_LABEL_CHARS = 20
+# Step 24.2d (7.8.12c "九"): the most UTF-8 a make_document's text check carries (post_group_media).
+TEXT_CHECK_BYTES = 262144
 DEFAULT_GROUP_LABEL = "家庭群"
 # The outbound kinds group_sends_per_hour counts - the one list send_refusal reads, so every
 # path that posts one of them is held to the same budget.
@@ -1187,7 +1189,7 @@ class StateGroups:
             self._log("notice posted", channel, group, None, len(body.encode("utf-8")))
         return out
 
-    def post_group_media(self, project_id, request_key, turn, kind=None, caption=None, check_only=False):
+    def post_group_media(self, project_id, request_key, turn, kind=None, caption=None, check_only=False, text=None):
         """Step 24.2 (design-steward 7.8.12, 7.8.9): one file the steward's send_media sends
         into the group of the turn its HOST names (the recorded audience; never a group the
         call names). In one transaction: the turn is the recorded one and its group is bound
@@ -1203,13 +1205,24 @@ class StateGroups:
         file: no outbound row, no budget used, nothing recorded for request_key (the send
         itself is judged again, authoritatively, by the call without check_only). kind may be
         omitted (a url's type is known only once fetched). A live code in the caption is
-        retired here as by every exit check: the model has already seen it."""
+        retired here as by every exit check: the model has already seen it.
+
+        text (step 24.2d, design-steward 7.8.12c "九"; check_only only, at most TEXT_CHECK_BYTES
+        of UTF-8): the title and body of a file the steward's make_document is about to make in
+        this group's turn, run through the same exit check before anything is made - its reason
+        answers withheld like a caption's. Nothing of it is stored."""
         if not (check_only and kind is None) and kind not in media_types.KINDS:
             raise StateGraphError("invalid_request: kind is image, voice or file")
+        if text is not None:
+            if not check_only:
+                raise StateGraphError("invalid_request: text is checked only with check_only")
+            _require_utf8("text", text, "invalid_request")
+            if len(text.encode("utf-8")) > TEXT_CHECK_BYTES:
+                raise StateGraphError(f"invalid_request: text is at most {TEXT_CHECK_BYTES} bytes")
         if caption is not None:
             _require_utf8("caption", caption, "invalid_request")
             caption = caption.strip() or None
-        request_hash = _hash([turn, kind, caption])
+        request_hash = _hash([turn, kind, caption] + ([text] if text is not None else []))
         moment = _now()
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
@@ -1219,6 +1232,8 @@ class StateGroups:
             row = self.group_turn(conn, turn, "media_group_turn_only")
             channel, group = row["channel"], row["group_ref"]
             reason = self.exit_check(conn, caption, moment) if caption else None
+            if reason is None and text:
+                reason = self.exit_check(conn, text, moment)
             refused = "withheld" if reason else self.send_refusal(conn, channel, group, moment)
             if check_only:
                 out = {"refused": refused, **({"reason": reason} if reason else {})} if refused else {"may_post": True}

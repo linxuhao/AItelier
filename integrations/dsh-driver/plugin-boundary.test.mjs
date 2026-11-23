@@ -47,6 +47,8 @@ import '../dsh-director/test/media.test.mjs';
 import '../dsh-director/test/media-gc.test.mjs';
 import '../dsh-director/test/read-document.test.mjs';
 import '../dsh-director/test/group-wake-images.test.mjs';
+import '../dsh-director/test/office.test.mjs';
+import '../dsh-director/test/make-document.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';
 import { adapterVocabulary, adapterPattern } from './plugin-vocabulary.mjs';
 

@@ -1085,7 +1085,7 @@ async def fetch(conn_id: str, request: Request, url: str = ""):
                 return _fetch_refused(502, "redirect_other_origin")
         except httpx.HTTPError:
             return _fetch_refused(502, "upstream_unavailable")
-    kind = media_types.sniff(bytes(body[:64]))
+    kind = media_types.identify(bytes(body))  # an OOXML file by its zip directory (7.8.12c "六")
     if kind is None:
         return _fetch_refused(415, "type")
     logger.info("steward gateway: fetch %s mime=%s bytes=%d", conn_id, kind["mime"], len(body))

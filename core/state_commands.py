@@ -1470,6 +1470,10 @@ class GroupMediaNotice(Project):
     notice: Literal["on", "off"]
     phase: Literal["check", "sent", "failed"]
     channel_down: bool = False
+    reason: str | None = Field(
+        default=None, max_length=64, json_schema_extra=_omit_default,
+        description="Optional: the failed send's own short code (for example room_not_bound), never "
+                    "free text from the room.")
 
 
 class GroupMediaPurgeReceipt(Request):

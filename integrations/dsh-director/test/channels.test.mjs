@@ -5,7 +5,7 @@
  *  host.d.ts `channels` shape. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, channelReplies, channelText, MORE, alertText } from '../lib/channels.mjs';
+import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, GROUP_LIMITS, channelReplies, channelText, MORE, alertText, trimRecent } from '../lib/channels.mjs';
 import { createMediaLibrary } from '../lib/media.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { PROPOSAL_KINDS } from '../lib/proposals.mjs';
@@ -2501,16 +2501,18 @@ const png = (width = 640, height = 480) => {
   return head;
 };
 
-/** A group world with the real media library: the host serves one room, `r1`. */
-function groupMediaWorld({ relay, list } = {}) {
+/** A group world with the real media library: the host serves one room, `r1`, whose media
+ *  switch is `keep` (design/steward-group-media.md, owner rulings 2026-11-23). */
+function groupMediaWorld({ relay, list, keep = 'on' } = {}) {
   const fake = fakeHost(), relayed = [], woken = [], logs = [], sent = [], bound = [];
   const dir = mkdtempSync(join(tmpdir(), 'dsh-group-media-'));
   const library = createMediaLibrary({ root: join(dir, 'media') });
+  const protects = [];
   const media = { ingest: (meta, open) => library.ingest(meta, open), resolve: async ref => library.lookup(ref),
-    setProtected: fn => library.setProtected(fn) };
+    setProtected: fn => { protects.push(fn); library.setProtected(fn); }, withdraw: ref => library.withdraw(ref) };
   const groups = {
     list: list ?? (async () => ({ owner_refs: { wechat: 'wxid_owner' },
-      groups: [{ channel: 'wechat', group_ref: 'r1', label: '家', mention_prefix: '@管家' }] })),
+      groups: [{ channel: 'wechat', group_ref: 'r1', label: '家', mention_prefix: '@管家', media_keep: keep }], media_purges: [] })),
     relay: async message => { relayed.push(message);
       return relay ?? { message_id: `g-${relayed.length}`, sender_role: 'member', sender_label: '成员甲' }; },
     bind: async () => ({ bound: true }),
@@ -2525,7 +2527,7 @@ function groupMediaWorld({ relay, list } = {}) {
     setRooms: async () => {} });
   channels.setGroupWake(async wake => { woken.push(wake); });
   channels.ready();
-  return { channels, calls: fake.calls, bound, relayed, woken, logs, sent, library, unregister, dir,
+  return { channels, calls: fake.calls, bound, relayed, woken, logs, sent, library, unregister, dir, protects,
     store: (messageRef, extra = {}) => channels.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_m1', messageRef,
       index: 0, kind: 'image', ...extra }, async () => png()),
     inbound: (messageRef, extra = {}) => channels.service.inbound({ channel: 'wechat', senderRef: 'wxid_m1', messageRef,
@@ -2535,13 +2537,14 @@ function groupMediaWorld({ relay, list } = {}) {
 test('group media: an un-mentioned message\'s file is stored for its room and recorded in the group, and starts no turn; the same group\'s mention starts exactly one', async () => {
   const w = groupMediaWorld();
   // What the channel plugin does first (index.mjs deliver -> storeMedia), and then inbound.
-  const stored = await w.store('g-a1', { conversationRef: 'r1' });
+  const stored = await w.store('g-a1', { conversationRef: 'r1', asked: false });
   assert.match(stored.ref, /^m_[0-9a-f]{16}$/);
   assert.equal(w.library.lookup(stored.ref).audience, 'group:wechat:r1', 'kept for that room, never the owner\'s');
+  assert.equal(w.library.lookup(stored.ref).kept, true, 'an un-mentioned file is a kept medium (one day, that room\'s turns only)');
   assert.deepEqual(await w.inbound('g-a1', { asked: false, attachments: [{ kind: 'image', ref: stored.ref }] }), { accepted: true });
   assert.deepEqual(w.relayed, [{ channel: 'wechat', groupRef: 'r1', senderRef: 'wxid_m1', messageRef: 'g-a1', text: '[图片]',
-    at: w.relayed[0].at, attachments: [{ kind: 'image', ref: stored.ref, mime: 'image/png', size: 33 }] }],
-  'recorded in the group: the placeholder line and the metadata the backend keeps in attachments_json');
+    at: w.relayed[0].at, attachments: [{ kind: 'image', ref: stored.ref, mime: 'image/png', size: 33 }], kept: true }],
+  'recorded in the group as kept: the placeholder line and the metadata the backend keeps in attachments_json');
   assert.equal(w.woken.length, 0, 'no turn for a message that does not call the steward');
   assert.deepEqual(w.sent, [], 'and nothing said back into the room');
   // The same group's @-message, after it: exactly one turn, carrying what the steward is asked.
@@ -2575,4 +2578,223 @@ test('group media: a room this host does not serve is refused before any byte is
   assert.deepEqual(await down.store('g-z', { conversationRef: 'r1' }), { refused: 'unavailable' });
   assert.deepEqual(down.library.rows, [], 'nothing stored against a room nobody vouched for');
   w.unregister(); down.unregister();
+});
+
+
+// --- the owner's rulings of 2026-11-23 (design/steward-group-media.md, "Owner rulings"): the
+// per-group media switch, default off; the notice before "on"; the purge with its receipt ------
+
+test('switch (d): a bound group with its switch off fetches nothing for an un-mentioned file - bound alone stores nothing', async () => {
+  const w = groupMediaWorld({ keep: 'off' });
+  let opened = false;
+  assert.deepEqual(await w.channels.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'g-off', index: 0,
+    kind: 'image', conversationRef: 'r1', asked: false }, async () => { opened = true; return png(); }), { refused: 'unsupported' });
+  assert.equal(opened, false, 'not one byte fetched');
+  assert.deepEqual(w.library.rows, []);
+  assert.ok(w.logs.some(([event, fields]) => event === 'channel_media_refused' && fields.reason === 'group_media_keep_off'));
+  // R5: a mention keeps today's rule - a served room stores it, as an addressed medium (no kept).
+  const addressed = await w.store('g-at', { conversationRef: 'r1', asked: true });
+  assert.match(addressed.ref, /^m_[0-9a-f]{16}$/);
+  assert.equal(w.library.lookup(addressed.ref).kept, undefined, 'an addressed medium is not kept');
+  w.unregister();
+});
+
+test('switch: with it on an un-mentioned file is stored kept; a relay that refuses takes it back at once, a duplicate takes nothing', async () => {
+  const x = groupMediaWorld({ relay: { refused: 'media_keep_off' } });
+  const stored = await x.store('g-k1', { conversationRef: 'r1', asked: false });
+  assert.equal(x.library.lookup(stored.ref).kept, true);
+  assert.deepEqual(await x.inbound('g-k1', { asked: false, attachments: [{ kind: 'image', ref: stored.ref }] }),
+    { accepted: false, reason: 'media_keep_off' });
+  assert.equal(x.relayed[0].kept, true, 'relayed as kept');
+  assert.equal(x.library.lookup(stored.ref), undefined, 'the stored row is withdrawn at once');
+  assert.deepEqual(x.library.rows, []);
+  assert.deepEqual(x.woken, [], 'no turn'); assert.deepEqual(x.sent, [], 'no line into the room');
+  x.unregister();
+  const d = groupMediaWorld({ relay: { duplicate: true, message_id: 'g-1', accepted: false } });
+  const again = await d.store('g-k2', { conversationRef: 'r1', asked: false });
+  assert.deepEqual(await d.inbound('g-k2', { asked: false, attachments: [{ kind: 'image', ref: again.ref }] }), { accepted: true, duplicate: true });
+  assert.ok(d.library.lookup(again.ref), 'a duplicate takes nothing back');
+  // An un-mentioned message without files has nothing to keep: not relayed at all.
+  assert.deepEqual(await d.inbound('g-k3', { asked: false, text: '随便说一句' }), { accepted: false, reason: 'nothing_kept' });
+  assert.equal(d.relayed.length, 1);
+  d.unregister();
+});
+
+test('switch: the library\'s protect set never holds a group\'s ref - neither the day nor a purge is ever held back', async () => {
+  const w = groupMediaWorld();
+  const stored = await w.store('g-p1', { conversationRef: 'r1', asked: false });
+  await w.inbound('g-p1', { asked: false, attachments: [{ kind: 'image', ref: stored.ref }] });
+  const held = w.protects.flatMap(fn => [...fn()]);
+  assert.ok(!held.includes(stored.ref), JSON.stringify(held));
+  w.unregister();
+});
+
+/** A world for the media pass: a scripted backend (list, notices, receipts, expiry), the real
+ *  library, and one WeChat channel whose connection and sends a test can change. */
+function switchWorld({ connected = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-media-switch-'));
+  const library = createMediaLibrary({ root: join(dir, 'media') });
+  const media = { ingest: (meta, open) => library.ingest(meta, open), resolve: async ref => library.lookup(ref),
+    setProtected: fn => library.setProtected(fn), withdraw: ref => library.withdraw(ref),
+    purgeKept: audience => library.purgeKept(audience), keptAudiences: async () => library.keptAudiences() };
+  const calls = [], logs = [], sent = [];
+  const state = { connected, sendFails: false, listFails: false, groups: [], media_purges: [], answers: {} };
+  const answer = (name, a) => (state.answers[name] ?? (() => ({})))(a);
+  const groups = {
+    list: async () => { calls.push(['list']); if (state.listFails) throw new Error('ECONNREFUSED');
+      return state.malformed ? { groups: state.groups } : JSON.parse(JSON.stringify({ owner_refs: { wechat: 'wxid_owner' },
+        groups: state.groups, media_purges: state.media_purges })); },
+    relay: async m => { calls.push(['relay', m]); return { message_id: 'g-1', sender_role: 'member', sender_label: '成员甲' }; },
+    bind: async () => ({}),
+    mediaNotice: async a => { calls.push(['notice', a]); return answer(a.phase, a); },
+    recordPurge: async a => { calls.push(['record', a]); return answer('record', a); },
+    expireMedia: async () => { calls.push(['expire']); return { deleted: 0 }; },
+  };
+  const channels = createOwnerChannels({ host: fakeHost().host, groups, media, owedFile: join(dir, 'owed.json'),
+    log: (event, fields) => logs.push([event, fields]) });
+  channels.service.register({ name: 'wechat', status: () => ({ connected: state.connected }), send: async () => ({}),
+    sendGroup: async (room, line) => { sent.push({ room, line }); if (state.sendFails) throw new Error('bridge 502'); return {}; },
+    setRooms: async () => {} });
+  channels.ready();
+  const group = (ref, extra = {}) => ({ channel: 'wechat', group_ref: ref, label: ref, mention_prefix: '@管家', media_keep: 'off', ...extra });
+  const keep = (ref, messageRef, bytes = png()) => library.ingest({ channel: 'wechat', messageRef, index: 0, audience: `group:wechat:${ref}`,
+    source: 'in', kept: true }, async () => bytes);
+  const named = name => calls.filter(([n]) => n === name).map(([, a]) => a);
+  return { dir, library, channels, calls, logs, sent, state, group, keep, named,
+    settle: () => new Promise(resolve => setTimeout(resolve, 30)), pass: () => channels.mediaPass(), stop: () => channels.stop() };
+}
+
+test('notice: the switch is on only after the line went out - check, send, then commit, exactly once; a lost commit is retried without a second send', async () => {
+  const w = switchWorld();
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
+  w.state.answers.check = () => ({ may_post: true, text: 'ON-NOTICE' });
+  let commits = 0;
+  w.state.answers.sent = () => { commits += 1; if (commits === 1) throw new Error('HTTP 502'); return { sent: true, state: 'on' }; };
+  await w.pass();
+  assert.deepEqual(w.named('notice').map(a => a.phase), ['check', 'sent'], 'the check first, the commit only after the send');
+  assert.deepEqual(w.sent, [{ room: 'r1', line: 'ON-NOTICE' }], 'the backend\'s words, sent once');
+  // The commit's answer was lost: the next pass commits again - and sends nothing.
+  await w.pass();
+  assert.deepEqual(w.named('notice').map(a => a.phase), ['check', 'sent', 'sent']);
+  assert.equal(w.sent.length, 1, 'never a second line for one epoch');
+  assert.deepEqual(w.named('notice')[2], { channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'sent' });
+  w.state.groups = [w.group('r1', { media_keep: 'on' })];
+  await w.pass();
+  assert.equal(w.named('notice').length, 3, 'nothing owed, nothing asked');
+  w.stop();
+});
+
+test('notice: refusals decided before a send spend no attempt - a budget refusal sends nothing; a disconnected channel is told as channel_down and nothing is sent', async () => {
+  const w = switchWorld({ connected: false });
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
+  w.state.answers.check = a => (a.channelDown ? { refused: 'channel_down' } : { refused: 'group_send_budget' });
+  await w.pass();
+  assert.deepEqual(w.named('notice'), [{ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'check', channelDown: true }]);
+  assert.deepEqual(w.sent, []);
+  w.state.connected = true;
+  await w.pass();
+  assert.deepEqual(w.named('notice').map(a => [a.phase, a.channelDown ?? false]), [['check', true], ['check', false]]);
+  assert.deepEqual(w.sent, [], 'a budget refusal sends nothing');
+  assert.ok(!w.named('notice').some(a => a.phase === 'failed'), 'and spends no attempt');
+  w.stop();
+});
+
+test('notice: a send that fails is reported failed, once per attempt; three failures are three answers', async () => {
+  const w = switchWorld();
+  await w.settle();
+  w.calls.length = 0;
+  w.state.sendFails = true;
+  w.state.answers.check = () => ({ may_post: true, text: 'ON-NOTICE' });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: attempt } })];
+    await w.pass();
+  }
+  assert.deepEqual(w.named('notice').filter(a => a.phase === 'failed').map(a => a.attempts), [0, 1, 2]);
+  assert.ok(!w.named('notice').some(a => a.phase === 'sent'), 'never committed as sent');
+  w.stop();
+});
+
+test('purge: an off group\'s kept rows are purged and the receipt recorded BEFORE its off-notice is checked; an on group\'s stay', async () => {
+  const w = switchWorld();
+  const a1 = await w.keep('r1', 'a1'), a2 = await w.keep('r1', 'a2', png(7, 7)), b1 = await w.keep('r2', 'b1');
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'off', epoch: 'E2', attempts: 0 } }), w.group('r2', { media_keep: 'on' })];
+  w.state.media_purges = [{ channel: 'wechat', group_ref: 'r1', epoch: 'E2' }];
+  let recorded = false;
+  w.state.answers.record = () => { recorded = true; return { recorded: true, settled: true }; };
+  w.state.answers.check = () => (recorded ? { may_post: true, text: 'OFF-NOTICE' } : { refused: 'purge_owed' });
+  w.state.answers.sent = () => ({ sent: true, state: 'off' });
+  await w.pass();
+  assert.equal(w.library.lookup(a1.ref), undefined); assert.equal(w.library.lookup(a2.ref), undefined);
+  assert.ok(w.library.lookup(b1.ref), 'the group whose switch is on keeps its rows');
+  const order = w.calls.map(([name, a]) => name === 'notice' ? `notice:${a.phase}` : name).filter(n => n !== 'list');
+  assert.deepEqual(order.slice(0, 3), ['record', 'notice:check', 'notice:sent'], 'the receipt first, then the off-notice');
+  assert.deepEqual(w.named('record'), [{ channel: 'wechat', groupRef: 'r1', epoch: 'E2',
+    receipt: { rows_before: 2, rows_after: 0, files_unlinked: 1, files_shared: 1, bytes_freed: 33 } }],
+  'two rows; the first file is shared with r2\'s kept copy of the same bytes and stays, the second is unlinked');
+  assert.deepEqual(w.sent, [{ room: 'r1', line: 'OFF-NOTICE' }]);
+  w.stop();
+});
+
+test('purge: a failed or malformed groups.list() purges nothing; an unlisted group\'s kept rows are purged without a receipt', async () => {
+  const w = switchWorld();
+  const kept = await w.keep('r9', 'x1');
+  await w.settle();
+  w.state.listFails = true;
+  await w.pass();
+  assert.ok(w.library.lookup(kept.ref), 'a read that failed is never "every group is off"');
+  w.state.listFails = false; w.state.malformed = true;
+  await w.pass();
+  assert.ok(w.library.lookup(kept.ref), 'nor is a read without media_purges');
+  w.state.malformed = false;
+  w.calls.length = 0;
+  await w.pass();
+  assert.equal(w.library.lookup(kept.ref), undefined, 'r9 is listed by nobody: its kept rows go');
+  assert.deepEqual(w.named('record'), [], 'no receipt is owed for it');
+  w.stop();
+});
+
+test('purge: a receipt whose record was not answered is not lost - the next pass sends what was really deleted', async () => {
+  const w = switchWorld();
+  await w.keep('r1', 'a1');
+  await w.settle();
+  w.state.groups = [w.group('r1')];
+  w.state.media_purges = [{ channel: 'wechat', group_ref: 'r1', epoch: 'E3' }];
+  let first = true;
+  w.state.answers.record = () => { if (first) { first = false; throw new Error('HTTP 502'); } return { recorded: true }; };
+  await w.pass();
+  await w.pass();
+  assert.deepEqual(w.named('record').map(a => a.receipt.rows_before), [1, 1], 'the retry still says one row');
+  w.stop();
+});
+
+test('expiry: the backend\'s kept rows are swept once an hour from the pass', async () => {
+  const w = switchWorld();
+  await w.settle();
+  const before = w.named('expire').length;
+  assert.equal(before, 1, 'the pass at ready swept once');
+  await w.pass();
+  assert.equal(w.named('expire').length, 1, 'not again within the hour');
+  w.stop();
+});
+
+test('wake: the twenty kept entries survive when the answered pairs overflow recentChars; keptChars is their backstop', () => {
+  const pairs = Array.from({ length: 30 }, (_, i) => ({ at: `2026-11-23T08:${String(i).padStart(2, '0')}:00Z`, sender: '成员甲',
+    q: '问'.repeat(40), a: '答'.repeat(40) }));
+  const kept = Array.from({ length: 20 }, (_, i) => ({ at: `2026-11-23T09:${String(i).padStart(2, '0')}:00Z`, sender: '成员乙', kept: true,
+    attachments: [{ kind: 'image', ref: `m_${String(i).padStart(16, '0')}`, mime: 'image/jpeg', size: 1234 }] }));
+  const recent = trimRecent([...pairs.slice(0, 10), ...kept, ...pairs.slice(10)]);
+  assert.equal(recent.filter(e => e.kept).length, 20, 'every kept entry stays');
+  assert.ok(JSON.stringify(recent.filter(e => !e.kept)).length <= GROUP_LIMITS.recentChars);
+  assert.ok(recent.filter(e => !e.kept).length < 30, 'the oldest pairs went');
+  assert.deepEqual(recent.filter(e => !e.kept).at(-1), pairs.at(-1), 'the newest pair stays');
+  const tight = trimRecent(kept, { ...GROUP_LIMITS, keptChars: 600 });
+  assert.ok(tight.length < 20 && JSON.stringify(tight).length <= 600);
+  assert.deepEqual(tight.at(-1), kept.at(-1), 'past keptChars the oldest kept go first');
+  assert.equal(GROUP_LIMITS.keptChars, 4000);
 });

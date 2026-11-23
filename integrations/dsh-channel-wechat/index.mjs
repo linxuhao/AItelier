@@ -113,7 +113,9 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
    *  too_large or gone, or that has no media_id, is refused without storeMedia; the rest are
    *  stored one by one. A group event's are stored with its room (`conversationRef`), so the
    *  library keeps them for that room (design/steward-group-media.md, the owner's ruling of
-   *  2026-11-22) whether or not the message calls the steward. Returns 'unbound' when storeMedia
+   *  2026-11-22), with the bridge's `asked` when it gave one: an un-mentioned message's files are
+   *  kept only while that group's media switch is on (the host decides, owner rulings
+   *  2026-11-23); `asked` is never invented when the bridge omits it. Returns 'unbound' when storeMedia
    *  answers channel_sender_not_bound (the rest are not fetched); throws when an answer is
    *  transient. */
   async function storeAttachments(event, items, resolved) {
@@ -128,6 +130,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       }
       const meta = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, index, kind: item.kind,
         ...(event.type === 'group_message' && event.room_ref ? { conversationRef: event.room_ref } : {}),
+        ...(event.type === 'group_message' && typeof event.asked === 'boolean' ? { asked: event.asked } : {}),
         ...(typeof item.mime === 'string' && item.mime ? { mime: item.mime } : {}),
         ...(typeof item.name === 'string' && item.name ? { name: item.name } : {}) };
       const answer = await ownerChannels.storeMedia(meta, openMedia(item.media_id));

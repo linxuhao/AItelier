@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
-import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
+import { createOwnerChannels, GROUP_LIMITS, trimRecent } from './lib/channels.mjs';
 import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
@@ -408,8 +408,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     let label;
     try { label = groupWakeName(group); }
     catch (error) { ctx.logger.warn('group wake refused ' + JSON.stringify({ channel, group_ref: groupRef, message_id })); throw error; }
-    const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
-    while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
+    // The answered exchanges are cut to recentChars, oldest first; the group's kept media (up to
+    // twenty of the last day, each with its sender) are never pushed out by them
+    // (design/steward-group-media.md section 7).
+    const recent = trimRecent((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? []);
     const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
       ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent: withAttachmentLines(recent) } };
     ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],

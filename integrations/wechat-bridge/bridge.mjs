@@ -526,14 +526,17 @@ export function groupBindAttempt(text) {
 /** The old base64 regex (`^(?:[A-Za-z0-9+/]{4})*(?:..==|...=)?$`) recursed once per four
  *  characters and threw RangeError past about 4,473,912 characters, dropping the whole
  *  message. This accepts exactly the same strings in one linear pass and without copying:
- *  a multiple of four, `[A-Za-z0-9+/]` throughout, and `=` only as a trailing run of at most
- *  two. No regex scans the (possibly huge) encoded input. */
-function isBase64Content(value) {
+ *  a multiple of four, `[A-Za-z0-9+/]` throughout, and at the end either nothing, a single
+ *  `=`, or `==` - and `==` only when the last two characters are both `=`. No regex scans
+ *  the (possibly huge) encoded input. */
+export function isBase64Content(value) {
   if (typeof value !== 'string' || value.length % 4 !== 0) return false;
   const length = value.length;
+  // One trailing `=` is padding; a second one only when the last character is `=` too, so a
+  // string shaped `<four data chars>=<one non-`=` char>`, such as `AAAAAA=A`, is not padding.
   let padding = 0;
   if (length && value.charCodeAt(length - 1) === 0x3d) padding = 1;
-  if (length > 1 && value.charCodeAt(length - 2) === 0x3d) padding = 2;
+  if (padding && length > 1 && value.charCodeAt(length - 2) === 0x3d) padding = 2;
   // With length a multiple of four, padding 1 leaves three data characters and padding 2
   // leaves two: exactly the `{3}=` / `{2}==` forms the regex accepted (plus the empty string).
   for (let i = 0; i < length - padding; i++) {

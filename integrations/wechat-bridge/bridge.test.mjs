@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS, MEDIA_LIMITS, MEDIA_FETCH, MEDIA_SEND, mediaOf,
   sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError, RESUME_LIMITS, accountRecord, ACCOUNT_FILE,
-  RING_SIZE, GROUP_RING_SIZE, STRANGER_RING_SIZE, MEDIA_STORE_BYTES, MEDIA_STORE_DIR, groupMediaSenderProbe } from './bridge.mjs';
+  RING_SIZE, GROUP_RING_SIZE, STRANGER_RING_SIZE, MEDIA_STORE_BYTES, MEDIA_STORE_DIR, groupMediaSenderProbe, isBase64Content } from './bridge.mjs';
 
 // The values of Wechaty's own enums (wechaty-puppet types) that the bridge reads.
 const types = { Message: { Unknown: 0, Attachment: 1, Audio: 2, Emoticon: 5, Image: 6, Text: 7, Video: 15 }, Contact: { Unknown: 0, Individual: 1, Official: 2 },
@@ -959,6 +959,12 @@ const probeLines = message => {
   return lines;
 };
 
+// The linear validator the probe uses replaced this regex, and the suite keeps the regex as the
+// independent expectation: whatever the linear pass says about a string, the regex said first.
+const OLD_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+// The characters whose agreement is enumerated: the whole base64 alphabet plus the pad.
+const BASE64_CHARS = ['A', 'Z', 'a', '0', '+', '/', '='];
+
 test('group media sender probe: a wxid prefix renders its shape and a digest the test computes', () => {
   const prefix = 'wxid_fixture:\n';
   const content = prefix + '<msg><img aeskey="SECRET" /></msg>';
@@ -976,6 +982,38 @@ test('group media sender probe: missing, empty and non-base64 content all render
   nonBase64.payload.content = '<< not base64! >>';
   assert.deepEqual([probeLines(probeMessage()), probeLines(probeMessage('')), probeLines(nonBase64)],
     [[line], [line], [line]]);
+});
+
+test('group media sender probe: the linear base64 validator agrees with the regex on every short string', () => {
+  const mismatches = [];
+  let compared = 0;
+  const compare = value => {
+    compared++;
+    // The expectation is the pre-fix regex, never the validator's own answer.
+    if (isBase64Content(value) !== OLD_BASE64.test(value)) mismatches.push(value);
+  };
+  const walk = prefix => {
+    compare(prefix);
+    if (prefix.length === 6) return;
+    for (const char of BASE64_CHARS) walk(prefix + char);
+  };
+  walk('');
+  // Longer strings, so the last block's padding is measured as well: a two-character pad is only
+  // padding when the last character is '=' too, which is what `<data>=<other>` breaks.
+  const boundaries = ['AAAAAA=A', 'AAAAAA=Z', 'AAA=====', 'A=======', 'AA===AAA', 'AAAAAA==', 'AAA====A', 'AAAAAAAA'];
+  for (const value of boundaries) compare(value);
+  assert.equal(compared, 137257 + boundaries.length, 'every string of length 0..6 was compared, plus the boundary list');
+  assert.deepEqual(mismatches, [],
+    `${compared} strings compared against ${OLD_BASE64}: the linear validator must accept exactly what the regex did`);
+});
+
+test('group media sender probe: content shaped `<data>=<other>` is not base64 and prints contentBytes=0', () => {
+  const line = 'group media sender probe: type=6 senderIsRoom=true contentBytes=0 prefixBytes=0 '
+    + 'prefixShape=empty prefixHash=- wxidTokens=0 chatroomTokens=0';
+  const overAccepted = probeMessage();
+  overAccepted.payload.content = 'AAAAAA=A';
+  assert.equal(OLD_BASE64.test('AAAAAA=A'), false, 'the regex never read `AAAAAA=A` as padding');
+  assert.deepEqual(probeLines(overAccepted), [line]);
 });
 
 test('group media sender probe: XML-first content has no prefix and an other shape, with counted tokens only', () => {

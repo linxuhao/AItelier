@@ -94,6 +94,24 @@ Measured on main `25f9ea72e15a`, and deliberately not re-decided here:
 * WeChat's own copy may be gone by the time the later question arrives, which is why the
   answer path reads the library and never a fresh fetch.
 
+## Deployment precondition (measured 2026-11-23)
+
+The running bridge container `aitelier-wechat-bridge` carries image
+`aitelier-wechat-bridge:local`, whose image was created 2026-11-22T20:52:33Z. The fork patch
+that widens the native plugin's incoming message types - the one that splits an
+`@chatroom` sender into talker and room and supplies the room payloads Wechaty's
+`Room.ready()` waits for - was committed 2026-11-22T21:25:04Z (`c55f520bb6`,
+`integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch:658`). The running
+image therefore predates it, and whether a bound room's non-text message ever reaches
+`relayGroup` in production is **unmeasured**. The unit-level arms below do not need it;
+the live witness does.
+
+Making the feature live takes one rebuild of that image and one recreate of its
+container, and a recreate loses the WeChat login - so it needs the owner's QR scan, the
+same window already owed for the 1:1 image CDN refusal (`iss-c8597b02f70d4640`). Until that
+window, this design is measured at the unit level only, and no answer here claims the
+feature is live.
+
 ## Open questions this delta leaves to measurement
 
 * The group record path (`groupInbound`) has not been read for whether it writes

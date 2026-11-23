@@ -1,5 +1,5 @@
 {
- "_about": "One real steward wake's driver_inbox (wait_for_state_change), ids and times renamed: written by tests/unit/test_driver_inbox_sender_kind.py, read by integrations/dsh-driver/steward-wake-contract.test.mjs.",
+ "_about": "One real steward wake's driver_inbox (wait_for_state_change), ids and times renamed: checked against a live wake by tests/unit/test_driver_inbox_sender_kind.py (regenerate by hand from the rows it prints on a mismatch), read by integrations/dsh-driver/steward-wake-contract.test.mjs.",
  "driver_inbox": [
   {
    "delivery_id": "delivery-director-letter",

@@ -93,6 +93,17 @@ def test_a_letter_a_host_notice_a_steward_reply_and_a_drivers_note_are_driver(wo
     assert _inbox(world.steward)[note["message_id"]]["sender_kind"] == "driver"
 
 
+def test_a_run_log_message_from_the_owner_stays_driver(world):
+    """The run-log page writes with send_driver_message as the owner: no sender driver and no
+    channel, like a host notice, and the conversation read does not show it. It is not a
+    conversation turn, so it opens no person's turn and names no requester (a choice, pinned)."""
+    bind(world)
+    sent = execute(world.owner, "send_driver_message", {
+        "request_key": "runlog-1", "target_driver_id": world.steward_row["driver_id"],
+        "subject": "Message from the run log", "body": "check the build"}, allow_write=True)
+    assert _inbox(world.steward)[sent["message_id"]]["sender_kind"] == "driver"
+
+
 def test_the_inbox_and_the_conversation_read_agree_on_who_wrote_each_owner_message(world):
     ids = _scenario(world)
     conversation = {m["message_id"]: m["sender_kind"] for m in execute(

@@ -517,6 +517,8 @@ PROSE_CONSTANT_EXEMPTIONS = {
         "SQL DDL for the drivers table",
     ("core/dsh_driver.py", "SCHEMA"):
         "SQL DDL for the per-project DSH driver table",
+    ("core/state_conversation_uploads.py", "SCHEMA"):
+        "SQL DDL for the conversation uploads table",
     ("core/state_attempts.py", "SCHEMA"):
         "SQL DDL schema for the attempt tables",
     ("core/state_lists.py", "SCHEMA"):

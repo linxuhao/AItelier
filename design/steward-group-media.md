@@ -94,23 +94,25 @@ Measured on main `25f9ea72e15a`, and deliberately not re-decided here:
 * WeChat's own copy may be gone by the time the later question arrives, which is why the
   answer path reads the library and never a fresh fetch.
 
-## Deployment precondition (measured 2026-11-23)
+## Deployment precondition (measured 2026-11-23; corrects a claim I first made from timestamps)
 
-The running bridge container `aitelier-wechat-bridge` carries image
-`aitelier-wechat-bridge:local`, whose image was created 2026-11-22T20:52:33Z. The fork patch
-that widens the native plugin's incoming message types - the one that splits an
-`@chatroom` sender into talker and room and supplies the room payloads Wechaty's
-`Room.ready()` waits for - was committed 2026-11-22T21:25:04Z (`c55f520bb6`,
-`integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch:658`). The running
-image therefore predates it, and whether a bound room's non-text message ever reaches
-`relayGroup` in production is **unmeasured**. The unit-level arms below do not need it;
-the live witness does.
+The bridge container mounts only its token file: `/opt/wechat-bridge` (bridge.mjs, main.mjs,
+node_modules) is baked into the image `aitelier-wechat-bridge:local` (image created
+2026-11-22T20:52:33Z, the files in it dated 17:28). A change to `bridge.mjs` therefore does
+not reach production by merging, and not by restarting that container either: it takes one
+image rebuild and one container recreate, and a recreate loses the WeChat login, so it
+needs the owner's QR scan - the same window already owed for the 1:1 image CDN refusal
+(`iss-c8597b02f70d4640`).
 
-Making the feature live takes one rebuild of that image and one recreate of its
-container, and a recreate loses the WeChat login - so it needs the owner's QR scan, the
-same window already owed for the 1:1 image CDN refusal (`iss-c8597b02f70d4640`). Until that
-window, this design is measured at the unit level only, and no answer here claims the
-feature is live.
+I first wrote here that the running image predates the fork patch that widens the native
+plugin's incoming message types: the patch landed in this repository at 21:25:04Z
+(`c55f520bb6`) and the image was created at 20:52:33Z. That was an inference from
+timestamps and it is false. Grepping the running container's addon finds the fork's cause
+chain inside it - `CDN HTTP status` matches in
+`/opt/wechat-bridge/node_modules/wechaty-puppet-neo/native/linux-x64/neo.node`, while the
+text before the fork carried no cause at all - so the native side already has the fork.
+Whether a bound room's non-text message reaches `relayGroup` is therefore unmeasured
+rather than blocked; only a real group image, after this code lands, can settle it.
 
 ## Open questions this delta leaves to measurement
 

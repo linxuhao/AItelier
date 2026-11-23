@@ -579,13 +579,24 @@ class StateGroups:
                 **({"reminders_disabled": disabled} if row is not None else {})}
 
     def clear_group_messages(self, channel, group_ref):
+        """The owner's 清空记录: every record row of this group goes. While its media switch is
+        on, the kept media rows go with them, so the library's kept copies are owed a purge
+        (reason 'clear', design/steward-group-media.md section 6): the host's sweep deletes them
+        and records the receipt; the switch stays on and keeps its epoch. Off, any copy is
+        already under the purge its turn-off owed."""
         self.steward._owner()
         with self.store.transaction(write=True) as conn:
             row = self._live_group(conn, channel, group_ref)
             if row is None:
                 raise StateNotFound("group_not_bound")
-            deleted = conn.execute("DELETE FROM state_group_messages WHERE channel=? AND group_ref=?",
-                                   (channel, row["group_ref"])).rowcount
+            on = row["media_keep"] == "on"
+            kept = self._drop_kept(conn, channel, row["group_ref"]) if on else 0
+            deleted = kept + conn.execute("DELETE FROM state_group_messages WHERE channel=? AND group_ref=?",
+                                          (channel, row["group_ref"])).rowcount
+            if on:
+                conn.execute("UPDATE state_owner_groups SET media_purge_rows=CASE WHEN media_purge_reason IS NULL "
+                             "THEN ? ELSE media_purge_rows+? END, media_purge_reason=COALESCE(media_purge_reason,'clear') "
+                             "WHERE channel=? AND group_ref=?", (kept, kept, channel, row["group_ref"]))
         return {"cleared": deleted}
 
     def set_group_media_keep(self, channel, group_ref, on):
@@ -1242,7 +1253,9 @@ class StateGroups:
         (kind media_notice, the constant's words) and, at this epoch, on_pending -> on or
         off_notice -> off. An on-notice that went out after the owner turned the switch off
         (now 'off') makes it off_notice, so the group reads that it is off again. Any other
-        mismatch answers superseded and changes no state. Answered once per request_key.
+        mismatch answers superseded and changes no state. Answered once per request_key - except
+        an on-notice at its epoch while a purge is still owed: {refused: purge_owed}, nothing
+        written and nothing recorded, so the same commit succeeds once the receipt is in.
 
         phase 'failed', called only when a send was attempted and failed: one more attempt; the
         MEDIA_NOTICE_ATTEMPTS-th falls back to off with the note notice_not_sent."""
@@ -1269,6 +1282,12 @@ class StateGroups:
                     out = {"refused": refused} if refused else {"may_post": True, "text": text}
                 self._log(f"media notice {notice} check {out.get('refused') or 'may post'}", channel, group_ref, None)
                 return out
+            if phase == "sent" and current and notice == "on" and row["media_purge_reason"] is not None:
+                # The switch never turns on while a purge is owed (once on, the debt's kept copies
+                # would be taken for this period's): nothing is written or recorded for the key,
+                # and the host keeps the commit and asks again after its sweep recorded the receipt.
+                self._log("media notice on sent -> purge_owed", channel, group_ref, None)
+                return {"refused": "purge_owed"}
             if phase == "sent":
                 if row is None:
                     result = {"superseded": True}
@@ -1505,14 +1524,15 @@ class StateGroups:
         switch is on (design/steward-group-media.md section 1; anything else stores nothing),
         with `media_notice` {phase, epoch, attempts} when the host owes it a notice;
         `media_purges` names every group, live or not, whose kept media the host still owes a
-        purge receipt for, with the epoch the receipt must name."""
+        purge receipt for, with the epoch the receipt must name - whatever its switch says (an
+        on group owes one after 清空记录)."""
         with self.store.transaction() as conn:
             self.steward._steward(conn)
             accounts = {r["channel"]: r["sender_ref"] for r in conn.execute(
                 "SELECT channel,sender_ref FROM state_owner_channels WHERE revoked_at IS NULL AND sender_ref IS NOT NULL")}
             groups, purges = [], []
             for r in conn.execute("SELECT * FROM state_owner_groups"):
-                if r["media_purge_reason"] is not None and r["media_keep"] != "on" and r["media_keep_at"]:
+                if r["media_purge_reason"] is not None and r["media_keep_at"]:
                     purges.append({"channel": r["channel"], "group_ref": r["group_ref"], "epoch": r["media_keep_at"]})
                 if r["revoked_at"] is not None:
                     continue

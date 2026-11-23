@@ -265,20 +265,35 @@ const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
  *  GROUP_LIMITS), the send gap and backstop the bridge's (wechat-bridge GROUP_SEND_LIMITS); no
  *  key is in two places. recentChars bounds the answered exchanges only: the kept media
  *  entries (design/steward-group-media.md section 7, at most twenty of the last day, counted by
- *  the backend) are never pushed out by them, and keptChars is their own backstop. */
-export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000 });
+ *  the backend) are never pushed out by them. keptChars is what the kept entries may use before
+ *  they take room from the answered exchanges; past both, a kept entry's sender name longer
+ *  than keptNameChars is shortened - a kept entry itself is never dropped here. */
+/** The bridge's group-send answers it gives before say() runs (wechat-bridge groupSend): nothing
+ *  was sent, so a notice spends no attempt on them. */
+const GROUP_SEND_REFUSED_BEFORE = Object.freeze({ 409: ['not_logged_in', 'room_not_bound'], 429: ['room_backstop'] });
+export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000, keptNameChars: 8 });
 
 /** A group wake's `recent` within its bounds (design/steward-group-media.md section 7): the
  *  oldest entry that is NOT kept goes first while those exceed recentChars, so a busy
- *  conversation never pushes the kept media out; the oldest kept entry goes only while the kept
- *  entries exceed keptChars. Order is kept; the list is not changed in place. */
+ *  conversation never pushes the kept media out; while the whole list exceeds recentChars +
+ *  keptChars the oldest answered entries go too; and if it still does, the kept entries' long
+ *  sender names are shortened. The owner's twenty kept entries (the backend's bound) all stay.
+ *  Order is kept; the list is not changed in place. */
 export function trimRecent(entries, limits = GROUP_LIMITS) {
-  const recent = Array.isArray(entries) ? [...entries] : [];
-  const size = kept => JSON.stringify(recent.filter(entry => (entry?.kept === true) === kept)).length;
-  while (recent.some(entry => entry?.kept !== true) && size(false) > limits.recentChars)
-    recent.splice(recent.findIndex(entry => entry?.kept !== true), 1);
-  while (recent.some(entry => entry?.kept === true) && size(true) > limits.keptChars)
-    recent.splice(recent.findIndex(entry => entry?.kept === true), 1);
+  let recent = Array.isArray(entries) ? [...entries] : [];
+  const kept = entry => entry?.kept === true;
+  const size = list => JSON.stringify(list).length;
+  while (recent.some(entry => !kept(entry)) && size(recent.filter(entry => !kept(entry))) > limits.recentChars)
+    recent.splice(recent.findIndex(entry => !kept(entry)), 1);
+  const budget = limits.recentChars + limits.keptChars;
+  while (recent.some(entry => !kept(entry)) && size(recent) > budget)
+    recent.splice(recent.findIndex(entry => !kept(entry)), 1);
+  if (size(recent) > budget) {
+    recent = recent.map(entry => {
+      const name = kept(entry) && typeof entry.sender === 'string' ? Array.from(entry.sender) : [];
+      return name.length > limits.keptNameChars ? { ...entry, sender: name.slice(0, limits.keptNameChars).join('') + '…' } : entry;
+    });
+  }
   return recent;
 }
 
@@ -593,7 +608,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   const pollStatus = () => {
     // A bridge that restarted lost its whitelist: it is set again with every status poll.
     // ...and the media switch's pass runs on that same read (design/steward-group-media.md).
-    if (isReady) void refreshRooms().then(mediaPass);
+    if (isReady) void mediaPass();
     for (const [channel, entry] of registered) void reportStatus(channel, statusOf(channel, entry));
     // The alert pass runs after this poll's reports, outside the status queue: a send may take
     // sendMs and its record half a minute more, and the next poll's reports must not wait.
@@ -857,15 +872,25 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // except `unavailable`, when the host could not be reached at all.
   const groupLanes = new Map();
   let groupWake;
-  const sendGroupLine = async (channel, groupRef, line) => {
+  /** One line into a group: {sent: true}; {refused: code} when it was refused before anything
+   *  was sent (no sender, or the bridge's 409 not_logged_in / room_not_bound or 429
+   *  room_backstop, which it answers before say()); else {failed: why} - a send that may have
+   *  started, a host send_timeout among them. */
+  const trySendGroup = async (channel, groupRef, line) => {
     const entry = registered.get(channel);
-    if (!entry?.sendGroup || !text(line)) { log('group_send_skipped', { channel, group_ref: groupRef }); return false; }
+    if (!entry?.sendGroup || !text(line)) { log('group_send_skipped', { channel, group_ref: groupRef }); return { refused: 'channel_down' }; }
     try {
       await within(Promise.resolve(entry.sendGroup(groupRef, line)), limits.sendMs, 'send_timeout');
       log('group_sent', { channel, group_ref: groupRef, length: line.length });
-      return true;
-    } catch (error) { log('group_send_failed', { channel, group_ref: groupRef, error: short(error) }); return false; }
+      return { sent: true };
+    } catch (error) {
+      log('group_send_failed', { channel, group_ref: groupRef, error: short(error) });
+      const code = typeof error?.code === 'string' ? error.code : '';
+      if (GROUP_SEND_REFUSED_BEFORE[error?.status]?.includes(code)) return { refused: code };
+      return { failed: code || short(error) };
+    }
   };
+  const sendGroupLine = async (channel, groupRef, line) => (await trySendGroup(channel, groupRef, line)).sent === true;
   /** Whether `channel`'s live groups include this room - the read the wake's own label
    *  lookup and the bridge's whitelist use (host.groups.list, the backend's owner groups).
    *  It is asked before a group message's first byte is fetched (storeMedia); a host that
@@ -905,8 +930,28 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // the purge sweep, then the notices, then (hourly) the backend's expiry of kept rows. Every
   // decision is the backend's; this side keeps only what a lost answer must not repeat.
   let mediaPassing = false, lastExpire = -Infinity;
-  // A notice the channel took whose commit was not answered: only the commit is retried.
-  const noticeCommits = new Set();
+  // A notice the channel took whose commit was not answered, by key -> its ask: only the commit
+  // is retried, at the start of every pass, whether or not the group is still listed with that
+  // notice (an on-notice the group read must reach the backend even after the owner turned the
+  // switch off: it then owes the off line). One is dropped only when the backend answers it,
+  // except purge_owed (the switch does not turn on before the receipt): that one waits.
+  const noticeCommits = new Map();
+  const commitNotice = async (key, ask) => {
+    const answer = await groups.mediaNotice({ ...ask, phase: 'sent' });
+    if (answer?.refused === 'purge_owed') return undefined;
+    noticeCommits.delete(key);
+    return answer ?? {};
+  };
+  const commitPending = async () => {
+    for (const [key, ask] of [...noticeCommits]) {
+      const seen = { channel: ask.channel, group_ref: ask.groupRef, notice: ask.notice };
+      try {
+        const answer = await commitNotice(key, ask);
+        if (answer) log('group_media_notice_committed', { ...seen, ...(answer.state ? { state: String(answer.state) } : {}) });
+        else log('group_media_notice_waiting', { ...seen, reason: 'purge_owed' });
+      } catch (error) { log('group_media_notice_error', { ...seen, error: short(error) }); }
+    }
+  };
   // A purge receipt not recorded yet, by audience and epoch: a later purge of the same debt
   // adds to it, so the counts of what was really deleted are not lost to a lost answer.
   const unrecorded = new Map();
@@ -916,12 +961,13 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     // for "every group is off".
     if (!Array.isArray(listed?.groups) || !Array.isArray(listed?.media_purges)) return;
     if (typeof media?.purgeKept !== 'function' || typeof media?.keptAudiences !== 'function') return;
+    // An on group is left alone unless it is listed as owing a purge (清空记录 while on).
     const on = new Set(listed.groups.filter(g => g?.media_keep === 'on').map(g => audienceOf(g.channel, g.group_ref)));
     const owed = new Map(listed.media_purges.filter(p => text(p?.channel) && text(p?.group_ref) && text(p?.epoch))
       .map(p => [audienceOf(p.channel, p.group_ref), p]));
     const audiences = new Set([...(await media.keptAudiences()), ...owed.keys()]);
     for (const audience of audiences) {
-      if (on.has(audience)) continue;
+      if (on.has(audience) && !owed.has(audience)) continue;
       let receipt;
       try { receipt = await media.purgeKept(audience); }
       catch (error) { log('group_media_purge_failed', { error: short(error) }); continue; }
@@ -947,14 +993,10 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       const seen = { channel: group.channel, group_ref: group.group_ref, notice: owedNotice.phase };
       const ask = { channel: group.channel, groupRef: group.group_ref, epoch: owedNotice.epoch, notice: owedNotice.phase };
       const key = [group.channel, group.group_ref, owedNotice.epoch, owedNotice.phase].join('\n');
+      // A commit still owed for this group (retried at the start of the pass): nothing else is
+      // sent to it until the backend has answered that one - a line is never sent twice here.
+      if ([...noticeCommits.values()].some(a => a.channel === group.channel && a.groupRef === group.group_ref)) continue;
       try {
-        if (noticeCommits.has(key)) {
-          // Sent before and not committed: commit only - the line is never sent twice here.
-          await groups.mediaNotice({ ...ask, phase: 'sent' });
-          noticeCommits.delete(key);
-          log('group_media_notice_committed', seen);
-          continue;
-        }
         // A refusal decidable before sending spends no attempt (director 640 (c)): a channel
         // that is not there or not connected is told to the backend as channel_down (it notes
         // why the switch waits), and nothing is sent.
@@ -965,14 +1007,18 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
           log('group_media_notice_waiting', { ...seen, reason: String(check?.refused ?? (down ? 'channel_down' : 'refused')) });
           continue;
         }
-        if (await sendGroupLine(group.channel, group.group_ref, check.text)) {
-          noticeCommits.add(key);
-          await groups.mediaNotice({ ...ask, phase: 'sent' });
-          noticeCommits.delete(key);
-          log('group_media_notice_sent', seen);
+        const sent = await trySendGroup(group.channel, group.group_ref, check.text);
+        if (sent.sent) {
+          noticeCommits.set(key, ask);
+          if (await commitNotice(key, ask)) log('group_media_notice_sent', seen);
+          else log('group_media_notice_waiting', { ...seen, reason: 'purge_owed' });
+        } else if (sent.refused) {
+          // Refused before anything went out (director 640 (c)): no attempt is spent.
+          log('group_media_notice_waiting', { ...seen, reason: sent.refused });
         } else {
+          // It may have started (a send_timeout among them): one attempt.
           await groups.mediaNotice({ ...ask, phase: 'failed', attempts: Number.isInteger(owedNotice.attempts) ? owedNotice.attempts : 0 });
-          log('group_media_notice_failed', seen);
+          log('group_media_notice_failed', { ...seen, reason: sent.failed });
         }
       } catch (error) { log('group_media_notice_error', { ...seen, error: short(error) }); }
     }
@@ -982,11 +1028,17 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     lastExpire = clock();
     try { await groups.expireMedia(); } catch (error) { log('group_media_expire_failed', { error: short(error) }); }
   };
-  const mediaPass = async listed => {
-    if (mediaPassing || listed === undefined) return;
+  // The guard is taken BEFORE groups.list() is read: a pass works only from a list read after
+  // the previous pass ended (and after this pass's owed commits), so a group a pass just turned
+  // on is never purged from an older read. While a pass runs, a poll still sets the whitelist.
+  const mediaPass = async () => {
+    if (mediaPassing) { await refreshRooms(); return; }
     mediaPassing = true;
-    try { await purgeSweep(listed); await noticePass(listed); await expirePass(); }
-    catch (error) { log('group_media_pass_failed', { error: short(error) }); }
+    try {
+      await commitPending();
+      const listed = await refreshRooms();
+      if (listed !== undefined) { await purgeSweep(listed); await noticePass(listed); await expirePass(); }
+    } catch (error) { log('group_media_pass_failed', { error: short(error) }); }
     finally { mediaPassing = false; }
   };
   const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments, asked }) => {
@@ -1495,11 +1547,11 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     setGroupWake: fn => { groupWake = fn; },
     refreshRooms,
     /** One media-switch pass on what groups.list() answers now (what each status poll runs). */
-    mediaPass: async () => mediaPass(await refreshRooms()),
+    mediaPass: () => mediaPass(),
     ready() {
       ready();
       isReady = true;
-      void refreshRooms().then(mediaPass);
+      void mediaPass();
       if (!statusTimer && typeof host.reportStatus === 'function') {
         statusTimer = setInterval(pollStatus, limits.statusMs);
         statusTimer.unref?.();

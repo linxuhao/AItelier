@@ -1227,7 +1227,9 @@ def test_r3_recent_lists_up_to_twenty_kept_media_of_the_last_day_with_who_sent_e
     turn_on(world)
     turn_on(world, room=ROOM2)
     kept_media(world, "old", media="m_0000000000000aaa")
-    at(timedelta(hours=24, seconds=1))
+    # The row is stamped with the real clock after the setup above (well under 30 s even on a
+    # loaded host); a day and 30 s after the clock's start is past its day.
+    at(timedelta(hours=24, seconds=30))
     recent = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})["recent"]
     assert recent == [], "exact at read time: past the day before any sweep"
     assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='kept_media'") == [(1,)]
@@ -1268,7 +1270,7 @@ def test_r3_kept_rows_live_one_day_and_off_deletes_them_but_not_the_groups_quest
     kept_media(world, "k-new")
     q = ask(world, "q1")
     reply(world, q["message_id"], "好")
-    at(timedelta(hours=24, seconds=1))
+    at(timedelta(hours=24, seconds=30))  # k-old was stamped by the real clock, after the setup
     assert execute(world.steward, "expire_group_media", {}, allow_write=True) == {"deleted": 1}
     assert rows(world, "SELECT channel_message_ref FROM state_group_messages WHERE kind='kept_media'") == [("k-new",)]
     world.owner.groups.set_group_media_keep("wechat", ROOM, False)
@@ -1318,3 +1320,49 @@ def test_section_9_the_media_keep_route_is_the_owners_alone(world, client):
                       headers=OWNER_HEADERS).status_code == 422
     listed_view = client.get("/api/steward/groups", headers=OWNER_HEADERS).json()["groups"][0]
     assert listed_view["media_keep"]["state"] == "on_pending"
+
+
+def test_f6_a_sent_on_commit_never_turns_the_switch_on_while_a_purge_is_owed(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    turn_on(world)
+    kept_media(world, "k1")
+    at(timedelta(minutes=1))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    at(timedelta(minutes=2))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    epoch = switch(world)[1]
+    notices = rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='media_notice'")
+    # A commit without the check (no host does this today): refused, nothing written, nothing recorded.
+    assert notice(world, "on", "sent", key="early") == {"refused": "purge_owed"}
+    assert switch(world)[0] == "on_pending" and switch(world)[4] == "off"
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='media_notice'") == notices
+    assert execute(world.steward, "list_owner_groups", {})["media_purges"] == [
+        {"channel": "wechat", "group_ref": ROOM, "epoch": epoch}], "the debt stays listed"
+    assert receipt(world, rows_before=1, files_unlinked=1)["settled"] is True
+    # The same commit, asked again after the receipt, turns it on: the refusal was not recorded.
+    assert notice(world, "on", "sent", key="early")["state"] == "on"
+
+
+def test_f7_clearing_a_groups_records_while_its_switch_is_on_owes_a_purge_of_its_kept_copies(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    turn_on(world)
+    epoch = switch(world)[1]
+    kept_media(world, "k1")
+    kept_media(world, "k2", media="m_00000000000000ff")
+    at(timedelta(minutes=1))
+    world.owner.groups.clear_group_messages("wechat", ROOM)
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='kept_media'") == [(0,)]
+    assert switch(world)[0:2] == ("on", epoch), "the switch stays on with its epoch"
+    assert switch(world)[4] == "clear" and switch(world)[6] == 2
+    assert execute(world.steward, "list_owner_groups", {})["media_purges"] == [
+        {"channel": "wechat", "group_ref": ROOM, "epoch": epoch}], "listed although the switch is on"
+    assert receipt(world, rows_before=2, files_unlinked=2, bytes_freed=66)["settled"] is True
+    assert rows(world, "SELECT reason, backend_rows, rows_before FROM state_group_media_purges") == [("clear", 2, 2)]
+    assert execute(world.steward, "list_owner_groups", {})["media_purges"] == []
+    # Off, a clear owes nothing new: the turn-off's own purge covers any copy.
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    receipt(world, key="off-receipt")
+    world.owner.groups.clear_group_messages("wechat", ROOM)
+    assert switch(world)[4] is None

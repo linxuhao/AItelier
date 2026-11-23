@@ -2631,7 +2631,7 @@ test('switch: the library\'s protect set never holds a group\'s ref - neither th
 
 /** A world for the media pass: a scripted backend (list, notices, receipts, expiry), the real
  *  library, and one WeChat channel whose connection and sends a test can change. */
-function switchWorld({ connected = true } = {}) {
+function switchWorld({ connected = true, sendGroup, limits } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-media-switch-'));
   const library = createMediaLibrary({ root: join(dir, 'media') });
   const media = { ingest: (meta, open) => library.ingest(meta, open), resolve: async ref => library.lookup(ref),
@@ -2651,10 +2651,11 @@ function switchWorld({ connected = true } = {}) {
     expireMedia: async () => { calls.push(['expire']); return { deleted: 0 }; },
   };
   const channels = createOwnerChannels({ host: fakeHost().host, groups, media, owedFile: join(dir, 'owed.json'),
-    log: (event, fields) => logs.push([event, fields]) });
+    log: (event, fields) => logs.push([event, fields]), ...(limits ? { limits: { ...CHANNEL_LIMITS, ...limits } } : {}) });
   channels.service.register({ name: 'wechat', status: () => ({ connected: state.connected }), send: async () => ({}),
-    sendGroup: async (room, line) => { sent.push({ room, line }); if (state.sendFails) throw new Error('bridge 502'); return {}; },
-    setRooms: async () => {} });
+    sendGroup: async (room, line) => { sent.push({ room, line }); if (sendGroup) return sendGroup(room, line);
+      if (state.sendFails) throw new Error('bridge 502'); return {}; },
+    setRooms: async () => { if (state.setRoomsGate) await state.setRoomsGate; } });
   channels.ready();
   const group = (ref, extra = {}) => ({ channel: 'wechat', group_ref: ref, label: ref, mention_prefix: '@管家', media_keep: 'off', ...extra });
   const keep = (ref, messageRef, bytes = png()) => library.ingest({ channel: 'wechat', messageRef, index: 0, audience: `group:wechat:${ref}`,
@@ -2671,7 +2672,12 @@ test('notice: the switch is on only after the line went out - check, send, then 
   w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
   w.state.answers.check = () => ({ may_post: true, text: 'ON-NOTICE' });
   let commits = 0;
-  w.state.answers.sent = () => { commits += 1; if (commits === 1) throw new Error('HTTP 502'); return { sent: true, state: 'on' }; };
+  w.state.answers.sent = () => {
+    commits += 1;
+    if (commits === 1) throw new Error('HTTP 502');
+    w.state.groups = [w.group('r1', { media_keep: 'on' })];
+    return { sent: true, state: 'on' };
+  };
   await w.pass();
   assert.deepEqual(w.named('notice').map(a => a.phase), ['check', 'sent'], 'the check first, the commit only after the send');
   assert.deepEqual(w.sent, [{ room: 'r1', line: 'ON-NOTICE' }], 'the backend\'s words, sent once');
@@ -2680,7 +2686,6 @@ test('notice: the switch is on only after the line went out - check, send, then 
   assert.deepEqual(w.named('notice').map(a => a.phase), ['check', 'sent', 'sent']);
   assert.equal(w.sent.length, 1, 'never a second line for one epoch');
   assert.deepEqual(w.named('notice')[2], { channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'sent' });
-  w.state.groups = [w.group('r1', { media_keep: 'on' })];
   await w.pass();
   assert.equal(w.named('notice').length, 3, 'nothing owed, nothing asked');
   w.stop();
@@ -2715,6 +2720,118 @@ test('notice: a send that fails is reported failed, once per attempt; three fail
   }
   assert.deepEqual(w.named('notice').filter(a => a.phase === 'failed').map(a => a.attempts), [0, 1, 2]);
   assert.ok(!w.named('notice').some(a => a.phase === 'sent'), 'never committed as sent');
+  w.stop();
+});
+
+test('F1: a sent on-notice whose commit was lost is committed at the next pass although the owner turned the switch off - then the off line goes out', async () => {
+  const w = switchWorld();
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
+  w.state.answers.check = () => ({ may_post: true, text: 'ON-NOTICE' });
+  w.state.answers.sent = () => { throw new Error('HTTP 502'); };
+  await w.pass();
+  assert.deepEqual(w.sent.map(x => x.line), ['ON-NOTICE'], 'the group read the on-notice');
+  // The owner turned it off meanwhile (on_pending -> off): the listing names no notice.
+  w.state.groups = [w.group('r1')];
+  w.state.answers.sent = a => (a.notice === 'on' ? { sent: true, state: 'off_notice' } : { sent: true, state: 'off' });
+  await w.pass();
+  assert.deepEqual(w.named('notice').map(a => [a.phase, a.notice, a.epoch]), [['check', 'on', 'E1'], ['sent', 'on', 'E1'], ['sent', 'on', 'E1']],
+    'the commit is asked again at the start of the pass, with no listing naming it');
+  await w.pass();
+  assert.equal(w.named('notice').length, 3, 'answered once: never asked again');
+  // The backend moved to off_notice: the next listing owes the off line, and it goes out.
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'off', epoch: 'E2', attempts: 0 } })];
+  w.state.answers.check = a => (a.notice === 'off' ? { may_post: true, text: 'OFF-NOTICE' } : { refused: 'superseded' });
+  await w.pass();
+  assert.deepEqual(w.sent.map(x => x.line), ['ON-NOTICE', 'OFF-NOTICE']);
+  w.stop();
+});
+
+test('F1: while a commit is owed for a group nothing else is sent to it; a purge_owed answer keeps the commit until the receipt is in', async () => {
+  const w = switchWorld();
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
+  w.state.answers.check = () => ({ may_post: true, text: 'ON-NOTICE' });
+  let owed = true;
+  w.state.answers.sent = () => {
+    if (owed) return { refused: 'purge_owed' };
+    w.state.groups = [w.group('r1', { media_keep: 'on' })];
+    return { sent: true, state: 'on' };
+  };
+  await w.pass();
+  await w.pass();
+  assert.deepEqual(w.named('notice').map(a => a.phase), ['check', 'sent', 'sent'], 'kept and asked again, never checked or sent again');
+  assert.equal(w.sent.length, 1);
+  owed = false;
+  await w.pass();
+  assert.deepEqual(w.named('notice').map(a => a.phase), ['check', 'sent', 'sent', 'sent']);
+  await w.pass();
+  assert.equal(w.named('notice').length, 4, 'answered: dropped');
+  w.stop();
+});
+
+test('F3: a pass takes its guard before it reads groups.list() - a poll during a pass that turns a group on never purges that group\'s fresh kept file', async () => {
+  const w = switchWorld();
+  await w.settle();
+  w.calls.length = 0;
+  let release1; const gate1 = new Promise(resolve => { release1 = resolve; });
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
+  w.state.answers.check = () => (w.state.groups[0].media_keep === 'on' ? { refused: 'superseded' } : { may_post: true, text: 'ON-NOTICE' });
+  w.state.answers.sent = async () => { await gate1; w.state.groups = [w.group('r1', { media_keep: 'on' })]; return { sent: true, state: 'on' }; };
+  const pass1 = w.pass();
+  await w.settle();
+  // A status poll now: the list it would read still shows r1 not on, and its setRooms is slow.
+  let release2; w.state.setRoomsGate = new Promise(resolve => { release2 = resolve; });
+  const pass2 = w.pass();
+  await w.settle();
+  w.state.setRoomsGate = null;
+  release1(); await pass1;
+  const stored = await w.channels.service.storeMedia({ channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'k1', index: 0,
+    kind: 'image', conversationRef: 'r1', asked: false }, async () => png());
+  assert.match(stored.ref ?? '', /^m_/, JSON.stringify(stored));
+  release2(); await pass2;
+  assert.ok(w.library.lookup(stored.ref), 'the kept file of the group just turned on stays');
+  await w.pass();
+  assert.ok(w.library.lookup(stored.ref), 'and a fresh pass reads r1 on');
+  w.stop();
+});
+
+test('F4: the bridge\'s refusals before say() spend no attempt; a send that may have started (send_timeout) is one', async () => {
+  const bridge = (status, code) => Object.assign(new Error(`bridge refused: ${code}`), { code, status });
+  let answer = () => { throw bridge(409, 'not_logged_in'); };
+  const w = switchWorld({ sendGroup: () => answer(), limits: { sendMs: 50 } });
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_notice: { phase: 'on', epoch: 'E1', attempts: 0 } })];
+  w.state.answers.check = () => ({ may_post: true, text: 'ON-NOTICE' });
+  for (const refusal of [bridge(409, 'not_logged_in'), bridge(409, 'room_not_bound'), bridge(429, 'room_backstop')]) {
+    answer = () => { throw refusal; };
+    await w.pass();
+  }
+  assert.ok(!w.named('notice').some(a => a.phase === 'failed'), 'no attempt spent on a refusal made before sending');
+  assert.deepEqual(w.logs.filter(([e]) => e === 'group_media_notice_waiting').map(([, f]) => f.reason),
+    ['not_logged_in', 'room_not_bound', 'room_backstop']);
+  answer = () => new Promise(() => {});
+  await w.pass();
+  answer = () => { throw bridge(500, 'send_failed'); };
+  await w.pass();
+  assert.deepEqual(w.named('notice').filter(a => a.phase === 'failed').length, 2, 'a timeout and a failed say() are each one attempt');
+  w.stop();
+});
+
+test('F7: an on group listed as owing a purge (清空记录) has its kept copies purged and the receipt recorded; an on group owing none keeps its own', async () => {
+  const w = switchWorld();
+  const a1 = await w.keep('r1', 'a1'), b1 = await w.keep('r2', 'b1', png(7, 7));
+  await w.settle();
+  w.calls.length = 0;
+  w.state.groups = [w.group('r1', { media_keep: 'on' }), w.group('r2', { media_keep: 'on' })];
+  w.state.media_purges = [{ channel: 'wechat', group_ref: 'r1', epoch: 'E1' }];
+  await w.pass();
+  assert.equal(w.library.lookup(a1.ref), undefined, 'r1\'s cleared kept copy is gone');
+  assert.ok(w.library.lookup(b1.ref), 'r2 owes nothing: its kept copy stays');
+  assert.deepEqual(w.named('record').map(a => [a.groupRef, a.epoch, a.receipt.rows_before]), [['r1', 'E1', 1]]);
   w.stop();
 });
 
@@ -2793,8 +2910,26 @@ test('wake: the twenty kept entries survive when the answered pairs overflow rec
   assert.ok(JSON.stringify(recent.filter(e => !e.kept)).length <= GROUP_LIMITS.recentChars);
   assert.ok(recent.filter(e => !e.kept).length < 30, 'the oldest pairs went');
   assert.deepEqual(recent.filter(e => !e.kept).at(-1), pairs.at(-1), 'the newest pair stays');
-  const tight = trimRecent(kept, { ...GROUP_LIMITS, keptChars: 600 });
-  assert.ok(tight.length < 20 && JSON.stringify(tight).length <= 600);
-  assert.deepEqual(tight.at(-1), kept.at(-1), 'past keptChars the oldest kept go first');
   assert.equal(GROUP_LIMITS.keptChars, 4000);
+});
+
+test('F5: keptChars never cuts the owner\'s twenty kept entries - the answered pairs go first, then long sender names are shortened', () => {
+  const label = '张'.repeat(20);
+  const kept = Array.from({ length: 20 }, (_, i) => ({ at: `2026-11-23T09:${String(i).padStart(2, '0')}:12.123456+00:00`, sender: label, kept: true,
+    attachments: [{ kind: 'voice', ref: 'm_0123456789abcdef', mime: 'audio/silk', size: 26214400, durationMs: 59999 }] }));
+  const pairs = Array.from({ length: 6 }, (_, i) => ({ at: `2026-11-23T08:0${i}:00+00:00`, sender: '成员甲', q: '问'.repeat(200), a: '答'.repeat(200) }));
+  assert.ok(JSON.stringify(kept).length > GROUP_LIMITS.keptChars, 'twenty long-named voice entries are past keptChars');
+  const out = trimRecent([...pairs, ...kept]);
+  assert.equal(out.filter(e => e.kept).length, 20, 'all twenty stay');
+  assert.ok(JSON.stringify(out).length <= GROUP_LIMITS.recentChars + GROUP_LIMITS.keptChars, 'the pairs made the room');
+  assert.ok(out.some(e => !e.kept), 'only as many pairs as needed went');
+  // Two attachments a message: past both budgets with no pair left, the names are shortened - and still twenty.
+  const two = kept.map(e => ({ ...e, attachments: [e.attachments[0], e.attachments[0]] }));
+  const tight = trimRecent([...pairs, ...two]);
+  assert.equal(tight.filter(e => e.kept).length, 20);
+  assert.equal(tight.filter(e => !e.kept).length, 0, 'the answered pairs went first');
+  assert.ok(tight.every(e => e.sender === '张'.repeat(GROUP_LIMITS.keptNameChars) + '…'), 'long names shortened');
+  assert.deepEqual(tight.map(e => e.attachments), two.map(e => e.attachments), 'nothing else changed');
+  // Within the budgets nothing is shortened.
+  assert.equal(trimRecent(kept.slice(0, 5))[0].sender, label);
 });

@@ -41,8 +41,8 @@ catch (error) { log(error.message); process.exit(78); }
 // No `name`: Wechaty then keeps its memory card in memory only and writes no file (the
 // container's root filesystem is read-only; the saved login is the fork's, not Wechaty's).
 // `options`: none for a QR login, {resume: true, expectUsername?} for a resume (step 19.1).
-// The bridge is the trusted local caller: after a saved-login resume the puppet has observed
-// nobody, so proactive pushes must reach destinations it has not seen in this process.
+// This is where the bridge turns the unobserved-text opt-in on; the fork's default (measured
+// by the option-off arm) is still to refuse a destination no inbound message has observed.
 const makeBot = options => WechatyBuilder.build({ puppet: new PuppetNeo({ ...options, allowUnobservedText: true }) });
 // Step 19.1: the fork's saved login - only its status ({present, off?, writes,
 // write_failures}, never the login itself; the bridge never deletes it) - and the account the

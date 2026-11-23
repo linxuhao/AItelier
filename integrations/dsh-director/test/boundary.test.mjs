@@ -117,6 +117,7 @@ export const SHIPPED = [
   join('test', 'connections.test.mjs'),
   join('test', 'media.test.mjs'),
   join('test', 'media-gc.test.mjs'),
+  join('test', 'group-wake-images.test.mjs'),
   join('test', 'fixtures', 'memory-crash.mjs'),
   join('test', 'fixtures', 'embed-fake.mjs'),
   join('test', 'fixtures', 'grep-block-probe.mjs'),

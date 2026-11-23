@@ -20,7 +20,7 @@ import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, wakeMedia } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -604,6 +604,21 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let routeLog = () => {};
   const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
     undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
+  // Step 23 group wake (iss-0d20ef5dd9a44cd0): the optional directorHost hook for a group
+  // @-turn's images. The plugin picks this group's own kept refs (and the message's own files)
+  // and calls `line`; the read/saveImage step is the same wakeMedia the owner's wake uses, so
+  // there is one implementation of "bytes -> native block -> 原图已附 line". An entry past the
+  // plugin's bound is rendered by mediaLine without attaching: its ref-only line keeps the
+  // media_call hint. On a text-only route wakeMedia attaches nothing and the wake is one block.
+  const groupWakeMedia = async () => {
+    if (!library) return undefined;
+    const routes = await routeInput();
+    const imageRoute = wakeTakesImages(routes), declared = declaresImage(routes);
+    const media = wakeMedia({ library, imageRoute, declared, attachments: attachmentStore(),
+      log: line => mediaLog('group_wake_media', { detail: String(line).slice(0, 200) }) });
+    return { line: (attachment, { attach = true } = {}) => attach
+      ? media.line(attachment) : mediaLine(attachment, { imageRoute, declared }), images: media.images };
+  };
   // Step 24.2b (7.8.12a "宿主入库"): one staged dashboard upload, streamed with this driver's token
   // (the backend answers only a delivery target of the message carrying it), and its ack.
   const fetchUpload = async (uploadId, signal) => uploadBody(await fetch(new URL(
@@ -638,6 +653,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         ...(env.AITELIER_DSH_MEMORY_VECTOR_URL ? { vector: { url: env.AITELIER_DSH_MEMORY_VECTOR_URL,
           model: env.AITELIER_DSH_MEMORY_VECTOR_MODEL } } : {}) } } : {}) },
     labels,
+    // Step 23: a group wake attaches its own kept images here; a host without a media library
+    // declares no hook and the director's wake stays one text block.
+    ...(library ? { wakeMedia: groupWakeMedia } : {}),
     // The steward's held work is an unanswered owner message, not a State claim.
     texts: steward ? stewardHostTexts(texts) : texts,
     /** The effective table: roles.json plus AItelier's State additions. */

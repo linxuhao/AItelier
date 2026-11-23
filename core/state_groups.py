@@ -852,9 +852,12 @@ class StateGroups:
         question」 on the first line, at most reply_chars in all, cut with '…'. Answered
         once per request_key: the replay returns the first answer.
 
-        A question this turn never stamped (the host's stamping request was lost, director 602
-        defect 1) is judged once more by the audience record of THIS turn (`_stamp_late`), within
-        bounds, before it is refused."""
+        A question this turn never stamped - one its recorded audience left out of question_ids,
+        such as an id past the first 20 (director 602 defect 1) - is judged once more by the
+        audience record of THIS turn (`_stamp_late`), within bounds, before it is refused. A lost
+        stamping request is not this fallback's case: the stamping is the same request and
+        transaction as the audience record, so a turn whose request was lost has no record here;
+        the host's retry of that request (record()) covers it."""
         _require_utf8("body", body, "invalid_body")
         if not isinstance(body, str) or not body.strip():
             raise StateGraphError("empty_body")
@@ -898,8 +901,10 @@ class StateGroups:
         return out
 
     def _stamp_late(self, conn, turn, ids):
-        """The bounded fallback for a question the host's stamping request never reached (director
-        602 defect 1): stamps with `turn` those of `ids` still unstamped and unanswered that the
+        """The bounded fallback for a question a recorded turn left out of its question_ids (director
+        602 defect 1; e.g. an id past the first 20 - a lost stamping request leaves no audience
+        record for the turn, so nothing here, and is covered by the host's retry of record()):
+        stamps with `turn` those of `ids` still unstamped and unanswered that the
         audience record of THIS turn covers - a group audience naming the question's own group
         (bound now), the question's sender among the turn's recorded senders, relayed before the
         turn was recorded and at most fresh_minutes before it. Never a question of another group

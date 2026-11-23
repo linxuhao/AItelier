@@ -75,10 +75,11 @@ test('ingest through the host adapter keeps the caller\'s signal: already aborte
   assert.match(stored.ref, /^m_[0-9a-f]{16}$/); assert.equal(opened, 1);
 });
 
-test('events(): the media library\'s cleanup runs at the start (an expired row and its file go) and daily after; stop() ends it', async () => {
+test('events(): the media library\'s cleanup runs at the start (an expired row and its file go) and hourly after; stop() ends it', async () => {
   // Review T3: runtime.mjs library?.start() / library?.stop(), through the adapter's own events()
   // and the stop it returns - not the library's cleanup() called by hand.
-  const DAY = 24 * 3600 * 1000;
+  // design/steward-group-media.md section 4: hourly, so a kept medium is on disk at most 25 hours.
+  const HOUR = 3600 * 1000, DAY = 24 * HOUR;
   const root = mkdtempSync(join(tmpdir(), 'steward-media-')), stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
   const old = createMediaLibrary({ root, now: () => Date.now() - 40 * DAY });
   const { ref } = await old.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
@@ -103,17 +104,17 @@ test('events(): the media library\'s cleanup runs at the start (an expired row a
     ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {}, goals: { get: () => undefined },
       agents: { withoutInitiator: fn => fn() }, sessionPersistence: { flush: async () => {} } } };
   const armed = [], cleared = [], { setInterval: realSet, clearInterval: realClear } = globalThis;
-  globalThis.setInterval = (fn, ms, ...rest) => { const timer = realSet(fn, ms, ...rest); if (ms === DAY) armed.push(timer); return timer; };
+  globalThis.setInterval = (fn, ms, ...rest) => { const timer = realSet(fn, ms, ...rest); if (ms === HOUR) armed.push(timer); return timer; };
   globalThis.clearInterval = timer => { if (armed.includes(timer)) cleared.push(timer); return realClear(timer); };
   try {
     const events = await host.events(api);
     assert.equal(await host.media.resolve(ref), undefined, 'the start\'s cleanup dropped the 40-day-old row');
     assert.equal(existsSync(file), false, 'and its file');
-    assert.equal(armed.length, 1, 'the daily cleanup is armed');
+    assert.equal(armed.length, 1, 'the hourly cleanup is armed');
     assert.equal(cleared.length, 0);
     events.stop();
     await Promise.resolve(events.done).catch(() => {});
-    assert.deepEqual(cleared, armed, 'stop() ends the daily cleanup');
+    assert.deepEqual(cleared, armed, 'stop() ends the hourly cleanup');
   } finally { Object.assign(globalThis, { setInterval: realSet, clearInterval: realClear }); }
 });
 
@@ -544,4 +545,18 @@ test('24.2b F4: a captioned send_media answers the owner when the turn ends with
   const auto = await forwardFinalText({ ...base, text: '还要别的颜色吗？', input: 'own-1' });
   assert.deepEqual(auto, { forwarded: true, reply_to: 'own-1', message_id: 'st-3' });
   assert.deepEqual((await unansweredOwnerMessages({ ...base, mediaAnswers: false })).map(m => m.message_id), []);
+});
+
+test('design/steward-group-media.md: the adapter\'s kept media - purgeKept and keptAudiences are the library\'s, withdraw takes a kept row', async () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const ops = mediaOps({ request: async () => ({}), library, gatewayFetch: async () => {} });
+  const meta = { channel: 'wechat', messageRef: 'k1', index: 0, audience: 'group:wechat:r1', source: 'in', kept: true };
+  const kept = await ops.ingest(meta, async () => PNG);
+  assert.equal((await ops.resolve(kept.ref)).kept, true);
+  assert.deepEqual(await ops.keptAudiences(), ['group:wechat:r1']);
+  assert.deepEqual(await ops.purgeKept('group:wechat:r1'), { rows_before: 1, rows_after: 0, files_unlinked: 1, files_shared: 0,
+    bytes_freed: PNG.length });
+  assert.deepEqual(await ops.keptAudiences(), []);
+  const again = await ops.ingest({ ...meta, messageRef: 'k2' }, async () => PNG);
+  assert.deepEqual(ops.withdraw(again.ref), { removed: 1 });
 });

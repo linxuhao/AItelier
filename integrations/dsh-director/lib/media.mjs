@@ -18,7 +18,8 @@
  *      gets the first answer, so the relayed message it builds is the same request);
  *   2. a chat channel's inbound media are held to limits.inbound_per_channel_hour, counted
  *      from the index (so a restart keeps the count); one past it is refused too_large -
- *      the design's placeholder for every over-limit attachment;
+ *      the design's placeholder for every over-limit attachment; a kept medium is counted
+ *      apart, per group, against limits.kept_per_group_hour, and never in the owner's hour;
  *   3. then `open({signal})` gives the bytes, counted as they come and cut at the bound (a
  *      declared size is never trusted) and under a deadline (first byte, then the whole
  *      file: a source that stalls is aborted and answered `unavailable`, so one stuck
@@ -38,11 +39,22 @@
  *  two files are the same). Each row carries its AUDIENCE: `owner`, `group:<channel>:
  *  <group_ref>` or (a director's subdirectory, 24.2b) `project:<project_id>`;
  *  `covers(turnAudience, row)` is the one rule media_call, send_media and read_document use (an
- *  owner turn covers every ref but a group's kept one, a group turn only its own group's).
+ *  owner turn covers every ref except a kept medium, a group turn only its own group's).
  *
- *  Kept 30 days (cleanup(), daily while started) and at most limits.total_bytes in all,
- *  oldest first; refs still owed to a relay (`protect()`) are never cleaned. Logs carry a
- *  mime and a size, never a name or a byte.
+ *  A KEPT medium (design/steward-group-media.md, owner rulings 2026-11-23) is a group file
+ *  sent without mentioning the steward, stored only while that group's switch is on: its row
+ *  carries `kept: true` (ingest takes it only with a group audience and source 'in'); only
+ *  that group's turns cover it - never an owner turn (R4); it lives limits.kept_hours (one
+ *  day): lookup() stops resolving it at that age, whatever the sweep did, and cleanup() drops
+ *  it; withdraw() takes it back; purgeKept(audience) deletes a group's kept rows with a
+ *  receipt that must close. Files are shared by sha256 and rows never are, so deleting one
+ *  group's kept row leaves the file while any other row (another group's, the owner's, an
+ *  addressed copy) still names it.
+ *
+ *  Kept 30 days (cleanup(), hourly while started) and at most limits.total_bytes in all,
+ *  oldest first; refs still owed to a relay (`protect()`) are never cleaned (a group's ref is
+ *  never owed, so a kept medium is never held back). Logs carry a mime and a size, never a
+ *  name or a byte.
  *
  *  A director's subdirectory (24.2b, design-steward 7.8.12a "一个写者一个子目录" and "导演给业主
  *  发媒体" items 2, 6, 7; pending 20): `d-<driver_id>/` is held to 1 GiB in all (limitsFor;
@@ -92,7 +104,8 @@ const keptName = name => typeof name === 'string' && name.length >= 1 && name.le
 /** Write errors that mean the disk cannot take the file (answered store_failed to a director). */
 const DISK_FULL = new Set(['ENOSPC', 'EDQUOT', 'EFBIG', 'EROFS', 'EIO']);
 const SNIFF_BYTES = 64;
-const DAY_MS = 24 * 3600 * 1000;
+const HOUR_MS = 3600 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 const signatureMatches = (buffer, signature) => signature.every(({ offset, hex }) => {
   const want = Buffer.from(hex, 'hex');
@@ -146,17 +159,16 @@ export function audienceLabel(audience) {
     return `project:${audience.project_id}`;
   return undefined;
 }
-/** Whether a turn of `audience` may use this row: an owner turn every ref, a group turn only
- *  its own group's (design-steward 7.8.12 "受众标签"), a director's project turn only its own
- *  project's rows (7.8.12a). Anything unreadable: no.
- *  A row kept from a group without a mention (`kept: true`, the group-media switch's §8 R4) is
- *  its own group's alone: an owner turn does not cover it (7.8.12b "十"). */
+/** Whether a turn of `audience` may use this row: an owner turn every ref but a kept medium,
+ *  a group turn only its own group's (design-steward 7.8.12 "受众标签"), a director's project
+ *  turn only its own project's rows (7.8.12a); a kept medium is its group's alone
+ *  (design/steward-group-media.md R4). Anything unreadable: no. */
 export function covers(audience, row) {
   const label = audienceLabel(audience);
-  const own = label !== undefined && (label.startsWith('group:') || label.startsWith('project:')) && row?.audience === label;
-  if (row?.kept === true) return own && label.startsWith('group:');
+  const ownGroup = label !== undefined && label.startsWith('group:') && row?.audience === label;
+  if (row?.kept === true) return ownGroup;
   if (audience?.kind === 'owner') return true;
-  return own;
+  return label !== undefined && (label.startsWith('group:') || label.startsWith('project:')) && row?.audience === label;
 }
 
 const KIND_NAMES = Object.freeze({ image: '图片', voice: '语音', file: '文件' });
@@ -269,8 +281,10 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     : kind === 'image' ? limits.image_bytes : kind === 'voice' ? limits.voice_bytes : limits.file_bytes;
   const maxBytes = Math.max(limits.image_bytes, limits.file_bytes, limits.voice_bytes, limits.outbound_bytes);
 
+  // A kept medium is dead from limits.kept_hours after it was stored, exactly, whatever the sweep did.
+  const expired = row => row.kept === true && now() - Date.parse(row.at) >= limits.kept_hours * HOUR_MS;
   const find = (channel, messageRef, index) => rows.find(row => row.channel === channel && row.messageRef === messageRef
-    && row.index === index && existsSync(absolute(row)));
+    && row.index === index && !expired(row) && existsSync(absolute(row)));
   const findRefusal = (channel, messageRef, index) => refusals.find(row => row.channel === channel
     && row.messageRef === messageRef && row.index === index);
   const MAX_REFUSALS = 10000;
@@ -283,7 +297,7 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   const lookup = ref => {
     if (typeof ref !== 'string' || !REF_PATTERN.test(ref)) return undefined;
     const row = rows.find(r => r.ref === ref);
-    if (!row) return undefined;
+    if (!row || expired(row)) return undefined;
     const path = absolute(row);
     if (!inside(path) || !existsSync(path)) return undefined;
     const type = MEDIA_TYPES.find(t => t.mime === row.mime);
@@ -405,6 +419,7 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     const name = keptName(meta.name);
     const row = { ref: freshRef(), sha256, mime: type.mime, size, ...(durationMs !== undefined ? { durationMs } : {}),
       audience: meta.audience, source: meta.source, channel: meta.channel, ...(name ? { name } : {}),
+      ...(meta.kept === true ? { kept: true } : {}),
       ...(typeof meta.messageRef === 'string' ? { messageRef: meta.messageRef } : {}),
       ...(Number.isInteger(meta.index) ? { index: meta.index } : {}), file, at: at.toISOString() };
     try { append(row); }
@@ -422,10 +437,11 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   let lane = Promise.resolve();
   const AUDIENCE = /^(owner|group:.+|project:.+)$/s;
   /** @param meta {channel, messageRef?, index?, audience: 'owner' | 'group:<channel>:<ref>' |
-   *    'project:<project_id>', source: 'in' | 'generated', sha256?, name?} (sha256: the bytes the
-   *    caller read, for a keyed replay's idempotency_conflict; name: the file's display name,
-   *    kept on the row when it is 1-255 characters without a control character - the name the
-   *    backend shows on a message carrying the ref) @param open ({signal}) => a byte
+   *    'project:<project_id>', source: 'in' | 'generated', sha256?, name?, kept?: true} (sha256:
+   *    the bytes the caller read, for a keyed replay's idempotency_conflict; name: the file's
+   *    display name, kept on the row when it is 1-255 characters without a control character -
+   *    the name the backend shows on a message carrying the ref; kept: a group's un-mentioned
+   *    file, only with a group audience and source 'in') @param open ({signal}) => a byte
    *    stream (async iterable, web stream or Buffer); throwing {refused: <closed set>} passes
    *    that refusal on. @param signal the caller's: aborted while this waits for the lane, the
    *    answer is `unavailable` at once and nothing is fetched; aborted while it reads, the
@@ -434,6 +450,8 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     const run = lane.then(async () => {
       if (typeof meta.audience !== 'string' || !AUDIENCE.test(meta.audience)) return { refused: 'invalid_media' };
       if (!['in', 'generated'].includes(meta.source) || typeof meta.channel !== 'string' || !meta.channel) return { refused: 'invalid_media' };
+      if (meta.kept !== undefined && (meta.kept !== true || !meta.audience.startsWith('group:') || meta.source !== 'in'))
+        return { refused: 'invalid_media' };
       if (typeof open !== 'function') return { refused: 'invalid_media' };
       if (meta.sha256 !== undefined && (typeof meta.sha256 !== 'string' || !SHA256_PATTERN.test(meta.sha256))) return { refused: 'invalid_media' };
       if (signal?.aborted) return { refused: 'unavailable' };
@@ -459,9 +477,17 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
         return { refused: code };
       };
       if (meta.source === 'in' && CHANNEL_SOURCES.has(meta.channel)) {
+        // A kept medium (a group's un-mentioned file) never spends the owner's hour: it is held
+        // to its own group's kept_per_group_hour, and inbound_per_channel_hour counts every other
+        // inbound row of the channel (design/steward-group-media.md section 11).
         const hour = now() - 3600000;
-        const taken = rows.filter(row => row.source === 'in' && row.channel === meta.channel && Date.parse(row.at) > hour).length;
-        if (taken >= limits.inbound_per_channel_hour) { log('media_refused', { reason: 'rate' }); return refuse('too_large'); }
+        const kept = meta.kept === true;
+        const taken = rows.filter(row => row.source === 'in' && row.channel === meta.channel && Date.parse(row.at) > hour
+          && (row.kept === true) === kept && (!kept || row.audience === meta.audience)).length;
+        if (taken >= (kept ? limits.kept_per_group_hour : limits.inbound_per_channel_hour)) {
+          log('media_refused', { reason: kept ? 'kept_rate' : 'rate' });
+          return refuse('too_large');
+        }
       }
       if (meta.channel === 'director') {
         const hour = now() - 3600000;
@@ -523,17 +549,54 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     if (n) log('media_evicted', { rows: n });
     return n;
   }
-  /** Rows past retention_days (and their files, once no row points at them), then the total
-   *  bound oldest first; a protected ref is never removed. */
+  /** Kept media past kept_hours, then rows past retention_days (and their files, once no row
+   *  points at them), then the total bound oldest first; a protected ref is never removed by
+   *  the 30 days or the total (a kept ref is never protected: no relay owes a group's ref). */
   function cleanup() {
     const cutoff = now() - limits.retention_days * DAY_MS, hold = protectedRefs();
-    const expired = new Set(rows.filter(row => Date.parse(row.at) < cutoff && !hold.has(row.ref)).map(row => row.ref));
-    const removed = dropRows(expired);
+    const victims = new Set(rows.filter(row => expired(row) || (Date.parse(row.at) < cutoff && !hold.has(row.ref)))
+      .map(row => row.ref));
+    const removed = dropRows(victims);
     const kept = refusals.filter(row => Date.parse(row.at) >= cutoff);
     if (kept.length !== refusals.length) { refusals = kept; rewrite(); }
     const evicted = enforceTotal();
     if (removed) log('media_expired', { rows: removed });
     return { removed, evicted };
+  }
+  /** Every kept row of `audience` and its files (design/steward-group-media.md section 6: the
+   *  deletion half of the switch going off, an unbind or a rebind), under the ingest lane so no
+   *  ingest of that audience is half done. A file another row still names (another group's,
+   *  the owner's, an addressed copy - files are shared by sha256, rows never are) stays and is
+   *  counted as shared. The receipt - {rows_before, rows_after, files_unlinked, files_shared,
+   *  bytes_freed}, counts only - must close: rows_after 0 and every unlinked file checked gone.
+   *  A file that could not be unlinked keeps its rows (so the next purge tries again) and the
+   *  purge throws purge_incomplete. */
+  function purgeKept(audience) {
+    const run = lane.then(() => {
+      if (typeof audience !== 'string' || !audience.startsWith('group:')) throw new Error('purgeKept: a group audience');
+      const victims = rows.filter(row => row.kept === true && row.audience === audience);
+      const refs = new Set(victims.map(row => row.ref)), files = new Map(victims.map(row => [row.file, row.size]));
+      if (refs.size) { rows = rows.filter(row => !refs.has(row.ref)); rewrite(); }
+      let unlinked = 0, shared = 0, freed = 0;
+      const stuck = [];
+      for (const [file, size] of files) {
+        if (rows.some(row => row.file === file)) { shared += 1; continue; }
+        const path = join(root, file);
+        if (inside(path)) { try { rmSync(path, { force: true }); } catch { /* checked below */ } }
+        if (existsSync(path)) stuck.push(file); else { unlinked += 1; freed += size; }
+      }
+      if (stuck.length) { rows.push(...victims.filter(row => stuck.includes(row.file))); rewrite(); }
+      const receipt = { rows_before: victims.length, rows_after: rows.filter(row => row.kept === true && row.audience === audience).length,
+        files_unlinked: unlinked, files_shared: shared, bytes_freed: freed };
+      if (receipt.rows_after !== 0) {
+        log('media_purge_failed', { rows: receipt.rows_after });
+        throw Object.assign(new Error('purge_incomplete'), { code: 'purge_incomplete', receipt });
+      }
+      if (receipt.rows_before) log('media_purged', { rows: receipt.rows_before });
+      return receipt;
+    });
+    lane = run.catch(() => {});
+    return run;
   }
   let timer;
   return {
@@ -543,17 +606,22 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     /** The bytes of a ref (undefined when the ref is unknown or its file is gone). */
     async read(ref) { const row = lookup(ref); return row ? { row, bytes: await readFile(row.path) } : undefined; },
     setProtected(fn) { if (typeof fn === 'function') protectFn = fn; },
-    /** Take back a file this host fetched for send_media and did not send (review MF3): the
-     *  `generated` row `ref`, and its file once no other row points at it (a file stored before,
-     *  shared by sha256, stays). A protected ref, an inbound row or an unknown ref is left alone. */
+    /** Take back a file this host fetched for send_media and did not send (review MF3), or a
+     *  kept medium the group's relay then refused (design/steward-group-media.md section 3): the
+     *  `generated` or `kept` row `ref`, and its file once no other row points at it (a file stored
+     *  before, shared by sha256, stays). A protected ref, an addressed inbound row or an unknown
+     *  ref is left alone. */
     withdraw(ref) {
       const row = rows.find(r => r.ref === ref);
-      if (!row || row.source !== 'generated' || protectedRefs().has(ref)) return { removed: 0 };
+      if (!row || !(row.source === 'generated' || row.kept === true) || protectedRefs().has(ref)) return { removed: 0 };
       return { removed: dropRows(new Set([ref])) };
     },
+    purgeKept,
+    /** The audiences that hold kept rows now (the purge sweep's list). */
+    keptAudiences() { return [...new Set(rows.filter(row => row.kept === true).map(row => row.audience))]; },
     /** Every file and row of this writer (the dashboard's 清空媒体). */
     clear() { const n = rows.length; rows = []; refusals = []; rmSync(home, { recursive: true, force: true }); return { removed: n }; },
-    start(intervalMs = DAY_MS) {
+    start(intervalMs = HOUR_MS) {
       if (timer) return;
       try { cleanup(); } catch (error) { log('media_cleanup_failed', { error: String(error?.code ?? 'error').slice(0, 40) }); }
       timer = setInterval(() => { try { cleanup(); } catch (error) { log('media_cleanup_failed', { error: String(error?.code ?? 'error').slice(0, 40) }); } }, intervalMs);

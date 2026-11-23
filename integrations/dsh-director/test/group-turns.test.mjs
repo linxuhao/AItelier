@@ -13,6 +13,7 @@ import { GroupTurns, GROUP_SOURCE, FOLD_SOURCE, FOLD_LINE, GROUP_TOOLS, FAMILY_T
   groupReminderRefusal, pausedRefusal, answerNow, foldGroupTurns, filterCompactionRequest, withoutGroupTurns, turnSpans, putBack, createGroupSetup, groupReplies, groupWakeName } from '../lib/group-turns.mjs';
 import { GROUP_LIMITS, CHANNEL_LIMITS, createOwnerChannels, channelReplies } from '../lib/channels.mjs';
 import { ContextInjection, clockLine } from '../lib/core.mjs';
+import { boot } from '../index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 let ids = 0;
@@ -24,7 +25,9 @@ const turns = () => new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'group
 const STEWARD_TOOLS = JSON.parse(readFileSync(join(here, '../roles.json'), 'utf8')).steward.presented;
 
 test('the plugin keeps its group bounds as code constants, none of them a backend or bridge key', () => {
-  assert.deepEqual({ ...GROUP_LIMITS }, { mergeMax: 5, turnToolCalls: 6, recentChars: 1500 });
+  // keptChars, keptNameChars (design/steward-group-media.md section 7): what the kept media entries
+  // use before the answered pairs give way, and how short a long sender name is cut past both.
+  assert.deepEqual({ ...GROUP_LIMITS }, { mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000, keptNameChars: 8 });
   assert.ok(Object.isFrozen(GROUP_LIMITS));
   const backend = readFileSync(join(here, '../../../core/state_groups.py'), 'utf8');
   const bridge = readFileSync(join(here, '../../wechat-bridge/bridge.mjs'), 'utf8');
@@ -815,11 +818,74 @@ test('setup (step 23.1): a merge that cannot be recorded goes back for a later t
   assert.equal(w.g.current.merged, 1);
 });
 
-test('group wake (step 23.1, 7.7.4): the wake names the group by its own name and never falls back to a shared one', () => {
-  const index = readFileSync(join(here, '../index.mjs'), 'utf8');
-  const wake = index.slice(index.indexOf('channels.setGroupWake('), index.indexOf('channels?.ready();'));
-  assert.ok(wake.includes('group: label') && wake.includes('group_label: label') && !wake.includes("'家庭群'"), 'no 家庭群 fallback in the wake');
-  assert.ok(wake.indexOf('groupWakeName(group)') < wake.indexOf('agent.steer('), 'the name is required before anything is steered');
+/** A whole boot with a fake host and a fake runtime: the packages it loads through its
+ *  declared entry are stubs written into a temporary directory, so no DSH is involved. */
+async function bootWorld() {
+  const dir = mkdtempSync(join(tmpdir(), 'group-boot-'));
+  const stub = (name, source) => {
+    const base = join(dir, 'node_modules', '@deepseek-ai', name);
+    mkdirSync(base, { recursive: true });
+    writeFileSync(join(base, 'package.json'), JSON.stringify({ name: '@deepseek-ai/' + name, version: '0.0.0', type: 'module', exports: './index.mjs' }));
+    writeFileSync(join(base, 'index.mjs'), source);
+  };
+  stub('dsh-tools', 'export const defineTool = tool => tool;\n');
+  stub('dsh-llm', 'export class HarnessError extends Error {}\nexport const createUserMessage = input => ({ ...input, id: "msg-1", role: "user" });\n');
+  const installed = [], steered = [], images = [];
+  let ready = 0;
+  const channels = {
+    setGroupWake: fn => installed.push(fn), ready: () => { ready += 1; },
+    ownerMessageSent: async () => ({}), sendGroup: async () => true, login: async () => ({}),
+  };
+  const group = { channel: 'wechat', group_ref: 'r1', label: '老家群', mention_prefix: '@管家', media_keep: 'on' };
+  const host = {
+    version: '1.0.0', capabilities: ['channels', 'groups'],
+    config: { sessionId: 'root-1', provider: 'test', model: 'test', stateDir: dir,
+      dshEntry: join(dir, 'entry.mjs'), rolesFile: join(here, '../roles.json'), rootRole: 'steward',
+      todo: { module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR' }, resumeWorkers: false },
+    context: async () => '', events: async () => ({}),
+    channels: { relay: async () => ({}), bind: async () => ({}), sourceOf: async () => null,
+      recordDelivery: async () => ({}), list: async () => ({ channels: [] }) },
+    groups: { list: async () => ({ groups: [group] }), recent: async () => ({ recent: [] }),
+      bind: async () => ({}), relay: async () => ({}), reply: async () => ({}), audience: async () => ({}),
+      ownerSpokeSince: async () => false, familyNote: async () => ({}), familyShow: async () => ({}) },
+    wakeMedia: async () => ({ images, line: async (item, { attach } = {}) => {
+      if (!attach) return `[图片 ${item.ref}；media_call]`;
+      images.push({ attachmentId: 'att-1', mediaType: 'image/png' });
+      return `[图片 ${item.ref}，原图已附]`;
+    } }),
+  };
+  const agent = { session: { id: 'root-1' }, steer: message => steered.push(message) };
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    get: name => name === 'loader' ? { await: async () => {} } : undefined,
+    tools: { guard() {}, register() {}, schemas: () => [] },
+    systemPrompt: { section() {} }, on() {},
+    agents: { create: async () => ({ agent, dispose: async () => {} }), get: () => agent, withoutInitiator: fn => fn() },
+    sessionPersistence: { stat: async () => undefined, flush: async () => {} },
+    goals: { disarm() {}, get: () => ({ phase: 'active' }) },
+    tokenMeter: { measure: () => ({ totalTokens: 0 }) }, compaction: { compactNow: async () => false },
+  };
+  const handle = await boot(ctx, { host, channels });
+  return { handle, installed, steered, ready };
+}
+
+test('group wake (step 23.1, 7.7.4): boot installs the handler that wakes with the group\'s own name', async t => {
+  const w = await bootWorld();
+  t.after(() => w.handle.close());
+  // The handler under test is the one the plugin's boot handed to a channel, not one
+  // imported separately: a boot that stopped installing it leaves nothing to invoke.
+  assert.equal(w.ready, 1, 'boot reached the channel install and opened the channels');
+  assert.equal(w.installed.length, 1);
+  assert.equal(typeof w.installed[0], 'function');
+  await w.installed[0]({ channel: 'wechat', groupRef: 'r1', senderRef: 'wxid_m', text: '@管家 看看这几张',
+    at: '2026-11-23T10:00:00+00:00', message_id: 'g1', sender_role: 'member', sender_label: '成员甲',
+    attachments: [{ kind: 'image', ref: 'm_1111111111111111', mime: 'image/png' }] });
+  assert.equal(w.steered.length, 1);
+  assert.deepEqual(w.steered[0].content.map(block => block.type), ['text', 'image']);
+  const wake = JSON.parse(w.steered[0].content[0].text).group_turn;
+  assert.equal(wake.group, '老家群', 'the group is named by its own name, never a shared one');
+  assert.match(wake.messages[0].attachments[0], /原图已附/);
+  assert.ok(!w.steered[0].content[0].text.includes('家庭群'), 'no shared-name fallback in the wake');
 });
 
 test('group wake (director 602 defect 3): a group the host does not name wakes nothing - refused, never group: null', () => {

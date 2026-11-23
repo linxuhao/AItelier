@@ -1,9 +1,12 @@
 /** wechat-bridge: one WeChat login kept alive in its own process, served over
  *  loopback HTTP to the steward's channel plugin (dsh-channel-wechat).
  *
- *  Why a separate process: puppet-neo keeps the login in memory only, so whoever
- *  holds it must outlive steward and host restarts, or every restart would need a
- *  new QR scan (design §7.2).
+ *  Why a separate process: puppet-neo keeps the login in memory, so whoever holds it
+ *  must outlive steward and host restarts (design §7.2). Step 19.1 (design §7.2.1, the
+ *  owner's rule of 2026-11-22: "a start resumes by itself; with nothing to resume it waits
+ *  for a QR to be asked for"): the fork also keeps the login encrypted on disk, and a start
+ *  that finds one resumes it (`resuming`) - a fresh bot built with `makeBot({resume: true})`,
+ *  never a QR. Nothing to resume (or saving off) starts `idle` exactly as before.
  *
  *  A login QR is asked of WeChat only on request (POST /login: the dashboard's button or
  *  the steward's tool, design §7.2 "按需二维码"), one at a time. A QR that expires or is
@@ -15,13 +18,17 @@
  *  the next, and whatever an old bot still emits is ignored.
  *
  *  This file is the HTTP layer, the event filter and the login's phases, with no
- *  dependency of its own: `makeBot()` returns a Wechaty instance (or a fake with the same
+ *  dependency of its own: `makeBot(options?)` returns a Wechaty instance (or a fake with the same
  *  events, start/stop and Contact.find) and `types` is Wechaty's `types`, both handed in
  *  by main.mjs, so the tests never load the real puppet. `renderQr` (qr-svg.mjs, also
- *  handed in) draws the login QR as an SVG for the dashboard. */
+ *  handed in) draws the login QR as an SVG for the dashboard; `savedLogin` (main.mjs: the
+ *  fork's `savedLoginStatus()` and the bridge's own `accountRecord`) is the saved login,
+ *  absent when the puppet has none. The bridge never deletes a saved-login file: only the
+ *  fork does (refused, ended by WeChat, or another account than expected). */
 import { createServer } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { createReadStream, rmSync } from 'node:fs';
+import { closeSync, constants, createReadStream, fstatSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync,
+  renameSync, rmSync, writeSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -74,6 +81,18 @@ const WAV_HEADER_SLACK = 4096;
  *  failed `attempts` times: then it is gone (410), so one file never holds the owner's later
  *  messages forever. */
 export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
+/** The bytes of described attachments kept on disk, so a process whose live map holds no entry
+ *  for an id answers GET /media for it from the copy instead of asking its puppet. The bound is
+ *  64 MiB: the rings could hold RING_SIZE 500 + GROUP_RING_SIZE 200 + STRANGER_RING_SIZE 50 =
+ *  750 described attachments at MEDIA_LIMITS.file's 25 MiB, i.e. 18,750 MiB, so an eager copy of
+ *  a full ring is not acceptable; 64 MiB holds two 25 MiB files and smaller ones besides.
+ *  Eviction is oldest-described-first (the smallest media_id sequence number), and an id whose
+ *  event leaves a ring is removed at once. The bound is not the rings': it can evict the copy of
+ *  an id whose event is still live. That process still serves the id on demand (the live path),
+ *  but a later process, holding no live entry for it, answers 404 - the same answer as for an id
+ *  that was never copied. */
+export const MEDIA_STORE_BYTES = 64 * MiB;
+export const MEDIA_STORE_DIR = 'media';
 /** A puppet error that says this message will never be handed over (neo's refusal of a peer it
  *  has not observed, an expired or unknown message; the fork's "payload is no longer cached",
  *  its refusal of a message of another WeChat type, and its refusals of a payload that can
@@ -103,6 +122,186 @@ const MEDIA_KINDS = ['image', 'voice', 'file'];
 export const LOGIN_LIMITS = Object.freeze({ minGapMs: 2 * 60_000, perHour: 5, perDay: 12, qrWaitMs: 30_000,
   qrLifeMs: 5 * 60_000 });
 const HOUR_MS = 3_600_000, DAY_MS = 24 * HOUR_MS;
+/** Step 19.1 (design 7.2.1): a resume with no outcome within waitMs is given up (`idle`,
+ *  resume_failed) - a display bound only, strictly above the fork's worst case (about 70 s:
+ *  seven 10-second requests); the fork's own `busy` keeps two sessions off one login. A
+ *  resume that failed for a passing reason (the network, `busy`, no outcome) is tried again
+ *  after each of retryMs, after the last bot has stopped; then the bridge waits for a QR to
+ *  be asked for. Until the host's first PUT /rooms names the bound account and rooms, what
+ *  arrives is held in memory (each kind at most its ring's size, oldest dropped): group
+ *  messages at most holdGroupMs after the start - after that they pass the rules with no
+ *  room bound, so their content is dropped, never stored - and 1:1 messages until that
+ *  first PUT. A held message whose login ended is dropped. countLogMs: how often the fork's
+ *  write counts are logged (only when they changed). The fork caps the resumes themselves
+ *  (6 an hour, 20 a day, across restarts) and answers `throttled` past them. */
+export const RESUME_LIMITS = Object.freeze({ waitMs: 150_000, retryMs: Object.freeze([30_000, 120_000, 600_000]),
+  holdGroupMs: 120_000, countLogMs: HOUR_MS });
+/** The fork's error prefixes for a resume that did not resume, and the idle reason each
+ *  leaves; none of them asks for a QR. RESUME_MISMATCH: the saved login was another account
+ *  than the expectUsername it was given; the fork has stopped that account and deleted the
+ *  one file that attempt read. The bridge's own check on login (attach) stays as a second
+ *  guard. RESUME_BUSY (another
+ *  resume still running in the fork) is passing: retried, as is any other error. */
+const RESUME_ENDS = Object.freeze({ RESUME_REJECTED: 'resume_rejected', RESUME_UNREADABLE: 'resume_unreadable',
+  RESUME_THROTTLED: 'resume_throttled', RESUME_NONE: 'boot', RESUME_MISMATCH: 'resume_account_mismatch' });
+const RESUME_WORD = /\bRESUME_(?:NONE|UNREADABLE|THROTTLED|REJECTED|BUSY|MISMATCH)\b/;
+/** `savedLoginStatus().off`, the fork's closed set of configuration errors. A failed write is
+ *  never one of them: writes and write_failures are counted apart. */
+const SAVED_LOGIN_OFF = new Set(['not_configured', 'key', 'dir']);
+/** The account logged in with a QR (design 7.2.1, the platform director's ruling 9 and his
+ *  notes 653-654), recorded by the bridge in its own directory (WECHAT_BRIDGE_ACCOUNT_DIR,
+ *  run.sh), never in the fork's data/: a copy of data/ put back cannot bring an old record
+ *  with it. Each resume hands it to the fork as expectUsername; the fork compares and answers
+ *  RESUME_MISMATCH, and the bridge compares a resumed login's user id with it again itself,
+ *  a second guard. None recorded: nothing is passed and nothing is compared. */
+export const ACCOUNT_FILE = 'account.user';
+const ACCOUNT_FILE_MAX = 4096;
+
+/** The account record in `dir` (the bridge's account directory): readAccount() -> the user id
+ *  recorded at the last QR login, or undefined (none, unreadable, a link or not a file);
+ *  recordAccount(id) writes it atomically (a 0600 temporary file, fsync, rename, the
+ *  directory fsynced) and throws when it cannot. No dir: nothing is read, a write throws. */
+export function accountRecord(dir) {
+  const file = dir ? join(dir, ACCOUNT_FILE) : undefined;
+  return {
+    dir,
+    readAccount() {
+      if (!file) return undefined;
+      let fd;
+      try {
+        fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const info = fstatSync(fd);
+        if (!info.isFile() || info.size > ACCOUNT_FILE_MAX) return undefined;
+        const value = JSON.parse(readFileSync(fd, 'utf8'));
+        return value?.v === 1 && typeof value.user_id === 'string' && value.user_id ? value.user_id : undefined;
+      } catch { return undefined; }
+      finally { if (fd !== undefined) closeSync(fd); }
+    },
+    recordAccount(userId) {
+      if (!file) throw new Error('no saved-login directory');
+      const temporary = `${file}.tmp-${randomBytes(8).toString('hex')}`;
+      try {
+        const fd = openSync(temporary, 'wx', 0o600);
+        try { writeSync(fd, JSON.stringify({ v: 1, user_id: userId })); fsyncSync(fd); } finally { closeSync(fd); }
+        renameSync(temporary, file);
+        const directory = openSync(dir, 'r');
+        try { fsyncSync(directory); } finally { closeSync(directory); }
+      } catch (error) {
+        rmSync(temporary, { force: true });
+        throw error;
+      }
+    },
+  };
+}
+
+const MEDIA_ID = /^\d+\.\d+$/;
+const mediaSeq = id => Number(id.slice(0, id.indexOf('.')));
+
+/** The durable copy of described attachments, in its own subdirectory of the bridge's
+ *  account directory (the directory accountRecord is given). `bytes` bounds the SUM of the
+ *  stored payload sizes; `put(id, {file, size, mime, durationMs})` moves a spooled 0600 file
+ *  into it and publishes its metadata last, so an entry exists only once its metadata has
+ *  landed: the index is read from the metadata files alone, and a payload without one is not
+ *  an entry and is never served. `get(id)` opens a stored payload without following links (a
+ *  link at the payload path is refused and the id dropped), and `remove(id)` deletes both
+ *  files. The index is rebuilt from the metadata at construction, so the next process serves
+ *  the same ids. */
+export function mediaStore(dir, { bytes = MEDIA_STORE_BYTES, log = () => {} } = {}) {
+  const root = dir ? join(dir, MEDIA_STORE_DIR) : undefined;
+  const entries = new Map();
+  let total = 0;
+  const bin = id => join(root, `${id}.bin`);
+  const meta = id => join(root, `${id}.json`);
+  const discard = path => { try { rmSync(path, { force: true }); } catch (error) { log(`media store file not deleted: ${short(error)}`); } };
+  function remove(id) {
+    if (!root) return;
+    const old = entries.get(id);
+    if (old) { total -= old.size; entries.delete(id); }
+    discard(bin(id));
+    discard(meta(id));
+  }
+  if (root) {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    const found = [];
+    for (const name of readdirSync(root)) {
+      const id = /^(\d+\.\d+)\.json$/.exec(name)?.[1];
+      if (!id) {
+        if (name.startsWith('tmp-')) discard(join(root, name));
+        continue;
+      }
+      let value;
+      try {
+        const fd = openSync(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try { value = JSON.parse(readFileSync(fd, 'utf8')); } finally { closeSync(fd); }
+        if (value?.v !== 1 || !Number.isSafeInteger(value.size) || value.size < 0 || value.size > bytes
+          || (value.mime !== undefined && typeof value.mime !== 'string')
+          || (value.durationMs !== undefined && !Number.isFinite(value.durationMs))) throw new Error('bad media metadata');
+        const payload = openSync(bin(id), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const info = fstatSync(payload);
+          if (!info.isFile() || info.size !== value.size) throw new Error('stored media bytes changed');
+        } finally { closeSync(payload); }
+      } catch (error) {
+        log(`stored media ${id} ignored: ${short(error)}`);
+        discard(join(root, name));
+        discard(bin(id));
+        continue;
+      }
+      found.push([id, { size: value.size, mime: value.mime, durationMs: value.durationMs }]);
+    }
+    for (const [id, value] of found.sort((a, b) => mediaSeq(a[0]) - mediaSeq(b[0]))) {
+      entries.set(id, value);
+      total += value.size;
+    }
+    for (const id of [...entries.keys()]) { if (total <= bytes) break; remove(id); }
+  }
+  return {
+    dir: root,
+    temp: () => join(root, `tmp-${randomBytes(8).toString('hex')}`),
+    put(id, { file, size, mime, durationMs }) {
+      if (!root || !MEDIA_ID.test(id)) { discard(file); return false; }
+      try {
+        remove(id);
+        renameSync(file, bin(id));
+        const temporary = `${meta(id)}.tmp-${randomBytes(8).toString('hex')}`;
+        try {
+          const fd = openSync(temporary, 'wx', 0o600);
+          try { writeSync(fd, JSON.stringify({ v: 1, size, mime, durationMs })); fsyncSync(fd); } finally { closeSync(fd); }
+          renameSync(temporary, meta(id));
+        } catch (error) { discard(temporary); throw error; }
+        entries.set(id, { size, mime, durationMs });
+        total += size;
+        while (total > bytes && entries.size) remove(entries.keys().next().value);
+        return entries.has(id);
+      } catch (error) {
+        log(`media ${id} not stored: ${short(error)}`);
+        discard(bin(id));
+        discard(meta(id));
+        return false;
+      }
+    },
+    get(id) {
+      if (!root || !entries.has(id)) return undefined;
+      const value = entries.get(id);
+      let fd;
+      try {
+        fd = openSync(bin(id), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const info = fstatSync(fd);
+        if (!info.isFile() || info.size !== value.size) throw new Error('stored media bytes changed');
+        return { fd, size: value.size, mime: value.mime, durationMs: value.durationMs };
+      } catch (error) {
+        if (fd !== undefined) closeSync(fd);
+        log(`stored media ${id} unreadable: ${short(error)}`);
+        remove(id);
+        return undefined;
+      }
+    },
+    remove,
+    ids: () => [...entries.keys()],
+    get bytes() { return total; },
+    get count() { return entries.size; },
+  };
+}
 
 /** Texts of more than `size` characters, cut into consecutive parts of at most
  *  `size` code points (a surrogate pair is never split). */
@@ -324,7 +523,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   groupRingSize = GROUP_RING_SIZE, strangerRingSize = STRANGER_RING_SIZE, sendLimits = GROUP_SEND_LIMITS,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   mediaLimits = MEDIA_LIMITS, tmpDir = tmpdir(), makeFileBox, fetchLimits = MEDIA_FETCH, isGone = isGoneError,
-  mediaSend = MEDIA_SEND }) {
+  mediaSend = MEDIA_SEND, savedLogin, resumeLimits = RESUME_LIMITS, mediaStoreBytes = MEDIA_STORE_BYTES }) {
   if (typeof token !== 'string' || !token.trim()) throw new Error('wechat-bridge refused: no token');
   if (typeof makeBot !== 'function') throw new Error('wechat-bridge refused: no makeBot');
   const expected = digest(token.trim());
@@ -332,8 +531,12 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   /** Step 24.2 (design 7.8.12 "活消息存在哪"): media_id ('<seq>.<index>') -> {message, index,
    *  kind, generation} for each fetchable attachment of an event in a ring. An entry goes in
    *  just before its event is pushed and leaves when that event is cut off a ring's head
-   *  (`push`), so it never outlives its event; a restart empties both. */
+   *  (`push`), so it never outlives its event; a restart empties this map. The bytes described
+   *  here are also copied into `store` (when the account directory is available), so a later
+   *  process whose live map holds no entry for the media_id answers it from the copy, without
+   *  asking its own puppet. */
   const live = new Map();
+  const store = savedLogin?.dir ? mediaStore(savedLogin.dir, { bytes: mediaStoreBytes, log }) : undefined;
   let fetching = false;
   // Step 23: the host's whitelist (PUT /rooms), in memory only - a restart starts empty and
   // the host sets it again: the bound account and each bound room with its @ prefix.
@@ -349,7 +552,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   // phase: idle (no QR, not logged in, no bot running; idle_reason says why) |
   // starting (a QR was requested and has not appeared yet) | waiting_qr (a QR can be
   // scanned; the only phase with `qr`) | scanned (scanned, to be confirmed on the phone)
-  // | logged_in.
+  // | resuming (step 19.1: the saved login is being resumed, no QR) | logged_in.
   const state = { phase: 'idle', idle_reason: 'boot', logged_in: false, user_id: undefined, qr: undefined,
     qr_svg: undefined, since: now().toISOString() };
   const setState = change => Object.assign(state, { idle_reason: undefined }, change, { since: now().toISOString() });
@@ -360,11 +563,41 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     catch { log('the login QR could not be drawn'); return undefined; }
   };
 
-  // `bot` is the current attempt's (undefined before the first request). `generation`
+  // Step 19.1: the saved login. `saving` is the fork's own word at the start - `off` (its
+  // closed set of configuration errors) or no saved-login calls at all leave the bridge as it
+  // was before 19.1: no resume, no hold, no account record. A failed write never turns it off.
+  const savedStatus = () => {
+    try { return savedLogin?.status() ?? undefined; }
+    catch (error) { log('saved login status unreadable: ' + short(error)); return undefined; }
+  };
+  const bootStatus = savedStatus();
+  const saving = Boolean(bootStatus) && bootStatus.off === undefined;
+  if (bootStatus && !saving) log(`saved login off (${SAVED_LOGIN_OFF.has(bootStatus.off) ? bootStatus.off : 'unknown'})`);
+  // The account the last QR login was with, handed to each resume as expectUsername (none
+  // recorded, e.g. the first start after the upgrade: nothing is compared).
+  let recorded = saving ? savedLogin.readAccount() : undefined;
+  // Not resumable until the next QR login: a resume here was another account
+  // (RESUME_MISMATCH, or refused on login), or a QR login's account could not be recorded (the record on disk may
+  // name another one, so the next resume would be refused).
+  let refused = false;
+  // After a QR login in this process: the fork's `writes` when its QR was asked for. The
+  // saved login on disk is that login's only once the fork has written since; a first write
+  // that failed leaves an older one, maybe another account's.
+  let qrWrites, writesBefore;
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  /** What /status calls resumable, never optimistic: a saved login is on disk (the fork's
+   *  `present`, from lstat), this process has not refused it, and after a QR login here the
+   *  fork has written that login's. */
+  const resumable = () => {
+    if (!saving || refused) return false;
+    const status = savedStatus();
+    return Boolean(status?.present) && (writesBefore === undefined || count(status.writes) > writesBefore);
+  };
+
   // changes with every request and every end; each bot's events and each timer carry the
   // generation they were made for, so those of an earlier attempt do nothing. `tasks`
   // holds the starts and stops still running (settled() waits for them).
-  let bot, generation = 0, qrTimer, lifeTimer;
+  let bot, generation = 0, qrTimer, lifeTimer, resumeTimer, retryTimer, retriesLeft = 0;
   const accepted = [];
   const tasks = new Set();
   const track = promise => {
@@ -376,7 +609,13 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     try { await old.stop(); } catch (error) { log('stopping the puppet failed: ' + short(error)); }
   })());
   const loginLive = () => ['starting', 'waiting_qr', 'scanned'].includes(state.phase);
-  const clearTimers = () => { clearTimeout(qrTimer); clearTimeout(lifeTimer); };
+  const clearTimers = () => { clearTimeout(qrTimer); clearTimeout(lifeTimer); clearTimeout(resumeTimer); };
+  const settle = async () => { while (tasks.size) await Promise.allSettled([...tasks]); };
+  // Step 19.1, the hold (RESUME_LIMITS): until the first PUT /rooms, what arrives waits here
+  // as {message, generation, group}, in arrival order.
+  let holding = saving, groupHoldOver = false;
+  const held = [];
+  let groupHoldTimer;
   /** This login attempt is over: idle with `reason`, and its bot stopped so nothing talks
    *  to WeChat until the next request. */
   const end = reason => {
@@ -384,10 +623,102 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     clearTimers();
     setState({ phase: 'idle', idle_reason: reason, logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
     log(`idle (${reason}): no QR until one is requested`);
+    held.length = 0;
     const old = bot;
     bot = undefined;
     if (old) void stopBot(old);
   };
+
+  /** Step 19.1: one resume of the saved login - a fresh bot with `makeBot({resume: true,
+   *  expectUsername})` (no expectUsername when none is recorded), its own generation, no QR.
+   *  Only from idle with no bot of its own. */
+  const resume = () => {
+    const mine = ++generation;
+    setState({ phase: 'resuming', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
+    log('resuming the saved login (no QR)');
+    let fresh;
+    try { fresh = makeBot({ resume: true, ...(recorded === undefined ? {} : { expectUsername: recorded }) }); }
+    catch (error) {
+      log('building the puppet failed: ' + short(error));
+      resumeFailed();
+      return;
+    }
+    bot = fresh;
+    attach(fresh, mine);
+    resumeTimer = setTimeout(() => {
+      if (mine !== generation || state.phase !== 'resuming') return;
+      log(`the saved login gave no answer in ${Math.round(resumeLimits.waitMs / 1000)} s`);
+      resumeFailed();
+    }, resumeLimits.waitMs);
+    resumeTimer.unref?.();
+    void track((async () => {
+      try { await fresh.start(); }
+      catch (error) {
+        log('starting the puppet failed: ' + short(error));
+        if (mine === generation && state.phase === 'resuming') resumeFailed();
+      }
+    })());
+  };
+  /** A resume, `retryMs.length` more times on a passing failure (RESUME_LIMITS): at the start,
+   *  and (the owner's answer to design 7.2.1 pending item 2) when a login ends here while its
+   *  saved login is still on disk. `delayMs` 0 with no bot: at once. */
+  const resumeEpisode = delayMs => {
+    retriesLeft = resumeLimits.retryMs.length;
+    if (delayMs || bot || tasks.size) scheduleResume(delayMs);
+    else resume();
+  };
+  /** The next resume after `delayMs`, after the last bot has stopped; void once anything else
+   *  happened meanwhile (a QR asked for, a close: the generation moved). */
+  const scheduleResume = delayMs => {
+    const mine = generation;
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(async () => {
+      if (mine !== generation || state.phase !== 'idle') return;
+      await settle();
+      if (mine !== generation || state.phase !== 'idle') return;
+      resume();
+    }, delayMs);
+    retryTimer.unref?.();
+  };
+  /** A resume that failed for a passing reason: idle (resume_failed), and the next try if any is left. */
+  const resumeFailed = () => {
+    end('resume_failed');
+    if (retriesLeft <= 0) return;
+    const delay = resumeLimits.retryMs[resumeLimits.retryMs.length - retriesLeft];
+    retriesLeft--;
+    log(`the saved login will be tried again in ${Math.round(delay / 1000)} s`);
+    scheduleResume(delay);
+  };
+  /** The hold's release: each held message of the current login through relay(), in arrival
+   *  order; one of an ended login is dropped. */
+  const release = which => {
+    const out = [];
+    for (let i = 0; i < held.length;) if (which(held[i])) out.push(...held.splice(i, 1)); else i++;
+    for (const entry of out) if (entry.generation === generation) relay(entry.message);
+  };
+  const hold = message => {
+    const group = Boolean(roomOf(message));
+    if (group && groupHoldOver) return relay(message);
+    held.push({ message, generation, group });
+    const size = group ? groupRingSize : ringSize;
+    if (held.filter(entry => entry.group === group).length > size) held.splice(held.findIndex(entry => entry.group === group), 1);
+  };
+  if (holding) {
+    groupHoldTimer = setTimeout(() => { groupHoldOver = true; release(entry => entry.group); }, resumeLimits.holdGroupMs);
+    groupHoldTimer.unref?.();
+  }
+  // The fork's write counts, logged at most every countLogMs and only when they changed.
+  let countTimer, counted = '0/0';
+  if (saving) {
+    countTimer = setInterval(() => {
+      const status = savedStatus();
+      const line = `${count(status?.writes)}/${count(status?.write_failures)}`;
+      if (!status || line === counted) return;
+      counted = line;
+      log(`saved login: ${count(status.writes)} writes, ${count(status.write_failures)} write failures`);
+    }, resumeLimits.countLogMs);
+    countTimer.unref?.();
+  }
 
   /** The event handlers of the bot built for attempt `mine`: an event of any other
    *  attempt's bot (one that ended, still stopping) is ignored, and within the attempt
@@ -416,21 +747,55 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     });
     target.on('login', user => {
       if (!current()) return;
+      const resumed = state.phase === 'resuming';
+      // Step 19.1 (ruling 9): a resumed login of another account than the recorded one is not
+      // taken - idle, nothing relayed or sent, its bot stopped. The fork already compares
+      // expectUsername and answers RESUME_MISMATCH (the 'error' handler), deleting that file;
+      // this is the second guard, should such a login ever be reported. The bridge deletes
+      // nothing: here the file stays, and every start resumes and refuses it again.
+      if (resumed && recorded !== undefined && user?.id !== recorded) {
+        refused = true;
+        return end('resume_account_mismatch');
+      }
       clearTimers();
       setState({ phase: 'logged_in', logged_in: true, user_id: user?.id, qr: undefined, qr_svg: undefined });
-      log('logged in');
+      log(resumed ? 'logged in (the saved login resumed)' : 'logged in');
+      if (resumed || !saving || !user?.id) return;
+      writesBefore = qrWrites;
+      try { savedLogin.recordAccount(user.id); recorded = user.id; refused = false; }
+      catch (error) {
+        refused = true;
+        log('the account logged in with could not be recorded, so its saved login will not be resumed: ' + short(error));
+      }
     });
     target.on('logout', () => {
       if (!current() || state.phase === 'idle') return;
+      if (state.phase === 'resuming') return resumeFailed();
       end('logged_out');
+      // The owner's answer to pending item 2: a login that ended HERE (the network, a
+      // watchdog) leaves its saved login on disk and is resumed; one WeChat ended took the
+      // saved login with it (the fork deletes it first), so present is false and nothing runs.
+      if (resumable()) resumeEpisode(0);
     });
     target.on('error', error => {
       log('error: ' + short(error));
+      if (!current()) return;
+      if (state.phase === 'resuming') {
+        // The fork's word may be in the message or in `data` (the puppet's own error shape).
+        const said = [error?.message, error?.data].filter(part => part !== undefined).join(' ') || String(error);
+        const outcome = RESUME_WORD.exec(said)?.[0];
+        if (outcome === 'RESUME_MISMATCH') refused = true;
+        return RESUME_ENDS[outcome] ? end(RESUME_ENDS[outcome]) : resumeFailed();
+      }
       // An error while logged in is only logged (Wechaty reports message handling failures
       // that way); before a login it ends the attempt: neo then gives up its session.
-      if (current() && loginLive()) end('login_failed');
+      if (loginLive()) end('login_failed');
     });
-    target.on('message', message => { if (current()) relay(message); });
+    target.on('message', message => {
+      if (!current()) return;
+      if (holding) hold(message);
+      else relay(message);
+    });
   };
 
   /** POST /login: [status, body]. Accepted only while idle; a refusal changes nothing. */
@@ -439,6 +804,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     if (state.phase === 'logged_in') return [409, { refused: 'already_logged_in' }];
     if (state.phase === 'waiting_qr' || state.phase === 'scanned') return [409, { refused: 'qr_waiting' }];
     if (state.phase === 'starting') return [409, { refused: 'login_starting' }];
+    if (state.phase === 'resuming') return [409, { refused: 'resuming' }];
     const at = now().getTime();
     while (accepted.length && accepted[0] <= at - DAY_MS) accepted.shift();
     const lastHour = accepted.filter(time => time > at - HOUR_MS);
@@ -450,6 +816,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     if (wait > 0) return [429, { refused: 'rate_limited', retry_after_s: Math.ceil(wait / 1000) }];
     accepted.push(at);
     const mine = ++generation;
+    if (saving) qrWrites = count(savedStatus()?.writes);
     setState({ phase: 'starting', logged_in: false, user_id: undefined, qr: undefined, qr_svg: undefined });
     log('login QR requested');
     let fresh;
@@ -478,7 +845,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     target.push({ seq: ++seq, ...event });
     if (target.length <= size) return;
     for (const dropped of target.splice(0, target.length - size))
-      for (const attachment of dropped.attachments ?? []) if (attachment.media_id) live.delete(attachment.media_id);
+      for (const attachment of dropped.attachments ?? []) if (attachment.media_id) {
+        live.delete(attachment.media_id);
+        store?.remove(attachment.media_id);
+      }
   };
 
   /** A group message (step 23): the account's own ones are dropped. In a BOUND room a text
@@ -507,6 +877,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       else {
         const mediaId = `${seq + 1}.0`;
         live.set(mediaId, { message, index: 0, kind: media.kind, generation });
+        archive(mediaId, { message, index: 0, kind: media.kind });
         event.attachments = [{ media_id: mediaId, ...described }];
       }
       push(groupRing, groupRingSize, event);
@@ -551,6 +922,7 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
           else {
             const mediaId = `${seq + 1}.0`;
             live.set(mediaId, { message, index: 0, kind: media.kind, generation });
+            archive(mediaId, { message, index: 0, kind: media.kind });
             event.attachments = [{ media_id: mediaId, ...described }];
           }
         }
@@ -685,17 +1057,64 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     }
   };
 
+  /** Side copy of a described attachment into the bounded store: the fetch runs while the
+   *  event is still in its ring, and an id whose event is cut before the copy lands is not kept.
+   *  GET /media keeps its own on-demand path for a live id, so the busy/gone/too_large/temporary
+   *  refusals below are unchanged; a stored copy is read only by a process that has no live
+   *  entry for that id. Nothing is stored for a stranger or an over-bound one. */
+  function archive(mediaId, entry) {
+    if (!store) return;
+    const file = store.temp();
+    const abandon = new AbortController();
+    const timeout = what => () => abandon.abort(new Error(`media store timed out: ${what}`));
+    const firstTimer = setTimeout(timeout(`no first byte in ${fetchLimits.firstByteMs} ms`), fetchLimits.firstByteMs);
+    const totalTimer = setTimeout(timeout(`not whole in ${fetchLimits.totalMs} ms`), fetchLimits.totalMs);
+    firstTimer.unref?.();
+    totalTimer.unref?.();
+    void (async () => {
+      try {
+        const saved = await spool(entry, file, abandon.signal, () => clearTimeout(firstTimer));
+        if (saved.too_large) return;
+        if (!live.has(mediaId)) return;
+        store.put(mediaId, { file, ...saved });
+      } catch (error) {
+        log(`media ${entry.kind} not stored: ${short(error)}`);
+      } finally {
+        clearTimeout(firstTimer);
+        clearTimeout(totalTimer);
+        rmSync(file, { force: true });
+      }
+    })();
+  }
+
+  /** A stored id from an earlier process: answer from the copy - this process holds no live
+   *  entry for it - with the headers a live answer carries (content-type, content-length,
+   *  cache-control, and x-voice-duration-ms for a voice), and without asking the puppet. */
+  function serveStored(stored, response) {
+    let bytes;
+    try { bytes = readFileSync(stored.fd); } finally { closeSync(stored.fd); }
+    response.writeHead(200, { 'content-type': typeof stored.mime === 'string' && stored.mime ? stored.mime : 'application/octet-stream',
+      'content-length': String(stored.size), 'cache-control': 'no-store',
+      ...(stored.durationMs === undefined ? {} : { 'x-voice-duration-ms': String(stored.durationMs) }) });
+    return response.end(bytes.length ? bytes : undefined);
+  }
+
   /** GET /media/:media_id: the bytes of one live attachment, fetched now and streamed out (a
-   *  voice with its length in `x-voice-duration-ms` when known). 404:
-   *  not live (never was, or its event left the ring); 410 gone: another login's message, a
-   *  refusal `isGone` recognises, or one that failed fetchLimits.attempts times; 503: another
-   *  fetch is running (busy, one at a time), or this one failed, ran out of time or lost its
-   *  client (unavailable, transient); 413 too_large: more bytes than its bound. The bytes sit in
-   *  tmpfs only while this answer runs. */
+   *  voice with its length in `x-voice-duration-ms` when known), or, when this process has no
+   *  live entry, the bounded store's copy of a media_id described by an earlier process. 404:
+   *  held by neither; 410 gone: another login's message, a refusal `isGone` recognises, or one
+   *  that failed fetchLimits.attempts times; 503: another fetch is running (busy, one at a
+   *  time), or this one failed, ran out of time or lost its client (unavailable, transient);
+   *  413 too_large: more bytes than its bound. A live answer's tmpfs file exists only while it
+   *  runs; the store's bounded copy is on disk. */
   async function serveMedia(mediaId, response) {
     const entry = live.get(mediaId);
-    if (!entry) return reply(response, 404, { error: 'not_found' });
-    if (entry.generation !== generation || !bot || entry.gone) return reply(response, 410, { error: 'gone' });
+    if (entry && (entry.generation !== generation || !bot || entry.gone)) return reply(response, 410, { error: 'gone' });
+    if (!entry) {
+      const stored = store?.get(mediaId);
+      if (stored) return serveStored(stored, response);
+      return reply(response, 404, { error: 'not_found' });
+    }
     if (fetching) return reply(response, 503, { error: 'busy' });
     fetching = true;
     const file = join(tmpDir, `wechat-media-${randomBytes(8).toString('hex')}`);
@@ -808,6 +1227,13 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     response.end(JSON.stringify(body));
   };
+  /** The two send endpoints' one answer place: a refused or failed send is attributable by
+   *  endpoint, status and code only - never by its text, room ref or member ref. A successful
+   *  send (status < 400) still logs nothing. */
+  const sendReply = (kind, response, status, body) => {
+    if (status >= 400) log(`send refused: ${kind} ${status} ${body?.error ?? 'unknown'}`);
+    return reply(response, status, body);
+  };
 
   const readJson = request => new Promise((resolve, reject) => {
     const chunks = [];
@@ -834,12 +1260,19 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
   };
 
   const server = createServer(async (request, response) => {
+    // Set as soon as a request is recognised as one of the two send endpoints, so an escaped
+    // send failure gets the same one attributable line as a refusal returned by the endpoint.
+    let sendKind;
     try {
       if (!authorized(request)) return reply(response, 401, { error: 'unauthorized' });
       const url = new URL(request.url, 'http://bridge');
       if (request.method === 'GET' && url.pathname === '/status') {
         const body = { phase: state.phase, ...(state.idle_reason ? { idle_reason: state.idle_reason } : {}),
-          logged_in: state.logged_in, since: state.since };
+          logged_in: state.logged_in, since: state.since, resumable: resumable() };
+        // Ruling 6: the fork's write counts, the reader of how often it writes; only with
+        // saving on, so a write failure never looks like off and off never shows counts.
+        const counts = saving ? savedStatus() : undefined;
+        if (counts) Object.assign(body, { writes: count(counts.writes), write_failures: count(counts.write_failures) });
         if (state.user_id) body.user_id = state.user_id;
         if (state.qr) body.qr = state.qr;
         if (state.qr_svg) body.qr_svg = state.qr_svg;
@@ -858,16 +1291,17 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
       if (request.method === 'POST' && url.pathname === '/send-file') {
         // Step 24.2: ?to= (the bound owner) or ?room= (a bound group), kind, mime, name; the body
         // is the file's bytes, at most mediaLimits.sendBody.
+        sendKind = 'POST /send-file';
         const bytes = await readBytes(request, mediaLimits.sendBody);
         const query = url.searchParams;
         const to = query.get('to') ?? '', room = query.get('room') ?? '', kind = query.get('kind') ?? '';
         const mime = query.get('mime') ?? '', name = query.get('name') ?? '';
         const plan = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
           ? sendPlan({ kind, name, bytes }, mediaSend) : undefined;
-        if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return reply(response, 400, { error: 'bad_request' });
-        if (typeof makeFileBox !== 'function') return reply(response, 501, { error: 'not_supported' });
+        if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return sendReply(sendKind, response, 400, { error: 'bad_request' });
+        if (typeof makeFileBox !== 'function') return sendReply(sendKind, response, 501, { error: 'not_supported' });
         const [status, result] = await sendFile({ to, room }, bytes, plan);
-        return reply(response, status, result);
+        return sendReply(sendKind, response, status, result);
       }
       if (request.method === 'POST' && url.pathname === '/login') {
         const [status, result] = requestLogin();
@@ -881,29 +1315,46 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
           return reply(response, 400, { error: 'bad_request' });
         ownerRef = body.owner_ref ?? undefined;
         rooms = new Map(list.map(r => [r.room_ref, r.prefix.normalize('NFKC').trim()]));
+        if (holding) {
+          holding = false;
+          clearTimeout(groupHoldTimer);
+          if (held.length) log(`released ${held.length} held message(s) at the first PUT /rooms`);
+          release(() => true);
+        }
         return reply(response, 200, { rooms: rooms.size, owner_ref_set: Boolean(ownerRef) });
       }
       if (request.method === 'POST' && url.pathname === '/send') {
+        sendKind = 'POST /send';
         const body = await readJson(request);
         if (typeof body?.room === 'string' && body.room) {
-          if (typeof body.text !== 'string' || !body.text.trim()) return reply(response, 400, { error: 'bad_request' });
+          if (typeof body.text !== 'string' || !body.text.trim()) return sendReply(sendKind, response, 400, { error: 'bad_request' });
           const [status, result] = await sendGroup(body.room, body.text);
-          return reply(response, status, result);
+          return sendReply(sendKind, response, status, result);
         }
         if (typeof body?.to !== 'string' || !body.to || typeof body.text !== 'string' || !body.text.trim()) {
-          return reply(response, 400, { error: 'bad_request' });
+          return sendReply(sendKind, response, 400, { error: 'bad_request' });
         }
         const [status, result] = await send(body.to, body.text);
-        return reply(response, status, result);
+        return sendReply(sendKind, response, status, result);
       }
       return reply(response, 404, { error: 'not_found' });
     } catch (error) {
+      if (sendKind) {
+        // One attributable line for the answer, whether the send refused itself or threw; the
+        // text is never logged, and the answer bodies/statuses are exactly as before.
+        const status = error?.status ?? 502;
+        const body = error?.status ? { error: error.message }
+          : { error: 'send_failed', detail: String(error?.message ?? error).slice(0, 200) };
+        return sendReply(sendKind, response, status, body);
+      }
       if (error?.status) return reply(response, error.status, { error: error.message });
-      // A failed send reaches the caller as one error; the text is never logged.
       log('request failed: ' + short(error));
       return reply(response, 502, { error: 'send_failed', detail: String(error?.message ?? error).slice(0, 200) });
     }
   });
+
+  // Step 19.1: a start with a saved login resumes it.
+  if (saving && loginEnabled && bootStatus.present) resumeEpisode(0);
 
   return {
     server,
@@ -912,8 +1363,13 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     get waiting() { return waiters.size; },
     /** Live attachments (step 24.2): never more than the ring events that carry a media_id. */
     get live() { return live.size; },
+    /** The durable copy: the sum of its stored payload sizes and its entry count, for the
+     *  bound's measurement. */
+    get storeBytes() { return store?.bytes ?? 0; },
+    get storeCount() { return store?.count ?? 0; },
+    storedIds: () => store?.ids() ?? [],
     /** Settles once every bot start/stop asked for so far has run. */
-    settled: async () => { while (tasks.size) await Promise.allSettled([...tasks]); },
+    settled: settle,
     listen: (port = DEFAULT_PORT, host = HOST) => new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => { server.off('error', reject); resolve(server.address()); });
@@ -922,6 +1378,10 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     close: async () => {
       generation++;
       clearTimers();
+      clearTimeout(retryTimer);
+      clearTimeout(groupHoldTimer);
+      clearInterval(countTimer);
+      held.length = 0;
       const old = bot;
       bot = undefined;
       for (const wake of waiters) wake();

@@ -206,3 +206,43 @@ test('director 602 defect 4: the snapshot says 群名暂不可用 when the group
   const description = runtime.match(/name: 'schedule_set',\s*description: '((?:[^'\\]|\\.)*)'/)?.[1] ?? '';
   assert.ok(description.includes('a group_required refusal names every bound group') && !description.includes('snapshot'), description);
 });
+
+
+test('design/steward-group-media.md: relay carries kept only when true; the notice, the purge receipt and the expiry are the host\'s own requests', async () => {
+  const host = recorder({ '/api/state/commands/record_group_media_purge':
+    Object.assign(new Error('AItelier: HTTP 422 "purge_incomplete: kept rows are left; purge again"'), { status: 422 }) });
+  const ops = groupOps({ request: host.request, project: 'aitelier-home', me: 'drv' });
+  await ops.relay({ channel: 'wechat', groupRef: 'r1', senderRef: 'm', messageRef: 'x', text: '[图片]', kept: true,
+    attachments: [{ kind: 'image', ref: 'm_0123456789abcdef' }] });
+  await ops.relay({ channel: 'wechat', groupRef: 'r1', senderRef: 'm', messageRef: 'y', text: 'hi' });
+  assert.equal(host.calls[0].body.kept, true);
+  assert.ok(!('kept' in host.calls[1].body), 'a mention\'s relay is the request it always was');
+  await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'check', channelDown: true });
+  await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'check' });
+  await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'sent' });
+  await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'failed', attempts: 2 });
+  await ops.mediaNotice({ channel: 'wechat', groupRef: 'r1', epoch: 'E1', notice: 'on', phase: 'failed', attempts: 3,
+    reason: 'room_backstop' });
+  const [down, check, sent, failed, reason] = host.calls.slice(2, 7).map(c => c.body);
+  assert.match(down.request_key, /^group-media-notice-check:/);
+  assert.notEqual(down.request_key, check.request_key, 'a check is a dry run: a fresh key each time');
+  assert.deepEqual({ ...down, request_key: undefined }, { request_key: undefined, channel: 'wechat', group_ref: 'r1', epoch: 'E1',
+    notice: 'on', phase: 'check', channel_down: true });
+  assert.ok(!('channel_down' in check));
+  assert.match(sent.request_key, /^group-media-notice:wechat:[0-9a-f]{16}:E1:sent$/, 'one commit key per epoch: a retry is State\'s replay');
+  assert.match(failed.request_key, /^group-media-notice:wechat:[0-9a-f]{16}:E1:failed:2$/);
+  assert.ok(!('reason' in failed), 'a failed attempt with no code says nothing it does not know');
+  assert.equal(reason.reason, 'room_backstop', 'the failed send\'s own code travels to State');
+  assert.equal(reason.phase, 'failed');
+  assert.match(reason.request_key, /:failed:3$/);
+  assert.ok(!sent.request_key.includes('r1'), 'the room is digested in the key');
+  const receipt = { rows_before: 2, rows_after: 0, files_unlinked: 1, files_shared: 1, bytes_freed: 33 };
+  assert.deepEqual(await ops.recordPurge({ channel: 'wechat', groupRef: 'r1', epoch: 'E2', receipt }), { refused: 'purge_incomplete' });
+  assert.deepEqual(host.calls[7].body.receipt, receipt);
+  assert.match(host.calls[7].body.request_key, /^group-media-purge:wechat:[0-9a-f]{16}:E2:[0-9a-f]{16}$/);
+  await ops.expireMedia();
+  assert.deepEqual(host.calls.map(c => c.path.split('/').at(-1)), ['relay_group_message', 'relay_group_message', 'group_media_notice',
+    'group_media_notice', 'group_media_notice', 'group_media_notice', 'group_media_notice', 'record_group_media_purge', 'expire_group_media']);
+  assert.deepEqual(host.calls.at(-1).body, {});
+  assert.ok(host.calls.every(c => c.readAs === undefined), 'never with the public-read header');
+});

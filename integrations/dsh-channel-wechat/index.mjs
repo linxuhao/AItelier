@@ -62,6 +62,15 @@ const sleep = (ms, signal) => new Promise(resolve => {
 /** Registers the channel and starts polling; returns `{ stop, polled }` (`polled`
  *  settles when the poll loop has ended). Timings, and `wait` (the pause between retries),
  *  are parameters for the tests. */
+/** Step 19.1 (design-steward 7.2.1): what an idle reason of the saved login's resume means,
+ *  said after the reason itself (the C12 alert quotes the first 80 characters). */
+const RESUME_IDLE = Object.freeze({
+  resume_rejected: 'WeChat ended the saved login',
+  resume_unreadable: 'the saved login cannot be read',
+  resume_throttled: 'too many resumes lately',
+  resume_failed: 'the saved login was not resumed',
+  resume_account_mismatch: 'the saved login was another account, deleted',
+});
 /** The bridge's /status as this channel's status. A bridge without `phase` (before the
  *  on-demand QR) is read as before: not logged in is 'scan needed'. */
 export function statusFromBridge(body) {
@@ -70,8 +79,12 @@ export function statusFromBridge(body) {
   switch (body.phase) {
     case 'starting': return { connected: false, detail: 'QR requested' };
     case 'scanned': return { connected: false, detail: 'QR scanned - confirm on the phone' };
-    case 'idle': return { connected: false,
-      detail: `no QR (${String(body.idle_reason ?? 'idle').slice(0, 40)}) - request one on the dashboard` };
+    case 'resuming': return { connected: false, detail: 'resuming saved login' };
+    case 'idle': {
+      const reason = String(body.idle_reason ?? 'idle').slice(0, 40);
+      const meaning = Object.hasOwn(RESUME_IDLE, reason) ? `: ${RESUME_IDLE[reason]}` : '';
+      return { connected: false, detail: `no QR (${reason}${meaning}) - request one on the dashboard` };
+    }
     default: return { connected: false, detail: 'scan needed', ...qrSvg };
   }
 }
@@ -113,7 +126,9 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
    *  too_large or gone, or that has no media_id, is refused without storeMedia; the rest are
    *  stored one by one. A group event's are stored with its room (`conversationRef`), so the
    *  library keeps them for that room (design/steward-group-media.md, the owner's ruling of
-   *  2026-11-22) whether or not the message calls the steward. Returns 'unbound' when storeMedia
+   *  2026-11-22), with the bridge's `asked` when it gave one: an un-mentioned message's files are
+   *  kept only while that group's media switch is on (the host decides, owner rulings
+   *  2026-11-23); `asked` is never invented when the bridge omits it. Returns 'unbound' when storeMedia
    *  answers channel_sender_not_bound (the rest are not fetched); throws when an answer is
    *  transient. */
   async function storeAttachments(event, items, resolved) {
@@ -128,6 +143,7 @@ export function startWechatChannel({ ownerChannels, logger = console, config = {
       }
       const meta = { channel: CHANNEL, senderRef: event.sender_ref, messageRef: event.message_ref, index, kind: item.kind,
         ...(event.type === 'group_message' && event.room_ref ? { conversationRef: event.room_ref } : {}),
+        ...(event.type === 'group_message' && typeof event.asked === 'boolean' ? { asked: event.asked } : {}),
         ...(typeof item.mime === 'string' && item.mime ? { mime: item.mime } : {}),
         ...(typeof item.name === 'string' && item.name ? { name: item.name } : {}) };
       const answer = await ownerChannels.storeMedia(meta, openMedia(item.media_id));

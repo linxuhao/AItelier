@@ -102,6 +102,10 @@ CREATE TABLE IF NOT EXISTS state_steward_turn_audience (
 CREATE TABLE IF NOT EXISTS state_pending_groups (
  channel TEXT NOT NULL, room_ref TEXT NOT NULL CHECK(room_ref<>''), mention_prefix TEXT NOT NULL,
  code_hash TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(channel, room_ref));
+CREATE TABLE IF NOT EXISTS state_group_media_purges (
+ purge_id TEXT PRIMARY KEY, channel TEXT NOT NULL, group_ref TEXT NOT NULL, epoch TEXT NOT NULL,
+ reason TEXT NOT NULL, backend_rows INTEGER NOT NULL, rows_before INTEGER NOT NULL, rows_after INTEGER NOT NULL,
+ files_unlinked INTEGER NOT NULL, files_shared INTEGER NOT NULL, bytes_freed INTEGER NOT NULL, at TEXT NOT NULL);
 """
 
 # The platform director's ruling of 2026-11-20 (design 7.7.10, Q6): the group bounds live in
@@ -128,6 +132,9 @@ GROUP_LIMITS = MappingProxyType({
     # r44w (design-steward 7.7.7, director 583): the owner-conversation lines telling the owner
     # a group reply was withheld; further withholds that hour stay in the group record only.
     "withheld_owner_lines_per_hour": 3,
+    # design/steward-group-media.md (owner 2026-11-23, 「一天， 标出谁发的，20件」): a mention
+    # turn's `recent` lists at most this many of its group's kept media, each with its sender.
+    "kept_recent_items": 20,
 })
 # A group's name (7.7.9): required, at most this many characters after NFKC, unlike every bound
 # group's on any channel; a group bound before names were required is given DEFAULT_GROUP_LABEL.
@@ -135,7 +142,7 @@ GROUP_LABEL_CHARS = 20
 DEFAULT_GROUP_LABEL = "家庭群"
 # The outbound kinds group_sends_per_hour counts - the one list send_refusal reads, so every
 # path that posts one of them is held to the same budget.
-GROUP_SEND_KINDS = ("confirmation", "confirmation_line", "media")
+GROUP_SEND_KINDS = ("confirmation", "confirmation_line", "media", "media_notice")
 # The family memory (7.7.8a, director 420): bounded, the same 30 days as the group rows.
 FAMILY_LIMITS = MappingProxyType({"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000})
 # Step 0 item 1 (7.7.11) decides this: True only if the owner's id in a group is NOT the
@@ -170,6 +177,20 @@ CONFIRMATION_LINES = MappingProxyType({
 BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
                "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
                "让我记住的事只在本群用，30 天后删。")
+# design/steward-group-media.md (owner 2026-11-23, R2): the lines a group reads when the owner
+# turns its media switch on and off - code's words, posted by the host (group_media_notice), the
+# switch is ON only once the first was sent, and the second goes out only after the purge's
+# receipt is recorded, so 「已经删除」 is true when it is read.
+MEDIA_KEEP_ON_NOTICE = ("本群已打开存图：群里没 @ 管家的图片、语音、文件，管家会先存下、不回话，存 1 天后自动删除。"
+                        "只有之后在本群 @ 管家时，管家才会去看（看时会交给外部模型服务处理）；业主私聊和别的群都用不到。"
+                        "业主在面板上看得到谁发过、是什么类型，看不到内容。关闭存图时，已存的一并删除。")
+MEDIA_KEEP_OFF_NOTICE = "本群已关闭存图：管家不再存群里没 @ 它的图片、语音、文件，之前存下的已经删除。"
+# The switch's states (section 1): only 'on' stores; the host owes the on-notice in on_pending
+# and the purge receipt, then the off-notice, in off_notice.
+MEDIA_KEEP_STATES = ("off", "on_pending", "on", "off_notice")
+# A notice whose send failed this many times falls back to off (refusals decided before a send
+# are not failures and are not counted).
+MEDIA_NOTICE_ATTEMPTS = 3
 OWNER_LABEL = "业主"
 # 7.9.4 step 4 (director 489 (b)): a group reminder's row is kind 'notice' with sender_role NULL
 # (step 23's CHECK stays owner/member). A reader that names a row's sender reads it as this.
@@ -243,6 +264,12 @@ def _now():
     return state_channels._now()
 
 
+def kept_cutoff(moment):
+    """The oldest time a kept medium's row is still alive (design/steward-group-media.md section
+    4): limits.kept_hours of the one media-types table, which the host's library reads too."""
+    return (moment - timedelta(hours=media_types.limits()["kept_hours"])).isoformat()
+
+
 def _initialize_schema(db) -> None:
     """The schema setup, run once per process per database file (core.state_schema_setup)."""
     with db.get_connection() as conn:
@@ -257,6 +284,18 @@ def _initialize_schema(db) -> None:
         add_column_if_missing(conn, "state_group_messages", "turn", "TEXT")
         # r44w (7.7.7): a withheld reply's row names the owner-conversation line it caused.
         add_column_if_missing(conn, "state_group_messages", "owner_notice", "TEXT")
+        # design/steward-group-media.md section 1 (owner 2026-11-23): the group's media switch,
+        # default off; the epoch (media_keep_at) notices and purges name; the failed sends of
+        # this epoch; why it waits or fell back; the purge this switch still owes a receipt for
+        # (its reason and the backend rows the transition deleted) and the epoch last purged.
+        add_column_if_missing(conn, "state_owner_groups", "media_keep",
+                              "TEXT NOT NULL DEFAULT 'off' CHECK(media_keep IN ('off','on_pending','on','off_notice'))")
+        add_column_if_missing(conn, "state_owner_groups", "media_keep_at", "TEXT")
+        add_column_if_missing(conn, "state_owner_groups", "media_keep_attempts", "INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(conn, "state_owner_groups", "media_keep_note", "TEXT")
+        add_column_if_missing(conn, "state_owner_groups", "media_purged_at", "TEXT")
+        add_column_if_missing(conn, "state_owner_groups", "media_purge_reason", "TEXT")
+        add_column_if_missing(conn, "state_owner_groups", "media_purge_rows", "INTEGER NOT NULL DEFAULT 0")
         for (channel, group_ref) in conn.execute(
                 "SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL AND "
                 "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
@@ -387,6 +426,41 @@ class StateGroups:
         cutoff = (moment - timedelta(days=GROUP_LIMITS["retention_days"])).isoformat()
         conn.execute("DELETE FROM state_group_messages WHERE at<?", (cutoff,))
         conn.execute("DELETE FROM state_family_memory WHERE at<?", (cutoff,))
+        # A kept medium's row lives one day (design/steward-group-media.md section 4); the purge
+        # ledger 30 days, like the rows it speaks for.
+        conn.execute("DELETE FROM state_group_messages WHERE kind='kept_media' AND at<=?", (kept_cutoff(moment),))
+        conn.execute("DELETE FROM state_group_media_purges WHERE at<?", (cutoff,))
+
+    @staticmethod
+    def _drop_kept(conn, channel, group_ref):
+        """This group's kept media rows, deleted; how many."""
+        return conn.execute("DELETE FROM state_group_messages WHERE channel=? AND group_ref=? AND kind='kept_media'",
+                            (channel, group_ref)).rowcount
+
+    @staticmethod
+    def _media_keep_set(conn, channel, group_ref, state, moment, purge=None, purge_rows=0):
+        """One transition of the group's media switch (design/steward-group-media.md section 1):
+        the new state and a new epoch, the attempts and the note cleared. `purge` (off, unbind,
+        rebind) makes a purge owed: the host purges the library's kept copies and records the
+        receipt (record_group_media_purge) under the epoch set here; the backend rows the
+        transition deleted are added to what that receipt will say."""
+        extra, args = "", []
+        if purge:
+            extra = (", media_purge_rows=CASE WHEN media_purge_reason IS NULL THEN ? ELSE media_purge_rows+? END,"
+                     " media_purge_reason=?")
+            args = [purge_rows, purge_rows, purge]
+        conn.execute("UPDATE state_owner_groups SET media_keep=?, media_keep_at=?, media_keep_attempts=0, "
+                     f"media_keep_note=NULL{extra} WHERE channel=? AND group_ref=?",
+                     (state, moment.isoformat(), *args, channel, group_ref))
+
+    def _media_keep_reset(self, conn, channel, group_ref, moment, reason):
+        """Unbind and rebind (R2): the switch goes back to off with a new epoch and owes a purge,
+        when it was ever used (a group whose switch was never touched has nothing to purge)."""
+        row = conn.execute("SELECT media_keep_at FROM state_owner_groups WHERE channel=? AND group_ref=?",
+                           (channel, group_ref)).fetchone()
+        if row is not None and row["media_keep_at"] is not None:
+            self._media_keep_set(conn, channel, group_ref, "off", moment, purge=reason,
+                                 purge_rows=self._drop_kept(conn, channel, group_ref))
 
     @staticmethod
     def _count(conn, sql, args):
@@ -475,6 +549,9 @@ class StateGroups:
                 group = row["group_ref"]
                 conn.execute("UPDATE state_owner_groups SET revoked_at=? WHERE channel=? AND group_ref=?",
                              (_now().isoformat(), channel, group))
+                # design/steward-group-media.md (R2): the media switch is off, and what it kept is
+                # purged by the host under a new epoch (the revoked row keeps it).
+                self._media_keep_reset(conn, channel, group, _now(), "unbind")
                 # 7.9.5 (director 489 (a), step 23.1): this group's lists stay; who of this group
                 # added or checked one of ITS items is forgotten (its members, and the owner's
                 # account here) - an item of another group keeps its names.
@@ -502,14 +579,60 @@ class StateGroups:
                 **({"reminders_disabled": disabled} if row is not None else {})}
 
     def clear_group_messages(self, channel, group_ref):
+        """The owner's 清空记录: every record row of this group goes. While its media switch is
+        on, the kept media rows go with them, so the library's kept copies are owed a purge
+        (reason 'clear', design/steward-group-media.md section 6): the host's sweep deletes them
+        and records the receipt; the switch stays on and keeps its epoch. Off, any copy is
+        already under the purge its turn-off owed."""
         self.steward._owner()
         with self.store.transaction(write=True) as conn:
             row = self._live_group(conn, channel, group_ref)
             if row is None:
                 raise StateNotFound("group_not_bound")
-            deleted = conn.execute("DELETE FROM state_group_messages WHERE channel=? AND group_ref=?",
-                                   (channel, row["group_ref"])).rowcount
+            on = row["media_keep"] == "on"
+            kept = self._drop_kept(conn, channel, row["group_ref"]) if on else 0
+            deleted = kept + conn.execute("DELETE FROM state_group_messages WHERE channel=? AND group_ref=?",
+                                          (channel, row["group_ref"])).rowcount
+            if on:
+                conn.execute("UPDATE state_owner_groups SET media_purge_rows=CASE WHEN media_purge_reason IS NULL "
+                             "THEN ? ELSE media_purge_rows+? END, media_purge_reason=COALESCE(media_purge_reason,'clear') "
+                             "WHERE channel=? AND group_ref=?", (kept, kept, channel, row["group_ref"]))
         return {"cleared": deleted}
+
+    def set_group_media_keep(self, channel, group_ref, on):
+        """The owner's media switch for this group (design/steward-group-media.md, owner
+        2026-11-23 R2, section 1): whether the files people post here WITHOUT mentioning the
+        steward are kept, one day, for a later mention in this group to read. Turning it on asks
+        the host for the on-notice (on_pending) and nothing is stored until that line was sent
+        (group_media_notice). Turning it off stops storing at once and deletes this group's kept
+        rows here, in this transaction; the host purges the library's copies, the receipt is
+        recorded, and only then is the off-notice posted. A click that changes nothing keeps the
+        epoch. Answers {state, backend_rows_deleted?}."""
+        self.steward._owner()
+        if not isinstance(on, bool):
+            raise StateGraphError("invalid_request: on is true or false")
+        moment = _now()
+        deleted = None
+        with self.store.transaction(write=True) as conn:
+            row = self._live_group(conn, channel, group_ref)
+            if row is None:
+                raise StateNotFound("group_not_bound")
+            state = row["media_keep"]
+            if on and state in ("off", "off_notice"):
+                # An off-notice still owed is dropped: the next line the group reads is the
+                # on-notice, which is then true. A purge still owed stays owed (the check refuses
+                # the on-notice until its receipt is recorded).
+                state = "on_pending"
+                self._media_keep_set(conn, channel, group_ref, state, moment)
+            elif not on and state == "on":
+                deleted = self._drop_kept(conn, channel, group_ref)
+                state = "off_notice"
+                self._media_keep_set(conn, channel, group_ref, state, moment, purge="off", purge_rows=deleted)
+            elif not on and state == "on_pending":
+                state = "off"  # nothing was announced and nothing was stored
+                self._media_keep_set(conn, channel, group_ref, state, moment)
+        self._log(f"media keep {'on' if on else 'off'} -> {state}", channel, group_ref, None)
+        return {"state": state, **({"backend_rows_deleted": deleted} if deleted is not None else {})}
 
     def name_group_member(self, channel, group_ref, sender_ref, label):
         """The owner names a member the bridge reported in this group (7.7.4): only the label
@@ -607,23 +730,26 @@ class StateGroups:
         included), its family note and its family memory entries. `groups_per_channel` is the
         cap the dashboard's 「添加群」 stops at."""
         self.steward._owner()
+        cutoff = kept_cutoff(_now())
         with self.store.transaction() as conn:
             groups = []
             for row in conn.execute("SELECT * FROM state_owner_groups WHERE revoked_at IS NULL ORDER BY channel"):
                 key = (row["channel"], row["group_ref"])
-                stats = conn.execute("SELECT COUNT(*), MAX(at) FROM state_group_messages WHERE channel=? AND group_ref=?",
-                                     key).fetchone()
+                stats = conn.execute("SELECT COUNT(*), MAX(at) FROM state_group_messages WHERE channel=? AND group_ref=? "
+                                     "AND kind<>'kept_media'", key).fetchone()
                 members = [{"sender_ref": m["sender_ref"], "label": m["label"] or member_label(m["ordinal"]),
                             "named": m["label"] is not None} for m in conn.execute(
                     "SELECT * FROM state_group_members WHERE channel=? AND group_ref=? ORDER BY ordinal", key)]
                 group = {"channel": row["channel"], "group_ref": row["group_ref"], "label": row["label"],
                          "mention_prefix": row["mention_prefix"], "bound_at": row["bound_at"],
-                         "messages_30d": stats[0], "last_message_at": stats[1], "members": members}
+                         "messages_30d": stats[0], "last_message_at": stats[1], "members": members,
+                         "media_keep": self._media_keep_view(conn, row, cutoff)}
                 if channel == row["channel"] and group_ref == row["group_ref"]:
+                    # A kept medium of the last day shows as its sender and placeholder; never its ref.
                     group["messages"] = [dict(m) for m in conn.execute(
                         "SELECT message_id,direction,kind,accepted,sender_ref,sender_role,body,original,withheld_reason,"
                         "reply_to,answered_by,at FROM state_group_messages WHERE channel=? AND group_ref=? "
-                        "ORDER BY at DESC, rowid DESC LIMIT 500", key)]
+                        "AND NOT (kind='kept_media' AND at<=?) ORDER BY at DESC, rowid DESC LIMIT 500", (*key, cutoff))]
                     for m in group["messages"]:
                         m["sender_label"] = (self._label_of(conn, *key, m["sender_ref"], m["sender_role"])
                                              if m["direction"] == "in" else
@@ -634,6 +760,21 @@ class StateGroups:
                     group["family_memory"] = self._entries(conn, *key)
                 groups.append(group)
         return {"groups": groups, "groups_per_channel": GROUP_LIMITS["groups_per_channel"]}
+
+    @staticmethod
+    def _media_keep_view(conn, row, cutoff):
+        """The dashboard's media switch of a group (design/steward-group-media.md section 9): its
+        state and since when, why it waits or fell back, the failed sends, whether a purge is
+        still owed, the kept media of the last day and the last purge receipt (counts only)."""
+        key = (row["channel"], row["group_ref"])
+        last = conn.execute("SELECT at,reason,backend_rows,rows_before,files_unlinked,files_shared,bytes_freed FROM "
+                            "state_group_media_purges WHERE channel=? AND group_ref=? ORDER BY at DESC, rowid DESC LIMIT 1",
+                            key).fetchone()
+        kept = conn.execute("SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "
+                            "kind='kept_media' AND at>?", (*key, cutoff)).fetchone()[0]
+        return {"state": row["media_keep"], "since": row["media_keep_at"], "note": row["media_keep_note"],
+                "attempts": row["media_keep_attempts"], "purge_owed": row["media_purge_reason"] is not None,
+                "kept_24h": kept, "last_purge": dict(last) if last else None}
 
     def _entries(self, conn, channel, group_ref):
         return [{"entry_id": e["entry_id"], "text": e["text"], "at": e["at"], "added_by_role": e["added_by_role"],
@@ -648,6 +789,9 @@ class StateGroups:
                      "VALUES(?,?,?,?,?,NULL) ON CONFLICT(channel,group_ref) DO UPDATE SET label=excluded.label,"
                      "mention_prefix=excluded.mention_prefix,bound_at=excluded.bound_at,revoked_at=NULL",
                      (channel, group_ref, label, prefix, moment.isoformat()))
+        # design/steward-group-media.md (R2, invariant (d)): a new binding starts with the switch
+        # off (the column default) and a rebind returns it to off - binding never means storing.
+        self._media_keep_reset(conn, channel, group_ref, moment, "rebind")
 
     def bind_owner_group(self, project_id, request_key, channel, group_ref, sender_ref, code, mention_prefix,
                          channel_message_ref=None):
@@ -706,7 +850,7 @@ class StateGroups:
         return out
 
     def relay_group_message(self, project_id, request_key, channel, group_ref, sender_ref, channel_message_ref, body,
-                            channel_at=None, attachments=None):
+                            channel_at=None, attachments=None, kept=False):
         """One @-message from the bound group: dated by the channel within the last
         fresh_minutes, deduplicated by its channel ref, stamped owner/member by code, held to
         the group's, the member's and the account's hourly bounds, stored. Answers
@@ -718,7 +862,14 @@ class StateGroups:
         7.8.9) is decided before the quotas: the answer then carries `confirmation` and, when
         the group's send budget allows, `confirmation_line` (and its message id) for the host
         to send. `attachments` (step 24.2, 7.8.12) is the metadata of the message's files, kept
-        in the row's attachments_json (core.media_types); never a byte or a name."""
+        in the row's attachments_json (core.media_types); never a byte or a name.
+
+        `kept` (design/steward-group-media.md section 3, owner 2026-11-23): the message did NOT
+        call the steward and carries files. It is recorded only while the group's media switch
+        is on (else media_keep_off, and no row), as ONE row of kind 'kept_media' (accepted 0)
+        with the sender's member row: not a question - none of the hourly windows counts it, it
+        decides no confirmation and yields no quota notice; a mention turn's `recent` lists it
+        for one day."""
         if channel not in CHANNELS:
             raise StateGraphError("invalid_channel")
         _require_utf8("body", body, "invalid_body")
@@ -729,12 +880,15 @@ class StateGroups:
             raise StateGraphError(f"body_too_long: {size} bytes; at most {BODY_MAX_BYTES} bytes")
         refuse_credential_body(body)
         files = media_types.normalise_attachments(attachments)
+        if kept and not files:
+            raise StateGraphError("invalid_request: a kept message carries its files")
         written = _written_at(channel_at)
         moment = _now()
         answer = None
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
-            if self._live_group(conn, channel, group_ref) is None:
+            group_row = self._live_group(conn, channel, group_ref)
+            if group_row is None:
                 answer = {"refused": "group_not_bound"}
             elif written is None:
                 answer = {"refused": "undated"}
@@ -748,6 +902,11 @@ class StateGroups:
                                 (channel, group_ref, channel_message_ref)).fetchone()
             if seen is not None:
                 return {"duplicate": True, "message_id": seen["message_id"], "accepted": bool(seen["accepted"])}
+            if kept and group_row["media_keep"] != "on":
+                # The authoritative half of the store gate: only a group whose switch is on (its
+                # notice sent) keeps an un-mentioned file; the host takes back what it stored.
+                self._log("message dropped media_keep_off", channel, group_ref, sender_ref, size)
+                return {"refused": "media_keep_off"}
             message_id = "gmsg-" + secrets.token_hex(10)
 
             def keep(kind, accepted=0, role=None, text=None):
@@ -770,6 +929,12 @@ class StateGroups:
                                    (channel,)).fetchone()
             role = "owner" if account is not None and account[0] == sender_ref else "member"
             label = self._member(conn, channel, group_ref, sender_ref, role)
+            if kept:
+                keep("kept_media", role=role, text=body)
+                self._retain(conn, moment)
+                self._log("message kept", channel, group_ref, sender_ref, size)
+                return {"message_id": message_id, "sender_role": role, "sender_label": label, "kept": True,
+                        "duplicate": False}
             hour = (moment - timedelta(hours=1)).isoformat()
             # The account's outbound cap comes first: past it nothing can go out, so the message
             # decides no confirmation either (a reply's record stays pending; review F1/F2).
@@ -1071,6 +1236,161 @@ class StateGroups:
                   channel, group, None)
         return out
 
+    # ---------------------------------------------------------------- the media switch (host side)
+    def group_media_notice(self, project_id, request_key, channel, group_ref, epoch, notice, phase, channel_down=False,
+                           reason=None):
+        """The host's post of a media-switch notice (design/steward-group-media.md section 2):
+        the switch is ON only once the on-notice was SENT (director 640 (c)).
+
+        phase 'check' is a dry run before the send: no row, no budget, nothing recorded for the
+        key. It answers {may_post: true, text} only for a live group in the state this notice
+        is owed in (on_pending for 'on', off_notice for 'off'), at exactly this epoch, with no
+        purge receipt still owed and the group send budget open; otherwise {refused} -
+        superseded, or one this transaction writes as the switch's note without counting an
+        attempt: channel_down (the host saw its channel down: no send is attempted),
+        purge_owed, group_send_budget, group_quota_account.
+
+        phase 'sent', called only after the channel took the line: one outbound row
+        (kind media_notice, the constant's words) and, at this epoch, on_pending -> on or
+        off_notice -> off. An on-notice that went out after the owner turned the switch off
+        (now 'off') makes it off_notice, so the group reads that it is off again. Any other
+        mismatch answers superseded and changes no state. Answered once per request_key - except
+        an on-notice at its epoch while a purge is still owed: {refused: purge_owed}, nothing
+        written and nothing recorded, so the same commit succeeds once the receipt is in.
+
+        phase 'failed', called only when a send was attempted and failed: one more attempt; the
+        MEDIA_NOTICE_ATTEMPTS-th falls back to off with the note notice_not_sent. An optional
+        `reason` for that phase is the send's own code, not prose: a string kept to 40 characters
+        with control characters replaced, stored as this group's media_keep_note on the earlier
+        failures so a switch still owed names its cause. A missing reason leaves the note as it
+        was; the last attempt always keeps notice_not_sent."""
+        if phase == "failed" and isinstance(reason, str):
+            reason = "".join(char if char.isprintable() else "_" for char in reason)[:40] or None
+        else:
+            reason = None
+        text = MEDIA_KEEP_ON_NOTICE if notice == "on" else MEDIA_KEEP_OFF_NOTICE
+        owed = "on_pending" if notice == "on" else "off_notice"
+        request_hash = _hash([channel, group_ref, epoch, notice, phase])
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            if phase != "check":
+                replay = self.steward._replay(conn, "group_media_notice", request_key, request_hash)
+                if replay is not None:
+                    return {**replay, "duplicate": True}
+            row = self._live_group(conn, channel, group_ref)
+            current = row is not None and row["media_keep"] == owed and row["media_keep_at"] == epoch
+            if phase == "check":
+                if not current:
+                    out = {"refused": "superseded"}
+                else:
+                    refused = ("channel_down" if channel_down else "purge_owed" if row["media_purge_reason"] is not None
+                               else self.send_refusal(conn, channel, group_ref, moment))
+                    conn.execute("UPDATE state_owner_groups SET media_keep_note=? WHERE channel=? AND group_ref=?",
+                                 (refused, channel, group_ref))
+                    out = {"refused": refused} if refused else {"may_post": True, "text": text}
+                self._log(f"media notice {notice} check {out.get('refused') or 'may post'}", channel, group_ref, None)
+                return out
+            if phase == "sent" and current and notice == "on" and row["media_purge_reason"] is not None:
+                # The switch never turns on while a purge is owed (once on, the debt's kept copies
+                # would be taken for this period's): nothing is written or recorded for the key,
+                # and the host keeps the commit and asks again after its sweep recorded the receipt.
+                self._log("media notice on sent -> purge_owed", channel, group_ref, None)
+                return {"refused": "purge_owed"}
+            if phase == "sent":
+                if row is None:
+                    result = {"superseded": True}
+                else:
+                    # The line went out: the record says so and the budget counts it, whatever
+                    # the switch did meanwhile.
+                    message_id = self._out_row(conn, channel, group_ref, "media_notice", text, moment,
+                                               request_key=request_key)
+                    state = row["media_keep"]
+                    if current and notice == "on":
+                        state = "on"
+                        self._media_keep_set(conn, channel, group_ref, state, moment)
+                    elif current:
+                        state = "off"  # the purge was recorded before the check let it through
+                        conn.execute("UPDATE state_owner_groups SET media_keep='off', media_keep_attempts=0, "
+                                     "media_keep_note=NULL WHERE channel=? AND group_ref=?", (channel, group_ref))
+                    elif notice == "on" and state == "off":
+                        state = "off_notice"
+                        self._media_keep_set(conn, channel, group_ref, state, moment, purge="off", purge_rows=0)
+                    result = {"sent": True, "message_id": message_id, "state": state,
+                              **({} if current or state == "off_notice" else {"superseded": True})}
+                    self._retain(conn, moment)
+            elif not current:
+                result = {"superseded": True}
+            else:
+                attempts = row["media_keep_attempts"] + 1
+                if attempts >= MEDIA_NOTICE_ATTEMPTS:
+                    conn.execute("UPDATE state_owner_groups SET media_keep='off', media_keep_attempts=?, "
+                                 "media_keep_note='notice_not_sent' WHERE channel=? AND group_ref=?",
+                                 (attempts, channel, group_ref))
+                    result = {"attempts": attempts, "state": "off"}
+                else:
+                    if reason is None:
+                        conn.execute("UPDATE state_owner_groups SET media_keep_attempts=? WHERE channel=? AND group_ref=?",
+                                     (attempts, channel, group_ref))
+                    else:
+                        conn.execute("UPDATE state_owner_groups SET media_keep_attempts=?, media_keep_note=? "
+                                     "WHERE channel=? AND group_ref=?", (attempts, reason, channel, group_ref))
+                    result = {"attempts": attempts, "state": owed}
+            out = self.steward._record(conn, "group_media_notice", request_key, request_hash, result)
+        self._log(f"media notice {notice} {phase} -> {result.get('state', 'superseded')}", channel, group_ref, None)
+        return out
+
+    def record_group_media_purge(self, project_id, request_key, channel, group_ref, epoch, receipt):
+        """The witness of a purge of a group's kept media (design/steward-group-media.md section
+        6, modelled on a bundle release): the host purged the library's kept rows of the group
+        and their files (purgeKept) and hands in the receipt; a receipt that does not close
+        (rows_after != 0) is refused purge_incomplete and nothing is recorded. One ledger row
+        is APPENDED (counts only - never a ref, a sha or a name), with the reason of the
+        transition that owed it and the backend rows it deleted. At the owed epoch the purge is
+        settled (media_purged_at), and only then may a notice of this group be posted; a receipt
+        of an older epoch is appended as superseded and settles nothing. Answered once per
+        request_key."""
+        if receipt["rows_after"] != 0:
+            raise StateGraphError("purge_incomplete: kept rows are left; purge again")
+        request_hash = _hash([channel, group_ref, epoch, receipt])
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            replay = self.steward._replay(conn, "record_group_media_purge", request_key, request_hash)
+            if replay is not None:
+                return {**replay, "duplicate": True}
+            row = conn.execute("SELECT * FROM state_owner_groups WHERE channel=? AND group_ref=?",
+                               (channel, group_ref)).fetchone()
+            if row is None:
+                raise StateNotFound("unknown_group")
+            current = row["media_keep_at"] == epoch and row["media_purge_reason"] is not None
+            purge_id = "gpurge-" + secrets.token_hex(8)
+            conn.execute("INSERT INTO state_group_media_purges(purge_id,channel,group_ref,epoch,reason,backend_rows,"
+                         "rows_before,rows_after,files_unlinked,files_shared,bytes_freed,at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (purge_id, channel, group_ref, epoch, row["media_purge_reason"] if current else "superseded",
+                          row["media_purge_rows"] if current else 0, receipt["rows_before"], receipt["rows_after"],
+                          receipt["files_unlinked"], receipt["files_shared"], receipt["bytes_freed"], moment.isoformat()))
+            if current:
+                conn.execute("UPDATE state_owner_groups SET media_purged_at=?, media_purge_reason=NULL, media_purge_rows=0, "
+                             "media_keep_note=CASE WHEN media_keep_note='purge_owed' THEN NULL ELSE media_keep_note END "
+                             "WHERE channel=? AND group_ref=?", (epoch, channel, group_ref))
+            self._retain(conn, moment)
+            result = {"recorded": True, "purge_id": purge_id, "settled": current}
+            out = self.steward._record(conn, "record_group_media_purge", request_key, request_hash, result)
+        self._log("media purge recorded" + ("" if current else " (superseded)"), channel, group_ref, None)
+        return out
+
+    def expire_group_media(self, project_id):
+        """The host's hourly sweep of kept media rows past limits.kept_hours (design
+        steward-group-media.md section 4), so a quiet group's rows do not linger until its next
+        write; every write path's _retain does the same."""
+        moment = _now()
+        with self.store.transaction(write=True) as conn:
+            self.steward._steward(conn, project_id)
+            deleted = conn.execute("DELETE FROM state_group_messages WHERE kind='kept_media' AND at<=?",
+                                   (kept_cutoff(moment),)).rowcount
+        return {"deleted": deleted}
+
     def set_steward_turn_audience(self, project_id, turn, audience, group=None, sender_refs=None, question_ids=None):
         """The steward's host records whose turn this is, before the turn's first step runs
         (7.7.3 item 5). One row, overwritten; no event. A group turn's `question_ids` (the
@@ -1213,27 +1533,42 @@ class StateGroups:
     @writer_only_read("list_owner_groups")
     def list_owner_groups(self):
         """The steward's host: each channel's bound account and live group with its @
-        prefix (the bridge's whitelist)."""
+        prefix (the bridge's whitelist). Each group's `media_keep` is 'on' only while its
+        switch is on (design/steward-group-media.md section 1; anything else stores nothing),
+        with `media_notice` {phase, epoch, attempts} when the host owes it a notice;
+        `media_purges` names every group, live or not, whose kept media the host still owes a
+        purge receipt for, with the epoch the receipt must name - whatever its switch says (an
+        on group owes one after 清空记录)."""
         with self.store.transaction() as conn:
             self.steward._steward(conn)
             accounts = {r["channel"]: r["sender_ref"] for r in conn.execute(
                 "SELECT channel,sender_ref FROM state_owner_channels WHERE revoked_at IS NULL AND sender_ref IS NOT NULL")}
-            groups = [{"channel": r["channel"], "group_ref": r["group_ref"], "label": r["label"],
-                       "mention_prefix": r["mention_prefix"]}
-                      for r in conn.execute("SELECT * FROM state_owner_groups WHERE revoked_at IS NULL")]
-        return {"owner_refs": accounts, "groups": groups}
+            groups, purges = [], []
+            for r in conn.execute("SELECT * FROM state_owner_groups"):
+                if r["media_purge_reason"] is not None and r["media_keep_at"]:
+                    purges.append({"channel": r["channel"], "group_ref": r["group_ref"], "epoch": r["media_keep_at"]})
+                if r["revoked_at"] is not None:
+                    continue
+                group = {"channel": r["channel"], "group_ref": r["group_ref"], "label": r["label"],
+                         "mention_prefix": r["mention_prefix"], "media_keep": "on" if r["media_keep"] == "on" else "off"}
+                if r["media_keep"] in ("on_pending", "off_notice"):
+                    group["media_notice"] = {"phase": "on" if r["media_keep"] == "on_pending" else "off",
+                                             "epoch": r["media_keep_at"], "attempts": r["media_keep_attempts"]}
+                groups.append(group)
+        return {"owner_refs": accounts, "groups": groups, "media_purges": purges}
 
     @writer_only_read("list_group_recent")
     def list_group_recent(self, channel, group_ref, limit=6):
         """The steward's host: the group's last answered questions and the replies that went
         out (a withheld reply as the sentence the group saw), oldest first - a group wake's
-        `recent`, which is data. Also this group's inbound messages that carry attachments and
-        were never answered: a medium the group kept without calling the steward (design
-        steward-group-media.md) is relayed as a question and opens no turn, so the pairs can
-        never show it; it comes back as its own entry with the metadata that names it (kind,
-        ref and, when the library knew them, mime/size/durationMs - never a byte or a name),
-        in the place its time gives it among the pairs. Both parts keep their own last
-        `limit` rows, so a group full of kept media cannot push the answered pairs out."""
+        `recent`, which is data. Also this group's questions that carry attachments and were
+        never answered (an addressed medium), each as its own entry with the metadata that
+        names it (kind, ref and, when the library knew them, mime/size/durationMs - never a
+        byte or a name), in the place its time gives it among the pairs; both keep their own
+        last `limit` rows. And (design/steward-group-media.md section 7, owner 2026-11-23) this
+        group's kept media - files posted without calling the steward while its switch was on -
+        of the last kept_hours, at most kept_recent_items whatever `limit` is, each
+        {at, sender, kept: true, attachments}."""
         with self.store.transaction() as conn:
             self.steward._steward(conn)
             bound = max(1, min(int(limit), 20))
@@ -1243,12 +1578,20 @@ class StateGroups:
                 "JOIN state_group_messages r ON r.message_id=q.answered_by WHERE q.channel=? AND q.group_ref=? "
                 "AND q.direction='in' ORDER BY q.at DESC, q.rowid DESC LIMIT ?",
                 (channel, group_ref, bound)).fetchall()
-            kept = conn.execute(
+            unanswered = conn.execute(
                 "SELECT at, rowid AS ord, sender_ref, sender_role, body AS q, attachments_json "
-                "FROM state_group_messages WHERE channel=? AND group_ref=? AND direction='in' "
+                "FROM state_group_messages WHERE channel=? AND group_ref=? AND direction='in' AND kind='question' "
                 "AND answered_by IS NULL AND attachments_json IS NOT NULL "
                 "ORDER BY at DESC, rowid DESC LIMIT ?",
                 (channel, group_ref, bound)).fetchall()
+            # design/steward-group-media.md section 7 (owner 2026-11-23, 「一天， 标出谁发的，20件」):
+            # this group's kept media of the last kept_hours, at most kept_recent_items, each with
+            # who sent it - a bound of its own, apart from the caller's `limit`.
+            kept = conn.execute(
+                "SELECT at, rowid AS ord, sender_ref, sender_role, attachments_json FROM state_group_messages "
+                "WHERE channel=? AND group_ref=? AND direction='in' AND kind='kept_media' AND at>? "
+                "ORDER BY at DESC, rowid DESC LIMIT ?",
+                (channel, group_ref, kept_cutoff(_now()), GROUP_LIMITS["kept_recent_items"])).fetchall()
             entries = [(r["at"], r["ord"], {"at": r["at"],
                                             "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
                                                                      r["sender_role"]),
@@ -1257,6 +1600,11 @@ class StateGroups:
                                              "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
                                                                       r["sender_role"]),
                                              "q": r["q"], "attachments": json.loads(r["attachments_json"])})
+                        for r in unanswered]
+            entries += [(r["at"], r["ord"], {"at": r["at"],
+                                             "sender": self._label_of(conn, channel, group_ref, r["sender_ref"],
+                                                                      r["sender_role"]),
+                                             "kept": True, "attachments": json.loads(r["attachments_json"] or "[]")})
                         for r in kept]
             return {"recent": [entry for _, _, entry in sorted(entries, key=lambda item: (item[0], item[1]))]}
 

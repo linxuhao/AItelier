@@ -228,7 +228,8 @@ def test_send_media_files_share_the_groups_twenty_sends_with_the_confirmations(w
     group_ready_plain(world, monkeypatch)
     q = gask(world, "q1")["message_id"]
     group_turn(world)
-    assert set(state_groups.GROUP_SEND_KINDS) == {"confirmation", "confirmation_line", "media"}
+    # design/steward-group-media.md section 2: the media switch's notice is held to the same budget.
+    assert set(state_groups.GROUP_SEND_KINDS) == {"confirmation", "confirmation_line", "media", "media_notice"}
     first = post_media(world, caption="一只猫")
     assert first["posted"] and first["channel"] == "wechat" and first["group_ref"] == ROOM and first["caption"] == "一只猫"
     # Replayed by its key: the same answer, no second row.
@@ -538,3 +539,11 @@ def test_fetch_is_on_the_gateways_port_alone(world, server, upstream):
     other = httpx.get(f"{server.main_url}{gw.PATH}/media/fetch", params={"url": CAT},
                       headers={"X-AItelier-Driver-Token": world.tokens["steward"]}, timeout=30)
     assert other.status_code == 404
+
+
+def test_kept_hours_is_one_key_of_the_shared_table_with_two_readers():
+    """design/steward-group-media.md section 4 (owner 2026-11-23, 「一天」): a kept medium lives
+    limits.kept_hours - the library (lib/media.mjs) and the backend (core.state_groups.kept_cutoff)
+    read the same key; every other row keeps retention_days."""
+    assert media_types.limits()["kept_hours"] == 24
+    assert media_types.limits()["retention_days"] == 30

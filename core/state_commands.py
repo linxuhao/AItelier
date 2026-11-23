@@ -1455,6 +1455,45 @@ class RelayGroupMessage(Project):
     body: str
     channel_at: str | None = Field(default=None, min_length=1, max_length=64)
     attachments: list[dict[str, Any]] | None = Field(default=None, max_length=10)
+    # design/steward-group-media.md section 3: a message that did not call the steward, kept
+    # (one day) only while the group's media switch is on.
+    kept: bool = False
+
+
+# design/steward-group-media.md sections 2, 4 and 6 (owner 2026-11-23): the HOST's media-switch
+# commands - a notice's check / sent / failed, the purge receipt, the hourly expiry of kept rows.
+class GroupMediaNotice(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    group_ref: str = Field(min_length=1, max_length=200)
+    epoch: str = Field(min_length=1, max_length=64)
+    notice: Literal["on", "off"]
+    phase: Literal["check", "sent", "failed"]
+    channel_down: bool = False
+    reason: str | None = Field(
+        default=None, max_length=64, json_schema_extra=_omit_default,
+        description="Optional: the failed send's own short code (for example room_not_bound), never "
+                    "free text from the room.")
+
+
+class GroupMediaPurgeReceipt(Request):
+    rows_before: int = Field(ge=0, le=10 ** 9)
+    rows_after: int = Field(ge=0, le=10 ** 9)
+    files_unlinked: int = Field(ge=0, le=10 ** 9)
+    files_shared: int = Field(ge=0, le=10 ** 9)
+    bytes_freed: int = Field(ge=0, le=2 ** 53)
+
+
+class RecordGroupMediaPurge(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    channel: _CHANNEL
+    group_ref: str = Field(min_length=1, max_length=200)
+    epoch: str = Field(min_length=1, max_length=64)
+    receipt: GroupMediaPurgeReceipt
+
+
+class ExpireGroupMedia(Project):
+    pass
 
 
 class PostGroupMedia(Project):
@@ -1771,6 +1810,8 @@ WRITE_REQUESTS = {
     "bind_owner_group": BindOwnerGroup, "relay_group_message": RelayGroupMessage,
     "post_group_reply": PostGroupReply, "set_steward_turn_audience": SetStewardTurnAudience,
     "post_group_media": PostGroupMedia, "create_group_reminder": CreateGroupReminder,
+    "group_media_notice": GroupMediaNotice, "record_group_media_purge": RecordGroupMediaPurge,
+    "expire_group_media": ExpireGroupMedia,
     "note_family_memory": NoteFamilyMemory,
     "post_group_notice": PostGroupNotice,
     "add_list_items": AddListItems, "check_list_items": CheckListItems, "remove_list_items": RemoveListItems,
@@ -2169,6 +2210,9 @@ def _handlers(service) -> dict:
         "relay_group_message": service.groups.relay_group_message,
         "post_group_reply": service.groups.post_group_reply,
         "post_group_media": service.groups.post_group_media,
+        "group_media_notice": service.groups.group_media_notice,
+        "record_group_media_purge": service.groups.record_group_media_purge,
+        "expire_group_media": service.groups.expire_group_media,
         "create_group_reminder": service.groups.create_group_reminder,
         "set_steward_turn_audience": service.groups.set_steward_turn_audience,
         "note_family_memory": service.groups.note_family_memory,
@@ -2348,7 +2392,11 @@ STEWARD_WRITE_ACTIONS = frozenset({
     "post_group_media",
     # Step 24.2b (design-steward 7.8.12a "宿主入库"): the HOST's ack of one dashboard upload it
     # fetched with its token and stored (or refused); the store is derived from the token.
-    "ack_conversation_upload"})
+    "ack_conversation_upload",
+    # design/steward-group-media.md (owner 2026-11-23): the HOST's media-switch commands, called in
+    # code (no steward tool maps onto them): a notice's check/sent/failed, a purge's receipt and
+    # the hourly expiry of kept media rows.
+    "group_media_notice", "record_group_media_purge", "expire_group_media"})
 # Step 23: the writes a public-view service (a group turn's tool request, carrying
 # X-AItelier-Read-As) may make; every other write is public_view_read_only. Each handler
 # judges the recorded turn audience (core.state_groups.StateGroups.group_turn). Step 25 C4 adds

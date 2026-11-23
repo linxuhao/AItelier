@@ -1,5 +1,5 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
-index 768d869..ddc635b 100644
+index 768d869..8928a05 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
 @@ -15,8 +15,9 @@ use wechat_protocol::{
@@ -14,27 +14,36 @@ index 768d869..ddc635b 100644
  };
  
  const DEVICE_NAME: &str = "Puppet Neo";
-@@ -110,6 +111,8 @@ struct SelfProfile {
+@@ -110,6 +111,10 @@ struct SelfProfile {
  enum Operation {
      StartLogin,
      PollLogin,
-+    /// Try the login saved on disk instead of asking for another QR scan.
-+    ResumeLogin,
++    /// Try the login saved on disk instead of asking for another QR scan, for the
++    /// account the caller expected. `expect` is that account, and `None` is the
++    /// caller that expects nobody in particular: whoever the file names is resumed.
++    ResumeLogin { expect: Option<String> },
      Heartbeat,
      PollIncoming,
      Sync { scene: u32 },
-@@ -182,6 +185,23 @@ impl NeoSession {
+@@ -182,6 +187,30 @@ impl NeoSession {
          self.task(Operation::PollLogin)
      }
  
-+    /// Try the login saved on disk. Every answer is one of `none`, `unreadable`,
-+    /// `throttled`, `busy`, `rejected` or `resumed`, and only `resumed` names the
-+    /// account.
++    /// Try the login saved on disk, for the account the caller expects. Every answer
++    /// is one of `none`, `unreadable`, `throttled`, `busy`, `rejected`, `mismatch` or
++    /// `resumed`, and only `resumed` names the account.
++    ///
++    /// `expect` is optional: a caller that passes nobody in particular keeps the
++    /// behaviour this call had before the expectation existed, and whatever account
++    /// the stored login belongs to is resumed. A caller that names an account gets
++    /// `mismatch` when the resumed login belongs to another one - that login is
++    /// stopped and its file deleted, so the next start does not spend a slot on it.
++    ///
 +    /// The only error that leaves this call is the renewal request's own, i.e. a
 +    /// transport fault on the one request a resume makes.
 +    #[napi]
-+    pub fn resume_login(&self) -> AsyncTask<NeoTask> {
-+        self.task(Operation::ResumeLogin)
++    pub fn resume_login(&self, expect: Option<String>) -> AsyncTask<NeoTask> {
++        self.task(Operation::ResumeLogin { expect })
 +    }
 +
 +    /// Whether a stored login is there (an lstat, never a decrypt), why the
@@ -47,15 +56,15 @@ index 768d869..ddc635b 100644
      #[napi]
      pub fn heartbeat(&self) -> AsyncTask<NeoTask> {
          self.task(Operation::Heartbeat)
-@@ -351,6 +371,7 @@ impl Task for NeoTask {
+@@ -351,6 +380,7 @@ impl Task for NeoTask {
          let stage = match &operation {
              Operation::StartLogin => "start QR login",
              Operation::PollLogin => "check or complete QR login",
-+            Operation::ResumeLogin => "resume the saved login",
++            Operation::ResumeLogin { .. } => "resume the saved login",
              Operation::Heartbeat => "check session heartbeat",
              Operation::PollIncoming => "wait for incoming message notifications",
              Operation::Sync { .. } => "read a sync page",
-@@ -377,8 +398,17 @@ impl Task for NeoTask {
+@@ -377,8 +407,17 @@ impl Task for NeoTask {
              &operation,
              Operation::DownloadMedia { .. } | Operation::DownloadVoice { .. }
          );
@@ -75,7 +84,7 @@ index 768d869..ddc635b 100644
      }
  
      fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-@@ -472,12 +502,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -472,12 +511,17 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
              if status == LoginStatus::Approved {
                  let mut attempt = session.attempt.take().expect("issued challenge");
                  let state = client.complete_login(&mut attempt)?;
@@ -89,11 +98,11 @@ index 768d869..ddc635b 100644
              }
              Ok(json!({ "status": status }))
          }
-+        Operation::ResumeLogin => resume_login(session),
++        Operation::ResumeLogin { expect } => resume_login(session, expect.as_deref()),
          Operation::Heartbeat => {
              let beat = read_session(session, heartbeat)?;
              Ok(
-@@ -776,6 +811,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
+@@ -776,6 +820,12 @@ fn run(session: &mut Session, operation: Operation) -> Result<Value> {
              let account = session.account.take().context("No active session")?;
              // Reserving the logout stops new account requests before submission.
              let reply = account.prepare_logout()?.submit_blocking()?;
@@ -106,7 +115,7 @@ index 768d869..ddc635b 100644
              Ok(json!({ "accepted": reply.accepted }))
          }
          Operation::Close => {
-@@ -820,15 +861,20 @@ fn read_session<T>(
+@@ -820,15 +870,20 @@ fn read_session<T>(
      session: &mut Session,
      operation: impl FnMut(&mut Session) -> Result<T>,
  ) -> Result<T> {
@@ -132,7 +141,7 @@ index 768d869..ddc635b 100644
          },
          // A new socket is needed after a failure and after a renewal, because a
          // socket cannot adopt newer credentials.
-@@ -915,6 +961,106 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
+@@ -915,6 +970,154 @@ fn lookup_self(session: &mut Session) -> Result<Value> {
      Ok(json!(profile))
  }
  
@@ -144,7 +153,8 @@ index 768d869..ddc635b 100644
 +}
 +
 +/// The status token one resume attempt answers. One of the closed set the bridge
-+/// branches on; `resumed` is the only answer that also names an account.
++/// branches on; `resumed` is the only answer that also names an account, and
++/// `mismatch` is the one that says the account it named was not the expected one.
 +fn resume_status<T>(answered: &stored_login::Answer<T>) -> &'static str {
 +    match answered {
 +        stored_login::Answer::None => "none",
@@ -152,16 +162,47 @@ index 768d869..ddc635b 100644
 +        stored_login::Answer::Throttled => "throttled",
 +        stored_login::Answer::Busy => "busy",
 +        stored_login::Answer::Rejected => "rejected",
++        stored_login::Answer::Mismatch => "mismatch",
 +        stored_login::Answer::Resumed { .. } => "resumed",
 +    }
 +}
 +
-+/// Try the stored login instead of the QR path.
++/// Whether the account WeChat just accepted is the one the caller expected.
 +///
-+/// Every answer the caller can see is one of the six tokens; the store's own
++/// A resume that named nobody expects whoever the stored login belongs to: that is
++/// what this call did before the expectation existed, and it stays the behaviour of
++/// every caller that passes nothing. A caller that did name an account is answered
++/// on that account's own name, never on the file's or the caller's word for it. An
++/// account WeChat accepted without naming is not the expected one either: a resume
++/// that cannot say which account it opened cannot be the account that was asked for.
++fn is_expected_account(expect: Option<&str>, resumed: &str) -> bool {
++    match expect {
++        None => true,
++        Some(expected) => !resumed.is_empty() && expected == resumed,
++    }
++}
++
++/// Does the account WeChat has just accepted belong to the one the caller expected?
++///
++/// `true` means it does not: the resume must not go on, so `stop` runs here, before this
++/// attempt can answer, and the answer is `mismatch`. `stop` is a parameter because the
++/// only account the product has is a live WeChat client, and this way a test with no
++/// client can witness the decision itself - the account is stopped, and only when the
++/// login belongs to somebody else.
++fn another_account(expect: Option<&str>, own_username: &str, stop: impl FnOnce()) -> bool {
++    if is_expected_account(expect, own_username) {
++        return false;
++    }
++    stop();
++    true
++}
++
++/// Try the stored login instead of the QR path, for the account `expect` names.
++///
++/// Every answer the caller can see is one of the seven tokens; the store's own
 +/// faults are answered as tokens too, and the only error that leaves here is a
 +/// failed renewal, the one request to WeChat.
-+fn resume_login(session: &mut Session) -> Result<Value> {
++fn resume_login(session: &mut Session, expect: Option<&str>) -> Result<Value> {
 +    // A session is already live: its credentials are the current ones, so this is
 +    // the design's `busy`, not a fault.
 +    if session.account.is_some() {
@@ -184,7 +225,7 @@ index 768d869..ddc635b 100644
 +        &store,
 +        now.into(),
 +        open_stored_login,
-+        |account| renew_stored_login(&store, account),
++        |account| renew_stored_login(&store, expect, account),
 +    )?;
 +    let status = resume_status(&answer);
 +    let stored_login::Answer::Resumed { accepted, .. } = answer else {
@@ -219,8 +260,14 @@ index 768d869..ddc635b 100644
 +/// anything else is a failed renewal and leaves here as an error. The rotated
 +/// credentials are written by `renew_and_persist`, which is how this path saves
 +/// them: because every renewal does, not on its own account.
++///
++/// A login that turns out to belong to another account than the one `expect` names is
++/// `Mismatched`: WeChat has just accepted these credentials, so the account is live
++/// and is stopped right here, and the store deletes the file this attempt read, still
++/// inside the writer lock the attempt holds.
 +fn renew_stored_login(
 +    store: &stored_login::Store,
++    expect: Option<&str>,
 +    mut account: AcceptedAccount,
 +) -> Result<stored_login::Opened<AcceptedAccount>> {
 +    let refreshed = match stored_login::renew_and_persist(
@@ -233,13 +280,23 @@ index 768d869..ddc635b 100644
 +        Err(error) => return Err(error),
 +    };
 +    account.username = refreshed.own_username.clone();
++    if another_account(expect, &account.username, || {
++        // The stored login belongs to another account, and WeChat has accepted it: a
++        // session that is not the caller's is live, so it ends before this attempt
++        // answers. A stop that fails leaves the same answer - the account must not be
++        // resumed either way, and an error here would keep the other account's file on
++        // disk, which is the round trip this answer exists to stop paying.
++        let _ = account.client.stop();
++    }) {
++        return Ok(stored_login::Opened::Mismatched);
++    }
 +    Ok(stored_login::Opened::Accepted(account))
 +}
 +
  fn submit_once(send: impl FnOnce() -> Result<wire::TextSendResult>) -> Value {
      match send() {
          Ok(result)
-@@ -1529,6 +1675,24 @@ mod tests {
+@@ -1529,6 +1732,24 @@ mod tests {
          assert!(run(&mut session, Operation::Logout).is_err());
      }
  
@@ -252,7 +309,7 @@ index 768d869..ddc635b 100644
 +            account: Some(NativeClient::new(options()).expect("a client that dials nothing")),
 +            ..Default::default()
 +        };
-+        let answer = run(&mut session, Operation::ResumeLogin)
++        let answer = run(&mut session, Operation::ResumeLogin { expect: None })
 +            .expect("a live session is busy, not a failure");
 +        assert_eq!(answer["status"], json!("busy"));
 +        assert!(
@@ -264,7 +321,7 @@ index 768d869..ddc635b 100644
      #[test]
      fn unhandled_sync_commands_are_skipped() {
          let messages = incoming_messages(
-@@ -1572,3 +1736,1958 @@ mod tests {
+@@ -1572,3 +1793,2097 @@ mod tests {
          );
      }
  }
@@ -548,6 +605,12 @@ index 768d869..ddc635b 100644
 +        /// WeChat refused these credentials; the file is deleted. A delete that
 +        /// fails is a failed write and the answer is still `rejected`.
 +        Rejected,
++        /// WeChat accepted them and they belong to another account than the caller
++        /// expected. This is this side's judgement, not WeChat's answer: the caller of
++        /// `open` has already stopped that account, and the file - the only one this
++        /// attempt read, through the store it holds - is deleted here, inside the
++        /// writer lock, exactly as a rejected login's is.
++        Mismatched,
 +    }
 +
 +    /// One resume attempt's answer: the closed set a caller branches on.
@@ -567,6 +630,10 @@ index 768d869..ddc635b 100644
 +        Busy,
 +        /// WeChat refused the stored login; the file is deleted.
 +        Rejected,
++        /// WeChat accepted the stored login and it belongs to another account than the
++        /// caller expected: that account was stopped and the file is deleted, so the
++        /// next start does not connect as it again.
++        Mismatch,
 +        /// WeChat accepted the stored login. `state` is the plaintext this attempt
 +        /// read, i.e. the credentials from before its own renewal rotated them;
 +        /// the rotated ones are what that renewal wrote back to the store.
@@ -842,6 +909,19 @@ index 768d869..ddc635b 100644
 +        }
 +        match open(usable)? {
 +            Opened::Accepted(accepted) => Ok(Answer::Resumed { state, accepted }),
++            Opened::Mismatched => {
++                // Another account's login, which the opener has already stopped. The
++                // file to delete is the one this attempt read through this store, and
++                // it is deleted while the writer lock above is still held, so a second
++                // start cannot read it between this answer and the unlink. Nothing else
++                // in the state directory is touched: not the counters, not the key,
++                // not the lock. A delete that fails is a failed write and still
++                // `mismatch` - the login is not resumed either way.
++                if store.delete().is_err() {
++                    WRITE_FAILURES.fetch_add(1, Ordering::Relaxed);
++                }
++                Ok(Answer::Mismatch)
++            }
 +            Opened::Rejected => {
 +                // WeChat said this login is no longer good, so the file is not
 +                // evidence of anything: keeping it would make every start pay the
@@ -2133,6 +2213,49 @@ index 768d869..ddc635b 100644
 +        }
 +
 +        #[test]
++        fn a_login_for_another_account_answers_mismatch_and_deletes_the_one_file_it_read() {
++            let _counting = counting();
++            let scratch = Scratch::new("mismatch");
++            let store = scratch.store();
++            store
++                .save(br#"{"schema":1,"own_username":"wxid_other"}"#)
++                .expect("store another account's login");
++            // The opener stands in for `renew_stored_login`: WeChat accepted these
++            // credentials, the name it answered is not the account the caller expected,
++            // so that account was stopped and the store is told what that makes this
++            // attempt. Deleting the file is the store's job, inside the lock it holds.
++            let answer = resume(&store, seconds(), opens, |_| Ok(Opened::Mismatched))
++                .expect("a mismatch is not an error");
++            assert_eq!(answer, Answer::Mismatch);
++            assert_eq!(
++                store.read().err(),
++                Some(Miss::Absent),
++                "another account's login is still on disk after a mismatch"
++            );
++
++            // Exactly one file went: the login. The slot this attempt spent, the key the
++            // operator supplied and the lock that serialises this writer are all still
++            // there - a mismatch is not a reason to lose any of them.
++            assert!(
++                store.resumes_path().exists(),
++                "a mismatch removed the resume counters"
++            );
++            assert!(scratch.key_file.exists(), "a mismatch removed the key file");
++            assert_eq!(
++                directory_entries(&scratch.dir),
++                vec![RESUMES_FILE.to_string()],
++                "a mismatch deleted something other than the stored login, or left the lock behind"
++            );
++
++            // And a later start finds nothing stored, instead of the same other account.
++            assert_eq!(
++                resume(&store, seconds(), opens, accepts).expect("a none answer is not an error"),
++                Answer::None,
++                "the login the mismatch deleted is still there"
++            );
++        }
++
++        #[test]
 +        fn saved_login_status_answers_present_and_counts_the_writes_it_saw() {
 +            let _counting = counting();
 +            let scratch = Scratch::new("status");
@@ -2193,11 +2316,11 @@ index 768d869..ddc635b 100644
 +
 +#[cfg(test)]
 +mod resume_answer_tests {
-+    use super::{resume_status, stored_login};
++    use super::{another_account, is_expected_account, resume_status, stored_login};
 +
 +    /// The bridge branches on these tokens, so each answer names exactly one of
 +    /// them and nothing else: `none`, `unreadable`, `throttled`, `busy`,
-+    /// `rejected`, `resumed`.
++    /// `rejected`, `mismatch`, `resumed`.
 +    #[test]
 +    fn every_resume_answer_is_one_of_the_closed_set() {
 +        assert_eq!(resume_status(&stored_login::Answer::<()>::None), "none");
@@ -2215,6 +2338,10 @@ index 768d869..ddc635b 100644
 +            "rejected"
 +        );
 +        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Mismatch),
++            "mismatch"
++        );
++        assert_eq!(
 +            resume_status(&stored_login::Answer::<()>::Resumed {
 +                state: Vec::new(),
 +                accepted: (),
@@ -2222,12 +2349,81 @@ index 768d869..ddc635b 100644
 +            "resumed"
 +        );
 +    }
++
++    /// A caller that names no account expects whoever the file belongs to: the same
++    /// stored login that a named expectation can answer `mismatch` for still answers
++    /// `resumed`, and the account WeChat named is the one this attempt goes on to use.
++    #[test]
++    fn a_resume_with_no_expected_account_still_answers_resumed() {
++        // The account the stored login belongs to, and one a caller might name instead.
++        let stored = "wxid_the_login_belongs_to";
++        assert!(
++            is_expected_account(None, stored),
++            "a resume that expected nobody refused the account the file names"
++        );
++        assert!(is_expected_account(Some(stored), stored));
++        assert!(!is_expected_account(Some("wxid_expected"), stored));
++        assert!(
++            !is_expected_account(Some("wxid_expected"), ""),
++            "an account WeChat accepted without naming was taken for the expected one"
++        );
++        // `mismatch` is the seventh answer, and the six before it keep their tokens.
++        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Mismatch),
++            "mismatch"
++        );
++        assert_eq!(
++            resume_status(&stored_login::Answer::<()>::Resumed {
++                state: Vec::new(),
++                accepted: (),
++            }),
++            "resumed"
++        );
++    }
++
++    /// The decision `renew_stored_login` makes, driven with the real predicate and no
++    /// client at all: a login that belongs to another account is refused, and the
++    /// account WeChat had accepted is stopped before this attempt can answer; a caller
++    /// that expects nobody is not refused and stops nobody; and the account the file
++    /// names, expected by its own name, is resumed.
++    #[test]
++    fn a_login_for_another_account_is_refused_and_its_account_stopped_before_the_answer() {
++        let stopped = std::cell::Cell::new(false);
++        assert!(
++            another_account(Some("wxid_expected"), "wxid_other", || stopped.set(true)),
++            "a login that belongs to another account was not refused"
++        );
++        assert!(
++            stopped.get(),
++            "another account was refused without stopping the session WeChat had opened"
++        );
++
++        let stopped = std::cell::Cell::new(false);
++        assert!(
++            !another_account(None, "wxid_other", || stopped.set(true)),
++            "a resume that expected nobody refused the account the file names"
++        );
++        assert!(
++            !stopped.get(),
++            "a resume that expected nobody stopped the account it had just opened"
++        );
++
++        let stopped = std::cell::Cell::new(false);
++        assert!(
++            !another_account(Some("wxid_other"), "wxid_other", || stopped.set(true)),
++            "the account the caller expected by name was refused"
++        );
++        assert!(
++            !stopped.get(),
++            "the account the caller expected by name was stopped"
++        );
++    }
 +}
 diff --git a/src/native.ts b/src/native.ts
-index 74037d2..ce56d6e 100644
+index 74037d2..99c9010 100644
 --- a/src/native.ts
 +++ b/src/native.ts
-@@ -4,6 +4,16 @@ import platforms from './native-platforms.json' with { type: 'json' }
+@@ -4,6 +4,17 @@ import platforms from './native-platforms.json' with { type: 'json' }
  /** Error message for a session that WeChat no longer accepts. */
  export const SESSION_ENDED = 'Neo session ended by WeChat'
  
@@ -2240,11 +2436,12 @@ index 74037d2..ce56d6e 100644
 +export const RESUME_THROTTLED = 'RESUME_THROTTLED'
 +export const RESUME_REJECTED = 'RESUME_REJECTED'
 +export const RESUME_BUSY = 'RESUME_BUSY'
++export const RESUME_MISMATCH = 'RESUME_MISMATCH'
 +
  export interface SelfProfile {
    nickname: string | null
    alias: string | null
-@@ -79,6 +89,8 @@ export interface DownloadedMedia {
+@@ -79,6 +90,8 @@ export interface DownloadedMedia {
    advertisedSizeMatches?: boolean | null
  }
  
@@ -2253,11 +2450,17 @@ index 74037d2..ce56d6e 100644
  export interface Session {
    startLogin(): Promise<{ png: string }>
    pollLogin(): Promise<
-@@ -122,9 +134,11 @@ export interface Session {
+@@ -122,9 +135,17 @@ export interface Session {
    lookupSelf(): Promise<SelfProfile>
    logout(): Promise<{ accepted: boolean }>
    close(): Promise<void>
-+  resumeLogin(): Promise<{ status: 'none' | 'unreadable' | 'throttled' | 'busy' | 'rejected' | 'resumed', username?: string, off?: string }>
++  /**
++   * Try the login saved on disk. `expectUsername` is optional: with it the resume
++   * answers `mismatch` when the stored login belongs to another account (and that
++   * login's file is deleted, so the next start does not spend a slot on it); without
++   * it, whoever the file names is resumed, exactly as before it existed.
++   */
++  resumeLogin(expectUsername?: string): Promise<{ status: 'none' | 'unreadable' | 'throttled' | 'busy' | 'rejected' | 'mismatch' | 'resumed', username?: string, off?: string }>
 +  savedLoginStatus(): SavedLoginStatus
  }
  
@@ -2266,19 +2469,19 @@ index 74037d2..ce56d6e 100644
  
  export function openNativeSession(): Session {
    const platform = `${process.platform}-${process.arch}`
-@@ -166,5 +180,7 @@ export function openNativeSession(): Session {
+@@ -166,5 +187,7 @@ export function openNativeSession(): Session {
      lookupSelf: async () => JSON.parse(await addon.lookupSelf()),
      logout: async () => JSON.parse(await addon.logout()),
      close: async () => { await addon.close() },
-+    resumeLogin: async () => JSON.parse(await addon.resumeLogin()),
++    resumeLogin: async (expectUsername?: string) => JSON.parse(await addon.resumeLogin(expectUsername)),
 +    savedLoginStatus: () => JSON.parse(addon.savedLoginStatus()),
    }
  }
 diff --git a/src/puppet-neo.ts b/src/puppet-neo.ts
-index ffa0bd5..4a17132 100644
+index ffa0bd5..34300b6 100644
 --- a/src/puppet-neo.ts
 +++ b/src/puppet-neo.ts
-@@ -6,10 +6,16 @@ import { PNG } from 'pngjs'
+@@ -6,10 +6,17 @@ import { PNG } from 'pngjs'
  import {
    openNativeSession,
    SESSION_ENDED,
@@ -2287,6 +2490,7 @@ index ffa0bd5..4a17132 100644
 +  RESUME_THROTTLED,
 +  RESUME_REJECTED,
 +  RESUME_BUSY,
++  RESUME_MISMATCH,
    type IncomingMessage,
    type MediaProfile,
    type SelfProfile,
@@ -2295,16 +2499,37 @@ index ffa0bd5..4a17132 100644
  } from './native.js'
  
  const CACHE_LIMIT = 2048
-@@ -230,9 +236,15 @@ export class PuppetNeo extends Puppet {
+@@ -230,9 +237,36 @@ export class PuppetNeo extends Puppet {
    private readonly contacts = new Map<string, payloads.Contact>()
    private readonly rooms = new Map<string, true>()
    private readonly messages = new Map<string, CachedMessage>()
-+  private readonly resume: boolean
++  /**
++   * How this puppet resumes the login saved on disk, when it does: the account the
++   * caller expects that login to belong to, if it named one. `undefined` here is the
++   * resume this puppet has always done - whoever the stored login belongs to.
++   */
++  private readonly resume?: { expectUsername?: string }
++  /**
++   * Let the trusted local bridge send to a peer or group no inbound message has observed.
++   * Tests show a resumed login still refuses such a send while this is off, and that the
++   * fork's default is off; opting in lets the send reach the session.
++   */
++  private readonly allowUnobservedText: boolean
  
 -  constructor(options: PuppetOptions = {}) {
-+  constructor(options: PuppetOptions & { resume?: boolean } = {}) {
++  constructor(
++    options: PuppetOptions & {
++      resume?: boolean | { expectUsername?: string }, expectUsername?: string, allowUnobservedText?: boolean
++    } = {},
++  ) {
      super(options)
-+    this.resume = options.resume === true
++    // The expectation may ride on the resume option itself or beside it; a resume
++    // given as `true` is the plain one, with nobody expected in particular.
++    this.resume =
++      options.resume === true ? { expectUsername: options.expectUsername } :
++      options.resume && typeof options.resume === 'object' ? options.resume :
++      undefined
++    this.allowUnobservedText = options.allowUnobservedText === true
 +  }
 +
 +  static savedLoginStatus(): SavedLoginStatus {
@@ -2312,14 +2537,25 @@ index ffa0bd5..4a17132 100644
    }
  
    protected createSession(): Session {
-@@ -550,7 +562,24 @@ export class PuppetNeo extends Puppet {
+@@ -385,6 +419,6 @@ export class PuppetNeo extends Puppet {
+   override async messageSendText(destination: string, text: string, mentions?: string[]): Promise<void> {
+     if (!this.session || !this.online || this.abort?.signal.aborted) throw new Error('Neo session is offline')
+     const observed = destination.endsWith('@chatroom') ? this.rooms.has(destination) : this.contacts.has(destination)
+-    if (mentions?.length || !observed) {
++    if (mentions?.length || (!observed && !this.allowUnobservedText)) {
+       throw new Error('Neo supports text to an observed peer or group')
+     }
+@@ -550,7 +584,28 @@ export class PuppetNeo extends Puppet {
  
    private async serve(session: Session, signal: AbortSignal): Promise<void> {
      await delay(0, undefined, { signal })
 -    const username = await this.loginWithQr(session, signal)
 +    let username: string
 +    if (this.resume) {
-+      const answer = await session.resumeLogin()
++      // The expected account, when the caller named one, goes all the way down: the
++      // fork compares it with the account the stored login belongs to before it
++      // answers `resumed`, and deletes that login when it belongs to somebody else.
++      const answer = await session.resumeLogin(this.resume.expectUsername)
 +      signal.throwIfAborted()
 +      if (answer.status === 'resumed' && typeof answer.username === 'string' && answer.username !== '') {
 +        username = answer.username
@@ -2329,6 +2565,7 @@ index ffa0bd5..4a17132 100644
 +          answer.status === 'unreadable' ? RESUME_UNREADABLE :
 +          answer.status === 'throttled' ? RESUME_THROTTLED :
 +          answer.status === 'rejected' ? RESUME_REJECTED :
++          answer.status === 'mismatch' ? RESUME_MISMATCH :
 +          RESUME_BUSY
 +        throw new Error(`${token} saved login was not resumed`)
 +      }
@@ -2339,7 +2576,7 @@ index ffa0bd5..4a17132 100644
      // `login` comes with the account's profile. A failed lookup falls back to the username.
      this.selfProfile = await session.lookupSelf().catch(() => undefined)
 diff --git a/test/ding-dong.test.ts b/test/ding-dong.test.ts
-index 0b4ffcd..c881ec1 100644
+index 0b4ffcd..ceb9c17 100644
 --- a/test/ding-dong.test.ts
 +++ b/test/ding-dong.test.ts
 @@ -32,6 +32,8 @@ interface Script {
@@ -2347,16 +2584,19 @@ index 0b4ffcd..c881ec1 100644
    /** The bytes a media download answers with, base64, by the file id it asked for. */
    downloads?: Record<string, string>
 +  /** What resumeLogin answers when the resume option is set. */
-+  resume?: { status: 'none' | 'unreadable' | 'throttled' | 'busy' | 'rejected' | 'resumed', username?: string, off?: string }
++  resume?: { status: 'none' | 'unreadable' | 'throttled' | 'busy' | 'rejected' | 'mismatch' | 'resumed', username?: string, off?: string }
    /** What the SILK of every voice note download decodes to. */
    decodedVoice?: { wavBase64: string, durationMs: number }
  }
-@@ -47,6 +49,13 @@ function scriptedSession(trace: unknown[], script: Script = {}): Session {
+@@ -47,6 +49,16 @@ function scriptedSession(trace: unknown[], script: Script = {}): Session {
      async pollLogin() {
        return { status: 'completed', username }
      },
-+    async resumeLogin() {
++    async resumeLogin(expectUsername?: string) {
 +      trace.push('resume-login')
++      // Which account the puppet expected the stored login to belong to, if it named
++      // one: the fork's own answer depends on it.
++      trace.push(['resume-expect', expectUsername])
 +      return script.resume ?? { status: 'none' }
 +    },
 +    savedLoginStatus() {
@@ -2365,7 +2605,7 @@ index 0b4ffcd..c881ec1 100644
      async heartbeat() {
        beats++
        if (beats > 1 && script.laterHeartbeat) throw script.laterHeartbeat
-@@ -136,8 +145,9 @@ function waitFor<T>(subscribe: (done: (value: T) => void) => void, label: string
+@@ -136,8 +148,9 @@ function waitFor<T>(subscribe: (done: (value: T) => void) => void, label: string
    })
  }
  
@@ -2376,7 +2616,7 @@ index 0b4ffcd..c881ec1 100644
      protected override createSession() { return scriptedSession(trace, script()) }
      protected override scanCode() { return 'fixture-qr' }
    }()
-@@ -621,6 +631,64 @@ test('an arriving file, image and voice note each come back as the FileBox to re
+@@ -621,6 +634,220 @@ test('an arriving file, image and voice note each come back as the FileBox to re
    }
  })
  
@@ -2423,6 +2663,54 @@ index 0b4ffcd..c881ec1 100644
 +  })
 +}
 +
++test('a stored login for another account is a mismatch that never resumes it', async () => {
++  const trace: unknown[] = []
++  const scans: payloads.EventScan[] = []
++  const { puppet, events } = scriptedPuppet(
++    trace,
++    () => ({ resume: { status: 'mismatch', username: 'wxid_other' } }),
++    { resume: true, expectUsername: 'wxid_expected' },
++  )
++  puppet.on('scan', payload => { scans.push(payload) })
++  const errored = waitFor<string>(done => puppet.once('error', payload => done(payload.data ?? '')), 'error').catch(() => '')
++  await puppet.start().catch(() => {})
++  await errored
++  try {
++    assert(events.errors.some(message => message.includes('RESUME_MISMATCH')))
++    assert.deepEqual(events.logins, [], 'the puppet resumed the account it was not asked for')
++    assert.deepEqual(
++      trace.filter(step => Array.isArray(step) && step[0] === 'resume-expect'),
++      [['resume-expect', 'wxid_expected']],
++      'the expected account never reached the resume attempt',
++    )
++    assert.equal(scans.length, 0)
++    assert(!trace.includes('start-login'))
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('the expected account may ride on the resume option itself', async () => {
++  const trace: unknown[] = []
++  const { puppet, events } = scriptedPuppet(
++    trace,
++    () => ({ resume: { status: 'resumed', username: 'wxid_expected' } }),
++    { resume: { expectUsername: 'wxid_expected' } },
++  )
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    assert.deepEqual(events.logins, [{ contactId: 'wxid_expected' }])
++    assert.deepEqual(
++      trace.filter(step => Array.isArray(step) && step[0] === 'resume-expect'),
++      [['resume-expect', 'wxid_expected']],
++    )
++  } finally {
++    await puppet.stop()
++  }
++})
++
 +test('a puppet without the resume option still scans and starts a QR login', async () => {
 +  const trace: unknown[] = []
 +  const scans: payloads.EventScan[] = []
@@ -2436,6 +2724,114 @@ index 0b4ffcd..c881ec1 100644
 +    assert(trace.includes('start-login'))
 +  } finally {
 +    await puppet.stop()
++  }
++})
++
++test('a trusted bridge can push text to a destination the puppet never observed', async () => {
++  const trace: unknown[] = []
++  const { puppet } = scriptedPuppet(trace, () => ({}), { allowUnobservedText: true })
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    await puppet.messageSendText('wxid_unobserved', 'proactive hello')
++    assert.deepEqual(
++      trace.filter(step => Array.isArray(step) && step[0] === 'send'),
++      [['send', 'wxid_unobserved', 'proactive hello']],
++      'the unobserved destination reached the scripted session',
++    )
++    // The option does not relax the mentions arm.
++    await assert.rejects(
++      puppet.messageSendText(sender, 'with mentions', [member]),
++      /Neo supports text to an observed peer or group/,
++    )
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('without the option an unobserved destination and mentions are still refused', async () => {
++  const trace: unknown[] = []
++  const { puppet } = scriptedPuppet(trace, () => ({}))
++  const ready = waitFor(done => puppet.once('ready', done), 'ready')
++  await puppet.start()
++  try {
++    await ready
++    await assert.rejects(
++      puppet.messageSendText('wxid_unobserved', 'nope'),
++      /Neo supports text to an observed peer or group/,
++    )
++    await assert.rejects(
++      puppet.messageSendText(sender, 'nope', [member]),
++      /Neo supports text to an observed peer or group/,
++    )
++    assert(!trace.some(step => Array.isArray(step) && step[0] === 'send'))
++  } finally {
++    await puppet.stop()
++  }
++})
++
++test('an unobserved group is sent with the option on and refused with it off', async () => {
++  const unobservedRoom = 'wxid_unobserved@chatroom'
++  for (const allowUnobservedText of [true, false]) {
++    const trace: unknown[] = []
++    const { puppet } = scriptedPuppet(trace, () => ({}), { allowUnobservedText })
++    const ready = waitFor(done => puppet.once('ready', done), 'ready')
++    await puppet.start()
++    try {
++      await ready
++      if (allowUnobservedText) {
++        await puppet.messageSendText(unobservedRoom, 'group hello')
++        assert.deepEqual(
++          trace.filter(step => Array.isArray(step) && step[0] === 'send'),
++          [['send', unobservedRoom, 'group hello']],
++          'the unobserved room reached the scripted session',
++        )
++      } else {
++        await assert.rejects(
++          puppet.messageSendText(unobservedRoom, 'group hello'),
++          /Neo supports text to an observed peer or group/,
++        )
++        assert(!trace.some(step => Array.isArray(step) && step[0] === 'send'))
++      }
++    } finally {
++      await puppet.stop()
++    }
++  }
++})
++
++test('after a resumed saved login an unobserved send is refused by default and delivered when opted in', async () => {
++  const destination = 'wxid_after_resume'
++  for (const allowUnobservedText of [false, true]) {
++    const trace: unknown[] = []
++    const { puppet, events } = scriptedPuppet(
++      trace,
++      () => ({ resume: { status: 'resumed', username: 'wxid_resume' }, messages: [] }),
++      { resume: true, allowUnobservedText },
++    )
++    const ready = waitFor(done => puppet.once('ready', done), 'ready')
++    await puppet.start()
++    try {
++      await ready
++      assert.deepEqual(events.logins, [{ contactId: 'wxid_resume' }], 'the saved login resumed')
++      if (allowUnobservedText) {
++        await puppet.messageSendText(destination, 'after resume')
++        assert.deepEqual(
++          trace.filter(step => Array.isArray(step) && step[0] === 'send'),
++          [['send', destination, 'after resume']],
++          'the unobserved destination reached the session after a resume',
++        )
++      } else {
++        await assert.rejects(
++          puppet.messageSendText(destination, 'after resume'),
++          /Neo supports text to an observed peer or group/,
++          'a resumed login has observed nobody',
++        )
++        assert(!trace.some(step => Array.isArray(step) && step[0] === 'send'))
++      }
++    } finally {
++      await puppet.stop()
++    }
 +  }
 +})
  test('an inbound fetch says which stage it stopped at: no session, or no login', async () => {

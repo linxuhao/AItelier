@@ -254,6 +254,24 @@ test('status follows the bridge\'s phase: idle with its reason, starting, the QR
   assert.deepEqual(statusFromBridge({ logged_in: false }), { connected: false, detail: 'scan needed' });
 });
 
+test('status, step 19.1: resuming the saved login, and each resume idle reason said with its meaning (the first 80 characters carry it)', () => {
+  assert.deepEqual(statusFromBridge({ phase: 'resuming', logged_in: false, resumable: true }), { connected: false, detail: 'resuming saved login' });
+  const said = {
+    resume_rejected: 'no QR (resume_rejected: WeChat ended the saved login) - request one on the dashboard',
+    resume_unreadable: 'no QR (resume_unreadable: the saved login cannot be read) - request one on the dashboard',
+    resume_throttled: 'no QR (resume_throttled: too many resumes lately) - request one on the dashboard',
+    resume_failed: 'no QR (resume_failed: the saved login was not resumed) - request one on the dashboard',
+    resume_account_mismatch: 'no QR (resume_account_mismatch: the saved login was another account, deleted) - request one on the dashboard',
+  };
+  for (const [reason, detail] of Object.entries(said)) {
+    assert.deepEqual(statusFromBridge({ phase: 'idle', idle_reason: reason, logged_in: false, resumable: false }), { connected: false, detail });
+    assert.ok(detail.indexOf(')') < 80, `${reason}: the meaning fits the alert's 80 characters`);
+  }
+  // Other reasons, and names that only look like a key of the table, are said as before.
+  assert.equal(statusFromBridge({ phase: 'idle', idle_reason: 'boot', logged_in: false }).detail, 'no QR (boot) - request one on the dashboard');
+  assert.equal(statusFromBridge({ phase: 'idle', idle_reason: 'toString', logged_in: false }).detail, 'no QR (toString) - request one on the dashboard');
+});
+
 test('login asks the bridge for a QR, answers without it, and reads the status quickly for a while', async () => {
   const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><path d="M4 4.5h7"/></svg>';
   const bridge = await fakeBridge({ status: { phase: 'idle', idle_reason: 'boot', logged_in: false, since: 'x' } });
@@ -715,7 +733,8 @@ test('media: a group event\'s file is stored through storeMedia with its room be
     await until(() => channels.received.length === 1);
     assert.deepEqual(channels.log, ['store g5.0', 'inbound g5'], 'the file is stored before the message is handed on');
     assert.deepEqual(channels.stored, [{ channel: 'wechat', senderRef: 'wxid_m1', messageRef: 'g5', index: 0, kind: 'image',
-      conversationRef: 'r1@chatroom' }], 'the room goes with it, so the library can scope the row to it');
+      conversationRef: 'r1@chatroom', asked: false }], 'the room goes with it, so the library can scope the row to it - and '
+      + 'the bridge\'s asked, so the host keeps an un-mentioned file only while the group\'s switch is on');
     assert.deepEqual(channels.opened.map(o => o.bytes.toString()), ['JPEG-BYTES'], 'fetched from GET /media once');
     // Un-mentioned: the host records it and opens no turn (the director decides that); the
     // channel passes the caption as the bridge gave it - empty - and the ref, never the id.
@@ -723,6 +742,26 @@ test('media: a group event\'s file is stored through storeMedia with its room be
       conversationRef: 'r1@chatroom', asked: false, attachments: [{ kind: 'image', ref: 'm_0000000000000001' }] });
     assert.ok(!JSON.stringify(channels.received).includes('5.0'), 'never the bridge\'s own media_id');
     assertClosedSet(channels.received);
+  } finally { await channel.stop(); await bridge.close(); }
+});
+
+test('media: asked reaches storeMedia only for a group message that carries it - never for 1:1, never invented when the bridge omits it', async () => {
+  // design/steward-group-media.md section 3 (owner rulings 2026-11-23).
+  const bridge = await fakeBridge();
+  const channels = mediaChannels();
+  for (const id of ['1.0', '2.0', '3.0']) bridge.media.set(id, [[200, Buffer.from('BYTES')]]);
+  const at = new Date().toISOString();
+  bridge.events.push({ seq: 1, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m1', message_ref: 'g1',
+    text: '', asked: true, at, attachments: [{ media_id: '1.0', kind: 'image', size: 5 }] },
+  { seq: 2, type: 'group_message', room_ref: 'r1@chatroom', sender_ref: 'wxid_m1', message_ref: 'g2',
+    text: '', at, attachments: [{ media_id: '2.0', kind: 'image', size: 5 }] },
+  mediaEvent(3, [{ media_id: '3.0', kind: 'image', size: 5 }], { asked: false }));
+  const channel = startWechatChannel({ ownerChannels: channels, logger: quiet, config: { tokenFile, url: bridge.url }, waitSeconds: 1 });
+  try {
+    await until(() => channels.received.length === 3);
+    assert.deepEqual(channels.stored.map(m => [m.messageRef, m.asked]), [['g1', true], ['g2', undefined], ['m3', undefined]]);
+    assert.ok(!('asked' in channels.stored[1]), 'a group message without asked stores without it');
+    assert.ok(!('asked' in channels.stored[2]) && !('conversationRef' in channels.stored[2]), 'a 1:1 message never carries it');
   } finally { await channel.stop(); await bridge.close(); }
 });
 

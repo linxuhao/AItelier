@@ -8,7 +8,7 @@ import { langStore } from '../../stores/i18n';
 
 const api = vi.hoisted(() => ({
   listOwnerGroups: vi.fn(), nameGroupMember: vi.fn(), unbindOwnerGroup: vi.fn(), createGroupCode: vi.fn(),
-  clearGroupRecords: vi.fn(), setFamilyNote: vi.fn(), deleteFamilyMemory: vi.fn(),
+  clearGroupRecords: vi.fn(), setFamilyNote: vi.fn(), deleteFamilyMemory: vi.fn(), setGroupMediaKeep: vi.fn(),
 }));
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
 import type { OwnerGroup } from '../../lib/api';
@@ -129,5 +129,67 @@ describe('StewardGroups', () => {
     const full = render(StewardGroups, {channel: 'wechat', bound: true});
     await waitFor(() => expect(full.container.querySelector('[data-groups-full]')?.textContent).toContain('3 groups are bound'));
     expect(full.container.querySelector('[data-group-add]')).toBeNull();
+  });
+
+  // design/steward-group-media.md section 9 (owner 2026-11-23): the media switch, its four states,
+  // why it waits and the last deletion; the switch asks the backend, which decides the state.
+  describe('the media switch', () => {
+    const keep = (over: Record<string, unknown>) => ({state: 'off', since: null, note: null, attempts: 0, purge_owed: false,
+      kept_24h: 0, last_purge: null, ...over});
+    const statusOf = async (mediaKeep: Record<string, unknown>) => {
+      api.listOwnerGroups.mockResolvedValue({groups: [{...group(), media_keep: mediaKeep}], groups_per_channel: 3});
+      langStore.set('zh-CN');
+      const view = render(StewardGroups, {channel: 'wechat', bound: true});
+      const status = await waitFor(() => {
+        const el = view.container.querySelector('[data-media-keep-status]');
+        expect(el).not.toBeNull();
+        return el as HTMLElement;
+      });
+      const box = view.container.querySelector('[data-media-keep="r1@chatroom"]') as HTMLInputElement;
+      return {view, status: status.textContent?.trim(), box, purge: view.container.querySelector('[data-media-purge]')?.textContent?.trim()};
+    };
+
+    it('off: 关, unchecked; clicking turns it on through the backend', async () => {
+      api.setGroupMediaKeep.mockResolvedValue({state: 'on_pending'});
+      const {view, status, box} = await statusOf(keep({}));
+      expect(status).toBe('关');
+      expect(box.checked).toBe(false);
+      expect(view.container.textContent).toContain('存群里没 @ 管家的图片、语音、文件（存 1 天；关掉即删除已存的）');
+      await fireEvent.click(box);
+      await waitFor(() => expect(api.setGroupMediaKeep).toHaveBeenCalledWith('wechat', 'r1@chatroom', true));
+    });
+
+    it('on_pending: 正在通知群里… with why it waits; on is not shown before the notice went out', async () => {
+      const {status, box} = await statusOf(keep({state: 'on_pending', note: 'group_send_budget'}));
+      expect(status).toBe('正在通知群里… · 群里本小时发送已满');
+      expect(box.checked).toBe(true);
+      cleanup();
+      expect((await statusOf(keep({state: 'on_pending', note: 'channel_down'}))).status).toBe('正在通知群里… · 渠道未连接');
+    });
+
+    it('on: 开 with since when and what it kept today; clicking turns it off', async () => {
+      api.setGroupMediaKeep.mockResolvedValue({state: 'off_notice'});
+      const {status, box} = await statusOf(keep({state: 'on', since: '2026-11-23T09:41:00Z', kept_24h: 3}));
+      expect(status).toMatch(/^开（自 .+）\s·\s今天存了 3 件$/);
+      expect(box.checked).toBe(true);
+      await fireEvent.click(box);
+      await waitFor(() => expect(api.setGroupMediaKeep).toHaveBeenCalledWith('wechat', 'r1@chatroom', false));
+    });
+
+    it('off_notice: 已关，正在删除 while the purge is owed, then 正在通知群里 with the last receipt', async () => {
+      expect((await statusOf(keep({state: 'off_notice', purge_owed: true}))).status).toBe('已关，正在删除');
+      cleanup();
+      const purge = {at: '2026-11-23T10:00:00Z', reason: 'off', backend_rows: 4, rows_before: 4, files_unlinked: 3, files_shared: 1, bytes_freed: 99};
+      const told = await statusOf(keep({state: 'off_notice', last_purge: purge}));
+      expect(told.status).toBe('已关，正在通知群里');
+      expect(told.purge).toBe('已删除 4 件（1 件文件另有记录引用，未删）');
+      expect(told.box.checked).toBe(false);
+    });
+
+    it('a notice that was never sent says so, and the switch reads off', async () => {
+      const {status, box} = await statusOf(keep({state: 'off', note: 'notice_not_sent', attempts: 3}));
+      expect(status).toBe('关 · 通知没发出去（开关仍是关）');
+      expect(box.checked).toBe(false);
+    });
   });
 });

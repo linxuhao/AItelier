@@ -341,6 +341,12 @@ class FamilyNote(BaseModel):
     text: str = Field(max_length=1000)
 
 
+class MediaKeep(BaseModel):
+    # strict: only true or false switches it ("yes" is not a click).
+    model_config = ConfigDict(extra="forbid", strict=True)
+    on: bool
+
+
 class PendingPick(BaseModel):
     model_config = ConfigDict(extra="forbid")
     channel: Channel
@@ -385,6 +391,15 @@ def unbind_group(channel: Channel, group_ref: str, service=Depends(get_service))
 def clear_group(channel: Channel, group_ref: str, service=Depends(get_service)):
     _owner(service)
     return _group_call(service.groups.clear_group_messages, channel, group_ref)
+
+
+@router.put("/groups/{channel}/{group_ref}/media-keep", dependencies=[Depends(authz.require_writer)])
+def set_group_media_keep(channel: Channel, group_ref: str, body: MediaKeep, service=Depends(get_service)):
+    """design/steward-group-media.md (owner 2026-11-23): whether this group's files sent without
+    mentioning the steward are kept, one day. On waits for the group's notice to be sent; off
+    deletes what was kept."""
+    _owner(service)
+    return _group_call(service.groups.set_group_media_keep, channel, group_ref, body.on)
 
 
 @router.put("/groups/{channel}/{group_ref}/members/{sender_ref}", dependencies=[Depends(authz.require_writer)])

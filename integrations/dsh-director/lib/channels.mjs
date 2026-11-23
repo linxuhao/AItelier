@@ -234,7 +234,10 @@ export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bi
   statusDetail: 300, recordAttempts: 6, recordRetryMs: 1000, answerAttempts: 2, answerRetryMs: 500, owedMs: 30000, owedMax: 200,
   lineMaxAgeMs: 3600000, receiptMs: 30000, receiptMaxAgeMs: 300000, mirrorChars: 600,
   fastStatusMs: 5000, fastStatusForMs: 180000, loginPerHour: 5, loginPerDay: 12, alertDetail: 80,
-  placeholderMs: 120000 });
+  placeholderMs: 120000,
+  // design/steward-group-media.md section 4: how often the backend's kept media rows past their
+  // day are swept (the library sweeps its own copies on the same hour).
+  keptExpireMs: 3600000 });
 
 /** The fixed text of a channel-down alert (design-steward 7.9.2): which channel, for how many
  *  minutes (the host's count) and the channel's own detail line (cut to `max` characters) - or
@@ -260,8 +263,47 @@ const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
  *  `recent` (that group's last exchanges, as data) is at most recentChars characters. The
  *  question quotas and the reply's length are the backend's (core/state_groups.py
  *  GROUP_LIMITS), the send gap and backstop the bridge's (wechat-bridge GROUP_SEND_LIMITS); no
- *  key is in two places. */
-export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500 });
+ *  key is in two places. recentChars bounds the answered exchanges only: the kept media
+ *  entries (design/steward-group-media.md section 7, at most twenty of the last day, counted by
+ *  the backend) are never pushed out by them. keptChars is what the kept entries may use before
+ *  they take room from the answered exchanges; past both, a kept entry's sender name longer
+ *  than keptNameChars is shortened - a kept entry itself is never dropped here. */
+/** The bridge's group-send answers it gives before say() runs (wechat-bridge groupSend): nothing
+ *  was sent, so a notice spends no attempt on them. */
+const GROUP_SEND_REFUSED_BEFORE = Object.freeze({ 409: ['not_logged_in', 'room_not_bound'], 429: ['room_backstop'] });
+export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000, keptNameChars: 8 });
+/** Group media wake (2026-11-23 defect: the steward's group turn had no image block): how many
+ *  of this group's KEPT images one @-turn attaches as native blocks, most recent first. The
+ *  backend keeps twenty kept entries a day; four shows the steward the last few without turning
+ *  a wake into an image dump (every block costs request tokens), and a host that attaches none
+ *  leaves the wake's lines as ref-only metadata. Kept entries past the bound keep their line.
+ *  Sibling of GROUP_LIMITS, not a key in it: the backend's twenty and DSH's block budget are
+ *  separate rules, and GROUP_LIMITS is the pinned set of group *text* bounds. */
+export const GROUP_WAKE_IMAGE_LIMIT = 4;
+
+/** A group wake's `recent` within its bounds (design/steward-group-media.md section 7): the
+ *  oldest entry that is NOT kept goes first while those exceed recentChars, so a busy
+ *  conversation never pushes the kept media out; while the whole list exceeds recentChars +
+ *  keptChars the oldest answered entries go too; and if it still does, the kept entries' long
+ *  sender names are shortened. The owner's twenty kept entries (the backend's bound) all stay.
+ *  Order is kept; the list is not changed in place. */
+export function trimRecent(entries, limits = GROUP_LIMITS) {
+  let recent = Array.isArray(entries) ? [...entries] : [];
+  const kept = entry => entry?.kept === true;
+  const size = list => JSON.stringify(list).length;
+  while (recent.some(entry => !kept(entry)) && size(recent.filter(entry => !kept(entry))) > limits.recentChars)
+    recent.splice(recent.findIndex(entry => !kept(entry)), 1);
+  const budget = limits.recentChars + limits.keptChars;
+  while (recent.some(entry => !kept(entry)) && size(recent) > budget)
+    recent.splice(recent.findIndex(entry => !kept(entry)), 1);
+  if (size(recent) > budget) {
+    recent = recent.map(entry => {
+      const name = kept(entry) && typeof entry.sender === 'string' ? Array.from(entry.sender) : [];
+      return name.length > limits.keptNameChars ? { ...entry, sender: name.slice(0, limits.keptNameChars).join('') + '…' } : entry;
+    });
+  }
+  return recent;
+}
 
 /** @param host  host.channels: relay, bind, sourceOf, recordDelivery, list, and optionally
  *    reportStatus (host.d.ts).
@@ -573,7 +615,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   };
   const pollStatus = () => {
     // A bridge that restarted lost its whitelist: it is set again with every status poll.
-    if (isReady) void refreshRooms();
+    // ...and the media switch's pass runs on that same read (design/steward-group-media.md).
+    if (isReady) void mediaPass();
     for (const [channel, entry] of registered) void reportStatus(channel, statusOf(channel, entry));
     // The alert pass runs after this poll's reports, outside the status queue: a send may take
     // sendMs and its record half a minute more, and the next poll's reports must not wait.
@@ -714,10 +757,15 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
      *  The row's AUDIENCE follows the message (design/steward-group-media.md, the owner's
      *  ruling of 2026-11-22): `owner` for a 1:1 message, `group:<channel>:<conversationRef>`
      *  for a group's - so the room's own turns cover it (`lib/media.mjs: covers()`) and no
-     *  other group's do. Storage is not gated on the mention: an un-mentioned message's files
-     *  are kept here just the same, for a later mention in that room to read. */
+     *  other group's do.
+     *
+     *  A group message that did not call the steward (`asked: false`, the bridge's word) is
+     *  kept only while that group's media switch is on (design/steward-group-media.md, owner
+     *  rulings 2026-11-23): `keepsMedia` replaces `servesGroup` - a bound group with the switch
+     *  off fetches nothing (refused `unsupported`) - and the row is stored as `kept` (one day,
+     *  that group's turns only). A mention, or a channel that does not say, keeps today's rule. */
     async storeMedia(meta = {}, open) {
-      const { channel, senderRef, messageRef, index, kind, conversationRef } = meta;
+      const { channel, senderRef, messageRef, index, kind, conversationRef, asked } = meta;
       if (!CHANNEL_NAMES.includes(channel) || !text(senderRef) || !text(messageRef) || !Number.isInteger(index) || index < 0
         || !MEDIA_KINDS.includes(kind) || typeof open !== 'function') return { refused: 'invalid_media' };
       if (!media) return { refused: 'unsupported' };
@@ -732,6 +780,13 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
             log('channel_media_refused', { channel, reason: 'channel_sender_not_bound' });
             return { refused: 'channel_sender_not_bound' };
           }
+        } else if (asked === false) {
+          // Un-mentioned: only a group whose switch is on (its notice sent) keeps it. Bound
+          // alone stores nothing (director 640 (d)).
+          if (!(await keepsMedia(channel, conversationRef))) {
+            log('channel_media_refused', { channel, reason: 'group_media_keep_off' });
+            return { refused: 'unsupported' };
+          }
         } else if (!(await servesGroup(channel, conversationRef))) {
           // Not a room this host serves: nothing is fetched, and the closed set has no word
           // for it - the host cannot take a file there at all.
@@ -744,7 +799,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       }
       const audience = conversationRef === undefined ? 'owner' : `group:${channel}:${conversationRef}`;
       let stored;
-      try { stored = await media.ingest({ channel, messageRef, index, audience, source: 'in' }, open); }
+      const kept = conversationRef !== undefined && asked === false ? { kept: true } : {};
+      try { stored = await media.ingest({ channel, messageRef, index, audience, source: 'in', ...kept }, open); }
       catch (error) { log('channel_media_failed', { channel, error: short(error) }); return { refused: 'unavailable' }; }
       return stored && (stored.ref || stored.refused) ? stored : { refused: 'unavailable' };
     },
@@ -824,15 +880,25 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // except `unavailable`, when the host could not be reached at all.
   const groupLanes = new Map();
   let groupWake;
-  const sendGroupLine = async (channel, groupRef, line) => {
+  /** One line into a group: {sent: true}; {refused: code} when it was refused before anything
+   *  was sent (no sender, or the bridge's 409 not_logged_in / room_not_bound or 429
+   *  room_backstop, which it answers before say()); else {failed: why} - a send that may have
+   *  started, a host send_timeout among them. */
+  const trySendGroup = async (channel, groupRef, line) => {
     const entry = registered.get(channel);
-    if (!entry?.sendGroup || !text(line)) { log('group_send_skipped', { channel, group_ref: groupRef }); return false; }
+    if (!entry?.sendGroup || !text(line)) { log('group_send_skipped', { channel, group_ref: groupRef }); return { refused: 'channel_down' }; }
     try {
       await within(Promise.resolve(entry.sendGroup(groupRef, line)), limits.sendMs, 'send_timeout');
       log('group_sent', { channel, group_ref: groupRef, length: line.length });
-      return true;
-    } catch (error) { log('group_send_failed', { channel, group_ref: groupRef, error: short(error) }); return false; }
+      return { sent: true };
+    } catch (error) {
+      log('group_send_failed', { channel, group_ref: groupRef, error: short(error) });
+      const code = typeof error?.code === 'string' ? error.code : '';
+      if (GROUP_SEND_REFUSED_BEFORE[error?.status]?.includes(code)) return { refused: code };
+      return { failed: code || short(error) };
+    }
   };
+  const sendGroupLine = async (channel, groupRef, line) => (await trySendGroup(channel, groupRef, line)).sent === true;
   /** Whether `channel`'s live groups include this room - the read the wake's own label
    *  lookup and the bridge's whitelist use (host.groups.list, the backend's owner groups).
    *  It is asked before a group message's first byte is fetched (storeMedia); a host that
@@ -842,18 +908,147 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     const listed = await groups.list();
     return (listed?.groups ?? []).some(group => group.channel === channel && group.group_ref === groupRef);
   };
-  /** The bridge's whitelist from the host: each channel's bound account and its bound group. */
+  /** Whether this room's media switch is on (design/steward-group-media.md section 3): the same
+   *  read, true only for a listed group whose `media_keep` is 'on' - its notice was sent. */
+  const keepsMedia = async (channel, groupRef) => {
+    if (typeof groups?.list !== 'function') return false;
+    const listed = await groups.list();
+    return (listed?.groups ?? []).some(group => group.channel === channel && group.group_ref === groupRef
+      && group.media_keep === 'on');
+  };
+  /** The bridge's whitelist from the host: each channel's bound account and its bound group.
+   *  Answers what the host listed, or undefined when it could not be read. */
   const refreshRooms = async () => {
-    if (typeof groups?.list !== 'function') return;
+    if (typeof groups?.list !== 'function') return undefined;
+    let listed;
     try {
       await hostReady();
-      const listed = await groups.list();
+      listed = await groups.list();
       for (const [channel, entry] of registered) {
         if (!entry.setRooms) continue;
         await entry.setRooms({ ownerRef: listed?.owner_refs?.[channel] ?? null,
           rooms: (listed?.groups ?? []).filter(g => g.channel === channel).map(g => ({ room_ref: g.group_ref, prefix: g.mention_prefix })) });
       }
     } catch (error) { log('group_rooms_failed', { error: short(error) }); }
+    return listed;
+  };
+
+  // ---- the media switch (design/steward-group-media.md, owner rulings 2026-11-23) ----
+  // One pass after each status poll's groups.list() (and once at ready), never two at once:
+  // the purge sweep, then the notices, then (hourly) the backend's expiry of kept rows. Every
+  // decision is the backend's; this side keeps only what a lost answer must not repeat.
+  let mediaPassing = false, lastExpire = -Infinity;
+  // A notice the channel took whose commit was not answered, by key -> its ask: only the commit
+  // is retried, at the start of every pass, whether or not the group is still listed with that
+  // notice (an on-notice the group read must reach the backend even after the owner turned the
+  // switch off: it then owes the off line). One is dropped only when the backend answers it,
+  // except purge_owed (the switch does not turn on before the receipt): that one waits.
+  const noticeCommits = new Map();
+  const commitNotice = async (key, ask) => {
+    const answer = await groups.mediaNotice({ ...ask, phase: 'sent' });
+    if (answer?.refused === 'purge_owed') return undefined;
+    noticeCommits.delete(key);
+    return answer ?? {};
+  };
+  const commitPending = async () => {
+    for (const [key, ask] of [...noticeCommits]) {
+      const seen = { channel: ask.channel, group_ref: ask.groupRef, notice: ask.notice };
+      try {
+        const answer = await commitNotice(key, ask);
+        if (answer) log('group_media_notice_committed', { ...seen, ...(answer.state ? { state: String(answer.state) } : {}) });
+        else log('group_media_notice_waiting', { ...seen, reason: 'purge_owed' });
+      } catch (error) { log('group_media_notice_error', { ...seen, error: short(error) }); }
+    }
+  };
+  // A purge receipt not recorded yet, by audience and epoch: a later purge of the same debt
+  // adds to it, so the counts of what was really deleted are not lost to a lost answer.
+  const unrecorded = new Map();
+  const audienceOf = (channel, groupRef) => `group:${channel}:${groupRef}`;
+  const purgeSweep = async listed => {
+    // Only a read that succeeded and is well-formed: a failed or partial read is never taken
+    // for "every group is off".
+    if (!Array.isArray(listed?.groups) || !Array.isArray(listed?.media_purges)) return;
+    if (typeof media?.purgeKept !== 'function' || typeof media?.keptAudiences !== 'function') return;
+    // An on group is left alone unless it is listed as owing a purge (清空记录 while on).
+    const on = new Set(listed.groups.filter(g => g?.media_keep === 'on').map(g => audienceOf(g.channel, g.group_ref)));
+    const owed = new Map(listed.media_purges.filter(p => text(p?.channel) && text(p?.group_ref) && text(p?.epoch))
+      .map(p => [audienceOf(p.channel, p.group_ref), p]));
+    const audiences = new Set([...(await media.keptAudiences()), ...owed.keys()]);
+    for (const audience of audiences) {
+      if (on.has(audience) && !owed.has(audience)) continue;
+      let receipt;
+      try { receipt = await media.purgeKept(audience); }
+      catch (error) { log('group_media_purge_failed', { error: short(error) }); continue; }
+      const entry = owed.get(audience);
+      if (!entry || typeof groups?.recordPurge !== 'function') continue;
+      const key = `${audience}\n${entry.epoch}`, before = unrecorded.get(key);
+      const total = before ? Object.fromEntries(Object.entries(receipt).map(([name, n]) => [name, name === 'rows_after' ? n : n + (before[name] ?? 0)]))
+        : receipt;
+      unrecorded.set(key, total);
+      try {
+        const answer = await groups.recordPurge({ channel: entry.channel, groupRef: entry.group_ref, epoch: entry.epoch, receipt: total });
+        unrecorded.delete(key);
+        log('group_media_purged', { channel: entry.channel, group_ref: entry.group_ref, rows: total.rows_before,
+          files: total.files_unlinked, shared: total.files_shared, ...(answer?.refused ? { refused: String(answer.refused) } : {}) });
+      } catch (error) { log('group_media_purge_record_failed', { channel: entry.channel, group_ref: entry.group_ref, error: short(error) }); }
+    }
+  };
+  const noticePass = async listed => {
+    if (!Array.isArray(listed?.groups) || typeof groups?.mediaNotice !== 'function') return;
+    for (const group of listed.groups) {
+      const owedNotice = group?.media_notice;
+      if (!owedNotice || !['on', 'off'].includes(owedNotice.phase) || !text(owedNotice.epoch)) continue;
+      const seen = { channel: group.channel, group_ref: group.group_ref, notice: owedNotice.phase };
+      const ask = { channel: group.channel, groupRef: group.group_ref, epoch: owedNotice.epoch, notice: owedNotice.phase };
+      const key = [group.channel, group.group_ref, owedNotice.epoch, owedNotice.phase].join('\n');
+      // A commit still owed for this group (retried at the start of the pass): nothing else is
+      // sent to it until the backend has answered that one - a line is never sent twice here.
+      if ([...noticeCommits.values()].some(a => a.channel === group.channel && a.groupRef === group.group_ref)) continue;
+      try {
+        // A refusal decidable before sending spends no attempt (director 640 (c)): a channel
+        // that is not there or not connected is told to the backend as channel_down (it notes
+        // why the switch waits), and nothing is sent.
+        const entry = registered.get(group.channel);
+        const down = !entry?.sendGroup || statusOf(group.channel, entry).connected !== true;
+        const check = await groups.mediaNotice({ ...ask, phase: 'check', ...(down ? { channelDown: true } : {}) });
+        if (down || check?.may_post !== true || !text(check.text)) {
+          log('group_media_notice_waiting', { ...seen, reason: String(check?.refused ?? (down ? 'channel_down' : 'refused')) });
+          continue;
+        }
+        const sent = await trySendGroup(group.channel, group.group_ref, check.text);
+        if (sent.sent) {
+          noticeCommits.set(key, ask);
+          if (await commitNotice(key, ask)) log('group_media_notice_sent', seen);
+          else log('group_media_notice_waiting', { ...seen, reason: 'purge_owed' });
+        } else if (sent.refused) {
+          // Refused before anything went out (director 640 (c)): no attempt is spent.
+          log('group_media_notice_waiting', { ...seen, reason: sent.refused });
+        } else {
+          // It may have started (a send_timeout among them): one attempt.
+          await groups.mediaNotice({ ...ask, phase: 'failed', attempts: Number.isInteger(owedNotice.attempts) ? owedNotice.attempts : 0,
+            reason: sent.failed });
+          log('group_media_notice_failed', { ...seen, reason: sent.failed });
+        }
+      } catch (error) { log('group_media_notice_error', { ...seen, error: short(error) }); }
+    }
+  };
+  const expirePass = async () => {
+    if (typeof groups?.expireMedia !== 'function' || clock() - lastExpire < limits.keptExpireMs) return;
+    lastExpire = clock();
+    try { await groups.expireMedia(); } catch (error) { log('group_media_expire_failed', { error: short(error) }); }
+  };
+  // The guard is taken BEFORE groups.list() is read: a pass works only from a list read after
+  // the previous pass ended (and after this pass's owed commits), so a group a pass just turned
+  // on is never purged from an older read. While a pass runs, a poll still sets the whitelist.
+  const mediaPass = async () => {
+    if (mediaPassing) { await refreshRooms(); return; }
+    mediaPassing = true;
+    try {
+      await commitPending();
+      const listed = await refreshRooms();
+      if (listed !== undefined) { await purgeSweep(listed); await noticePass(listed); await expirePass(); }
+    } catch (error) { log('group_media_pass_failed', { error: short(error) }); }
+    finally { mediaPassing = false; }
   };
   const handleGroup = async ({ channel, senderRef, messageRef, text: body, at, conversationRef: groupRef, groupBind, attachments, asked }) => {
     const seen = { channel, group_ref: groupRef, sender_ref: senderRef, length: body.length };
@@ -865,13 +1060,20 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     // no line into the room. A channel that does not say leaves the old behaviour: every group
     // message it hands in is one that called the steward.
     const mentioned = asked !== false;
+    // design/steward-group-media.md section 3 (owner 2026-11-23): an un-mentioned message is
+    // relayed as KEPT - recorded only while the group's switch is on, never as a question. One
+    // without files has nothing to keep and is not relayed at all.
+    if (!mentioned && !groupBind && !attachments?.length) {
+      log('group_message_refused', { ...seen, reason: 'nothing_kept' });
+      return { accepted: false, reason: 'nothing_kept' };
+    }
     let result;
     try {
       await hostReady();
       result = groupBind
         ? await groups.bind({ channel, groupRef, senderRef, messageRef, prefix: groupBind.prefix, code: groupBind.code })
         : await groups.relay({ channel, groupRef, senderRef, messageRef, text: body, ...(text(at) ? { at } : {}),
-          ...(attachments?.length ? { attachments } : {}) });
+          ...(attachments?.length ? { attachments } : {}), ...(mentioned ? {} : { kept: true }) });
     } catch (error) {
       log('group_inbound_failed', { ...seen, error: short(error) });
       return { accepted: false, reason: 'unavailable' };
@@ -892,6 +1094,11 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     if (result?.refused) {
       log('group_message_refused', { ...seen, reason: String(result.refused) });
       if (result.notice && mentioned) await sendGroupLine(channel, groupRef, result.notice);
+      // The relay did not keep it (the switch went off between the two checks, stale, ...):
+      // what storeMedia kept for it is taken back at once (the library withdraws only kept rows).
+      if (!mentioned) for (const item of attachments ?? []) if (text(item?.ref)) {
+        try { await media?.withdraw?.(item.ref); } catch (error) { log('group_media_withdraw_failed', { ...seen, error: short(error) }); }
+      }
       return { accepted: false, reason: String(result.refused) };
     }
     if (result?.duplicate) return { accepted: true, duplicate: true };
@@ -1364,10 +1571,12 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
      *  its session exists). */
     setGroupWake: fn => { groupWake = fn; },
     refreshRooms,
+    /** One media-switch pass on what groups.list() answers now (what each status poll runs). */
+    mediaPass: () => mediaPass(),
     ready() {
       ready();
       isReady = true;
-      void refreshRooms();
+      void mediaPass();
       if (!statusTimer && typeof host.reportStatus === 'function') {
         statusTimer = setInterval(pollStatus, limits.statusMs);
         statusTimer.unref?.();

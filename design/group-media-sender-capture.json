@@ -1,0 +1,329 @@
+{
+  "question": "Why does a WeChat group message relayed by the bridge arrive at the host with sender_ref equal to the ROOM id (27960105726@chatroom) instead of the member who posted it, and which field or call could name that member instead?",
+  "snapshot": {
+    "worktree": "a director scratch worktree, detached at the base commit; the path is not part of this record",
+    "commit": "fad28d4927f54decb9f302712fe3edfcf2d93ca1",
+    "state": "clean before this report; the only file written is design/group-media-sender-capture.json",
+    "method": "the worktree's own bytes; no network, no image build, no container started, no WeChat login; one local npm-cache blob of the pinned wechaty 1.20.2 was read because the bridge calls a wechaty method and the bridge has no node_modules in the tree",
+    "premise_from_dispatch": "the project's State database (state_group_messages) holds sender_ref = 27960105726@chatroom for a member's group media and questions (measured by the director, 2026-11-23); only the owner's own messages resolve to a wxid"
+  },
+  "wire_fields": [
+    {
+      "field": "AddMessage.from",
+      "where": "integrations/wechat-bridge/neo-fork/upstream/native/src/lib.rs:657 (the decoder's struct, as the test helper builds it at :656)",
+      "can_name_group_member": "no",
+      "evidence": "For a group message it is the room: lib.rs:472 tests `message.from.ends_with(\"@chatroom\")` and lib.rs:478 puts it in `room`; the fork's typed path does the same at 0001-incoming-message-types.patch:708-711.",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.to",
+      "where": "lib.rs:658",
+      "can_name_group_member": "no",
+      "evidence": "The receiving account: lib.rs:486 puts it in `listener` for a 1:1 message (patch:713-714 for the typed path).",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.peer",
+      "where": "lib.rs:659",
+      "can_name_group_member": "no",
+      "evidence": "The conversation, not a person: the helper's expression `if to == \"fixture-self\" { from } else { to }` yields the room for a group message (from = room, to = self). The fork never reads `peer`.",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.sender_id",
+      "where": "lib.rs:660",
+      "can_name_group_member": "only-if-populated",
+      "evidence": "The one wire field the fork consumes as a sender: 0001-incoming-message-types.patch:710 `let talker = message.sender_id.unwrap_or_else(|| room.clone());`. The test helper builds it as `(!from.ends_with(\"@chatroom\")).then(|| from.into())` (lib.rs:660), i.e. empty for a group message and the peer for a 1:1 one. Which wire field of the external crate `wechat-protocol` 2.2.0 fills it is NOT in this tree (git ls-files | grep -ci wechat-protocol = 0), so whether the real decoder ever fills it for a group message is unmeasured here; the fork's own doc (patch:43-44) says it does not.",
+      "status": "read (presence and use); undetermined (what fills it)"
+    },
+    {
+      "field": "AddMessage.outgoing",
+      "where": "lib.rs:661",
+      "can_name_group_member": "no",
+      "evidence": "Drops the account's own messages: lib.rs:467 `if message.message_type != 1 || message.outgoing { return None }`; patch:704-706 for non-text.",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.server_message_id",
+      "where": "lib.rs:662",
+      "can_name_group_member": "no",
+      "evidence": "The message id the addon reports as `id` (lib.rs:470, patch:707); no account-side lookup by it exists in the addon (lib.rs:65-75 + the patch's added operations are send/media/codec only).",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.numbered1, numbered6, numbered7, opaque11, numbered13, server_sequence",
+      "where": "lib.rs:663, :667, :668, :672, :673, :674",
+      "can_name_group_member": "unknown",
+      "evidence": "The decoder named them by position, not by meaning: `numberedN`/`opaque11` are fields the crate could not name. Nothing in this tree reads them, and nothing says whether any holds an id. Marked unknown, not 'no': the crate's decoder is not in the tree.",
+      "status": "unknown"
+    },
+    {
+      "field": "AddMessage.message_type",
+      "where": "lib.rs:664",
+      "can_name_group_member": "no",
+      "evidence": "WeChat's type (1 text, 3 image, 34 voice, 49 file/quote, ...) - the fork routes on it at patch:701 and passes it through as `messageType` (patch:54, :1512).",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.content",
+      "where": "lib.rs:665",
+      "can_name_group_member": "only-if-prefixed",
+      "evidence": "The raw payload bytes; for text the member is inside it as the leading `sender:\\n` token (lib.rs:494-504), and for a non-text message it is WeChat's XML. Whether a group non-text content also starts with that token is not measured in this tree - but the bridge already tolerates one: integrations/wechat-bridge/bridge.mjs:342-347 slices `text.slice(text.indexOf('<'))` before parsing, which is a no-op only if the content starts with '<'.",
+      "status": "read (the field travels); unmeasured (whether a group media content carries the prefix)"
+    },
+    {
+      "field": "AddMessage.content_text",
+      "where": "lib.rs:666",
+      "can_name_group_member": "unknown",
+      "evidence": "A text view of the content the decoder offers; the fork's typed path ignores it (patch:700-726) and its text path reads `content_text` (lib.rs:470). Whether the decoder strips a member prefix into it for media is not in the tree.",
+      "status": "unknown"
+    },
+    {
+      "field": "AddMessage.inline_data",
+      "where": "lib.rs:669",
+      "can_name_group_member": "no",
+      "evidence": "A thumbnail's bytes (patch:57-59, :57 doc); carried to wechaty as `inlineData` (patch:1514) and never parsed for identity.",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.created_at",
+      "where": "lib.rs:670",
+      "can_name_group_member": "no",
+      "evidence": "The time the message is dated with: lib.rs:471, patch:60.",
+      "status": "read"
+    },
+    {
+      "field": "AddMessage.msgsource",
+      "where": "lib.rs:671",
+      "can_name_group_member": "unknown",
+      "evidence": "The only other structured per-message field the decoder keeps (WeChat's MsgSource), typed by the crate and equal to None in the helper. The fork never reads it: `grep -rn msgsource --exclude-dir=.git .` returns exactly one line, `.../native/src/lib.rs:671:            msgsource: None,`. Nothing in this tree says whether it can carry a member; nothing says it cannot.",
+      "status": "unknown (never read by anything in this tree)"
+    },
+    {
+      "field": "AddMessage.raw",
+      "where": "lib.rs:675",
+      "can_name_group_member": "unknown",
+      "evidence": "Bytes the decoder kept but did not parse (empty in the helper). A field the crate skipped would sit here. Not read by anything in the tree.",
+      "status": "unknown"
+    },
+    {
+      "field": "puppet payload id",
+      "where": "integrations/wechat-bridge/neo-fork/upstream/src/puppet-neo.ts:237-239 and neo-fork/0001-incoming-message-types.patch:1506-1508",
+      "can_name_group_member": "no",
+      "evidence": "`{ id: item.id, ... }` - the server message id.",
+      "status": "read"
+    },
+    {
+      "field": "puppet payload talkerId",
+      "where": "upstream/src/puppet-neo.ts:239 and patch:1508 `talkerId: item.talker,`",
+      "can_name_group_member": "depends entirely on item.talker",
+      "evidence": "item.talker is built by the addon: the room when the wire's sender_id is empty (patch:710). This is the value the bridge reads as the sender (bridge.mjs:864). For a group non-text message it is the room id.",
+      "status": "read"
+    },
+    {
+      "field": "puppet payload roomId",
+      "where": "upstream/src/puppet-neo.ts:240-242 and patch:1516-1518 `putRecent(this.messages, item.id, { ...text, roomId: item.room })`",
+      "can_name_group_member": "no",
+      "evidence": "The group itself; the bridge reads it as the conversation (bridge.mjs:339).",
+      "status": "read"
+    },
+    {
+      "field": "puppet payload listenerId",
+      "where": "upstream/src/puppet-neo.ts:245 and patch (the `else if (item.listener)` branch)",
+      "can_name_group_member": "no",
+      "evidence": "Set only for a 1:1 message; absent for every group message.",
+      "status": "read"
+    },
+    {
+      "field": "puppet payload text / messageType / content / inlineData",
+      "where": "patch:1506-1515",
+      "can_name_group_member": "no (text is undefined for non-text; content as above)",
+      "evidence": "`text: item.text` is undefined for a typed message (patch:54-56: only `content`/`inlineData` carry the payload), so a group media message reaches the bridge with its raw content and no text.",
+      "status": "read"
+    },
+    {
+      "field": "wechaty Message.talker() (the last hop into the bridge)",
+      "where": "wechaty 1.20.2 (the pin at integrations/wechat-bridge/package.json:13), package/dist/esm/src/user-modules/message.js:183-209, and .../contact.js:186-188",
+      "can_name_group_member": "no - it is exactly payload.talkerId",
+      "evidence": "`talker() { ... let talkerId = this.payload.talkerId; ... talker = this.wechaty.Contact.load(talkerId); ... }` and `constructor(id) { super(); this.id = id; ... }`, so `message.talker()?.id === payload.talkerId`. Message.self() is `talker.id === currentUserId` (message.js:515-519), and Message.room() reads `payload.roomId` (message.js:289-299).",
+      "status": "measured on the pinned version's own source"
+    },
+    {
+      "field": "bridge event (the host's whole view of a group message)",
+      "where": "integrations/wechat-bridge/bridge.mjs:866, :875-881, :890, :895",
+      "can_name_group_member": "no",
+      "evidence": "`{ room_ref, sender_ref, message_ref, at }` plus text/asked/attachments. sender_ref is the only sender field the host ever gets, and it is bridge.mjs:864's `message.talker()?.id`.",
+      "status": "read"
+    }
+  ],
+  "what_the_wire_carries": [
+    "1. WeChat's sync page is decoded by the addon into `wire::AddMessage` records; the fork's `incoming_messages` keeps sync command id 5 and decodes each payload (0001-incoming-message-types.patch:688-696; upstream/native/src/lib.rs:454-461).",
+    "2. The decoder's record holds from, to, peer, sender_id, outgoing, server_message_id, message_type, content, content_text, inline_data, created_at, msgsource and a few unnamed fields plus raw bytes (upstream/native/src/lib.rs:656-675) - the crate that fills them (`wechat-protocol` 2.2.0, `use wechat_protocol::` at lib.rs:11) is not vendored anywhere in this tree, so how `sender_id` is derived is not readable here.",
+    "3. A text group message names the member inside the content, not in a field: lib.rs:472-481 takes `message.from.ends_with(\"@chatroom\")` as the room and calls `group_sender` on the text, which splits at the first `:\\n` and rejects a sender that is empty, longer than 512 bytes, carries a control character or ends with `@chatroom` (lib.rs:494-504). That is why a text message - the owner's or any member's - can resolve to a wxid.",
+    "4. A non-text group message goes through `incoming_message`, which sets `let talker = message.sender_id.unwrap_or_else(|| room.clone());` and `room = message.from` (patch:700-712). The addon's own doc for the field says why: \"In a group the wire names the group: the member who posted a non-text message is not in the payload\" (patch:43-44), and the TypeScript interface repeats it: \"In a group: the member for text, the group otherwise\" (patch:990).",
+    "5. The addon's test for exactly this case asserts the room as the talker: `assert_eq!(json[\"talker\"], \"fixture-room@chatroom\")` (patch:833-838), and passes only when the test itself injects a member id (`named.sender_id = Some(\"fixture-member\".into())`, patch:842-844) - a state no in-tree measurement shows the real wire producing for a group message.",
+    "6. `TypedMessage.talker` becomes the puppet payload's `talkerId` verbatim: `talkerId: item.talker` (upstream/src/puppet-neo.ts:239, patch:1508), while the group rides separately as `roomId: item.room` (puppet-neo.ts:242, patch:1518).",
+    "7. wechaty's `Message.talker()` returns `Contact.load(payload.talkerId)` (wechaty 1.20.2 message.js:183-209) and a Contact's `id` is the id it was loaded with (contact.js:186-188), so `message.talker()?.id` is the payload's talkerId byte for byte.",
+    "8. The bridge reads exactly that as the sender: `const senderRef = message.talker()?.id;` (bridge.mjs:864) and puts it in the event as `sender_ref` (bridge.mjs:866) for a text call, a media attachment (bridge.mjs:875-881) and a group-bind alike (bridge.mjs:895). The 1:1 relay uses the same expression (bridge.mjs:911) and gets a wxid because a 1:1 record's talker is `message.from`, the peer (patch:713-714).",
+    "9. The only sender check on the group path is `if (message.self()) return false` (bridge.mjs:863), and `self()` is `talker.id === currentUserId` (wechaty message.js:515-519) - with the room as the talker it is false even for a message the account itself posted from the phone.",
+    "10. The channel plugin passes the event's sender on unchanged: `senderRef: event.sender_ref` for both the stored attachments (integrations/dsh-channel-wechat/index.mjs:144-146) and the message itself (index.mjs:191), and the host records it as `sender_ref` on the row (core/state_groups.py:913-916).",
+    "11. The host then treats that string as the person: `role = \"owner\" if account[0] == sender_ref else \"member\"` and `label = self._member(...)` (core/state_groups.py:928-931), where `_member` makes a state_group_members row keyed by (channel, group_ref, sender_ref) and hands out 成员甲/乙 by first appearance (state_groups.py:399-412); the row column is `sender_ref TEXT NOT NULL CHECK(sender_ref<>'')` (state_groups.py:89-91).",
+    "12. So the collapse is total for a group's non-text messages: every member's image, voice and file is one member row, one 成员甲 label (which is what design/steward-group-media.md:44 R3 asks to avoid: 「一天， 标出谁发的，20件」), and one per-member quota bucket (state_groups.py:15: 20 per member, keyed by sender_ref).",
+    "13. THE STEP THAT LOSES THE MEMBER is the addon, not the bridge and not the host: 0001-incoming-message-types.patch:710 `let talker = message.sender_id.unwrap_or_else(|| room.clone());` - the fork decides a group non-text message's talker is the room whenever the wire's `sender_id` is empty, and everything downstream (puppet-neo.ts:239, wechaty message.js:183-209, bridge.mjs:864, index.mjs:191, state_groups.py:913-916) copies that one value faithfully.",
+    "14. It is INHERITED, not a fork regression: before the patch, upstream dropped every non-text message instead of relaying it - `incoming_text` returns None unless `message.message_type == 1` (upstream/native/src/lib.rs:466-469) and the upstream test asserts it for an image (`incoming_text(image), None`, lib.rs:741-742). Nothing that worked was broken; the fork added the delivery and, in the same hunk, recorded the wire's failure to name the member (patch:43-44). The asymmetry is by message TYPE, not by who wrote it: text names its poster (lib.rs:472-481), non-text cannot.",
+    "15. A corollary for the observed rows: the stored room id proves the addon's fallback was taken (talker is `sender_id` or the room, patch:710, so a room talker means sender_id was empty or itself the room). It does NOT prove which of the other wire fields (msgsource, raw, content prefix) were empty - none of them is read by anything in this tree."
+  ],
+  "candidate_sources": [
+    {
+      "source": "A. The same wire field the fork already reads: AddMessage.sender_id",
+      "evidence": "patch:710 already prefers it; the fork's test drives the member arm only by injecting it (patch:842-844). If the real decoder filled it for a group message, no code change would be needed anywhere - the value would already flow to sender_ref.",
+      "risk": "None to try (it needs no code change), but the measured room sender_ref is evidence it was empty for that message; the crate's decoder is not in the tree, so 'never filled' cannot be read, only inferred.",
+      "status": "unmeasured (the inference from the stored row is the closest thing to a measurement)"
+    },
+    {
+      "source": "B. A member prefix inside AddMessage.content, i.e. \"<member>:\\n<msg>...\" before the XML, for a group non-text message",
+      "evidence": "Text group messages carry exactly this prefix (lib.rs:494-504); the bridge already slices at the first '<' before parsing XML (bridge.mjs:342-347), which is the shape a prefix needs; the content already reaches the bridge today as payload.content (patch:56, :1513) and mediaOf reads it (bridge.mjs:382). If it is there, a bridge-only fix could strip it into sender_ref with no fork change and no new wire field.",
+      "risk": "If the prefix is not there, the fix is a no-op and the probe's cost is sunk. If it is there but differs in shape (a bare wxid without '@chatroom', an alias, a display name), it needs a normalisation rule; a display name would be worse than the room (it can be changed by any member).",
+      "status": "unmeasured - and the cheapest to settle"
+    },
+    {
+      "source": "C. AddMessage.msgsource (WeChat's MsgSource XML for that message)",
+      "evidence": "The field exists in the decoder's struct (lib.rs:671) and is never read by anything in this tree (one grep hit, only that line). It is the one other structured per-message payload the decoder keeps.",
+      "risk": "The crate's type for it is not in the tree, so what it can hold is unknown; exposing it means a fork change and an image rebuild, and if it holds only silence/signature nodes the probe costs a build for nothing. Its values are per-message protocol data, not owner content, but could contain ids.",
+      "status": "unmeasured"
+    },
+    {
+      "source": "D. AddMessage.raw - bytes the decoder kept but did not parse",
+      "evidence": "lib.rs:675 `raw: vec![]` in the decoder's record, unread by the fork: a wire field the crate skipped would survive here.",
+      "risk": "Most expensive probe (fork + Rust rebuild), and the field may be unrelated bytes (a re-encoded body) rather than an unparsed protobuf remainder. Even if a token is found, proving which member it names needs a controlled experiment (two different members, plus one repeat).",
+      "status": "unmeasured"
+    },
+    {
+      "source": "E. A second sync call or another scene for the same message (scene 6 initial, 7 heartbeat, 1 poll)",
+      "evidence": "All three scenes go through the same decode and the same `incoming_messages` (lib.rs:454-461; puppet-neo.ts:217, :224, :226), so a scene cannot add a field the decode already dropped. Nothing in the tree suggests a richer per-message page.",
+      "risk": "Low value: even a second call would return the same AddMessage record unless the crate is changed.",
+      "status": "read (no path in the tree); would need a fork change to even try"
+    },
+    {
+      "source": "F. The client's own room roster: wechaty Room.memberAll() / puppet roomMemberList(room) / roomPayload(room).memberIdList",
+      "evidence": "Measured empty by construction: the fork's `roomRawPayload` returns `{ id, topic: '', memberIdList: [], adminIdList: [] }` (patch:1355-1359) and `roomMemberList` returns `[]` (patch:1374-1376), with the fork's own reason: \"Neo's sync stream names the group and the member who spoke, never who else is in it\" (patch:1369-1373); the tests assert `[]` (patch:1704-1715).",
+      "risk": "Not just unavailable - useless for this question even if it existed: a roster says who is in the room, never which member posted one message.",
+      "status": "measured (empty)"
+    },
+    {
+      "source": "G. A bridge-side probe of WeChat itself: ask the account for the room's members (the addon already does read-only account requests: `request.lookup_contacts` at lib.rs:417)",
+      "evidence": "lib.rs:413-430 shows the account can be asked about contacts by username, so the transport exists; the operation enum (lib.rs:65-75) has no room-member request, and the patch adds only send/media/codec operations.",
+      "risk": "A new protocol operation with unknown support (a build + a live login to learn whether WeChat answers), and like F it can only produce a roster, not the poster of a given message. Attribution would then be a guess.",
+      "status": "unmeasured, and unsound as an attribution source"
+    },
+    {
+      "source": "H. Attribute the medium to whoever later asks about it (\"@管家 这个图上是什么\")",
+      "evidence": "design/steward-group-media.md:18-22 names that exact sequence as the use case, so the asking message and the kept medium are usually adjacent.",
+      "risk": "It labels the asker as the poster: wrong whenever one member posts the image and another asks about it, and the host would then state 谁发的 falsely (R3). No measurement would ever make this sound; it is a guess dressed as data.",
+      "status": "unmeasured and unsound"
+    },
+    {
+      "source": "I. The owner names the sender himself (the existing member-naming API)",
+      "evidence": "PUT /groups/{channel}/{group_ref}/members/{sender_ref} (api/steward_routers.py:405-408) and state_groups.name_group_member (core/state_groups.py:637-654) already rename a member row.",
+      "risk": "With the room as sender_ref there is exactly one row to name, so naming it names every member at once - it cannot express per-member labels until sender_ref is per member. It also needs the owner to type a name per message, which is not attribution.",
+      "status": "measured (the API exists; it cannot fix this alone)"
+    }
+  ],
+  "capture_plan": [
+    {
+      "for": "B (content prefix) + A (is sender_id ever non-empty), one probe, bridge-only",
+      "layer": "integrations/wechat-bridge/bridge.mjs, in relayGroup immediately before `mediaOf` (bridge.mjs:862-868), only when `roomOf(message)` is set and `message.type() !== types.Message.Text`.",
+      "log_one_line": "print, on one line: payload.messageType; `talkerIsRoom` = (payload.talkerId === payload.roomId); `WECHAT_BRIDGE_SENDER_PROBE` tag; contentLen = Buffer.from(payload.content,'base64').length; prefixLen = the index of the first '<' in that text (0 = none); prefixShape = a boolean that the prefix matches /^[^\\s:<]{1,64}:\\n$/u; prefixEqualsRoom = boolean; and prefixHash = sha256(prefix).slice(0,16).",
+      "what_to_post": "one image in the bound group WITHOUT the @ prefix (kept-media arm), then, if a second data point is wanted, one voice note from the SAME member: the same prefixHash twice proves the field is per-message-stable; then ask a second member to post one image, whose prefixHash must differ. Who posted what is known out of band by the director, never from the wire.",
+      "must_not_log": "the message text and any caption; the XML content (it carries CDN urls and the AES key); the media bytes; the room id and any member id value; the owner's or members' display names; the base64 content itself. Bools, lengths and a truncated hash only. After the probe, the line is reverted in the same branch (or, if kept, it states no ids and is pinned by a test).",
+      "settles": "prefixLen > 0 with a wxid-shaped prefix and a stable prefixHash per member = B is real and a bridge-only fix attributes group media; prefixLen == 0 everywhere = B is dead and C/D are the only wire-side candidates left; talkerIsRoom true confirms the addon fallback was taken on this very message."
+    },
+    {
+      "for": "C (msgsource) and D (raw), only if B is dead - fork change",
+      "layer": "integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch, TypedMessage (patch:41-61) plus the `incoming_message` body (patch:700-726): add a debug object carrying, for msgsource, only its ELEMENT NAMES and their counts (no values), and for raw only its byte length and the count of ASCII runs matching /^(wxid_[A-Za-z0-9_-]{1,64}|[A-Za-z0-9_-]{1,64}@chatroom)$/ - never the runs themselves, plus sha256 of each match truncated to 16 hex.",
+      "what_to_post": "the same three posts as probe B (member A, member B, member A again): equal hashes for one member and different hashes across members is what proves the field carries the member without ever printing an id.",
+      "must_not_log": "element text values, any id or id-shaped token in full, the XML body, the media bytes, message text. Element names, counts and truncated hashes only.",
+      "settles": "a per-member-stable hashed token in msgsource or raw names the member; all-empty means the wire carries no member for non-text at all, and the only honest options left are room-level attribution (today's behaviour) or a room-roster-based guess (rejected above as unsound)."
+    },
+    {
+      "for": "the premise (which rows actually carry the room), zero cost, no WeChat",
+      "layer": "the state database, read-only: `SELECT direction, kind, sender_role, sender_ref FROM state_group_messages WHERE group_ref = '27960105726@chatroom' ORDER BY at DESC LIMIT 50;` on a copy, never on the live file while the backend writes.",
+      "what_to_post": "nothing.",
+      "must_not_log": "the message bodies / original / attachments_json columns; only kind, direction, sender_role and whether sender_ref equals the room. Run it on a copy so no writer sees a lock.",
+      "settles": "whether the room appears only on non-text rows (as the code predicts) or also on text rows (which the code would not produce, since text takes its talker from the content prefix) - the second would mean the premise 'only the owner's messages resolve to a wxid' needs re-reading as 'only text messages resolve to a wxid'."
+    }
+  ],
+  "cost": {
+    "probe_B_bridge_only": {
+      "image_rebuild": "yes, required: bridge.mjs is baked into the image (`COPY --chmod=0444 bridge.mjs main.mjs qr-svg.mjs ./`, integrations/wechat-bridge/Dockerfile:92) and run.sh mounts no source (run.sh:94-103). The native stage still runs first (Dockerfile:18-70: `git fetch` of puppet-neo at :30, `cargo build --release --locked` + `cargo test` at :58-59), then npm ci and the bridge's own suite (Dockerfile:80, :102).",
+      "wall_clock": "8-25 min for the build with warm Docker layer cache and network (git fetch github.com + npm registry + crates.io); the Rust release build and the two npm ci runs dominate; a cold cache is longer. Restart 5-15 s, resume of the saved login a few seconds.",
+      "moving_parts": [
+        "docker build of integrations/wechat-bridge (network required; the aitelier/bridge images are otherwise unaffected)",
+        "container recreate via run.sh (docker run --detach --name aitelier-wechat-bridge, run.sh:94-103); a short bridge outage, during which the channel plugin holds its cursor and retries",
+        "the saved login must still be accepted: main.mjs resumes it at start (main.mjs:8-12) from the volumes run.sh mounts (run.sh:63-86, state/data + saved-login-key), and only if the fork still holds a usable login - otherwise a QR scan with the owner's phone is needed",
+        "the room must still be bound in the bridge's whitelist (PUT /rooms by the host, bridge.mjs:541-543), else a non-text group message is dropped before the probe (bridge.mjs:867-868)",
+        "the owner (or one member) must post one image in the group: an un-mentioned image is relayed as a group_message with asked=false whatever the group's media switch says (bridge.mjs:867-884 vs the switch, which the HOST applies at state_groups.py:904-908), so the probe works even with the switch off"
+      ],
+      "failure_cost": "one image build plus a container restart and one group post are spent; if the resume is refused, the owner must scan a QR (his phone at hand) and the saved login is re-established. Nothing is lost: the previous image stays tagged and can be re-run by rebuilding from this commit; the probe line is reverted in one commit if it is not kept. Most importantly a negative answer is still an answer: it kills candidate B, the cheapest of the six."
+    },
+    "probe_C_D_fork": {
+      "image_rebuild": "yes, the same build, plus a real fork change: the patch is applied to the fetched puppet-neo and the Rust addon is rebuilt and must pass `cargo test` (Dockerfile:58-59), then the addon and the rebuilt dist/ are copied into the image (Dockerfile:83-85).",
+      "wall_clock": "the same 8-25 min plus the extra Rust work and one more test cycle; two rebuilds if the first probe line is wrong. The three controlled posts need two members to cooperate.",
+      "moving_parts": "as probe B, plus: the patch's sha256 is pinned in neo-fork/pin.json, so BOTH the patch and the pin have to be updated in one commit or the build refuses at Dockerfile:38-56; the Rust toolchain is pinned (rust:1.93.1-bookworm) and the build needs network.",
+      "failure_cost": "if msgsource and raw are both empty, the only thing learned is a measured negative, and the fork change is reverted; the cost is the build time and the two members' posts. This is the expensive last resort, which is why it is gated on probe B's negative."
+    },
+    "probe_DB": "minutes, no build, no container, no WeChat: copy the sqlite file, run the one SELECT above."
+  },
+  "verdict": "No - a group media message's sender cannot be attributed from this repository's bytes: the fork itself replaces the missing member with the room (0001-incoming-message-types.patch:710) and everything downstream copies that value, so the only thing that can settle it is one live capture - one image posted by one member in the bound group through a bridge whose probe prints, for that typed message, only the pre-'<' content prefix's length/shape/hash and whether talkerId equals roomId (candidate B); if that prefix is absent, the same run's fork-side probe of msgsource element names and raw-token hashes is what settles it.",
+  "premise_check": [
+    "The dispatch says 'only the owner's own messages resolve to a wxid'. The code draws the line by message TYPE, not by author: a group text message names its poster from the content prefix (upstream/native/src/lib.rs:472-481, :494-504) whoever wrote it, and a group non-text message cannot name anyone (patch:43-44, :710). So a member's TEXT @-message should already arrive with the member's wxid, and only non-text (and any text posted without the prefix, which is not relayed at all, bridge.mjs:887-891) collapses to the room.",
+    "If the measured rows show the room on question rows too, those questions were most likely non-text (voice) or the row is a kept/addressed media row - the zero-cost DB probe in capture_plan decides which, without touching WeChat.",
+    "Nothing in this report claims the owner's messages travel a different path: the 1:1 relay (bridge.mjs:911) resolves a wxid because a 1:1 record's talker is `message.from`, the peer (patch:713-714), and it is a different path (bridge.mjs:905-931) from the group relay (bridge.mjs:862-897)."
+  ],
+  "measured_commands": [
+    {
+      "command": "grep -rn \"msgsource\" --exclude-dir=.git .",
+      "output": "./integrations/wechat-bridge/neo-fork/upstream/native/src/lib.rs:671:            msgsource: None,",
+      "means": "the one field besides sender_id that could hold a per-message identity is never read anywhere in the tree"
+    },
+    {
+      "command": "git ls-files | grep -ci wechat-protocol",
+      "output": "0",
+      "means": "the crate that decodes the wire (wechat-protocol 2.2.0) is not in the tree, so 'which wire field fills sender_id' is not readable here"
+    },
+    {
+      "command": "grep -rl \"sender_id\" --exclude-dir=.git .",
+      "output": "./integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch\n./integrations/wechat-bridge/neo-fork/upstream/native/src/lib.rs",
+      "means": "the sender field exists only in the fork patch and in the decoder's struct as the test helper builds it; no other module in the repository mentions it"
+    },
+    {
+      "command": "tar -xzOf <the npm cache root>/content-v2/sha512/6c/86/7c9b...e3795 package/dist/esm/src/user-modules/message.js | sed -n 183,209p",
+      "output": "    talker() {\n        if (!this.payload) {\n            throw new Error('no payload');\n        }\n        let talkerId = this.payload.talkerId;\n        ...\n        let talker;\n        if (this.wechaty.isLoggedIn && talkerId === this.wechaty.puppet.currentUserId) {\n            talker = this.wechaty.ContactSelf.load(talkerId);\n        }\n        else {\n            talker = this.wechaty.Contact.load(talkerId);\n        }\n        return talker;",
+      "means": "wechaty's talker() is exactly payload.talkerId (npm cache blob for wechaty-1.20.2.tgz, the version package.json:13 pins; the bridge has no node_modules in this worktree, so the pinned tarball's own dist was read instead)"
+    },
+    {
+      "command": "tar -xzOf <same blob> package/dist/esm/src/user-modules/contact.js | sed -n 186,189p",
+      "output": "    constructor(id) {\n        super();\n        this.id = id;",
+      "means": "Contact.id is the id it was loaded with, so message.talker()?.id === payload.talkerId"
+    }
+  ],
+  "scope_and_limits": [
+    "Read-only: no docker build, no container, no WeChat login, no network. The only file written is this report.",
+    "Not measured here: which wire field fills AddMessage.sender_id (the decoder is in an external crate), what msgsource/raw can hold, and whether a group non-text content carries a member prefix. All three are named as unmeasured with the probe that would settle them.",
+    "Not verified here: the state_group_messages rows themselves - the dispatch's measurement is taken as given; the DB probe in capture_plan is the free way to check which rows carry the room.",
+    "The fork's prose is internally inconsistent and should not be trusted as a measurement: patch:43-44 says a group non-text message's member is not in the wire, while patch:990 and patch:1369-1373 say the sync stream names 'the member who spoke' - true for text, false for non-text, which is exactly the distinction this report draws."
+  ],
+  "references": [
+    "integrations/wechat-bridge/bridge.mjs:339, :342-347, :371-395, :486-491, :862-897, :899-931",
+    "integrations/wechat-bridge/neo-fork/0001-incoming-message-types.patch:41-61, :688-726, :829-844, :990, :1355-1377, :1501-1518, :1704-1718",
+    "integrations/wechat-bridge/neo-fork/upstream/native/src/lib.rs:11, :42-56, :65-75, :413-430, :454-492, :494-504, :655-675, :690-742",
+    "integrations/wechat-bridge/neo-fork/upstream/src/puppet-neo.ts:115-123, :230-253",
+    "integrations/wechat-bridge/package.json:13-14; integrations/wechat-bridge/neo-fork/pin.json (puppet-neo 0.1.1, commit ddfa5ecd53ba1303d7e424acb47f86989715af89)",
+    "integrations/wechat-bridge/Dockerfile:18-70, :80-102; integrations/wechat-bridge/main.mjs:8-12; integrations/wechat-bridge/run.sh:63-86, :94-103",
+    "integrations/dsh-channel-wechat/index.mjs:144-146, :186-212",
+    "integrations/dsh-driver/steward-host.mjs:868-874",
+    "core/state_groups.py:15, :74-91, :399-421, :913-916, :928-931, :637-654; api/steward_routers.py:405-408",
+    "design/steward-group-media.md:14-20 (the ruling and its use case), :30-44 (R3 「标出谁发的」)",
+    "wechaty 1.20.2 dist/esm/src/user-modules/message.js:183-209, :289-299, :515-519 and contact.js:186-188, read from the local npm cache blob 6c867c9b694ec9ae122a7c55ba76cc19e984f09c997675e19cb9df5ed040655f7dede7fabaa3f8a49c6ec22267574a9b5c6c8813e1770766fcca340e661e3795 (tarball wechaty-1.20.2.tgz)"
+  ]
+}

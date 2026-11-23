@@ -19,7 +19,7 @@ import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
 import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
-import { attachmentLine, withAttachmentLines } from './lib/media.mjs';
+import { attachmentLine } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
-import { createOwnerChannels, GROUP_LIMITS } from './lib/channels.mjs';
+import { createOwnerChannels, GROUP_LIMITS, GROUP_WAKE_IMAGE_LIMIT, trimRecent } from './lib/channels.mjs';
 import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
@@ -79,6 +79,65 @@ export function ownerChannelsFor(ctx, host) {
     ...(host.capabilities.includes('media') && host.media ? { media: host.media } : {}),
     ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
     log: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) });
+}
+
+/** Step 23 (7.7.4) group @-turn wake, with the group's own kept media (2026-11-23 defect
+ *  iss-0d20ef5dd9a44cd0): the kept images are stored and named by ref, but a group turn's
+ *  steering has no image block and the steward owns no image-capable connection, so it cannot
+ *  look at them (`media_call` truthfully answers 拿不到). A host with a media library may give
+ *  `wakeMedia()` - the wakeMedia shape from 24.2b: `line(attachment, {attach})` and `images`
+ *  (ImageAttachmentRefs). The plugin uses it ONLY for refs this wake read from its own
+ *  `groups.recent({channel, groupRef})` and for the message's own attachments; a host without
+ *  the hook keeps today's one text block and `attachmentLine`'s ref-only lines. Exported so a
+ *  test reaches the same handler boot installs through a channel's real `setGroupWake`. */
+export function registerGroupWake({ ctx, channels, host, groupTurns, agentExists, getAgent, createUserMessage }) {
+  if (!groupTurns || !channels || !host.groups) return;
+  channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label, attachments }) => {
+    await agentExists;
+    const agent = getAgent();
+    const listed = await host.groups.list().catch(error => { ctx.logger.warn('group wake: groups not read: ' + String(error?.message ?? error).slice(0, 200)); return {}; });
+    const group = (listed?.groups ?? []).find(g => g.channel === channel && g.group_ref === groupRef);
+    // The group's own name (step 23.1, 7.7.4) or no wake at all (director 602 defect 3, fail closed):
+    // groupWakeName throws, the channel logs group_wake_failed and the question stays unanswered.
+    let label;
+    try { label = groupWakeName(group); }
+    catch (error) { ctx.logger.warn('group wake refused ' + JSON.stringify({ channel, group_ref: groupRef, message_id })); throw error; }
+    // The answered exchanges are cut to recentChars, oldest first; the group's kept media (up to
+    // twenty of the last day, each with its sender) are never pushed out by them
+    // (design/steward-group-media.md section 7).
+    const recent = trimRecent((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? []);
+    const media = typeof host.wakeMedia === 'function' ? await host.wakeMedia() : undefined;
+    // Only the KEPT entries of this wake's own recent may spend the image budget, newest first.
+    // An owner's or another group's ref is never in this list: recent was read with this wake's
+    // (channel, groupRef), and channels.mjs already checked the message's own attachments against
+    // that same room. The rest keep their ref-only line with the media_call hint.
+    const attachable = new Set();
+    let budget = GROUP_WAKE_IMAGE_LIMIT;
+    if (media) for (let i = recent.length - 1; i >= 0 && budget > 0; i--) {
+      const entry = recent[i];
+      if (entry?.kept !== true || !Array.isArray(entry.attachments)) continue;
+      for (const attachment of entry.attachments) {
+        if (attachment?.kind !== 'image' || !attachment.ref) continue;
+        attachable.add(attachment);
+        if (--budget === 0) break;
+      }
+    }
+    const line = (attachment, options) => media ? media.line(attachment, options) : attachmentLine(attachment);
+    const shown = (list, own = false) => Promise.all(list.map(attachment => line(attachment,
+      { attach: own || attachable.has(attachment) })));
+    const shownRecent = await Promise.all(recent.map(async entry => Array.isArray(entry?.attachments)
+      ? { ...entry, attachments: await shown(entry.attachments) } : entry));
+    const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
+      ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: await shown(attachments, true) } : {}) }], recent: shownRecent } };
+    // Read the images only now: `line` fills the host's array while the lines above render,
+    // and a host whose `images` getter answers a fresh copy must still send what it filled.
+    const images = media?.images ?? [];
+    ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) },
+      ...images.map(attachment => ({ type: 'image', attachment }))],
+      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: label, question_ids: [message_id],
+        sender_refs: [senderRef] } })));
+    await ctx.sessionPersistence.flush();
+  });
 }
 
 export async function boot(ctx, { host = ctx.directorHost, channels = ownerChannelsFor(ctx, host) } = {}) {
@@ -418,25 +477,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // request, as they always did), then the worker-facing plan tools.
   await op('install')(api);
   // Step 23: an accepted group question is steered into the steward tagged with its group (the
-  // tag, never the text, makes the turn a group turn), with that group's recent exchanges.
-  if (groupTurns && channels && host.groups) channels.setGroupWake(async ({ channel, groupRef, senderRef, text, at, message_id, sender_role, sender_label, attachments }) => {
-    await agentExists;
-    const listed = await host.groups.list().catch(error => { ctx.logger.warn('group wake: groups not read: ' + String(error?.message ?? error).slice(0, 200)); return {}; });
-    const group = (listed?.groups ?? []).find(g => g.channel === channel && g.group_ref === groupRef);
-    // The group's own name (step 23.1, 7.7.4) or no wake at all (director 602 defect 3, fail closed):
-    // groupWakeName throws, the channel logs group_wake_failed and the question stays unanswered.
-    let label;
-    try { label = groupWakeName(group); }
-    catch (error) { ctx.logger.warn('group wake refused ' + JSON.stringify({ channel, group_ref: groupRef, message_id })); throw error; }
-    const recent = [...((await host.groups.recent({ channel, groupRef }).catch(() => ({})))?.recent ?? [])];
-    while (recent.length && JSON.stringify(recent).length > GROUP_LIMITS.recentChars) recent.shift();
-    const wake = { group_turn: { group: label, messages: [{ message_id, sender_role, sender: sender_label,
-      ...(at ? { at } : {}), text, ...(attachments?.length ? { attachments: attachments.map(attachmentLine) } : {}) }], recent: withAttachmentLines(recent) } };
-    ctx.agents.withoutInitiator(() => agent.steer(createUserMessage({ content: [{ type: 'text', text: JSON.stringify(wake) }],
-      source: { kind: GROUP_SOURCE, channel, group_ref: groupRef, group_label: label, question_ids: [message_id],
-        sender_refs: [senderRef] } })));
-    await ctx.sessionPersistence.flush();
-  });
+  // tag, never the text, makes the turn a group turn), with that group's recent exchanges and
+  // - where the host can attach them - the group's own kept images.
+  registerGroupWake({ ctx, channels, host, groupTurns, agentExists, getAgent: () => agent, createUserMessage });
   // The host is installed: the channel plugins' messages may reach it now.
   channels?.ready();
   const planRef = { attempt_id: { type: 'string', required: true }, item_id: { type: 'string', required: true } };

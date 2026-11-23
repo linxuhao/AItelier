@@ -16,7 +16,8 @@
  *  - dataLine(data): the one line `var DATA = <JSON>;` the host puts before the Document Builder
  *    template - a data literal only: one line (JSON escapes every line break), with U+2028,
  *    U+2029 and < escaped too.
- *  - checkText(...): what a group turn's exit check reads (title, then body or every cell). */
+ *  - checkText(...): what a group turn's exit check reads (title, then body or every cell, and
+ *    a pdf's or docx's text as the file shows it). */
 import { MEDIA_LIMITS } from './media.mjs';
 
 /** The formats make_document makes, with their table rows' mime and extension. */
@@ -30,15 +31,17 @@ export const OFFICE_FONT = 'WenQuanYi Zen Hei';
 export const TITLE_CHARS = 60;
 export const SHEET_CHARS = 31;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+// Zero-width and bidi controls: a name that shows other than it is (a spoofed extension).
+const INVISIBLE = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
 const NOT_IN_NAME = /[/\\:*?"<>|]/;
 
 const refuse = (refused, reason) => ({ refused, reason });
 
-/** A title: 1-60 characters, not only spaces, no control character and none of / \ : * ? " < > |
- *  (it names the file: `<title>.<ext>`). */
+/** A title: 1-60 characters, not only spaces, no control, zero-width or bidi character and none
+ *  of / \ : * ? " < > | (it names the file: `<title>.<ext>`). */
 export function validTitle(title) {
   return typeof title === 'string' && title.trim() !== '' && [...title].length <= TITLE_CHARS
-    && !CONTROL.test(title) && !NOT_IN_NAME.test(title) && title === title.trim();
+    && !CONTROL.test(title) && !INVISIBLE.test(title) && !NOT_IN_NAME.test(title) && title === title.trim();
 }
 /** A file name make_document gave a library row: a valid title and one of the formats' extensions. */
 export function validDocumentName(name, ext) {
@@ -69,6 +72,10 @@ const cellsOf = line => {
   return inner.split('|').map(cell => cell.trim());
 };
 
+/** A table's separator row under a header of `count` cells: at least one bar, a `---` per cell
+ *  (a bare `---` is a rule, never a one-column table's separator). */
+const separatorRow = (line, count) => line.includes('|') && TABLE_RULE.test(line) && cellsOf(line).length === count;
+
 /** The blocks of a pdf's or docx's body (the subset above), or {refused, reason}:
  *  invalid_request (not text, a table row with more cells than its header) or too_large (over
  *  office_body_chars characters, office_blocks blocks, a table over its rows or columns). */
@@ -87,7 +94,7 @@ export function parseBody(body, limits = MEDIA_LIMITS) {
     else if ((match = /^->\s+(.*)$/.exec(line))) blocks.push({ t: 'p', align: 'right', runs: inlineRuns(match[1]) });
     else if ((match = /^[-*]\s+(.*)$/.exec(line))) blocks.push({ t: 'li', mark: '•', runs: inlineRuns(match[1]) });
     else if ((match = /^(\d{1,4})[.)]\s+(.*)$/.exec(line))) blocks.push({ t: 'li', mark: `${Number(match[1])}.`, runs: inlineRuns(match[2]) });
-    else if (line.startsWith('|') && i + 1 < lines.length && TABLE_RULE.test(lines[i + 1].trim())) {
+    else if (line.startsWith('|') && i + 1 < lines.length && separatorRow(lines[i + 1].trim(), cellsOf(line).length)) {
       const header = cellsOf(line);
       if (header.length > limits.office_cols) return refuse('too_large', `a table has at most ${limits.office_cols} columns`);
       const rows = [header];
@@ -156,9 +163,22 @@ export function dataLine(data) {
   return 'var DATA = ' + JSON.stringify(data).replace(/[\u2028\u2029<]/g, ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0')) + ';';
 }
 
-/** The text a group turn's exit check reads: the title, then the body or every row's cells
- *  (tab-separated, one row a line) - what the made file will show. */
-export function checkText({ title, body, sheet, rows }) {
+/** A pdf's or docx's blocks as the made file shows them: one line a block (a list item with its
+ *  mark, a table one line a row, its cells tab-separated), the markup gone - `AI**telier**` is
+ *  "AItelier" here. */
+export function shownText(blocks) {
+  const runs = list => list.map(run => run.text).join('');
+  return blocks.map(block => {
+    if (block.t === 'table') return block.rows.map(row => row.map(runs).join('\t')).join('\n');
+    if (block.t === 'li') return `${block.mark} ${runs(block.runs)}`;
+    return block.runs ? runs(block.runs) : '';
+  }).join('\n');
+}
+
+/** The text a group turn's exit check reads: the title, then an xlsx's sheet name and every
+ *  row's cells (tab-separated, one row a line); a pdf's or docx's body as written AND its blocks
+ *  as shown (shownText) - what the made file will show, whatever markup split a word. */
+export function checkText({ title, body, sheet, rows, blocks }) {
   if (Array.isArray(rows)) return [title, sheet ?? '', ...rows.map(row => row.map(String).join('\t'))].join('\n');
-  return `${title}\n${body}`;
+  return `${title}\n${body}${Array.isArray(blocks) ? `\n${shownText(blocks)}` : ''}`;
 }

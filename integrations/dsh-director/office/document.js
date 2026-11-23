@@ -71,7 +71,9 @@ builder.CreateFile("docx");
       push(p);
     } else if (block.t === "table") {
       var rows = block.rows.length, cols = block.rows[0].length;
-      var table = Api.CreateTable(cols, rows);
+      // This build's (OnlyOffice Docs 10.0.0) CreateTable takes the ROWS first: (cols, rows)
+      // made a cols x rows table and failed every non-square one ("Row index N is out of bounds").
+      var table = Api.CreateTable(rows, cols);
       table.SetWidth("percent", 100);
       var sides = ["SetTableBorderTop", "SetTableBorderBottom", "SetTableBorderLeft", "SetTableBorderRight",
         "SetTableBorderInsideH", "SetTableBorderInsideV"];

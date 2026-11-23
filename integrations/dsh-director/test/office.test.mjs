@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { attachmentLine, createMediaLibrary, identify, ooxmlType, sniff, MEDIA_LIMITS } from '../lib/media.mjs';
-import { checkText, dataLine, inlineRuns, parseBody, sheetCell, sheetCells, validDocumentName, validTitle } from '../lib/office-blocks.mjs';
+import { checkText, dataLine, inlineRuns, parseBody, sheetCell, sheetCells, shownText, validDocumentName, validTitle, OFFICE_FONT } from '../lib/office-blocks.mjs';
 import { SAMPLES, TABLE, ooxml, zipFrom } from './fixtures/zip-samples.mjs';
 
 const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -18,7 +18,7 @@ const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 
 test('ooxmlType: every container sample of the table answers its mime', () => {
-  assert.ok(SAMPLES.length >= 18);
+  assert.ok(SAMPLES.length >= 20);
   for (const sample of SAMPLES) assert.equal(ooxmlType(zipFrom(sample))?.mime ?? null, sample.mime, sample.about);
 });
 
@@ -128,6 +128,13 @@ test('parseBody: the bounds, and the same input gives the same blocks', () => {
   assert.equal(parseBody(header(MEDIA_LIMITS.office_cols + 1)).refused, 'too_large');
   assert.ok(parseBody(header(MEDIA_LIMITS.office_cols)).blocks);
   assert.equal(parseBody(header(2) + '\n|a|b|c|').refused, 'invalid_request');
+  // A table needs a real separator row (review N6): a bar and a --- per header cell. A bare
+  // --- under a |-line is a rule; a separator with another cell count is no separator.
+  assert.deepEqual(parseBody('|线\n---').blocks, [{ t: 'p', runs: [{ text: '|线' }] }, { t: 'hr' }]);
+  assert.deepEqual(parseBody('| a | b |\n---').blocks.map(block => block.t), ['p', 'hr']);
+  assert.deepEqual(parseBody('| a | b |\n|---|---|---|').blocks.map(block => block.t), ['p', 'p']);
+  assert.deepEqual(parseBody('| a |\n|---|').blocks, [{ t: 'table', rows: [[[{ text: 'a' }]]] }]);
+  assert.deepEqual(parseBody('| a | b |\n---|---').blocks.map(block => block.t), ['table']);
   const rows = n => header(1) + '\n' + Array.from({ length: n }, () => '|x|').join('\n');
   assert.equal(parseBody(rows(MEDIA_LIMITS.office_table_rows)).refused, 'too_large');
   assert.ok(parseBody(rows(MEDIA_LIMITS.office_table_rows - 1)).blocks);
@@ -190,4 +197,54 @@ test('titles and document names', () => {
   assert.equal(validDocumentName('x.png', 'png'), false);
   assert.equal(checkText({ title: 't', body: 'b' }), 't\nb');
   assert.equal(checkText({ title: 't', sheet: 's', rows: [['a', 1], ['b']] }), 't\ns\na\t1\nb');
+  // Zero-width and bidi characters (review N5): a name that shows other than it is.
+  for (const ch of ['\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u2066', '\u2067', '\u2068', '\u2069', '\ufeff']) {
+    assert.equal(validTitle(`账单${ch}fdp.exe`), false, ch.codePointAt(0).toString(16));
+    assert.equal(validDocumentName(`账单${ch}.pdf`, 'pdf'), false, ch.codePointAt(0).toString(16));
+  }
+  assert.equal(validTitle('账单\u2010二'), true, 'a hyphen next to the range is fine');
+});
+
+test('the exit check reads a body as written and as shown: markup that splits a word is gone in the shown text (review S1)', () => {
+  const body = '# AI**telier** 报告\n- 第*一*条\n1. 乙\n| 名 | 值 |\n|---|---|\n| A**I** | te*lier* |\n---\n\\pagebreak\n-> 签名';
+  const { blocks } = parseBody(body);
+  assert.equal(shownText(blocks), 'AItelier 报告\n• 第一条\n1. 乙\n名\t值\nAI\ttelier\n\n\n签名');
+  assert.equal(checkText({ title: 't', body, blocks }), `t\n${body}\n${shownText(blocks)}`);
+});
+
+test('the Document Builder template: a table of R rows and C columns is CreateTable(R, C) in this build, every cell filled (review M1)', () => {
+  // A model of OnlyOffice Docs 10.0.0's builder API as the real image answers it (a 2x5 table made
+  // with CreateTable(2, 5) has 2 rows: "Row index 2 is out of bounds [0, 1]"). Everything else is a no-op.
+  const source = readFileSync(new URL('../office/document.js', import.meta.url), 'utf8');
+  const run = blocks => {
+    const tables = [];
+    const noop = () => new Proxy(function () {}, { get: (target, key) => (key === 'GetElementsCount' ? () => 1 : () => noop()) });
+    const paragraph = cells => new Proxy({}, { get: (target, key) => (key === 'AddElement' ? element => cells.push(element.text) : () => noop()) });
+    const Api = new Proxy({}, { get: (target, key) => {
+      if (key === 'CreateRun') return () => { const run = { text: '' }; return new Proxy(run, { get: (r, k) => (k === 'text' ? r.text : k === 'AddText' ? t => { r.text += t; } : () => noop()) }); };
+      if (key === 'CreateTable') return (rowCount, colCount) => {
+        const grid = Array.from({ length: rowCount }, () => Array.from({ length: colCount }, () => []));
+        tables.push(grid);
+        return new Proxy({}, { get: (t, k) => (k !== 'GetRow' ? () => noop() : r => {
+          if (!(r >= 0 && r < rowCount)) throw new Error(`Row index ${r} is out of bounds [0, ${rowCount - 1}]`);
+          return { GetCell: c => {
+            if (!(c >= 0 && c < colCount)) throw new Error(`Cell index ${c} is out of bounds [0, ${colCount - 1}]`);
+            return new Proxy({}, { get: (x, kk) => (kk === 'GetContent' ? () => ({ GetElement: () => paragraph(grid[r][c]) }) : () => noop()) });
+          } };
+        }) });
+      };
+      return () => noop();
+    } });
+    vm.runInNewContext(`${dataLine({ format: 'pdf', title: 't', font: OFFICE_FONT, blocks })}\n${source}`, { Api, builder: { CreateFile: () => {} } });
+    return tables.map(grid => grid.map(row => row.map(cell => cell.join(''))));
+  };
+  const table = (cols, rows) => [...Array.from({ length: rows }, (_, r) => '|' + Array.from({ length: cols }, (_, c) => `r${r}c${c}`).join('|') + '|')];
+  for (const [cols, rows] of [[3, 6], [2, 5], [5, 2], [30, 200], [1, 1]]) {
+    const lines = table(cols, rows);
+    lines.splice(1, 0, '|' + Array.from({ length: cols }, () => '---').join('|') + '|');
+    const { blocks, refused } = parseBody(lines.join('\n'), { ...MEDIA_LIMITS, office_body_chars: 1e6 });
+    assert.equal(refused, undefined, `${cols}x${rows}`);
+    const [grid] = run(blocks);
+    assert.deepEqual(grid, Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => `r${r}c${c}`)), `${cols} columns x ${rows} rows`);
+  }
 });

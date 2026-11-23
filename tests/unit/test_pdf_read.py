@@ -39,7 +39,7 @@ import pdf_fixtures as F  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "integrations" / "dsh-director" / "pdf_read.py"
-SANDBOXES = {"landlock", "landlock_fs", "none"}
+SANDBOXES = {"landlock+seccomp", "landlock_fs+seccomp", "seccomp", "landlock", "landlock_fs", "none"}
 
 
 def _env(home):
@@ -400,7 +400,7 @@ records = []
 def probe():
     libc = ctypes.CDLL(None)
     rec = {"limits": {name: list(resource.getrlimit(getattr(resource, name)))
-                      for name in ("RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NOFILE", "RLIMIT_CORE")},
+                      for name in ("RLIMIT_CPU", "RLIMIT_AS", "RLIMIT_FSIZE", "RLIMIT_NOFILE", "RLIMIT_CORE", "RLIMIT_NPROC")},
            "no_new_privs": libc.prctl(39, 0, 0, 0, 0)}
     def attempt(fn):
         try:
@@ -447,6 +447,22 @@ def _landlock_abi():
     return max(abi, 0)
 
 
+def _seccomp_available():
+    """Whether a process here may install a seccomp filter (x86_64, and no policy refusing it):
+    an allow-everything filter, installed in a throwaway child."""
+    if os.uname().machine != "x86_64":
+        return False
+    code = ("import ctypes, sys\n"
+            "libc = ctypes.CDLL(None)\n"
+            "libc.prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4\n"
+            "assert libc.prctl(38, 1, 0, 0, 0) == 0\n"
+            "class F(ctypes.Structure): _fields_ = [('c', ctypes.c_uint16), ('t', ctypes.c_uint8), ('f', ctypes.c_uint8), ('k', ctypes.c_uint32)]\n"
+            "class P(ctypes.Structure): _fields_ = [('n', ctypes.c_uint16), ('p', ctypes.POINTER(F))]\n"
+            "prog = (F * 1)(F(6, 0, 0, 0x7FFF0000))\n"
+            "sys.exit(0 if libc.prctl(22, 2, ctypes.addressof(P(1, prog)), 0, 0) == 0 else 1)\n")
+    return subprocess.run([sys.executable, "-I", "-c", code], timeout=30).returncode == 0
+
+
 def test_limits_and_landlock_are_in_place_before_the_libraries_load(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
@@ -479,22 +495,110 @@ def test_limits_and_landlock_are_in_place_before_the_libraries_load(tmp_path):
         assert limits["RLIMIT_FSIZE"] == [8 * 1024 ** 2] * 2
         assert limits["RLIMIT_NOFILE"] == [64, 64]
         assert limits["RLIMIT_CORE"] == [0, 0]
+        assert limits["RLIMIT_NPROC"] == [0, 0]
         assert record["no_new_privs"] == 1
         assert record["read_input"] == "ok" and record["write_out_dir"] == "ok"
         sandbox = result["sandbox"]
         assert sandbox in SANDBOXES
-        if sandbox == "none":
-            continue
-        assert record["read_outside"] == "PermissionError", record
-        assert record["write_outside"] == "PermissionError", record
-        if sandbox == "landlock":
+        layers = sandbox.split("+")
+        if layers[0] in ("landlock", "landlock_fs"):
+            assert record["read_outside"] == "PermissionError", record
+            assert record["write_outside"] == "PermissionError", record
+        if layers[0] == "landlock" or "seccomp" in layers:
             assert record["tcp_connect"] == "PermissionError", record
-    assert not (tmp_path / "outside.txt").exists()
+    if result["sandbox"].startswith("landlock"):
+        assert not (tmp_path / "outside.txt").exists()
     # Either state is acceptable (a container's seccomp may refuse landlock), but the
     # reported state must be the one this environment really offers.
     abi = _landlock_abi()
-    assert result["sandbox"] == ("landlock" if abi >= 4 else "landlock_fs" if abi >= 1 else "none"), abi
+    layers = ["landlock" if abi >= 4 else "landlock_fs" if abi >= 1 else None, "seccomp" if _seccomp_available() else None]
+    assert result["sandbox"] == ("+".join(x for x in layers if x) or "none"), (abi, layers)
     print("sandbox reported:", result["sandbox"], "landlock abi:", abi)
+
+
+HIJACK = r"""
+import importlib.util, json, os, signal, socket, sys
+script, out_dir, unix_path, victim = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("pdf_read_hijack", script)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sandbox = module.harden(None, out_dir)
+# From here on this is what a child taken over by a hostile PDF could try.
+def attempt(fn):
+    try:
+        fn()
+        return "ok"
+    except OSError as exc:
+        return type(exc).__name__
+families = {name: getattr(socket, name) for name in ("AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK", "AF_PACKET")
+            if hasattr(socket, name)}
+rec = {"sandbox": sandbox}
+for name, family in families.items():
+    for kind in ("SOCK_STREAM", "SOCK_DGRAM", "SOCK_RAW"):
+        rec[name + " " + kind] = attempt(lambda: socket.socket(family, getattr(socket, kind)).close())
+rec["socketpair"] = attempt(lambda: [s.close() for s in socket.socketpair()])
+def unix_connect():
+    s = socket.socket(socket.AF_UNIX)
+    try:
+        s.connect(unix_path)
+    finally:
+        s.close()
+rec["unix_pathname_connect"] = attempt(unix_connect)
+rec["kill_other"] = attempt(lambda: os.kill(int(victim), signal.SIGKILL))
+rec["kill_all"] = attempt(lambda: os.kill(-1, 0))
+rec["kill_self"] = attempt(lambda: os.kill(os.getpid(), 0))
+def fork():
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    os.waitpid(pid, 0)
+rec["fork"] = attempt(fork)
+rec["execve"] = attempt(lambda: os.execv("/bin/true", ["/bin/true"]))
+print(json.dumps(rec))
+"""
+
+
+def test_a_hijacked_child_cannot_open_a_socket_of_any_family_signal_fork_or_exec(tmp_path):
+    """Review SEC-1: under landlock ABI 4 alone a child still reached pathname UNIX sockets (the
+    docker socket, the session bus), UDP and other processes. With the seccomp layer reported,
+    every socket family, socketpair, a signal to another process, fork and exec are refused."""
+    if not _seccomp_available():
+        pytest.skip("SKIPPED LOUDLY: this environment refuses a seccomp filter, so the reader reports no seccomp layer")
+    out = tmp_path / "out"
+    out.mkdir()
+    unix_path = str(tmp_path / "s.sock")
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(unix_path)
+    listener.listen(1)
+    victim = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-c", HIJACK, str(SCRIPT), str(out), unix_path, str(victim.pid)],
+                              capture_output=True, env=_env(tmp_path), cwd=tmp_path, timeout=60)
+        assert proc.returncode == 0, proc.stderr.decode()[-3000:]
+        rec = json.loads(proc.stdout)
+        assert victim.poll() is None, "the sandboxed child killed a process that is not its own"
+    finally:
+        victim.kill()
+        victim.wait()
+        listener.close()
+    assert "seccomp" in rec.pop("sandbox")
+    assert rec.pop("kill_self") == "ok", "a signal to itself stays allowed (abort, raise)"
+    refused = {key: value for key, value in rec.items() if value != "PermissionError"}
+    assert not refused, refused
+    for family in ("AF_UNIX", "AF_INET", "AF_INET6"):
+        for kind in ("SOCK_STREAM", "SOCK_DGRAM"):
+            assert f"{family} {kind}" in rec
+
+
+def test_the_seccomp_filter_is_well_formed():
+    module = _load_module()
+    program = module.seccomp_program(4242)
+    assert len(program) < 256
+    for i, (code, jt, jf, k) in enumerate(program):
+        assert 0 <= jt < 256 and 0 <= jf < 256 and 0 <= k < 2 ** 32
+        if code != module.BPF_RET_K:
+            assert i + 1 + max(jt, jf) < len(program), "a jump past the end"
+    assert program[-1][0] == module.BPF_RET_K and program[0] == (module.BPF_LD_W_ABS, 0, 0, 4)
 
 
 def test_the_script_imports_only_the_standard_library_pypdfium2_and_pil():

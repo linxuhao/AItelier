@@ -6,13 +6,25 @@ The PDF may come from a stranger, so before the native parser is loaded the chil
 limits itself:
 
   1. resource limits: CPU soft 20 s / hard 22 s, address space 1.5 GiB, files
-     written 8 MiB, 64 descriptors, no core dumps;
+     written 8 MiB (each), 64 descriptors, no core dumps, no new process (NPROC 0,
+     which a root user is not held to);
   2. PR_SET_NO_NEW_PRIVS;
-  3. landlock: read and execute only the interpreter's prefixes, the system
+  3. landlock: read (never execute) only the interpreter's prefixes, the system
      library and font directories and the input file; write only in the output
-     directory; TCP bind and connect denied. Where the kernel (or a container's
-     seccomp policy) does not offer landlock, the result says sandbox "none" and
-     the read goes on.
+     directory; on landlock ABI 4 and later also TCP bind and connect denied.
+     Landlock does not cover UNIX sockets (pathname or abstract), UDP, signals or
+     new processes: measured on kernel 6.8 (ABI 4), all of those stay open under it;
+  4. seccomp (x86_64 only), which closes those: socket and socketpair of every
+     family, connect, bind, listen, accept, sendto/sendmsg/sendmmsg, io_uring,
+     execve/execveat, fork/vfork and a clone that is not a thread, unshare/setns,
+     ptrace, process_vm_readv/writev, pidfd_open/getfd/send_signal, and kill, tkill,
+     tgkill and rt_(tg)sigqueueinfo at any process but this one fail with EPERM
+     (clone3 with ENOSYS, so a thread falls back to clone).
+  What stays open even with every layer: reading inside the allowed paths, writing
+  files of up to 8 MiB each in the output directory until the CPU limit, and the
+  descriptors the host gave (stdout and stderr). Each layer fails open: the result's
+  `sandbox` names exactly the layers in place, joined by "+" - "landlock" (files and
+  TCP) or "landlock_fs" (files only), then "seccomp" - or "none", and the read goes on.
 
 Only then are pypdfium2 and PIL imported. PDF forms are never initialised.
 
@@ -52,6 +64,7 @@ LIMITS = (
     (resource.RLIMIT_FSIZE, 8 * 1024 * 1024, 8 * 1024 * 1024),
     (resource.RLIMIT_NOFILE, 64, 64),
     (resource.RLIMIT_CORE, 0, 0),
+    (resource.RLIMIT_NPROC, 0, 0),
 )
 READ_ROOTS = ("/usr/lib", "/lib", "/lib64", "/usr/share/fonts")
 SELFCHECK_TEXT = "pdf reader selfcheck 4721"
@@ -81,6 +94,24 @@ FS_REMOVE_FILE, FS_MAKE_REG, FS_TRUNCATE = 1 << 5, 1 << 8, 1 << 14
 NET_BIND_TCP, NET_CONNECT_TCP = 1 << 0, 1 << 1
 PR_SET_NO_NEW_PRIVS = 38
 
+# seccomp (linux/seccomp.h, linux/filter.h, linux/audit.h). The numbers are x86_64's; on any
+# other machine no filter is installed.
+PR_SET_SECCOMP, SECCOMP_MODE_FILTER = 22, 2
+SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO = 0x7FFF0000, 0x00050000
+EPERM, ENOSYS = 1, 38
+AUDIT_ARCH_X86_64, X32_SYSCALL_BIT, CLONE_THREAD = 0xC000003E, 0x40000000, 0x00010000
+BPF_LD_W_ABS, BPF_JEQ_K, BPF_JGE_K, BPF_JSET_K, BPF_RET_K = 0x20, 0x15, 0x35, 0x45, 0x06
+# Refused outright: no socket of any family, no exec, no new process, no reaching into another.
+DENIED_SYSCALLS = (
+    41, 42, 43, 44, 46, 49, 50, 53, 288, 307,  # socket connect accept sendto sendmsg bind listen socketpair accept4 sendmmsg
+    425, 426, 427,  # io_uring_setup/enter/register (io_uring can open sockets past this filter)
+    57, 58, 59, 322, 272, 308,  # fork vfork execve execveat unshare setns
+    101, 310, 311, 424, 434, 438,  # ptrace process_vm_readv/writev pidfd_send_signal pidfd_open pidfd_getfd
+)
+# A signal only to this process (its first argument, a 32-bit pid or tgid, must be ours).
+SELF_ONLY_SYSCALLS = (62, 129, 200, 234, 297)  # kill rt_sigqueueinfo tkill tgkill rt_tgsigqueueinfo
+SYS_CLONE, SYS_CLONE3 = 56, 435
+
 
 class _RulesetAttr(ctypes.Structure):
     _fields_ = [("handled_access_fs", ctypes.c_uint64), ("handled_access_net", ctypes.c_uint64)]
@@ -102,26 +133,19 @@ def _handled_fs(abi):
     return mask
 
 
-def harden(input_path, out_dir):
-    """Limits, no_new_privs, then landlock. Returns the sandbox state for the report:
-    "landlock" (files and TCP), "landlock_fs" (files only: ABI < 4) or "none"."""
-    set_limits()
-    libc = ctypes.CDLL(None, use_errno=True)
-    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
-    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-        return "none"
-    syscall = libc.syscall
-    syscall.restype = ctypes.c_long
+def _landlock(syscall, input_path, out_dir):
+    """The landlock layer: "landlock" (files and TCP), "landlock_fs" (files only: ABI < 4) or None."""
     abi = syscall(ctypes.c_long(SYS_CREATE_RULESET), None, ctypes.c_size_t(0), ctypes.c_uint32(CREATE_RULESET_VERSION))
     if abi < 1:
-        return "none"
+        return None
     handled = _handled_fs(abi)
     attr = _RulesetAttr(handled, NET_BIND_TCP | NET_CONNECT_TCP if abi >= 4 else 0)
     size = ctypes.sizeof(_RulesetAttr) if abi >= 4 else 8
     ruleset = syscall(ctypes.c_long(SYS_CREATE_RULESET), ctypes.byref(attr), ctypes.c_size_t(size), ctypes.c_uint32(0))
     if ruleset < 0:
-        return "none"
-    read_dir = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR
+        return None
+    # No execute right: a library is mapped, never executed, and landlock's execute is execve's.
+    read_dir = FS_READ_FILE | FS_READ_DIR
     write_dir = FS_READ_FILE | FS_READ_DIR | FS_WRITE_FILE | FS_MAKE_REG | FS_REMOVE_FILE | FS_TRUNCATE
     rules = [(root, read_dir) for root in (sys.prefix, sys.base_prefix, *READ_ROOTS)]
     if input_path is not None:
@@ -138,14 +162,84 @@ def harden(input_path, out_dir):
                 rule = _PathBeneathAttr(access & handled, fd)
                 if syscall(ctypes.c_long(SYS_ADD_RULE), ctypes.c_int(ruleset), ctypes.c_int(RULE_PATH_BENEATH),
                            ctypes.byref(rule), ctypes.c_uint32(0)) != 0:
-                    return "none"
+                    return None
             finally:
                 os.close(fd)
         if syscall(ctypes.c_long(SYS_RESTRICT_SELF), ctypes.c_int(ruleset), ctypes.c_uint32(0)) != 0:
-            return "none"
+            return None
     finally:
         os.close(ruleset)
     return "landlock" if abi >= 4 else "landlock_fs"
+
+
+def seccomp_program(pid):
+    """The seccomp filter as (code, jt, jf, k): DENIED_SYSCALLS and any non-x86_64 call -> EPERM,
+    clone3 -> ENOSYS, clone without CLONE_THREAD -> EPERM, SELF_ONLY_SYSCALLS at another pid -> EPERM."""
+    program = [
+        (BPF_LD_W_ABS, 4, 0, 0), (BPF_JEQ_K, AUDIT_ARCH_X86_64, 0, "deny"),  # seccomp_data.arch
+        (BPF_LD_W_ABS, 0, 0, 0), (BPF_JGE_K, X32_SYSCALL_BIT, "deny", 0),  # seccomp_data.nr
+        *[(BPF_JEQ_K, nr, "deny", 0) for nr in DENIED_SYSCALLS],
+        (BPF_JEQ_K, SYS_CLONE3, "enosys", 0),
+        (BPF_JEQ_K, SYS_CLONE, "clone", 0),
+        *[(BPF_JEQ_K, nr, "self", 0) for nr in SELF_ONLY_SYSCALLS],
+        (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
+        "clone", (BPF_LD_W_ABS, 16, 0, 0), (BPF_JSET_K, CLONE_THREAD, "allow", "deny"),  # args[0] low word: flags
+        "self", (BPF_LD_W_ABS, 20, 0, 0), (BPF_JEQ_K, 0, 0, "deny"),  # args[0] high word
+        (BPF_LD_W_ABS, 16, 0, 0), (BPF_JEQ_K, pid, "allow", "deny"),
+        "allow", (BPF_RET_K, SECCOMP_RET_ALLOW, 0, 0),
+        "deny", (BPF_RET_K, SECCOMP_RET_ERRNO | EPERM, 0, 0),
+        "enosys", (BPF_RET_K, SECCOMP_RET_ERRNO | ENOSYS, 0, 0),
+    ]
+    labels, n = {}, 0
+    for item in program:
+        if isinstance(item, str):
+            labels[item] = n
+        else:
+            n += 1
+    out = []
+    for item in program:
+        if isinstance(item, str):
+            continue
+        code, k, jt, jf = item
+        here = len(out) + 1
+        out.append((code, labels[jt] - here if isinstance(jt, str) else jt,
+                    labels[jf] - here if isinstance(jf, str) else jf, k))
+    return out
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8), ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(_SockFilter))]
+
+
+def _seccomp(libc):
+    """The seccomp layer: "seccomp" once the filter is in place, else None (another machine, or
+    a kernel or container policy that refuses it)."""
+    if os.uname().machine != "x86_64":
+        return None
+    program = seccomp_program(os.getpid())
+    filters = (_SockFilter * len(program))(*program)
+    prog = _SockFprog(len(program), filters)
+    if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.addressof(prog), 0, 0) != 0:
+        return None
+    return "seccomp"
+
+
+def harden(input_path, out_dir):
+    """Limits, no_new_privs, landlock, then seccomp. Returns the sandbox state for the report:
+    the layers in place joined by "+" ("landlock" or "landlock_fs", then "seccomp"), or "none"."""
+    set_limits()
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        return "none"
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+    layers = [_landlock(syscall, input_path, out_dir), _seccomp(libc)]
+    return "+".join(layer for layer in layers if layer) or "none"
 
 
 def load_libraries():

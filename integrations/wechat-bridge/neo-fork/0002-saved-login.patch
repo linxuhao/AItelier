@@ -1,8 +1,623 @@
 diff --git a/native/src/lib.rs b/native/src/lib.rs
+index 768d869..4374d69 100644
 --- a/native/src/lib.rs
 +++ b/native/src/lib.rs
+@@ -1572,3 +1572,618 @@ mod tests {
          );
      }
  }
 +
-+// saved-login placeholder
++// ---------------------------------------------------------------------------
++// Stored login (steward design step 19.1, section 7.2.1)
++//
++// An accepted login is written to disk encrypted with AES-256-GCM under a
++// 32-byte key the operator supplies by path, so a fresh bridge process can
++// resume it instead of asking for another QR scan. Every answer here is typed:
++// a store that is switched off, unreadable or throttled never becomes a panic,
++// and a read that fails never deletes the file it could not read.
++// ---------------------------------------------------------------------------
++mod stored_login {
++    #![allow(dead_code)] // the login path consumes these in step 19.1's next stage.
++
++    use anyhow::{anyhow, Result};
++    use base64::{engine::general_purpose::STANDARD, Engine};
++    use serde_json::{json, Value};
++    use std::{
++        ffi::OsString,
++        fs::{File, OpenOptions},
++        io::{ErrorKind, Write},
++        os::unix::fs::{OpenOptionsExt, PermissionsExt},
++        path::{Path, PathBuf},
++        time::{SystemTime, UNIX_EPOCH},
++    };
++
++    /// Environment variable naming the directory the store lives in.
++    pub const STATE_DIR_ENV: &str = "PUPPET_NEO_STATE_DIR";
++    /// Environment variable naming the file that holds the 32-byte key.
++    pub const STATE_KEY_ENV: &str = "PUPPET_NEO_STATE_KEY_FILE";
++
++    /// The one envelope schema this build writes, and the only one it opens.
++    const SCHEMA: &str = "puppet-neo/stored-login/1";
++    /// The AAD binds a ciphertext to this schema, so a document whose schema
++    /// line was edited (or a ciphertext moved into another purpose's slot)
++    /// fails to open instead of decrypting.
++    const AAD: &[u8] = b"puppet-neo/stored-login/1";
++    const STATE_FILE: &str = "account.v1";
++    const RESUMES_FILE: &str = "resumes";
++    pub const KEY_LEN: usize = 32;
++    /// At most six resume attempts in an hour and twenty in a day. The counters
++    /// live in the store, not in memory, so a restart does not reset them.
++    pub const RESUMES_PER_HOUR: usize = 6;
++    pub const RESUMES_PER_DAY: usize = 20;
++    const HOUR: u64 = 3_600;
++    const DAY: u64 = 86_400;
++
++    /// Why persistence is off — the closed set a status row may show.
++    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++    pub enum Off {
++        NotConfigured,
++        Key,
++        Dir,
++    }
++
++    impl Off {
++        pub fn as_str(self) -> &'static str {
++            match self {
++                Off::NotConfigured => "not_configured",
++                Off::Key => "key",
++                Off::Dir => "dir",
++            }
++        }
++    }
++
++    /// Why a stored login was not resumed. `Absent` is the design's `none`.
++    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++    pub enum Miss {
++        Absent,
++        Unreadable,
++    }
++
++    impl Miss {
++        pub fn as_str(self) -> &'static str {
++            match self {
++                Miss::Absent => "none",
++                Miss::Unreadable => "unreadable",
++            }
++        }
++    }
++
++    /// Whether one resume attempt may contact WeChat now.
++    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
++    pub enum Allowance {
++        Allowed,
++        Throttled,
++    }
++
++    impl Allowance {
++        pub fn as_str(self) -> &'static str {
++            match self {
++                Allowance::Allowed => "allowed",
++                Allowance::Throttled => "throttled",
++            }
++        }
++    }
++
++    #[derive(Debug, Clone)]
++    pub struct Store {
++        dir: PathBuf,
++        key: [u8; KEY_LEN],
++    }
++
++    impl Store {
++        /// Resolve the operator's two paths. Any of these answers off, and a
++        /// store that is off is never read or written: neither variable set, a
++        /// key that is not 32 bytes in an owner-only regular file, a state
++        /// directory that is missing, is not a directory, or does not accept a
++        /// file.
++        pub fn from_parts(
++            state_dir: Option<OsString>,
++            key_file: Option<OsString>,
++        ) -> std::result::Result<Store, Off> {
++            let (Some(dir), Some(key_file)) = (state_dir, key_file) else {
++                return Err(Off::NotConfigured);
++            };
++            let dir = PathBuf::from(dir);
++            if !dir.is_dir() {
++                return Err(Off::Dir);
++            }
++            let key = read_key(&PathBuf::from(key_file))?;
++            probe_writable(&dir).map_err(|_| Off::Dir)?;
++            Ok(Store { dir, key })
++        }
++
++        pub fn from_env() -> std::result::Result<Store, Off> {
++            Store::from_parts(
++                std::env::var_os(STATE_DIR_ENV),
++                std::env::var_os(STATE_KEY_ENV),
++            )
++        }
++
++        pub fn dir(&self) -> &Path {
++            &self.dir
++        }
++
++        pub fn state_path(&self) -> PathBuf {
++            self.dir.join(STATE_FILE)
++        }
++
++        pub fn resumes_path(&self) -> PathBuf {
++            self.dir.join(RESUMES_FILE)
++        }
++
++        /// Is there a stored login? lstat only — the answer a status row needs
++        /// and must not pay a decrypt for. A file that exists but will not open
++        /// still answers true here; `read` is what tells the two apart.
++        pub fn present(&self) -> bool {
++            self.state_path().symlink_metadata().is_ok()
++        }
++
++        /// Seal `plaintext` and put it in place atomically.
++        pub fn write(&self, plaintext: &[u8]) -> Result<()> {
++            let envelope = seal(&self.key, plaintext)?;
++            atomic_write(&self.state_path(), &envelope)
++        }
++
++        pub fn read(&self) -> std::result::Result<Vec<u8>, Miss> {
++            let envelope = match std::fs::read(self.state_path()) {
++                Ok(bytes) => bytes,
++                Err(err) if err.kind() == ErrorKind::NotFound => return Err(Miss::Absent),
++                Err(_) => return Err(Miss::Unreadable),
++            };
++            open(&self.key, &envelope).map_err(|_| Miss::Unreadable)
++        }
++
++        /// Remove the stored login. Idempotent: a file that is already gone is
++        /// the state the caller asked for.
++        pub fn delete(&self) -> Result<()> {
++            match std::fs::remove_file(self.state_path()) {
++                Ok(()) => Ok(()),
++                Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
++                Err(err) => Err(err.into()),
++            }
++        }
++
++        /// Count one resume attempt and say whether it may go. A counter file
++        /// that cannot be read, cannot be parsed or cannot be written fails
++        /// closed: the attempt is refused rather than left uncounted.
++        pub fn allow_resume(&self, now: u64) -> Allowance {
++            let mut seen = match read_counters(&self.resumes_path()) {
++                Ok(seen) => seen,
++                Err(_) => return Allowance::Throttled,
++            };
++            seen.retain(|at| now.saturating_sub(*at) < DAY);
++            let hour = seen
++                .iter()
++                .filter(|at| now.saturating_sub(**at) < HOUR)
++                .count();
++            if hour >= RESUMES_PER_HOUR || seen.len() >= RESUMES_PER_DAY {
++                return Allowance::Throttled;
++            }
++            seen.push(now);
++            let mut body = String::new();
++            for at in &seen {
++                body.push_str(&format!("{at}\n"));
++            }
++            if atomic_write(&self.resumes_path(), body.as_bytes()).is_err() {
++                return Allowance::Throttled;
++            }
++            Allowance::Allowed
++        }
++    }
++
++    fn read_key(path: &Path) -> std::result::Result<[u8; KEY_LEN], Off> {
++        let meta = std::fs::symlink_metadata(path).map_err(|_| Off::Key)?;
++        if !meta.file_type().is_file() {
++            return Err(Off::Key);
++        }
++        if meta.permissions().mode() & 0o077 != 0 {
++            return Err(Off::Key);
++        }
++        let bytes = std::fs::read(path).map_err(|_| Off::Key)?;
++        if bytes.len() != KEY_LEN {
++            return Err(Off::Key);
++        }
++        let mut key = [0u8; KEY_LEN];
++        key.copy_from_slice(&bytes);
++        Ok(key)
++    }
++
++    fn probe_writable(dir: &Path) -> std::io::Result<()> {
++        let probe = dir.join(format!(".probe.{}.{}", std::process::id(), nanos()));
++        let file = OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .mode(0o600)
++            .open(&probe)?;
++        drop(file);
++        std::fs::remove_file(&probe)
++    }
++
++    fn read_counters(path: &Path) -> Result<Vec<u64>> {
++        let body = match std::fs::read_to_string(path) {
++            Ok(body) => body,
++            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
++            Err(err) => return Err(err.into()),
++        };
++        let mut seen = Vec::new();
++        for line in body.lines() {
++            let line = line.trim();
++            if line.is_empty() {
++                continue;
++            }
++            seen.push(
++                line.parse::<u64>()
++                    .map_err(|_| anyhow!("a resume counter is not a unix second"))?,
++            );
++        }
++        Ok(seen)
++    }
++
++    fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
++        let dir = path
++            .parent()
++            .ok_or_else(|| anyhow!("the stored login has no directory"))?;
++        let name = path
++            .file_name()
++            .map(|name| name.to_string_lossy().into_owned())
++            .unwrap_or_else(|| "login".to_string());
++        let tmp = dir.join(format!(".{name}.tmp.{}.{}", std::process::id(), nanos()));
++        let write = (|| -> Result<()> {
++            let mut file = OpenOptions::new()
++                .write(true)
++                .create_new(true)
++                .mode(0o600)
++                .open(&tmp)?;
++            file.write_all(bytes)?;
++            file.sync_all()?;
++            Ok(())
++        })();
++        if let Err(err) = write {
++            let _ = std::fs::remove_file(&tmp);
++            return Err(err);
++        }
++        if let Err(err) = std::fs::rename(&tmp, path) {
++            let _ = std::fs::remove_file(&tmp);
++            return Err(err.into());
++        }
++        // The rename is durable only once the directory itself is flushed.
++        if let Ok(dir) = File::open(dir) {
++            let _ = dir.sync_all();
++        }
++        Ok(())
++    }
++
++    fn seal(key: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
++        use openssl::symm::{Cipher, Crypter, Mode};
++        let mut nonce = [0u8; 12];
++        openssl::rand::rand_bytes(&mut nonce)?;
++        let mut crypter = Crypter::new(Cipher::aes_256_gcm(), Mode::Encrypt, key, Some(&nonce))?;
++        crypter.aad_update(AAD)?;
++        let mut body = vec![0u8; plaintext.len() + 16];
++        let mut written = crypter.update(plaintext, &mut body)?;
++        written += crypter.finalize(&mut body[written..])?;
++        body.truncate(written);
++        let mut tag = [0u8; 16];
++        crypter.get_tag(&mut tag)?;
++        let envelope = json!({
++            "schema": SCHEMA,
++            "nonce": STANDARD.encode(nonce),
++            "tag": STANDARD.encode(tag),
++            "ciphertext": STANDARD.encode(&body),
++        });
++        Ok(serde_json::to_vec(&envelope)?)
++    }
++
++    fn open(key: &[u8; KEY_LEN], envelope: &[u8]) -> Result<Vec<u8>> {
++        use openssl::symm::{Cipher, Crypter, Mode};
++        let doc: Value = serde_json::from_slice(envelope)?;
++        if doc.get("schema").and_then(Value::as_str) != Some(SCHEMA) {
++            return Err(anyhow!("the stored login carries another schema"));
++        }
++        let field = |name: &str| -> Result<Vec<u8>> {
++            let text = doc
++                .get(name)
++                .and_then(Value::as_str)
++                .ok_or_else(|| anyhow!("the stored login has no {name}"))?;
++            STANDARD
++                .decode(text)
++                .map_err(|_| anyhow!("the stored login's {name} is not base64"))
++        };
++        let nonce = field("nonce")?;
++        let tag = field("tag")?;
++        let body = field("ciphertext")?;
++        if nonce.len() != 12 || tag.len() != 16 {
++            return Err(anyhow!("the stored login's envelope is the wrong size"));
++        }
++        let mut crypter = Crypter::new(Cipher::aes_256_gcm(), Mode::Decrypt, key, Some(&nonce))?;
++        crypter.aad_update(AAD)?;
++        let mut plain = vec![0u8; body.len() + 16];
++        let mut written = crypter.update(&body, &mut plain)?;
++        crypter.set_tag(&tag)?;
++        written += crypter.finalize(&mut plain[written..])?;
++        plain.truncate(written);
++        Ok(plain)
++    }
++
++    fn nanos() -> u128 {
++        SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .map(|elapsed| elapsed.as_nanos())
++            .unwrap_or(0)
++    }
++
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++
++        struct Scratch {
++            root: PathBuf,
++            dir: PathBuf,
++            key_file: PathBuf,
++        }
++
++        impl Scratch {
++            fn new(tag: &str) -> Scratch {
++                let root = std::env::temp_dir().join(format!(
++                    "puppet-neo-store-{}-{}-{tag}",
++                    std::process::id(),
++                    nanos()
++                ));
++                let dir = root.join("state");
++                std::fs::create_dir_all(&dir).expect("create the scratch state directory");
++                let key_file = root.join("key");
++                write_key(&key_file, &[7u8; KEY_LEN]);
++                Scratch { root, dir, key_file }
++            }
++
++            fn configured(&self) -> std::result::Result<Store, Off> {
++                Store::from_parts(Some(self.dir.clone().into()), Some(self.key_file.clone().into()))
++            }
++
++            fn store(&self) -> Store {
++                self.configured().expect("a configured store")
++            }
++        }
++
++        impl Drop for Scratch {
++            fn drop(&mut self) {
++                let _ = std::fs::remove_dir_all(&self.root);
++            }
++        }
++
++        fn write_key(path: &Path, bytes: &[u8]) {
++            std::fs::write(path, bytes).expect("write the key file");
++            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
++                .expect("an owner-only key file");
++        }
++
++        #[test]
++        fn the_store_round_trips_the_bytes_it_was_given() {
++            let scratch = Scratch::new("round-trip");
++            let store = scratch.store();
++            assert!(!store.present(), "a fresh store holds no login");
++            let login = b"{\"schema\":\"account/1\",\"wxid\":\"wxid_probe\"}";
++            store.write(login).expect("write the login");
++            assert!(store.present());
++            assert_eq!(store.read().expect("read it back"), login);
++            let on_disk = std::fs::read(store.state_path()).expect("the file is there");
++            assert!(
++                !on_disk
++                    .windows(b"wxid_probe".len())
++                    .any(|window| window == b"wxid_probe"),
++                "the file on disk is not the plaintext"
++            );
++            let mode = std::fs::metadata(store.state_path())
++                .expect("the file is there")
++                .permissions()
++                .mode();
++            assert_eq!(mode & 0o777, 0o600, "the stored login is owner-only");
++        }
++
++        #[test]
++        fn a_key_that_is_not_32_bytes_answers_off_key() {
++            let scratch = Scratch::new("short-key");
++            for (bytes, tag) in [
++                (vec![7u8; KEY_LEN - 1], "31 bytes"),
++                (vec![7u8; KEY_LEN + 1], "33 bytes"),
++            ] {
++                write_key(&scratch.key_file, &bytes);
++                assert_eq!(scratch.configured().err(), Some(Off::Key), "{tag}");
++                assert_eq!(
++                    scratch.dir.join(STATE_FILE).exists(),
++                    false,
++                    "a store that is off writes nothing ({tag})"
++                );
++            }
++        }
++
++        #[test]
++        fn a_key_file_anyone_can_read_answers_off_key() {
++            let scratch = Scratch::new("key-mode");
++            std::fs::set_permissions(&scratch.key_file, std::fs::Permissions::from_mode(0o640))
++                .expect("loosen the key file");
++            assert_eq!(scratch.configured().err(), Some(Off::Key));
++        }
++
++        #[test]
++        fn a_state_directory_that_is_missing_or_not_a_directory_answers_off_dir() {
++            let scratch = Scratch::new("no-dir");
++            let missing = scratch.root.join("not-there");
++            assert_eq!(
++                Store::from_parts(
++                    Some(missing.into()),
++                    Some(scratch.key_file.clone().into())
++                )
++                .err(),
++                Some(Off::Dir)
++            );
++            let a_file = scratch.root.join("a-file");
++            std::fs::write(&a_file, b"x").expect("write a plain file");
++            assert_eq!(
++                Store::from_parts(Some(a_file.into()), Some(scratch.key_file.clone().into())).err(),
++                Some(Off::Dir)
++            );
++        }
++
++        #[test]
++        fn neither_variable_set_answers_off_not_configured() {
++            let scratch = Scratch::new("unset");
++            assert_eq!(Store::from_parts(None, None).err(), Some(Off::NotConfigured));
++            assert_eq!(
++                Store::from_parts(Some(scratch.dir.clone().into()), None).err(),
++                Some(Off::NotConfigured)
++            );
++            assert_eq!(
++                Store::from_parts(None, Some(scratch.key_file.clone().into())).err(),
++                Some(Off::NotConfigured)
++            );
++        }
++
++        #[test]
++        fn a_tampered_ciphertext_answers_unreadable_and_keeps_the_file() {
++            let scratch = Scratch::new("tamper-ciphertext");
++            let store = scratch.store();
++            store.write(b"{\"wxid\":\"wxid_probe\"}").expect("write the login");
++            let path = store.state_path();
++            let mut doc: Value =
++                serde_json::from_slice(&std::fs::read(&path).expect("the file is there"))
++                    .expect("an envelope");
++            let mut body = STANDARD
++                .decode(doc["ciphertext"].as_str().expect("a ciphertext"))
++                .expect("base64");
++            body[0] ^= 0x01;
++            doc["ciphertext"] = json!(STANDARD.encode(&body));
++            std::fs::write(&path, serde_json::to_vec(&doc).expect("an envelope")).expect("rewrite");
++            assert_eq!(store.read().err(), Some(Miss::Unreadable));
++            assert!(path.exists(), "an unreadable login is kept, never deleted");
++        }
++
++        #[test]
++        fn an_envelope_from_another_schema_answers_unreadable_and_keeps_the_file() {
++            let scratch = Scratch::new("tamper-schema");
++            let store = scratch.store();
++            store.write(b"{\"wxid\":\"wxid_probe\"}").expect("write the login");
++            let path = store.state_path();
++            let mut doc: Value =
++                serde_json::from_slice(&std::fs::read(&path).expect("the file is there"))
++                    .expect("an envelope");
++            doc["schema"] = json!("puppet-neo/stored-login/2");
++            std::fs::write(&path, serde_json::to_vec(&doc).expect("an envelope")).expect("rewrite");
++            assert_eq!(store.read().err(), Some(Miss::Unreadable));
++            assert!(path.exists(), "an unreadable login is kept, never deleted");
++        }
++
++        #[test]
++        fn a_different_key_answers_unreadable_and_keeps_the_file() {
++            let scratch = Scratch::new("wrong-key");
++            let store = scratch.store();
++            store.write(b"{\"wxid\":\"wxid_probe\"}").expect("write the login");
++            write_key(&scratch.key_file, &[9u8; KEY_LEN]);
++            let other = scratch.store();
++            assert_eq!(other.read().err(), Some(Miss::Unreadable));
++            assert!(other.present(), "the file is still there");
++        }
++
++        #[test]
++        fn a_corrupted_envelope_answers_unreadable_and_keeps_the_file() {
++            let scratch = Scratch::new("garbage");
++            let store = scratch.store();
++            std::fs::write(store.state_path(), b"not an envelope").expect("write garbage");
++            assert_eq!(store.read().err(), Some(Miss::Unreadable));
++            assert!(store.present());
++        }
++
++        #[test]
++        fn delete_removes_the_login_and_a_second_delete_succeeds() {
++            let scratch = Scratch::new("delete");
++            let store = scratch.store();
++            store.write(b"{}").expect("write the login");
++            store.delete().expect("delete the login");
++            assert!(!store.present());
++            assert_eq!(store.read().err(), Some(Miss::Absent));
++            store
++                .delete()
++                .expect("deleting a login that is already gone is the state the caller asked for");
++        }
++
++        #[test]
++        fn the_sixth_resume_in_an_hour_is_allowed_and_the_seventh_is_not() {
++            let scratch = Scratch::new("throttle-hour");
++            let store = scratch.store();
++            let now = 1_800_000_000u64;
++            for attempt in 1..=RESUMES_PER_HOUR {
++                assert_eq!(
++                    store.allow_resume(now + attempt as u64).as_str(),
++                    "allowed",
++                    "resume {attempt}"
++                );
++            }
++            assert_eq!(
++                store.allow_resume(now + 60).as_str(),
++                "throttled",
++                "the seventh attempt inside an hour"
++            );
++        }
++
++        #[test]
++        fn an_attempt_an_hour_old_drops_out_of_the_hourly_window() {
++            let scratch = Scratch::new("throttle-window");
++            let store = scratch.store();
++            let now = 1_800_000_000u64;
++            for attempt in 0..RESUMES_PER_HOUR {
++                assert_eq!(
++                    store.allow_resume(now + attempt as u64).as_str(),
++                    "allowed",
++                    "resume {attempt}"
++                );
++            }
++            assert_eq!(
++                store.allow_resume(now + HOUR).as_str(),
++                "allowed",
++                "the oldest attempt is an hour old and no longer counts"
++            );
++        }
++
++        #[test]
++        fn twenty_resumes_in_a_day_are_the_daily_limit() {
++            let scratch = Scratch::new("throttle-day");
++            let store = scratch.store();
++            let now = 1_800_000_000u64;
++            let step = HOUR + 60;
++            for attempt in 0..RESUMES_PER_DAY {
++                assert_eq!(
++                    store.allow_resume(now + attempt as u64 * step).as_str(),
++                    "allowed",
++                    "resume {attempt}"
++                );
++            }
++            assert_eq!(
++                store.allow_resume(now + RESUMES_PER_DAY as u64 * step).as_str(),
++                "throttled",
++                "the twenty-first attempt inside a day"
++            );
++        }
++
++        #[test]
++        fn an_unparsable_counter_file_answers_throttled_and_is_left_alone() {
++            let scratch = Scratch::new("throttle-garbage");
++            let store = scratch.store();
++            let garbage = b"1\nnot-a-second\n2\n";
++            std::fs::write(store.resumes_path(), garbage).expect("write garbage counters");
++            assert_eq!(
++                store.allow_resume(1_800_000_000).as_str(),
++                "throttled",
++                "counters it cannot trust fail closed"
++            );
++            assert_eq!(
++                std::fs::read(store.resumes_path()).expect("the counter file is there"),
++                garbage,
++                "a counter file it could not read is not rewritten"
++            );
++        }
++    }
++}

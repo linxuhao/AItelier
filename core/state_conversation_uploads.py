@@ -471,18 +471,36 @@ def _ref_store(conn, project_id: str, ref: str) -> str | None:
 
 def open_for_display(service, project_id: str, media_id, directory, root=None):
     """(open binary handle, mime, kind, size) of one attachment of `project_id`'s conversation,
-    for a reader of that conversation: the same verdict as the conversation read
-    (`list_user_conversation`, judged here from the service's own trust, so a public-view or
-    anonymous service is refused ProjectPrivate before any row is read). LookupError
-    (UNKNOWN_MEDIA) when this conversation does not name the id or the library row's file
-    would leave its subdirectory; FileNotFoundError("gone") when the file was there and no
-    longer is. The file is opened before this returns."""
+    for a PERSON reading that conversation in the panel (7.8.12a "显示", "隐私"):
+
+    - the conversation read's verdict (`list_user_conversation`, judged here from the
+      service's own trust, so a public-view or anonymous service is refused ProjectPrivate
+      before any row is read);
+    - never a driver token, on any project: the panel is this route's only reader, and every
+      host reads its own library (a director the staged upload as a delivery target, through
+      open_for_target), so no driver - member, steward, director of another project or any
+      other registered token - is given the bytes here;
+    - on the steward's project only the owner (the project user, as the upload route asks).
+
+    Each of these is ProjectPrivate (403). Uploads nobody came for in 7 days are swept first,
+    so a stopped director's upload turns 410 here too. LookupError (UNKNOWN_MEDIA) when this
+    conversation does not name the id or the library row's file would leave its subdirectory;
+    FileNotFoundError("gone") when the file was there and no longer is. The file is opened
+    before this returns."""
     from core import media_library
+    from core.state_commands import ProjectPrivate
     from core.state_privacy import refuse_private_read, trust_of
+    from core.state_steward import steward_project
     refuse_private_read(trust_of(service), "list_user_conversation")
+    if getattr(service, "driver_id", None):
+        raise ProjectPrivate()
     store = service.store
     with store.transaction() as conn:
         pid = store._project(conn, project_id)["project_id"]
+    if pid == steward_project() and not service.driver_inbox._project_user():
+        raise ProjectPrivate()
+    sweep(store, directory)
+    with store.transaction() as conn:
         row = where = None
         if isinstance(media_id, str) and media_types.UPLOAD_ID.fullmatch(media_id):
             row = conn.execute(f"SELECT state, store, ref, mime, kind FROM {TABLE} "

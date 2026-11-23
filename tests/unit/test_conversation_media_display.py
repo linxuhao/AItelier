@@ -164,6 +164,77 @@ def test_a_non_reader_an_anonymous_request_and_a_public_read_are_403_even_on_a_p
     assert show(client, "alpha", upload_id).status_code == 200
 
 
+def test_no_driver_token_gets_the_bytes_on_any_project(world, client, media_root):
+    """PRIV-1: a registered driver token passes require_reader, but no host reads through the
+    panel's route - the steward's token, a director's, and a driver that is no member of the
+    project all get 403, on the steward's project (an owner upload, a relayed channel image)
+    and on a director's (a director's sent ref)."""
+    from tests.unit.test_conversation_upload_ack import token_headers
+    world.tokens["outsider"] = world.registry.register("outsider", "outsider", actor="test")["token"]
+    home_upload = uploaded(client, IMAGE, project=HOME, name="medical-scan.png")
+    send(client, [home_upload], project=HOME, key="home-1")
+    shelve(media_root, STEWARD_MEMORY_USER, REF_A, IMAGE)
+    relayed(world, client, [REF_A])
+    shelve(media_root, "d-" + driver_id(world, "director"), REF_B, IMAGE)
+    driver_says(world, "director", "alpha", [REF_B])
+    for project, media_id in ((HOME, home_upload), (HOME, REF_A), ("alpha", REF_B)):
+        assert show(client, project, media_id).status_code == 200, (project, media_id)
+        for name in ("steward", "director", "outsider"):
+            r = show(client, project, media_id, headers=token_headers(world.tokens[name]))
+            assert r.status_code == 403, (project, media_id, name, r.status_code)
+            assert IMAGE not in r.content
+
+
+def test_the_verdict_is_judged_in_open_for_display_itself(world, client, media_root):
+    """TQ-1 and PRIV-1, below the route: a public-view or anonymous service, any driver service,
+    and a person who is not the owner on the steward's project are refused by the function
+    (require_reader is not what refuses them); that person still reads a director's project."""
+    from core import media_library
+    from core.state_commands import ProjectPrivate
+    from core.state_conversation_uploads import open_for_display
+    upload_id = uploaded(client, IMAGE)
+    send(client, [upload_id])
+    home_upload = uploaded(client, IMAGE, project=HOME)
+    directory = media_library.staging_dir()
+    # Opened to the public, so nothing below the verdict (the store's unopened-project check)
+    # refuses the public view or the anonymous service on its own.
+    StateService(world.db, actor="fixture", project_read_trusted=True).store.set_project_access(
+        "alpha", "public", "fixture")
+    refused = {
+        "public view": (StateService(world.db, actor="owner:" + OWNER, project_read_trusted=False), "alpha", upload_id),
+        "anonymous": (StateService(world.db, actor="anonymous", project_read_trusted=False), "alpha", upload_id),
+        "driver": (driver_service(world, "director"), "alpha", upload_id),
+        "steward driver": (driver_service(world, "steward"), HOME, home_upload),
+        "reader on the steward's project": (StateService(world.db, actor="reader@example.test", project_read_trusted=True),
+                                            HOME, home_upload),
+    }
+    for label, (service, project, media_id) in refused.items():
+        with pytest.raises(ProjectPrivate):
+            open_for_display(service, project, media_id, directory)
+        assert label
+    reader = StateService(world.db, actor="reader@example.test", project_read_trusted=True)
+    handle, mime, kind, size = open_for_display(reader, "alpha", upload_id, directory)
+    with handle:
+        assert (handle.read(), mime, kind, size) == (IMAGE, "image/png", "image", len(IMAGE))
+    owner = StateService(world.db, actor="owner:" + OWNER, project_read_trusted=True)
+    handle, *_ = open_for_display(owner, HOME, home_upload, directory)
+    handle.close()
+
+
+def test_an_upload_nobody_came_for_in_7_days_is_gone_on_the_display_route_too(world, client, media_root):
+    """Nit C4: the sweep also runs from the display route, so a stopped director's upload is
+    410 here (and refused gone in the conversation) without another upload, fetch or ack."""
+    upload_id = uploaded(client, IMAGE)
+    send(client, [upload_id])
+    assert show(client, "alpha", upload_id).status_code == 200
+    raw(world, "UPDATE state_conversation_uploads SET created_at='2026-01-01T00:00:00.000000+00:00' WHERE upload_id=?",
+        (upload_id,))
+    assert show(client, "alpha", upload_id).status_code == 410
+    (entry,) = next(m for m in StateService(world.db, actor="owner:" + OWNER, project_read_trusted=True)
+                    .driver_inbox.list_user_conversation("alpha")["messages"] if m.get("attachments"))["attachments"]
+    assert entry["refused"] == "gone"
+
+
 # --- u_ ---------------------------------------------------------------------------------------
 
 def test_an_upload_is_served_from_staging_before_the_ack_and_from_the_library_after(world, client, media_root):

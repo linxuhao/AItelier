@@ -233,7 +233,9 @@ async def conversation_media(project_id: str, media_id: str, service=Depends(get
     conversation, for the panel's thumbnails, voice player and file downloads.
 
     Who: `require_reader` and the conversation read's own verdict, so an anonymous request and
-    one carrying `X-AItelier-Read-As` are 403 even on a public project. Which: `u_...` (a
+    one carrying `X-AItelier-Read-As` are 403 even on a public project; a driver token is 403 on
+    every project (hosts read their own libraries), and on the steward's project only the owner
+    gets the bytes. Which: `u_...` (a
     dashboard upload: staging, then the library after the first ack), `m_...` named by this
     conversation (core.state_conversation_uploads.open_for_display); anything else is 404, a
     file that was cleaned is 410 `gone`. Headers as workspace_raw: the type the magic bytes

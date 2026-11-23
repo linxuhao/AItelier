@@ -4,12 +4,14 @@ What it runs: one ``node --test`` invocation from the repository root, and nothi
 Its argv is ``[<node>, "--test", "integrations/wechat-bridge/bridge.test.mjs"]`` -- the file
 named explicitly, with the path the package's own npm script uses (``package.json``'s
 ``test`` script), so the suite is run exactly the way its author runs it. The floor is
-``\u2139 tests 120`` / ``\u2139 pass 120`` / ``\u2139 fail 0``, measured in the shipped image on
-2026-11-23 with the repaired group media sender probe and its eight witnesses -- the newest two
+``\u2139 tests 121`` / ``\u2139 pass 121`` / ``\u2139 fail 0``, measured in the shipped image on
+2026-11-23 with the repaired group media sender probe and its nine witnesses -- the newest three
 hold the probe's linear base64 validator against the regex it replaced (a differential case over
-every string of length 0..6 and a boundary list) and check that content shaped
-``<data>=<other>`` prints ``contentBytes=0`` (node v24.22.3, pytest wall clock 13 s). The
-earlier floor, 118, was the same suite with the probe and its six witnesses; the one before that,
+every string of length 0..6 and a boundary list), check that content shaped
+``<data>=<other>`` prints ``contentBytes=0``, and read a content accessor that answers once
+exactly once when that one answer is ``undefined`` (node v24.22.3, pytest wall clock 14 s). The
+earlier floor, 120, was the same suite with the probe and its eight witnesses; the one before
+that, 118, was the same suite with the probe and its six witnesses; the one before that,
 116, was the same suite with the probe and its original four witnesses; the one before that, 112,
 was before that probe; the one before that, 110, was before the send-refusal log lines and their
 two witnesses were added; the one before that, 68, was before the bridge's media store and its
@@ -101,8 +103,8 @@ class Suite:
 BRIDGE = Suite(
     name="wechat-bridge",
     file="integrations/wechat-bridge/bridge.test.mjs",
-    expected_tests=120,
-    expected_pass=120,
+    expected_tests=121,
+    expected_pass=121,
 )
 
 

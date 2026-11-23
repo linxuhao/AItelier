@@ -1105,6 +1105,28 @@ test('group media sender probe: a one-shot talker, room id and content getter st
   } finally { await s.bridge.close(); }
 });
 
+test('group media sender probe: a content getter whose one answer is undefined is still read once', async () => {
+  const logs = [];
+  const s = await mediaBridge({ log: line => logs.push(line) });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    const medium = mediaMessage({ kind: 'image', id: 'absent-content', roomId: ROOM, from: ROOM, xml: XML.image(5), bytes: Buffer.from('PHOTO') });
+    let contentReads = 0;
+    Object.defineProperty(medium.payload, 'content', { configurable: true,
+      get() { if (++contentReads > 1) throw new Error('payload.content answered already'); return undefined; } });
+    bot.emit('message', medium);
+    const [, body] = await s.json('/events?after=0');
+    assert.deepEqual(body.events.map(e => [e.type, e.message_ref, e.sender_ref]),
+      [['group_message', 'absent-content', ROOM]]);
+    assert.equal(contentReads, 1, 'the payload content was read once, absent or not');
+    assert.deepEqual(logs.filter(line => line.startsWith('group media sender probe:')),
+      ['group media sender probe: type=6 senderIsRoom=true contentBytes=0 '
+        + 'prefixBytes=0 prefixShape=empty prefixHash=- wxidTokens=0 chatroomTokens=0']);
+    assert.ok(!logs.some(line => line.startsWith('message skipped')), logs.join('\n'));
+  } finally { await s.bridge.close(); }
+});
+
 test('media: the bounds are code constants', () => {
   assert.deepEqual({ ...MEDIA_LIMITS }, { image: 20 * 1048576, file: 25 * 1048576, voiceSource: 2 * 1048576, voiceMs: 125000,
     voiceWavMax: 12 * 1048576, voiceWavUnknown: 6 * 1048576, sendBody: 25 * 1048576 });

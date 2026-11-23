@@ -367,13 +367,12 @@ const count = value => {
  *  one, must agree (a 49 the fork files as Unknown is taken by its raw type). A file is let in
  *  only when the payload carries its XML and that says appmsg type 6 and quotes nothing: a
  *  quoted reply (49/57), or a 49 whose XML cannot be read, is never let in. Sizes and the file name are what WeChat's
- *  XML reports (not trusted: GET /media/:media_id counts the real bytes). */
-/** `rawContent` defaults to the message's own payload content; callers that already read it
- *  (the group relay reads it once for both `mediaOf` and the sender probe) pass that value so
- *  a puppet whose accessor answers only once is read once. The sentinel, rather than an
- *  `undefined` default, keeps an explicitly passed absent content from causing a second read. */
-const CONTENT_UNSET = Symbol('content not supplied');
-export function mediaOf(message, types, limits = MEDIA_LIMITS, rawContent = CONTENT_UNSET) {
+ *  XML reports (not trusted: GET /media/:media_id counts the real bytes).
+ *  `rawContent` is the message's own payload content unless a caller that already read it
+ *  passes that reading (the group relay reads it once for `mediaOf` and the sender probe). It
+ *  is a rest argument and not an `undefined` default, so a one-read accessor whose one answer
+ *  was `undefined` is still read once. */
+export function mediaOf(message, types, limits = MEDIA_LIMITS, ...rawContent) {
   const type = message.type();
   const kinds = [['image', types.Message?.Image, 3], ['voice', types.Message?.Audio, 34], ['file', types.Message?.Attachment, 49]];
   const payload = message.payload ?? {};
@@ -383,7 +382,7 @@ export function mediaOf(message, types, limits = MEDIA_LIMITS, rawContent = CONT
   if (!found) return undefined;
   const [kind, , raw] = found;
   if (payload.messageType !== undefined && payload.messageType !== raw) return undefined;
-  const xml = contentXml(rawContent === CONTENT_UNSET ? message?.payload?.content : rawContent);
+  const xml = contentXml(rawContent.length ? rawContent[0] : message?.payload?.content);
   if (kind === 'file' && (xml === undefined || /<refermsg[\s>]/.test(xml)
     || element(xml.slice(xml.indexOf('<appmsg')), 'type') !== '6')) return undefined;
   const described = { kind };
@@ -525,20 +524,21 @@ export function groupBindAttempt(text) {
 
 /** The old base64 regex (`^(?:[A-Za-z0-9+/]{4})*(?:..==|...=)?$`) recursed once per four
  *  characters and threw RangeError past about 4,473,912 characters, dropping the whole
- *  message. This accepts exactly the same strings in one linear pass and without copying:
+ *  message. This answers the same for every string the regex could answer, in one linear pass
+ *  and without copying:
  *  a multiple of four, `[A-Za-z0-9+/]` throughout, and at the end either nothing, a single
  *  `=`, or `==` - and `==` only when the last two characters are both `=`. No regex scans
  *  the (possibly huge) encoded input. */
 export function isBase64Content(value) {
   if (typeof value !== 'string' || value.length % 4 !== 0) return false;
   const length = value.length;
-  // One trailing `=` is padding; a second one only when the last character is `=` too, so a
-  // string shaped `<four data chars>=<one non-`=` char>`, such as `AAAAAA=A`, is not padding.
+  // One trailing `=` is padding; a second one only when the character before it is `=` too, so
+  // an `=` with any data character after it, such as `AAAAAA=A`, is not padding.
   let padding = 0;
   if (length && value.charCodeAt(length - 1) === 0x3d) padding = 1;
   if (padding && length > 1 && value.charCodeAt(length - 2) === 0x3d) padding = 2;
-  // With length a multiple of four, padding 1 leaves three data characters and padding 2
-  // leaves two: exactly the `{3}=` / `{2}==` forms the regex accepted (plus the empty string).
+  // With length a multiple of four, padding 1 leaves three data characters in the last block
+  // and padding 2 leaves two: the `{3}=` / `{2}==` forms the regex accepted (plus the empty string).
   for (let i = 0; i < length - padding; i++) {
     const code = value.charCodeAt(i);
     if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39)

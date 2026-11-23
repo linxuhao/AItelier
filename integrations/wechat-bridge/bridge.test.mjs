@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, chmodSync, statSync, symlinkSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, chmodSync, statSync, symlinkSync, existsSync, rmSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1404,7 +1404,7 @@ test('media: an owner\'s held photo survives 600 strangers (half with files): st
 
 // --- described attachments across a restart -------------------------------------------------
 // Two consecutive createBridge calls over one state directory stand for two processes: each
-// gets its own bot and its own rings, and the second has no message a puppet could hand over.
+// gets its own bot and its own rings, and the second holds no live entry: its stub emits no message.
 // The bounded store in that directory is the only thing that crosses the restart.
 const storedBridge = (dir, options = {}) => mediaBridge({ savedLogin: accountRecord(dir), ...options });
 
@@ -1568,6 +1568,205 @@ test('media restart: an attachment whose bytes cross the bound is not stored', a
     assert.deepEqual(readdirSync(join(state, MEDIA_STORE_DIR)), []);
     assert.deepEqual((await fetchMedia(s, mediaId)).slice(0, 1), [413], 'the live refusal is unchanged');
   } finally { await s.bridge.close(); }
+});
+
+test('media restart: the stored answer of a voice carries the headers a live answer carries, its duration too', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const bytes = wav(32000, 3200); // 16 kHz mono 16-bit, 100 ms
+  const HEADERS = ['content-type', 'content-length', 'cache-control', 'x-voice-duration-ms'];
+  const headers = answer => Object.fromEntries(HEADERS.map(name => [name, answer.headers.get(name) ?? null]));
+  const first = await storedBridge(state);
+  let second, firstOpen = true;
+  try {
+    const bot = await first.login();
+    bot.emit('message', mediaMessage({ kind: 'voice', id: 'voice-across', xml: XML.voice(3000), bytes }));
+    const [, body] = await first.json('/events?after=0');
+    const mediaId = body.events[0].attachments[0].media_id;
+    const live = await first.call('/media/' + mediaId);
+    const liveHeaders = headers(live);
+    assert.equal(Buffer.from(await live.arrayBuffer()).length, bytes.length);
+    assert.equal(liveHeaders['x-voice-duration-ms'], '100', 'a live voice answer carries its length');
+    await until(() => first.bridge.storedIds().includes(mediaId));
+    const liveAgain = await first.call('/media/' + mediaId);
+    const liveAgainHeaders = headers(liveAgain);
+    await liveAgain.arrayBuffer();
+    assert.deepEqual(liveAgainHeaders, liveHeaders, 'the live answer carries those headers before and after the copy landed');
+    await first.bridge.close();
+    firstOpen = false;
+
+    second = await storedBridge(state);
+    assert.equal(second.bridge.live, 0, 'the next process holds no live entry');
+    const stored = await second.call('/media/' + mediaId);
+    const storedBytes = Buffer.from(await stored.arrayBuffer());
+    assert.deepEqual([stored.status, storedBytes.length], [200, bytes.length]);
+    assert.deepEqual(headers(stored), liveHeaders, 'the stored answer carries the same headers as a live one');
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
+});
+
+test('media restart: a payload whose metadata never landed is not an entry and is never served', async () => {
+  // "Publishes its metadata last": the payload is in place while the metadata is not yet, and
+  // what a reader then sees is no entry at all.
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const dir = join(state, MEDIA_STORE_DIR);
+  const payload = Buffer.from('PAYLOAD-WITHOUT-METADATA');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '111.0.bin'), payload);
+  const s = await storedBridge(state);
+  try {
+    assert.deepEqual(s.bridge.storedIds(), [], 'a payload without its metadata is not an entry');
+    assert.equal(s.bridge.storeBytes, 0);
+    assert.deepEqual(await s.json('/media/111.0'), [404, { error: 'not_found' }], 'it is not served');
+    assert.equal(readFileSync(join(dir, '111.0.bin')).toString(), payload.toString(), 'the bytes were left where they were');
+  } finally { await s.bridge.close(); }
+  // The other half of the ordering: metadata whose payload never landed is not an entry either.
+  const other = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const otherDir = join(other, MEDIA_STORE_DIR);
+  mkdirSync(otherDir, { recursive: true });
+  writeFileSync(join(otherDir, '222.0.json'), JSON.stringify({ v: 1, size: payload.length, mime: 'image/jpeg' }));
+  const t = await storedBridge(other);
+  try {
+    assert.deepEqual(t.bridge.storedIds(), [], 'metadata without its payload is not an entry');
+    assert.deepEqual(readdirSync(otherDir), [], 'the metadata whose payload is missing is discarded');
+    assert.deepEqual(await t.json('/media/222.0'), [404, { error: 'not_found' }]);
+  } finally { await t.bridge.close(); }
+});
+
+test('media restart: a payload that is a link is refused at construction, never served', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const dir = join(state, MEDIA_STORE_DIR);
+  const victim = join(state, 'victim.bin');
+  const payload = Buffer.from('ORIGINAL');
+  const stolen = Buffer.from('STOLEN!!'); // the same 8 bytes, so only the link check refuses it
+  const first = await storedBridge(state);
+  let second, firstOpen = true;
+  let mediaId;
+  try {
+    const bot = await first.login();
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'linked-down', bytes: payload }));
+    const [, body] = await first.json('/events?after=0');
+    mediaId = body.events[0].attachments[0].media_id;
+    await until(() => first.bridge.storedIds().includes(mediaId));
+    await first.bridge.close();
+    firstOpen = false;
+
+    writeFileSync(victim, stolen);
+    rmSync(join(dir, `${mediaId}.bin`));
+    symlinkSync(victim, join(dir, `${mediaId}.bin`));
+    second = await storedBridge(state);
+    assert.deepEqual(second.bridge.storedIds(), [], 'the link is not an entry');
+    assert.deepEqual(await second.json('/media/' + mediaId), [404, { error: 'not_found' }], 'a link at the payload path is not served');
+    assert.deepEqual(readdirSync(dir).filter(name => name.startsWith(mediaId)), [], 'both of its files were discarded');
+    assert.equal(readFileSync(victim).toString(), stolen.toString(), 'the link target was never read as media');
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
+});
+
+test('media restart: a stored payload swapped for a link while the bridge runs is refused, never served', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const dir = join(state, MEDIA_STORE_DIR);
+  const victim = join(state, 'victim.bin');
+  const payload = Buffer.from('ORIGINAL');
+  const stolen = Buffer.from('STOLEN!!'); // same 8 bytes: a size check alone would let it through
+  const first = await storedBridge(state);
+  let s, firstOpen = true;
+  let mediaId;
+  try {
+    const bot = await first.login();
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'linked-live', bytes: payload }));
+    const [, body] = await first.json('/events?after=0');
+    mediaId = body.events[0].attachments[0].media_id;
+    await until(() => first.bridge.storedIds().includes(mediaId));
+    await first.bridge.close();
+    firstOpen = false;
+
+    // This process indexed the entry, holds no live message for it, and the link is planted
+    // after its store was built: only get()'s open can refuse it.
+    s = await storedBridge(state);
+    assert.deepEqual(s.bridge.storedIds(), [mediaId], 'the entry is in the index, so get(id) reads it');
+    writeFileSync(victim, stolen);
+    rmSync(join(dir, `${mediaId}.bin`));
+    symlinkSync(victim, join(dir, `${mediaId}.bin`));
+    assert.deepEqual(await s.json('/media/' + mediaId), [404, { error: 'not_found' }], 'the link is not followed');
+    assert.deepEqual(s.bridge.storedIds(), [], 'the unreadable entry was dropped');
+    assert.deepEqual(readdirSync(dir).filter(name => name.startsWith(mediaId)), [], 'its files were discarded');
+    assert.equal(readFileSync(victim).toString(), stolen.toString(), 'the link target was never read as media');
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (s) await s.bridge.close();
+  }
+});
+
+test('media restart: an id removed from the store leaves neither its payload nor its metadata on disk', async () => {
+  // Evicted by the byte cap.
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const dir = join(state, MEDIA_STORE_DIR);
+  const s = await storedBridge(state, { mediaStoreBytes: 25 });
+  try {
+    const bot = await s.login();
+    const ids = [];
+    for (const label of ['AAA', 'BBB', 'CCC']) {
+      const bytes = Buffer.from(label.repeat(3) + '\n');
+      bot.emit('message', mediaMessage({ kind: 'file', id: 'rm-' + label, xml: XML.file(bytes.length), bytes }));
+      ids.push((await s.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id);
+    }
+    await until(() => s.bridge.storedIds().includes(ids[2]) && s.bridge.storeCount === 2);
+    assert.deepEqual(s.bridge.storedIds(), ids.slice(1), 'the oldest copy was evicted');
+    assert.deepEqual([existsSync(join(dir, `${ids[0]}.bin`)), existsSync(join(dir, `${ids[0]}.json`))], [false, false],
+      'the evicted id left neither its payload nor its metadata');
+    assert.deepEqual(readdirSync(dir).sort(), [`${ids[1]}.bin`, `${ids[1]}.json`, `${ids[2]}.bin`, `${ids[2]}.json`].sort(),
+      'the kept ids still have both of their files');
+  } finally { await s.bridge.close(); }
+  // Cut off the ring: the same two files.
+  const cutState = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const cutDir = join(cutState, MEDIA_STORE_DIR);
+  const cut = await storedBridge(cutState, { ringSize: 1 });
+  try {
+    const bot = await cut.login();
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'cut-first', bytes: Buffer.from('FIRST') }));
+    const cutId = (await cut.json('/events?after=0'))[1].events[0].attachments[0].media_id;
+    await until(() => cut.bridge.storedIds().includes(cutId));
+    bot.emit('message', mediaMessage({ kind: 'image', id: 'cut-second', bytes: Buffer.from('SECOND') }));
+    const keptId = (await cut.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id;
+    await until(() => !cut.bridge.storedIds().includes(cutId) && cut.bridge.storedIds().includes(keptId));
+    assert.deepEqual(readdirSync(cutDir).sort(), [`${keptId}.bin`, `${keptId}.json`].sort(),
+      'the id whose event left the ring left neither its payload nor its metadata');
+  } finally { await cut.bridge.close(); }
+});
+
+test('media restart: the byte cap can drop the copy of an event still in its ring; the next process answers 404', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wechat-bridge-state-'));
+  const first = await storedBridge(state, { mediaStoreBytes: 25 });
+  let second, firstOpen = true;
+  try {
+    const bot = await first.login();
+    const ids = [];
+    for (const label of ['AAA', 'BBB', 'CCC']) {
+      const bytes = Buffer.from(label.repeat(3) + '\n');
+      bot.emit('message', mediaMessage({ kind: 'file', id: 'cap-' + label, xml: XML.file(bytes.length), bytes }));
+      ids.push((await first.json('/events?after=0'))[1].events.at(-1).attachments[0].media_id);
+    }
+    await until(() => first.bridge.storedIds().includes(ids[2]) && first.bridge.storeCount === 2);
+    assert.deepEqual(first.bridge.storedIds(), ids.slice(1), 'the cap evicted the oldest copy');
+    assert.equal(first.bridge.live, 3, 'all three events are still in their ring, so all three ids are live');
+    const [status, bytes] = await fetchMedia(first, ids[0]);
+    assert.deepEqual([status, bytes.toString()], [200, 'AAAAAAAAA\n'], 'the process that described it still serves it live');
+    await first.bridge.close();
+    firstOpen = false;
+
+    second = await storedBridge(state, { mediaStoreBytes: 25 });
+    assert.deepEqual(second.bridge.live, 0);
+    assert.deepEqual(second.bridge.storedIds(), ids.slice(1));
+    assert.deepEqual(await second.json('/media/' + ids[0]), [404, { error: 'not_found' }],
+      'the copy the cap evicted is not served after a restart');
+  } finally {
+    if (firstOpen) await first.bridge.close();
+    if (second) await second.bridge.close();
+  }
 });
 
 test('send-file: the plan follows what the fork can send: a bubble JPEG as an image, voice-bar PCM as a voice, the rest as a file', () => {

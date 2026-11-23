@@ -81,13 +81,16 @@ const WAV_HEADER_SLACK = 4096;
  *  failed `attempts` times: then it is gone (410), so one file never holds the owner's later
  *  messages forever. */
 export const MEDIA_FETCH = Object.freeze({ firstByteMs: 30_000, totalMs: 120_000, attempts: 5 });
-/** The bytes of described attachments kept on disk so a later process can answer GET /media
- *  without asking the puppet for a message it no longer holds. The bound is 64 MiB: the rings
- *  could hold RING_SIZE 500 + GROUP_RING_SIZE 200 + STRANGER_RING_SIZE 50 = 750 described
- *  attachments at MEDIA_LIMITS.file's 25 MiB, i.e. 18,750 MiB, so an eager copy of a full ring
- *  is not acceptable; 64 MiB holds two 25 MiB files and smaller ones besides. Eviction is
- *  oldest-described-first (the smallest media_id sequence number), and an id whose event
- *  leaves a ring is removed at once. */
+/** The bytes of described attachments kept on disk, so a process whose live map holds no entry
+ *  for an id answers GET /media for it from the copy instead of asking its puppet. The bound is
+ *  64 MiB: the rings could hold RING_SIZE 500 + GROUP_RING_SIZE 200 + STRANGER_RING_SIZE 50 =
+ *  750 described attachments at MEDIA_LIMITS.file's 25 MiB, i.e. 18,750 MiB, so an eager copy of
+ *  a full ring is not acceptable; 64 MiB holds two 25 MiB files and smaller ones besides.
+ *  Eviction is oldest-described-first (the smallest media_id sequence number), and an id whose
+ *  event leaves a ring is removed at once. The bound is not the rings': it can evict the copy of
+ *  an id whose event is still live. That process still serves the id on demand (the live path),
+ *  but a later process, holding no live entry for it, answers 404 - the same answer as for an id
+ *  that was never copied. */
 export const MEDIA_STORE_BYTES = 64 * MiB;
 export const MEDIA_STORE_DIR = 'media';
 /** A puppet error that says this message will never be handed over (neo's refusal of a peer it
@@ -197,9 +200,12 @@ const mediaSeq = id => Number(id.slice(0, id.indexOf('.')));
 /** The durable copy of described attachments, in its own subdirectory of the bridge's
  *  account directory (the directory accountRecord is given). `bytes` bounds the SUM of the
  *  stored payload sizes; `put(id, {file, size, mime, durationMs})` moves a spooled 0600 file
- *  into it and publishes its metadata last, `get(id)` opens a stored payload without
- *  following links, and `remove(id)` deletes both. The index is rebuilt from the metadata at
- *  construction, so the next process serves the same ids. */
+ *  into it and publishes its metadata last, so an entry exists only once its metadata has
+ *  landed: the index is read from the metadata files alone, and a payload without one is not
+ *  an entry and is never served. `get(id)` opens a stored payload without following links (a
+ *  link at the payload path is refused and the id dropped), and `remove(id)` deletes both
+ *  files. The index is rebuilt from the metadata at construction, so the next process serves
+ *  the same ids. */
 export function mediaStore(dir, { bytes = MEDIA_STORE_BYTES, log = () => {} } = {}) {
   const root = dir ? join(dir, MEDIA_STORE_DIR) : undefined;
   const entries = new Map();
@@ -527,7 +533,8 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
    *  just before its event is pushed and leaves when that event is cut off a ring's head
    *  (`push`), so it never outlives its event; a restart empties this map. The bytes described
    *  here are also copied into `store` (when the account directory is available), so a later
-   *  process can answer the same media_id without a puppet that no longer holds the message. */
+   *  process whose live map holds no entry for the media_id answers it from the copy, without
+   *  asking its own puppet. */
   const live = new Map();
   const store = savedLogin?.dir ? mediaStore(savedLogin.dir, { bytes: mediaStoreBytes, log }) : undefined;
   let fetching = false;
@@ -1080,8 +1087,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     })();
   }
 
-  /** A stored id from an earlier process: answer from the copy, with the same headers a live
-   *  answer carries, and without asking a puppet that no longer holds the message. */
+  /** A stored id from an earlier process: answer from the copy - this process holds no live
+   *  entry for it - with the headers a live answer carries (content-type, content-length,
+   *  cache-control, and x-voice-duration-ms for a voice), and without asking the puppet. */
   function serveStored(stored, response) {
     let bytes;
     try { bytes = readFileSync(stored.fd); } finally { closeSync(stored.fd); }

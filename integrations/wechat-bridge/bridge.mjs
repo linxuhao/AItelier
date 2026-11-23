@@ -367,8 +367,12 @@ const count = value => {
  *  one, must agree (a 49 the fork files as Unknown is taken by its raw type). A file is let in
  *  only when the payload carries its XML and that says appmsg type 6 and quotes nothing: a
  *  quoted reply (49/57), or a 49 whose XML cannot be read, is never let in. Sizes and the file name are what WeChat's
- *  XML reports (not trusted: GET /media/:media_id counts the real bytes). */
-export function mediaOf(message, types, limits = MEDIA_LIMITS) {
+ *  XML reports (not trusted: GET /media/:media_id counts the real bytes).
+ *  `rawContent` is the message's own payload content unless a caller that already read it
+ *  passes that reading (the group relay reads it once for `mediaOf` and the sender probe). It
+ *  is a rest argument and not an `undefined` default, so a one-read accessor whose one answer
+ *  was `undefined` is still read once. */
+export function mediaOf(message, types, limits = MEDIA_LIMITS, ...rawContent) {
   const type = message.type();
   const kinds = [['image', types.Message?.Image, 3], ['voice', types.Message?.Audio, 34], ['file', types.Message?.Attachment, 49]];
   const payload = message.payload ?? {};
@@ -378,7 +382,7 @@ export function mediaOf(message, types, limits = MEDIA_LIMITS) {
   if (!found) return undefined;
   const [kind, , raw] = found;
   if (payload.messageType !== undefined && payload.messageType !== raw) return undefined;
-  const xml = contentXml(payload.content);
+  const xml = contentXml(rawContent.length ? rawContent[0] : message?.payload?.content);
   if (kind === 'file' && (xml === undefined || /<refermsg[\s>]/.test(xml)
     || element(xml.slice(xml.indexOf('<appmsg')), 'type') !== '6')) return undefined;
   const described = { kind };
@@ -516,6 +520,88 @@ export function groupBindAttempt(text) {
   if (!GROUP_CODE.test(code) && spaced && GROUP_CODE.test(spaced[2] + ' ' + code))
     return { prefix: spaced[1].trimEnd(), code: spaced[2] + ' ' + code };
   return GROUP_CODE.test(code) && prefix.length > 1 ? { prefix, code } : undefined;
+}
+
+/** The old base64 regex (`^(?:[A-Za-z0-9+/]{4})*(?:..==|...=)?$`) recursed once per four
+ *  characters and threw RangeError past about 4,473,912 characters, dropping the whole
+ *  message. This answers the same for every string the regex could answer, in one linear pass
+ *  and without copying:
+ *  a multiple of four, `[A-Za-z0-9+/]` throughout, and at the end either nothing, a single
+ *  `=`, or `==` - and `==` only when the last two characters are both `=`. No regex scans
+ *  the (possibly huge) encoded input. */
+export function isBase64Content(value) {
+  if (typeof value !== 'string' || value.length % 4 !== 0) return false;
+  const length = value.length;
+  // One trailing `=` is padding; a second one only when the character before it is `=` too, so
+  // an `=` with any data character after it, such as `AAAAAA=A`, is not padding.
+  let padding = 0;
+  if (length && value.charCodeAt(length - 1) === 0x3d) padding = 1;
+  if (padding && length > 1 && value.charCodeAt(length - 2) === 0x3d) padding = 2;
+  // With length a multiple of four, padding 1 leaves three data characters in the last block
+  // and padding 2 leaves two: the `{3}=` / `{2}==` forms the regex accepted (plus the empty string).
+  for (let i = 0; i < length - padding; i++) {
+    const code = value.charCodeAt(i);
+    if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39)
+      || code === 0x2b || code === 0x2f)) return false;
+  }
+  return true;
+}
+
+// A member id as the content prefix carries it: at most 32 characters of `[A-Za-z0-9_-]`. A
+// room id cannot match (its '@' is outside the set), and neither can a display name.
+const MEMBER_ID = /^[A-Za-z0-9_-]{1,32}$/;
+
+/** The member id a raw group payload content begins with, or undefined when it begins with
+ *  anything else. A group message's content is `<member>:\n<XML>` (the prefix the text path
+ *  reads, upstream/native/src/lib.rs:494-504): the poster's id is the token before the first
+ *  ':' or newline inside the bytes before the first '<'. Accepted only when it is non-empty,
+ *  at most 32 characters and made only of `[A-Za-z0-9_-]`, so a display name, a room id (its
+ *  '@' is outside that set) or an over-long run is never taken for a member id. This is the one
+ *  rule the probe below reads as `prefixShape=wxid`. `content` is the base64 payload content
+ *  the puppet carries; anything that is not base64, or has no '<' after a non-empty prefix,
+ *  yields undefined. The caller decides what to record; nothing here logs an id. */
+export function memberIdOfContent(content) {
+  if (!isBase64Content(content)) return undefined;
+  const bytes = Buffer.from(content, 'base64');
+  const at = bytes.indexOf(0x3c);
+  if (at <= 0) return undefined;
+  const token = bytes.toString('utf8', 0, at).split(/[:\n]/)[0];
+  return MEMBER_ID.test(token) ? token : undefined;
+}
+
+/** One redacted line for a group medium whose talker is the room: does its payload content
+ *  begin with the poster's member id the way a group text's does, and which wire field named
+ *  the sender the relay recorded? Only counts, a shape and a truncated digest are logged -
+ *  never the content or base64, a member id or a room id.
+ *  `senderRef`, `roomRef` and `content` come from the relay, which read each of them once, and
+ *  they are the values read off the wire - never the relay's derived sender, so
+ *  `senderIsRoom` keeps measuring the talker. The probe itself reads no payload field and
+ *  never asks for the content, the room id or the talker, because the relay hands those in.
+ *  `senderSource` names where the recorded sender came from: the content prefix when the
+ *  talker named only the room and the content begins with a member id, the talker when it
+ *  named someone, and otherwise the room the row still carries. */
+export function groupMediaSenderProbe(message, log = () => {}, { senderRef, roomRef, content } = {}) {
+  const value = message?.type?.();
+  const type = Number.isFinite(value) ? value : 0;
+  const senderIsRoom = Boolean(roomRef && senderRef === roomRef);
+  const memberId = memberIdOfContent(content);
+  const senderSource = !senderIsRoom ? 'talker' : (memberId ? 'content-prefix' : 'room');
+  const bytes = isBase64Content(content) ? Buffer.from(content, 'base64') : Buffer.alloc(0);
+  // The bytes before the XML are the text path's prefix; its digest covers all of them,
+  // while the shape reads only the token before the first ':' or newline inside them.
+  const at = bytes.indexOf(0x3c);
+  const prefixBytes = at > 0 ? at : 0;
+  let prefixShape = 'other';
+  if (!bytes.length) prefixShape = 'empty';
+  else if (memberId) prefixShape = 'wxid';
+  const prefixHash = prefixBytes
+    ? createHash('sha256').update(bytes.subarray(0, prefixBytes)).digest('hex').slice(0, 12) : '-';
+  const text = bytes.toString('utf8');
+  const wxidTokens = (text.match(/wxid_[A-Za-z0-9_-]+/g) ?? []).length;
+  const chatroomTokens = (text.match(/[0-9]+@chatroom/g) ?? []).length;
+  log(`group media sender probe: type=${type} senderIsRoom=${senderIsRoom} senderSource=${senderSource} `
+    + `contentBytes=${bytes.length} prefixBytes=${prefixBytes} prefixShape=${prefixShape} `
+    + `prefixHash=${prefixHash} wxidTokens=${wxidTokens} chatroomTokens=${chatroomTokens}`);
 }
 
 export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxWaitSeconds = MAX_WAIT_SECONDS, now = () => new Date(),
@@ -864,15 +950,25 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     const senderRef = message.talker()?.id;
     if (!roomRef || !senderRef) return false;
     const base = { room_ref: roomRef, sender_ref: senderRef, message_ref: String(message.id), ...(at ? { at } : {}) };
+    // One read of the raw content for the whole message: the description and the probe get
+    // this very value, so a puppet accessor that answers once still delivers its medium.
+    const content = message.payload?.content;
     const media = rooms.has(roomRef) && message.type() !== types.Message.Text
-      ? mediaOf(message, types, mediaLimits) : undefined;
+      ? mediaOf(message, types, mediaLimits, content) : undefined;
     if (media) {
+      // The fork makes a group non-text message's talker the room whenever the wire names no
+      // sender, but WeChat's own content begins with the poster's member id and a
+      // two-character separator before the XML. Record that derived id as the sender; the
+      // room stays the conversation, and the probe keeps reading the wire values below.
+      const memberId = senderRef === roomRef ? memberIdOfContent(content) : undefined;
+      if (senderRef === roomRef) groupMediaSenderProbe(message, log, { senderRef, roomRef, content });
       // The 1:1 path's own shape, unchanged: a description only - nothing is fetched until
       // GET /media/:media_id asks - and one over its bound has no media_id. The group ring
       // shares the one `seq`, so '<seq>.<index>' is unique across the rings.
       const called = calledText(message.text(), rooms.get(roomRef));
       const { too_large: tooLarge, ...described } = media;
-      const event = { type: 'group_message', ...base, text: called ?? '', asked: called !== undefined };
+      const event = { type: 'group_message', ...base, sender_ref: memberId ?? senderRef,
+        text: called ?? '', asked: called !== undefined };
       if (tooLarge) event.attachments = [{ ...described, too_large: true }];
       else {
         const mediaId = `${seq + 1}.0`;

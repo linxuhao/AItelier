@@ -48,6 +48,7 @@ const adapterImport = new RegExp('(?:\\bfrom\\s*|\\bimport\\s*\\(?\\s*|\\brequir
 export const EXCLUDED = [`node_modules`, join('test', 'fixtures', 'request-bodies'),
   join('package-lock.json')];
 export const SHIPPED = [
+  join('.gitignore'),
   join('conformance', 'index.mjs'),
   join('director.md'),
   join('steward.md'),

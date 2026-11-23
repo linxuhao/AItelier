@@ -53,6 +53,17 @@ export function hostWording(host) {
   return { texts, labels };
 }
 
+/** A wake event's user message. Step 24.2b (design-steward 7.8.12a "收图的路线"): the text
+ *  block, then one image block per attachment (an ImageAttachmentRef from
+ *  ctx.get('attachments').saveImage). Without images the content is exactly the one text block. */
+export const wakeEventMessage = (createUserMessage, kind, text, images = []) =>
+  createUserMessage({ content: [{ type: 'text', text }, ...images.map(attachment => ({ type: 'image', attachment }))], source: { kind } });
+
+/** api.notify: with an id through the outbox (delivered once per id#sha(text); the images ride
+ *  along and stay out of the key), without one straight to the steer. */
+export const hostNotify = (outbox, notify) => (text, options = {}) =>
+  options.id ? outbox.deliverOnce(String(options.id), text, { images: options.images }).then(() => {}) : notify(text, options.images);
+
 /** The owner's chat channels (design-steward 7.2), when the host declares them. */
 export function ownerChannelsFor(ctx, host) {
   if (!Array.isArray(host?.capabilities) || !host.capabilities.includes('channels') || !host.channels) return undefined;
@@ -293,20 +304,20 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // from "the owner wrote to me", which is exactly how a routine tick gets
   // mistaken for an unanswered message. DSH's MessageSourceMap is merge-extensible
   // (each producer declares its own kind, consumers fall through unknown ones).
-  const eventMessage = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: labels.runtimeEvent } });
-  const notify = async text => {
+  const eventMessage = (text, images) => wakeEventMessage(createUserMessage, labels.runtimeEvent, text, images);
+  const notify = async (text, images) => {
     if (disposed) return;
     // A host may hold notify from install() on; it can deliver only once the director
     // session exists (events() is called after that).
     if (!agent) throw new Error('directorHost api: notify is not available before the director session exists (events() is where delivery starts)');
-    ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text)));
+    ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text, images)));
     await ctx.sessionPersistence.flush();
   };
   // The runtime's own notices go through the outbox (recorded before delivery, replayed
   // after a restart); the host's events are delivered once per id (plugin step 7).
   // A notice is marked delivered only when it was: during shutdown delivery throws, so the
   // notice stays recorded and the next process replays it.
-  const deliver = async text => { if (disposed) throw new Error('director stopping: notice kept for replay'); await notify(text); };
+  const deliver = async (text, images) => { if (disposed) throw new Error('director stopping: notice kept for replay'); await notify(text, images); };
   const outbox = await new Outbox({ dir: config.stateDir, deliver, log: line => ctx.logger.info(line) }).load();
   // A slot is free and dispatches were refused: one wake naming them, through the
   // outbox (recorded first; its id is derived from the refusals, so a restart that
@@ -370,7 +381,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (resumed.length || failed.length) await outbox.send('resume:' + startedAt, texts.workersResumed + JSON.stringify({ resumed, failed,
       ...(failed.length ? { failed_next: 'each failed plan is still bound to its dead session: take it over with todo_rebind, or dispatch a fresh worker (batch_redispatch for batch plans)' } : {}) }));
   };
-  const notifyEvent = (text, options = {}) => options.id ? outbox.deliverOnce(String(options.id), text).then(() => {}) : notify(text);
+  const notifyEvent = hostNotify(outbox, notify);
   // The api a host gets, complete from install() on (host.d.ts DirectorApi): every
   // member exists; `agent` reads undefined and notify refuses until the session exists.
   const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,

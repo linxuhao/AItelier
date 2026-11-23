@@ -81,9 +81,13 @@ export interface DirectorApi {
    *  new event. Checked before delivery, recorded after it: a crash in between
    *  duplicates, never loses. If notify throws, the host must deliver the event again
    *  later under the same id; the conformance suite checks exactly that (a delivery
-   *  that failed comes back with the same id), and that every event carries an id. */
-  notify(text: string, options?: { id?: string }): Promise<void>;
-  eventMessage(text: string): unknown;
+   *  that failed comes back with the same id), and that every event carries an id.
+   *  Step 24.2b (design-steward 7.8.12a): `images` are ImageAttachmentRefs (ctx.get('attachments').saveImage);
+   *  the wake then carries one image block per ref after its text. They are not part of
+   *  the once-only key (id with text), so the text must name what is new. */
+  notify(text: string, options?: { id?: string; images?: unknown[] }): Promise<void>;
+  /** The wake's user message: one text block, then one image block per entry of `images`. */
+  eventMessage(text: string, images?: unknown[]): unknown;
   report(phase: string, error?: string, event?: unknown): Promise<void>;
   currentPhase(): string;
   /** A host-side failure the status reports should carry (cleared with clearHostError). */

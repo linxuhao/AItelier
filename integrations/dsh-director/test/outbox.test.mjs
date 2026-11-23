@@ -121,4 +121,24 @@ test('a host event and a replayed notice reach the session byte-identical: no pr
   }
 });
 
+test('24.2b: a host event carries its images to deliver; the key is still id with text, so the same text is held back whatever the images', async () => {
+  const dir = await fresh(), got = [];
+  const deliver = async (text, images) => { got.push([text, images]); };
+  const A = { attachmentId: 'att-a', mediaType: 'image/png' }, B = { attachmentId: 'att-b', mediaType: 'image/jpeg' };
+  let outbox = await new Outbox({ dir, deliver, keep: 4 }).load();
+  assert.deepEqual(await outbox.deliverOnce('inbox:img', 'PHOTO m_1', { images: [A, B] }), { delivered: true });
+  assert.deepEqual(got, [['PHOTO m_1', [A, B]]], 'the images reach deliver, in order, with the text');
+  // A redelivery of the same id and text is a duplicate: other images, none, or the same ones.
+  assert.deepEqual(await outbox.deliverOnce('inbox:img', 'PHOTO m_1', { images: [B] }), { duplicate: true });
+  assert.deepEqual(await outbox.deliverOnce('inbox:img', 'PHOTO m_1'), { duplicate: true });
+  outbox = await new Outbox({ dir, deliver, keep: 4 }).load();          // a restart
+  assert.deepEqual(await outbox.deliverOnce('inbox:img', 'PHOTO m_1', { images: [A, B] }), { duplicate: true });
+  assert.equal(outbox.seen('inbox:img', 'PHOTO m_1'), true, 'recorded under wakeKey(id, text)');
+  assert.deepEqual((await readFile(join(dir, 'delivered.jsonl'), 'utf8')).split('\n').filter(Boolean), [wakeKey('inbox:img', 'PHOTO m_1')]);
+  // An event without an id passes its images too; one without images passes none.
+  await outbox.deliverOnce(undefined, 'NO ID', { images: [A] });
+  await outbox.deliverOnce('inbox:plain', 'PLAIN');
+  assert.deepEqual(got.slice(1), [['NO ID', [A]], ['PLAIN', undefined]]);
+});
+
 test.after(async () => { for (const dir of dirs) await rm(dir, { recursive: true, force: true }); });

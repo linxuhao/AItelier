@@ -2,7 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateHost, OPTIONAL_OPS } from '../lib/host.mjs';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { wakeEventMessage, hostNotify } from '../index.mjs';
+import { Outbox } from '../lib/outbox.mjs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -114,4 +117,64 @@ test('worker capacity config: positive maxActiveSubagents, reservedSlots below i
     [{ reservedSlots: 0 }, /reservedSlots must be an integer from 1/],
     [{ reservedSlots: -1 }, /reservedSlots must be an integer/]])
     assert.throws(() => validateHost({ ...base, config: { ...base.config, ...config } }), pattern, JSON.stringify(config));
+});
+
+// ---- Step 24.2b (design-steward 7.8.12a "收图的路线" steps 1-2): a wake can carry images.
+
+/** The director's notify as boot() wires it: api.notify = hostNotify(outbox, notify), where notify
+ *  (and the outbox's deliver) steers eventMessage(text, images). createUserMessage like DSH's: it
+ *  adds an id and the role and freezes the message. */
+const wakeWorld = () => {
+  const steered = [];
+  let n = 0;
+  const createUserMessage = input => Object.freeze({ ...input, id: 'msg-' + ++n, role: 'user' });
+  const eventMessage = (text, images) => wakeEventMessage(createUserMessage, 'runtime-event', text, images);
+  const notify = async (text, images) => { steered.push(eventMessage(text, images)); };
+  const outbox = new Outbox({ dir: mkdtempSync(join(tmpdir(), 'dsh-director-wake-')), deliver: notify });
+  return { steered, outbox, notify, api: () => hostNotify(outbox, notify) };
+};
+// What every wake was before 24.2b: one text block, the runtime-event source - in this key order.
+const todays = text => JSON.stringify({ content: [{ type: 'text', text }], source: { kind: 'runtime-event' } });
+const withoutIdentity = ({ id, role, ...message }) => (assert.equal(role, 'user'), JSON.stringify(message));
+
+test('24.2b: notify(text, {id, images}) steers one user message whose content is the text, then one image block per ref', async () => {
+  const world = wakeWorld();
+  await world.outbox.load();
+  const notify = world.api();
+  const first = { attachmentId: 'att-1', mediaType: 'image/png', width: 960, height: 704 };
+  const second = { attachmentId: 'att-2', mediaType: 'image/jpeg', width: 10, height: 10 };
+  await notify('[图片 m_8c1d，image/png，原图已附]', { id: 'inbox:42', images: [first, second] });
+  assert.equal(world.steered.length, 1);
+  assert.deepEqual(world.steered[0].content, [{ type: 'text', text: '[图片 m_8c1d，image/png，原图已附]' },
+    { type: 'image', attachment: first }, { type: 'image', attachment: second }]);
+  assert.deepEqual(world.steered[0].source, { kind: 'runtime-event' });
+  // Delivered once per id with text: the same wake again is held back, images or not.
+  await notify('[图片 m_8c1d，image/png，原图已附]', { id: 'inbox:42', images: [first, second] });
+  assert.equal(world.steered.length, 1);
+  // Without an id the images still ride along.
+  await notify('NO ID', { images: [second] });
+  assert.deepEqual(world.steered[1].content, [{ type: 'text', text: 'NO ID' }, { type: 'image', attachment: second }]);
+});
+
+test('24.2b: without images every wake is byte-identical to today\'s one text block', async () => {
+  const world = wakeWorld();
+  await world.outbox.load();
+  const notify = world.api();
+  await notify('WITH ID', { id: 'inbox:1' });
+  await notify('EMPTY LIST', { id: 'inbox:2', images: [] });
+  await notify('NO OPTIONS');
+  await notify('NO ID', {});
+  assert.deepEqual(world.steered.map(withoutIdentity), ['WITH ID', 'EMPTY LIST', 'NO OPTIONS', 'NO ID'].map(todays));
+  // The api's own eventMessage, called the way hosts call it today (text only).
+  assert.equal(withoutIdentity(wakeEventMessage(input => ({ ...input, id: 'x', role: 'user' }), 'runtime-event', 'HOST')), todays('HOST'));
+});
+
+test('24.2b: boot() wires notify, the outbox deliver and api.notify through these helpers, images included', () => {
+  // boot() needs a whole DSH; the wiring itself is read from the source, as group-turns.test does.
+  const index = readFileSync(fileURLToPath(new URL('../index.mjs', import.meta.url)), 'utf8');
+  for (const line of ['const eventMessage = (text, images) => wakeEventMessage(createUserMessage, labels.runtimeEvent, text, images);',
+    'const notify = async (text, images) => {', 'agent.steer(eventMessage(text, images))',
+    'const deliver = async (text, images) => {', 'await notify(text, images); };',
+    'const notifyEvent = hostNotify(outbox, notify);', 'notify: notifyEvent, eventMessage,'])
+    assert.ok(index.includes(line), `index.mjs no longer has: ${line}`);
 });

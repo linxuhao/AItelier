@@ -479,6 +479,8 @@ def test_the_change_migrates_a_database_written_by_the_previous_code(tmp_path):
                  # Step 24.1b's confirmations of outward actions and the dashboard message
                  # marks (core/state_steward_confirmations.py).
                  "state_steward_confirmations", "state_steward_dashboard_messages",
+                 # Step 24.2b's dashboard conversation uploads (core/state_conversation_uploads.py).
+                 "state_conversation_uploads",
                  # The Git bundle release ledger (evidence/bundle-store-release-20261120):
                  # one append-only row per released candidate digest.
                  "state_git_bundle_releases"}

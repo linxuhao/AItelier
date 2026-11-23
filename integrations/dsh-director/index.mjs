@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
-import { registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
+import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
 import { attachmentLine, withAttachmentLines } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
@@ -42,6 +42,10 @@ import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
 
 export const name = 'dsh-director';
+/** Step 24.2b (design-steward 7.8.12a "导演与管家的不同"): the tools a director's media_call runs on
+ *  its files - its own media connection's, each taking its file as `*_base64`. */
+export const DIRECTOR_MEDIA_TOOLS = Object.freeze(['mcp__agentmcp__ocr_image', 'mcp__agentmcp__vision_critique',
+  'mcp__agentmcp__transcribe_audio']);
 export const inject = ['agents', 'sessions', 'sessionPersistence', 'sessionQuery', 'systemPrompt', 'tools', 'compaction',
   'credentials', 'llm', 'goals', 'tokenMeter', 'directorHost'];
 
@@ -52,6 +56,17 @@ export function hostWording(host) {
   const labels = { ...defaultLabels, ...(host.labels ?? {}) };
   return { texts, labels };
 }
+
+/** A wake event's user message. Step 24.2b (design-steward 7.8.12a "收图的路线"): the text
+ *  block, then one image block per attachment (an ImageAttachmentRef from
+ *  ctx.get('attachments').saveImage). Without images the content is exactly the one text block. */
+export const wakeEventMessage = (createUserMessage, kind, text, images = []) =>
+  createUserMessage({ content: [{ type: 'text', text }, ...images.map(attachment => ({ type: 'image', attachment }))], source: { kind } });
+
+/** api.notify: with an id through the outbox (delivered once per id#sha(text); the images ride
+ *  along and stay out of the key), without one straight to the steer. */
+export const hostNotify = (outbox, notify) => (text, options = {}) =>
+  options.id ? outbox.deliverOnce(String(options.id), text, { images: options.images }).then(() => {}) : notify(text, options.images);
 
 /** The owner's chat channels (design-steward 7.2), when the host declares them. */
 export function ownerChannelsFor(ctx, host) {
@@ -113,6 +128,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // returned (send_media fetches only those, through the connection that returned them).
   const mediaHost = stewardCatalog && host.capabilities.includes('media') ? host.media : undefined;
   const urlLedger = mediaHost ? new UrlLedger() : undefined;
+  // Step 24.2b (7.8.12a "导演与管家的不同"): a director with a media library runs media_call on
+  // its own project's refs, through these tools of its own registry only (no catalog, no gateway).
+  const directorMedia = rootRole === 'director' && host.capabilities.includes('media') ? host.media : undefined;
   if (stewardCatalog) {
     // External content (7.8.8): the guard reads only the cache and the turn record; a
     // connection tool's result marks the turn before the result is released.
@@ -293,20 +311,20 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // from "the owner wrote to me", which is exactly how a routine tick gets
   // mistaken for an unanswered message. DSH's MessageSourceMap is merge-extensible
   // (each producer declares its own kind, consumers fall through unknown ones).
-  const eventMessage = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: labels.runtimeEvent } });
-  const notify = async text => {
+  const eventMessage = (text, images) => wakeEventMessage(createUserMessage, labels.runtimeEvent, text, images);
+  const notify = async (text, images) => {
     if (disposed) return;
     // A host may hold notify from install() on; it can deliver only once the director
     // session exists (events() is called after that).
     if (!agent) throw new Error('directorHost api: notify is not available before the director session exists (events() is where delivery starts)');
-    ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text)));
+    ctx.agents.withoutInitiator(() => agent.steer(eventMessage(text, images)));
     await ctx.sessionPersistence.flush();
   };
   // The runtime's own notices go through the outbox (recorded before delivery, replayed
   // after a restart); the host's events are delivered once per id (plugin step 7).
   // A notice is marked delivered only when it was: during shutdown delivery throws, so the
   // notice stays recorded and the next process replays it.
-  const deliver = async text => { if (disposed) throw new Error('director stopping: notice kept for replay'); await notify(text); };
+  const deliver = async (text, images) => { if (disposed) throw new Error('director stopping: notice kept for replay'); await notify(text, images); };
   const outbox = await new Outbox({ dir: config.stateDir, deliver, log: line => ctx.logger.info(line) }).load();
   // A slot is free and dispatches were refused: one wake naming them, through the
   // outbox (recorded first; its id is derived from the refusals, so a restart that
@@ -370,7 +388,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (resumed.length || failed.length) await outbox.send('resume:' + startedAt, texts.workersResumed + JSON.stringify({ resumed, failed,
       ...(failed.length ? { failed_next: 'each failed plan is still bound to its dead session: take it over with todo_rebind, or dispatch a fresh worker (batch_redispatch for batch plans)' } : {}) }));
   };
-  const notifyEvent = (text, options = {}) => options.id ? outbox.deliverOnce(String(options.id), text).then(() => {}) : notify(text);
+  const notifyEvent = hostNotify(outbox, notify);
   // The api a host gets, complete from install() on (host.d.ts DirectorApi): every
   // member exists; `agent` reads undefined and notify refuses until the session exists.
   const api = { ctx, defineTool, llm, createUserMessage, config, roles, texts, labels, todo, children, jsonOutput,
@@ -733,6 +751,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // Step 24.2 (design-steward 7.8.12): media_call and send_media, when the host has a media library.
     if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
       media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
+    if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
+      media: directorMedia, rootSession: config.sessionId, projectId: config.projectId, names: DIRECTOR_MEDIA_TOOLS });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
     // Step 23, 25 C4, 23.1: the family memory, the family lists and group_reminder_set (lib/group-tools.mjs).

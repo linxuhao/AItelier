@@ -2,26 +2,28 @@
  *  the `media` capability exists only with a media root (AITELIER_MEDIA_ROOT, given by the DSH
  *  host), the gateway fetch stores what /fetch answered as `generated` under the turn's
  *  audience, the group's send_media record, the relays carry attachment metadata only when
- *  there is some, storeMedia's binding read, and a wake shows attachments one line each. */
+ *  there is some, storeMedia's binding read, and a wake shows attachments one line each.
+ *  Step 24.2b: an owner turn's send_media as one steward message with the file, mirrored. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aitelierHost, DriverRuntime } from './runtime.mjs';
-import { channelOps, groupOps, mediaOps, mediaRootFrom, stateWake, withAttachmentLines } from './steward-host.mjs';
+import { channelOps, forwardFinalText, groupOps, mediaOps, mediaRootFrom, stateWake, unansweredOwnerMessages, withAttachmentLines } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { createRequire } from 'node:module';
 import { measuredEntryForTest } from './dsh-entry.mjs';
 import { registerMediaTools } from '../dsh-director/lib/media-tools.mjs';
+import { createOwnerChannels } from '../dsh-director/lib/channels.mjs';
 
 const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier',
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });
 const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'), Buffer.from([0, 0, 0, 64, 0, 0, 0, 64]), Buffer.alloc(40)]);
 
-test('the media capability: a steward with a media root has it (and validates); without a root, or a director, has none', () => {
+test('the media capability: a steward with a media root has it (and validates); without a root it has none', () => {
   const root = mkdtempSync(join(tmpdir(), 'steward-media-'));
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: root }));
   assert.deepEqual(steward.capabilities.slice(-8), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog', 'media']);
@@ -30,8 +32,30 @@ test('the media capability: a steward with a media root has it (and validates); 
   assert.doesNotThrow(() => validateHost(steward));
   const bare = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }));
   assert.ok(!bare.capabilities.includes('media')); assert.equal(bare.media, undefined);
+});
+
+test('24.2b: a director with a media root has its own d-<driver_id> library (1 GiB), no gateway and no group', async () => {
+  // design-steward 7.8.12a "一个写者一个子目录": one writer per subdirectory.
+  const root = mkdtempSync(join(tmpdir(), 'director-media-'));
   const director = aitelierHost(env({ AITELIER_MEDIA_ROOT: root }));
-  assert.ok(!director.capabilities.includes('media'), 'the director gets the root (24.2b uses it), not the steward\'s tools');
+  assert.equal(director.capabilities.at(-1), 'media');
+  assert.doesNotThrow(() => validateHost(director));
+  for (const op of ['ingest', 'resolve', 'read', 'fetch', 'setProtected']) assert.equal(typeof director.media[op], 'function', op);
+  assert.equal(director.media.postGroup, undefined, 'a director has no group to post to');
+  const { ref } = await director.media.ingest({ channel: 'director', messageRef: 'k1', index: 0, audience: 'project:aitelier-home', source: 'generated' }, async () => PNG);
+  assert.match(ref, /^m_[0-9a-f]{16}$/);
+  assert.ok(existsSync(join(root, 'd-drv-home', 'index.jsonl')), 'the director writes d-<driver_id>/');
+  assert.equal(existsSync(join(root, 'owner')), false, 'never the steward\'s subdirectory');
+  assert.equal((await director.media.resolve(ref)).audience, 'project:aitelier-home');
+  const fetched = await director.media.fetch({ connId: 'x', url: 'https://example.invalid/a.png', audience: 'project:aitelier-home' });
+  assert.equal(fetched.refused, 'fetch_failed', 'no gateway');
+  // The library under the adapter is held to the director's 1 GiB.
+  assert.equal(createMediaLibrary({ root, userId: 'd-drv-home' }).limits.total_bytes, 1024 * 1024 * 1024);
+  // No media root, or a driver id that cannot name a subdirectory: no library, no capability.
+  for (const extra of [{}, { AITELIER_MEDIA_ROOT: root, AITELIER_DRIVER_ID: '../x' }, { AITELIER_MEDIA_ROOT: root, AITELIER_DRIVER_ID: '' }]) {
+    const bare = aitelierHost(env(extra));
+    assert.ok(!bare.capabilities.includes('media'), JSON.stringify(extra)); assert.equal(bare.media, undefined);
+  }
 });
 
 test('ingest through the host adapter keeps the caller\'s signal: already aborted is unavailable, open never called, nothing stored', async () => {
@@ -195,4 +219,175 @@ test('the media tools are accepted by the pinned DSH defineTool', async t => {
   registerMediaTools({ tools: { register: tool => names.push(tool.name) } }, { ctx: {}, defineTool, jsonOutput, HarnessError: Error,
     media: {}, catalog: {}, turns: {}, channels: undefined, ledger: {} });
   assert.deepEqual(names, ['media_call', 'send_media']);
+});
+
+// --- step 24.2b (design-steward 7.8.12a "出站", 7.8.18 适配器与插件): an owner turn's send_media is
+// ONE steward message with the file (send_user_message attachments), mirrored by the plugin;
+// a group turn's is unchanged (post_group_media, the group's sendFile). Real pieces: the
+// adapter's mediaOps over a real library, the plugin's media tools and ownerChannels; State and
+// the WeChat channel are fakes that record what they were asked.
+
+function ownerMediaWorld({ requester, audience = { kind: 'owner' } } = {}) {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const state = [], sent = [], files = [], deliveries = [];
+  // The steward conversation's sources: msg-w came from WeChat; dash-1 (the dashboard) has none.
+  const sources = new Map([['msg-w', { direction: 'in', channel: 'wechat', sender_ref: 'wxid_owner', channel_message_ref: 'q1' }]]);
+  const host = { relay: async () => ({}), bind: async () => ({ bound: false }), sourceOf: async id => sources.get(id) ?? null,
+    recordDelivery: async delivery => { deliveries.push(delivery); return {}; },
+    list: async () => ({ channels: [{ channel: 'wechat', bound: true, sender_ref: 'wxid_owner', revoked_at: null }], default_channel: 'wechat' }) };
+  const channels = createOwnerChannels({ host });
+  channels.service.register({ name: 'wechat', status: () => ({ connected: true }), mediaKinds: ['image', 'file'],
+    send: async (text, options) => { sent.push([text, options]); return { ref: 'out' }; },
+    sendFile: async file => { files.push(file); return { ref: 'file-out' }; } });
+  channels.ready();
+  const request = async (path, body) => {
+    state.push([path, body]);
+    if (path === '/api/state/commands/send_user_message') return { result: { message_id: `sm-${state.length}` } };
+    if (path === '/api/state/commands/post_group_media') return { result: body.check_only ? { may_post: true }
+      : { posted: true, message_id: 'gm1', channel: 'wechat', group_ref: 'r1' } };
+    throw new Error(`unexpected ${path}`);
+  };
+  const media = mediaOps({ request, library, gatewayFetch: async () => { throw new Error('no gateway here'); },
+    owner: { request, project: 'aitelier-home', mirror: (...args) => channels.ownerMessageSent(...args) } });
+  const tools = new Map(), turn = { audience, turn: 't1' };
+  registerMediaTools({ tools: { register: tool => tools.set(tool.name, tool) } }, { ctx: {}, defineTool: tool => tool, jsonOutput: {},
+    HarnessError: Error, media, catalog: { rootSession: 'root', requester, catalog: () => new Set(), outward: () => false },
+    turns: { audience: () => turn.audience, open: () => turn }, channels, ledger: { lookup: () => undefined } });
+  const run = args => tools.get('send_media').execute(args, { agent: { session: { id: 'root' } }, callId: 'c1', token: 'tok', signal: AbortSignal.timeout(5000) });
+  const messages = () => state.filter(([path]) => path === '/api/state/commands/send_user_message').map(([, body]) => body);
+  return { library, state, sent, files, deliveries, media, run, messages };
+}
+
+test('24.2b send_media, dashboard turn: exactly one send_user_message with the attachment, replying to the owner\'s message; no channel send', async () => {
+  const w = ownerMediaWorld({ requester: 'dash-1' });
+  const { ref } = await w.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const answer = await w.run({ ref, caption: '一只猫' });
+  assert.equal(answer.sent, true); assert.equal(answer.ref, ref); assert.match(answer.message_id, /^sm-/);
+  assert.deepEqual(answer.mirror, { mirrored: false, reason: 'dashboard' });
+  const [message, ...more] = w.messages();
+  assert.equal(more.length, 0, 'one message');
+  assert.deepEqual(message.attachments, [ref]);
+  assert.equal(message.body, '一只猫'); assert.equal(message.reply_to_message_id, 'dash-1'); assert.equal(message.project_id, 'aitelier-home');
+  assert.equal(message.subject, 'Image');
+  assert.match(message.request_key, /^send-media:/);
+  assert.equal(w.sent.length + w.files.length, 0, 'nothing on a channel');
+  assert.equal(w.deliveries.length, 0);
+});
+
+test('24.2b send_media, WeChat turn: the same one message, and the mirror sends the file exactly once (one delivery record)', async () => {
+  const w = ownerMediaWorld({ requester: 'msg-w' });
+  const { ref } = await w.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const answer = await w.run({ ref });
+  assert.equal(answer.sent, true);
+  assert.deepEqual(answer.mirror, { mirrored: true, channel: 'wechat' });
+  assert.equal(w.messages().length, 1);
+  assert.deepEqual(w.messages()[0].attachments, [ref]); assert.equal(w.messages()[0].reply_to_message_id, 'msg-w');
+  assert.equal(w.messages()[0].body, '', 'no caption: a message of the file alone');
+  assert.equal(w.files.length, 1, 'sendFile exactly once');
+  assert.equal(w.sent.length, 0, 'no text to send');
+  const row = w.library.lookup(ref);
+  assert.deepEqual(w.files[0], { kind: 'image', mime: 'image/png', name: `image-${ref.slice(2, 10)}.png`, path: row.path, to: 'wxid_owner', replyToRef: 'q1' });
+  assert.equal(w.deliveries.length, 1);
+  assert.equal(w.deliveries[0].messageId, answer.message_id);
+  // With a caption the text goes first, then the file - still one record.
+  const again = await w.run({ ref, caption: '猫' });
+  assert.equal(w.sent.length, 1); assert.deepEqual(w.sent[0], ['猫', { replyToRef: 'q1', to: 'wxid_owner' }]);
+  assert.equal(w.files.length, 2);
+  assert.equal(w.deliveries.length, 2); assert.equal(w.deliveries[1].messageId, again.message_id);
+});
+
+test('24.2b send_media, an owner turn no owner message opened (a reminder): the message has no reply_to and goes to the default channel', async () => {
+  const w = ownerMediaWorld({ requester: undefined });
+  const { ref } = await w.library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const answer = await w.run({ ref });
+  assert.equal(answer.sent, true, 'not refused no_requester');
+  assert.equal(w.messages().length, 1);
+  assert.ok(!('reply_to_message_id' in w.messages()[0]));
+  assert.deepEqual(answer.mirror, { mirrored: true, channel: 'wechat' });
+  assert.equal(w.files.length, 1); assert.equal(w.files[0].to, 'wxid_owner'); assert.ok(!('replyToRef' in w.files[0]));
+});
+
+test('24.2b send_media, group turn: post_group_media and the group\'s sendFile as in 24.2; no send_user_message', async () => {
+  const w = ownerMediaWorld({ requester: 'msg-w', audience: { kind: 'group', channel: 'wechat', group_ref: 'r1' } });
+  const { ref } = await w.library.ingest({ channel: 'generated', audience: 'group:wechat:r1', source: 'generated' }, async () => PNG);
+  const answer = await w.run({ ref, caption: '猫' });
+  assert.deepEqual(answer, { sent: true, ref, kind: 'image', channel: 'wechat' });
+  assert.deepEqual(w.state.map(([path, body]) => [path, body.check_only === true]),
+    [['/api/state/commands/post_group_media', true], ['/api/state/commands/post_group_media', false]]);
+  assert.equal(w.messages().length, 0, 'never written into the owner\'s conversation');
+  assert.equal(w.files.length, 1); assert.equal(w.files[0].groupRef, 'r1'); assert.equal(w.files[0].to, undefined);
+  assert.equal(w.deliveries.length, 0);
+});
+
+test('24.2b sendMediaToOwner: a State refusal is {refused} and nothing is mirrored; only the steward\'s host has it', async () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const { ref } = await library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const mirrored = [];
+  const ops = mediaOps({ request: async () => ({}), library, gatewayFetch: async () => {},
+    owner: { project: 'aitelier-home', mirror: async (...args) => { mirrored.push(args); return { mirrored: true }; },
+      request: async () => { throw new Error('AItelier /api/state/commands/send_user_message: HTTP 422 "invalid_attachment: each attachment"'); } } });
+  assert.equal((await ops.sendToOwner({ ref })).refused, 'invalid_attachment');
+  assert.equal((await ops.sendToOwner({ ref: 'm_' + '0'.repeat(16) })).refused, 'unknown_ref');
+  assert.equal(mirrored.length, 0);
+  assert.equal(mediaOps({ request: async () => ({}), library, gatewayFetch: async () => {} }).sendToOwner, undefined, 'no owner, no sendToOwner');
+  const root = mkdtempSync(join(tmpdir(), 'steward-media-'));
+  const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: root }));
+  assert.equal(typeof steward.media.sendToOwner, 'function');
+  assert.doesNotThrow(() => validateHost(steward));
+  assert.equal(aitelierHost(env({ AITELIER_MEDIA_ROOT: root })).media.sendToOwner, undefined, 'a director has no owner turn');
+});
+
+test('24.2b C1: send_media in an owner turn, then the turn\'s final text: two steward messages - the file does not swallow the reply', async () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const { ref } = await library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  // State as the backend keeps it: the steward's messages under its token's driver id, with
+  // their attachments in the conversation read.
+  const conversation = [{ message_id: 'own-1', created_at: '2026-11-23T10:00:00Z', sender_kind: 'user', sender_driver_id: null,
+    subject: '画只猫', body: '画只猫', segments: [] }];
+  const request = async (path, body) => {
+    if (path === '/api/state/query/list_user_conversation') return { messages: conversation, next_cursor: null };
+    if (path !== '/api/state/commands/send_user_message') throw new Error(`unexpected ${path}`);
+    const id = `st-${conversation.length}`;
+    conversation.push({ message_id: id, created_at: `2026-11-23T10:00:0${conversation.length}Z`, sender_kind: 'driver',
+      sender_driver_id: 'drv-home', subject: body.subject, body: body.body, segments: [], reply_to_message_id: body.reply_to_message_id ?? null,
+      ...(body.attachments ? { attachments: body.attachments.map(id => ({ id, kind: 'image', mime: 'image/png', size: PNG.length, name: 'x.png' })) } : {}) });
+    return { result: { message_id: id } };
+  };
+  const ops = mediaOps({ request, library, gatewayFetch: async () => {}, owner: { request, project: 'aitelier-home', mirror: async () => ({ mirrored: false, reason: 'dashboard' }) } });
+  const sent = await ops.sendToOwner({ ref, replyTo: 'own-1' });
+  assert.equal(sent.message_id, 'st-1');
+  const base = { request, project: 'aitelier-home', me: 'drv-home' };
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), ['own-1'], 'the file alone answers nothing');
+  const auto = await forwardFinalText({ ...base, text: '画好了，一只橘猫。', input: 'own-1' });
+  assert.deepEqual(auto, { forwarded: true, reply_to: 'own-1', message_id: 'st-2' });
+  const mine = conversation.filter(m => m.sender_driver_id === 'drv-home');
+  assert.deepEqual(mine.map(m => [m.subject, m.body, Boolean(m.attachments)]), [['Image', '', true], ['Re: 画只猫', '画好了，一只橘猫。', false]]);
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), [], 'the text reply answers it');
+});
+
+test('24.2b F4: a captioned send_media answers the owner when the turn ends with no text; the final text, when there is one, still goes out', async () => {
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-media-')) });
+  const { ref } = await library.ingest({ channel: 'generated', audience: 'owner', source: 'generated' }, async () => PNG);
+  const conversation = [{ message_id: 'own-1', created_at: '2026-11-23T10:00:00Z', sender_kind: 'user', sender_driver_id: null,
+    subject: '画只猫', body: '画只猫', segments: [] }];
+  const request = async (path, body) => {
+    if (path === '/api/state/query/list_user_conversation') return { messages: conversation, next_cursor: null };
+    if (path !== '/api/state/commands/send_user_message') throw new Error(`unexpected ${path}`);
+    const id = `st-${conversation.length}`;
+    conversation.push({ message_id: id, created_at: `2026-11-23T10:00:0${conversation.length}Z`, sender_kind: 'driver',
+      sender_driver_id: 'drv-home', subject: body.subject, body: body.body, segments: [], reply_to_message_id: body.reply_to_message_id ?? null,
+      ...(body.attachments ? { attachments: body.attachments.map(id => ({ id, kind: 'image', mime: 'image/png', size: PNG.length, name: 'x.png' })) } : {}) });
+    return { result: { message_id: id } };
+  };
+  const ops = mediaOps({ request, library, gatewayFetch: async () => {}, owner: { request, project: 'aitelier-home', mirror: async () => ({ mirrored: false, reason: 'dashboard' }) } });
+  const base = { request, project: 'aitelier-home', me: 'drv-home' };
+  assert.equal((await ops.sendToOwner({ ref, caption: '   ', replyTo: 'own-1' })).message_id, 'st-1');
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), ['own-1'], 'a blank caption answers nothing');
+  assert.equal((await ops.sendToOwner({ ref, caption: '画好了，一只橘猫。', replyTo: 'own-1' })).message_id, 'st-2');
+  // The turn ended with no text: the captioned file is the answer (open threads, heldWork, idle_dormant).
+  assert.deepEqual((await unansweredOwnerMessages(base)).map(m => m.message_id), [], 'the captioned file answers it');
+  // The turn ended WITH text: forwardFinalText still sends it (C1), the file does not swallow it.
+  const auto = await forwardFinalText({ ...base, text: '还要别的颜色吗？', input: 'own-1' });
+  assert.deepEqual(auto, { forwarded: true, reply_to: 'own-1', message_id: 'st-3' });
+  assert.deepEqual((await unansweredOwnerMessages({ ...base, mediaAnswers: false })).map(m => m.message_id), []);
 });

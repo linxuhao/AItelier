@@ -44,6 +44,7 @@ STEWARD_SCHEDULE = "sch-canary"
 CHANNEL_MESSAGE = "message-source-canary"
 STEWARD_CONNECTION = "canaryconn"
 STEWARD_CONFIRMATION = "KCNRY"
+CONVERSATION_UPLOAD = "u_0000000000c0ffee"
 
 
 def canary(table: str) -> str:
@@ -323,6 +324,12 @@ def _plan():
         "state_steward_dashboard_messages": (
             "INSERT INTO state_steward_dashboard_messages(message_id,at) VALUES(?,?)",
             (c("state_steward_dashboard_messages"), now)),
+        # Step 24.2b: a staged dashboard upload into the OPENED project (the canary as its
+        # user and its file name).
+        "state_conversation_uploads": (
+            ("INSERT INTO state_conversation_uploads(upload_id,project_id,user,kind,mime,size,name,state,"
+             "created_at) VALUES(?,?,?,'image','image/png',1,?,'staged',?)"),
+            (CONVERSATION_UPLOAD, OPEN, c("state_conversation_uploads"), c("state_conversation_uploads"), now)),
     }
 
 

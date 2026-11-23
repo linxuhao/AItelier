@@ -158,6 +158,18 @@ services:
       # header's value), one 0600 file per connection, written by the backend alone.
       # Read-write and mounted into NO other container (not dev_mcp, not aitelier-zg).
       - ${AITELIER_STEWARD_SECRETS_HOST_DIR:-${HOME}/.local/share/aitelier/steward-mcp-secrets}:/run/aitelier-steward-secrets
+      # Step 24.2b (design-steward 7.8.12a): the DSH hosts' media library, read-only,
+      # so the conversation media route can serve a stored attachment; and the
+      # dashboard uploads' staging directory, read-write, which only the backend
+      # writes. Both at the identical absolute path, so core/dsh_driver.media_root()
+      # and core/media_library.staging_dir() resolve unchanged (HOME above == the
+      # host's). Mounted into NO other container (not dev_mcp, not aitelier-zg).
+      # Create both before `up -d` (staging with mode 700): a missing bind source
+      # is created by Docker, owned by root, and every upload then answers 503
+      # staging_unavailable. Recreate (`up -d`), never just restart: a restart runs
+      # the live-mounted new code without these two mounts.
+      - ${HOME}/.local/share/dsh-director/media:${HOME}/.local/share/dsh-director/media:ro
+      - ${HOME}/.local/share/aitelier/media-staging:${HOME}/.local/share/aitelier/media-staging
       # The SPA bundle is baked into the image at /srv/web_dist (outside /app,
       # so this mount can't shadow it — served via AITELIER_WEB_DIST). A plain
       # `docker compose up -d --build` deploys frontend changes; no anonymous

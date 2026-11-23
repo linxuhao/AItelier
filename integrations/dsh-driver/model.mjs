@@ -1,5 +1,11 @@
 /** Native DSH adapter over the host's existing sticky model routes/failover. */
-export function openaiMessages(options, images = null) {
+/** Step 24.2b (design-steward 7.8.12a "不收图的路线"): the one line an image block becomes on a
+ *  session whose route does not take images. Nothing of the image is read or sent. */
+export const noImageLine = ref => `[图片 ${ref?.name || ref?.attachmentId || ref?.id || '?'}：本路线不收图，未发送]`;
+
+/** `images` resolves an image block to its request URL. `textOnly` is a session whose route does
+ *  not take images: every image block becomes noImageLine instead, and nothing throws. */
+export function openaiMessages(options, images = null, { textOnly = false } = {}) {
   const messages = options.system ? [{ role: 'system', content: options.system }] : [];
   for (const message of options.messages) {
     const text = [], reasoning = [], calls = [], parts = [];
@@ -7,6 +13,7 @@ export function openaiMessages(options, images = null) {
       if (block.type === 'text') text.push(block.text);
       else if (block.type === 'reasoning') reasoning.push(block.text);
       else if (block.type === 'tool-call') calls.push({ id: block.id, type: 'function', function: { name: block.name, arguments: block.arguments } });
+      else if (block.type === 'image' && textOnly) text.push(noImageLine(block.attachment));
       else if (block.type === 'image') {
         if (!images) throw new Error('driver bridge cannot forward an image without the durable attachment service');
         const url = images(block.attachment);
@@ -50,6 +57,47 @@ async function requestImageUrls(ctx, options, signal) {
       `data:${info.mediaType};base64,${Buffer.from(info.data).toString('base64')}`);
   }
   return urls;
+}
+
+/** Step 24.2b (design-steward 7.8.12a "路线能力"): what a route may be sent when nothing says more. */
+const TEXT_ONLY = Object.freeze({ root: Object.freeze(['text']), child: Object.freeze(['text']) });
+const takesImage = list => Array.isArray(list) && list.includes('image');
+/** `measured: false`: the backend's route table has no `_input` yet, so nothing was measured
+ *  (OPS-1). Image input then stays as it was before 24.2b - declared, and sent as image_url - and
+ *  only the new wake images stay placeholder lines. */
+const unmeasured = routes => routes?.measured === false;
+/** What resolveModel declares (7.8.12a "路线能力"): DSH does not say which session asks, so image
+ *  input only when the root's route AND the children's route both take images - or nothing was
+ *  measured yet. */
+export const declaresImage = routes => unmeasured(routes) || (takesImage(routes?.root) && takesImage(routes?.child));
+/** Whether a wake carries its images as native blocks: the same intersection resolveModel declares
+ *  (DSH replaces every image block with a text line before stream() when the model is declared
+ *  text-only, so a block on a mixed route would arrive as neither image nor media_call hint), and
+ *  never before the routes were measured. */
+export const wakeTakesImages = routes => !unmeasured(routes) && declaresImage(routes);
+
+/** The backend's `GET /api/dsh-drivers/{project}/route-input` ({root, child}), read at most once
+ *  per `ttlMs` (60 s) and shared by every session of this process. `read(signal)` is the request.
+ *  A read that fails answers the last good value, or text-only when there is none, and is tried
+ *  again on the next call: an unknown route never takes images. */
+export function routeInputCache(read, { ttlMs = 60000, now = Date.now, log = () => {} } = {}) {
+  let value = null, at = -Infinity, pending = null;
+  return function routeInput(signal) {
+    if (value && now() - at < ttlMs) return Promise.resolve(value);
+    pending ??= (async () => {
+      try {
+        const answer = await read(signal);
+        value = Object.freeze({ root: takesImage(answer?.root) ? ['text', 'image'] : ['text'],
+          child: takesImage(answer?.child) ? ['text', 'image'] : ['text'], ...(unmeasured(answer) ? { measured: false } : {}) });
+        at = now();
+        return value;
+      } catch (error) {
+        log(`route-input read failed (${String(error?.message ?? error).slice(0, 200)}); ${value ? 'keeping the last answer' : 'treating both routes as text-only'}`);
+        return value ?? TEXT_ONLY;
+      } finally { pending = null; }
+    })();
+    return pending;
+  };
 }
 
 /** Reasoning efforts the completion bridge accepts. */
@@ -252,27 +300,35 @@ export const rootReasoningEffort = value => REASONING_EFFORTS.includes(value) ? 
 /** Root completions default to rootEffort (the director plans and judges); native
  *  children default to workerEffort. The runtime passes both from roles.json. An
  *  explicit DSH reasoningEffort is passed through. */
-export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', workerEffort = 'high', retry = {} }) {
+export function installHostModel(ctx, { LlmAdapter }, { request, project, session, rootEffort = 'max', workerEffort = 'high', retry = {},
+  routeInput = async () => TEXT_ONLY }) {
   const retryOptions = { budgetMs: retry.budgetMs ?? modelRetryBudgetMs(), delayMs: retry.delayMs ?? RETRY_DELAY_MS,
     maxDelayMs: retry.maxDelayMs ?? RETRY_MAX_DELAY_MS, log: retry.log ?? stderrRetryLog,
     ...(retry.now ? { now: retry.now } : {}), ...(retry.sleep ? { sleep: retry.sleep } : {}),
     ...(retry.random ? { random: retry.random } : {}) };
   class HostAdapter extends LlmAdapter {
-    async resolveModel(provider, model) {
+    async resolveModel(provider, model, signal) {
+      // Step 24.2b (7.8.12a "路线能力"): DSH does not say which session asks, so image input is
+      // declared only when the root's route AND the children's route both take images. Otherwise
+      // the file tool refuses read_image (the tool stays; the call is refused). A table with no
+      // `_input` measured nothing: declared as before 24.2b (declaresImage).
+      const routes = await routeInput(signal);
       return { provider, id: model, name: model, context: { contextWindow: 1000000 }, defaultMaxTokens: 32768,
-        // The aitelier route forwards OpenAI-style image_url parts to litellm, and the
-        // host model behind it answers them (verified 2026-11-03: a 960x704 frame was
-        // read as its on-screen heading). Without this the file tool refuses read_image.
-        inputModalities: ['text', 'image'] };
+        inputModalities: declaresImage(routes) ? ['text', 'image'] : ['text'] };
     }
     async *stream(options) {
-      const imageUrls = await requestImageUrls(ctx, options, options.signal);
+      // stream() knows its session: that session's own route decides. A route without images
+      // reads no image byte (the attachment service is not even asked) and sends one line per
+      // image block instead (noImageLine) - never an image_url, never a throw.
+      const routes = await routeInput(options.signal);
+      const textOnly = !unmeasured(routes) && !takesImage((options.sessionId ?? session) === session ? routes.root : routes.child);
+      const imageUrls = textOnly ? new Map() : await requestImageUrls(ctx, options, options.signal);
       // One signal for the whole call: a retry lives inside the same 30-minute
       // bound as the attempt it replaces, not a fresh one.
       const signal = options.signal ?? AbortSignal.timeout(1800000);
       const result = await completionWithRetry(request, `/api/dsh-drivers/${encodeURIComponent(project)}/completion`, {
         session_id: options.sessionId ?? session,
-        messages: openaiMessages(options, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id)),
+        messages: openaiMessages(options, (ref) => imageUrls.get(ref?.attachmentId ?? ref?.id), { textOnly }),
         tools: options.tools?.map(t => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } })),
         max_tokens: options.maxTokens ?? 32768,
         reasoning_effort: options.reasoningEffort ?? ((options.sessionId ?? session) === session ? rootEffort : workerEffort),

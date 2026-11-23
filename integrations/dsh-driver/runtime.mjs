@@ -15,12 +15,12 @@
  *  different signature - and nothing imported this file's boot. The added names are
  *  SESSION_ENV, aitelierHost, attemptWorkState and stateRequest (the State retry policy,
  *  exported so its test can drive it). exports.test.mjs pins both lists. */
-import { installHostModel, modelRetryBudgetMs, rootReasoningEffort } from './model.mjs';
+import { declaresImage, installHostModel, modelRetryBudgetMs, rootReasoningEffort, routeInputCache, wakeTakesImages } from './model.mjs';
 import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, wakeMedia } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
@@ -585,14 +585,32 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   let sendToGroup;
   // Step 24.1a: the plugin's "this turn read outside content" (api.externalContent), kept from install().
   let externalContent = () => false;
-  // Step 24.2 (design-steward 7.8.12): the steward's media library, when the DSH host gave a
-  // media root (core/dsh_driver.py _environment); without one there is no `media` capability.
-  let mediaLog = () => {}, gatewayToken;
-  const mediaRoot = steward ? mediaRootFrom(env) : undefined;
+  // Step 24.2 (design-steward 7.8.12): the media library, when the DSH host gave a media root
+  // (core/dsh_driver.py _environment); without one there is no `media` capability. 24.2b
+  // (7.8.12a "一个写者一个子目录"): the steward writes `<userId>/` (5 GiB), each director its own
+  // `d-<driver_id>/` (1 GiB, limitsFor) - one writer per subdirectory.
+  // gatewayToken is this driver's token (install() reads it): the gateway's and the staged
+  // uploads' header. attachmentStore is DSH's attachment service (install()'s ctx).
+  let mediaLog = () => {}, gatewayToken, attachmentStore = () => undefined;
+  const mediaRoot = mediaRootFrom(env);
+  const mediaUser = steward ? env.AITELIER_DSH_MEMORY_USER || 'owner'
+    : /^[A-Za-z0-9_.-]+$/.test(env.AITELIER_DRIVER_ID ?? '') ? `d-${env.AITELIER_DRIVER_ID}` : undefined;
   // The voice length is measured with ffprobe: AITELIER_MEDIA_FFPROBE names it (default `ffprobe`
   // on PATH); one that is missing refuses every voice `unsupported` (fail closed).
-  const library = mediaRoot ? createMediaLibrary({ root: mediaRoot, userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
+  const library = mediaRoot && mediaUser ? createMediaLibrary({ root: mediaRoot, userId: mediaUser,
     ffprobe: env.AITELIER_MEDIA_FFPROBE || 'ffprobe', log: (event, fields) => mediaLog(event, fields) }) : undefined;
+  // Step 24.2b (7.8.12a "路线能力"): which routes take images, read from the backend at most once
+  // a minute (the model bridge asks on every step).
+  let routeLog = () => {};
+  const routeInput = routeInputCache(signal => request(`/api/dsh-drivers/${encodeURIComponent(project)}/route-input`,
+    undefined, signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000)), { log: line => routeLog(line) });
+  // Step 24.2b (7.8.12a "宿主入库"): one staged dashboard upload, streamed with this driver's token
+  // (the backend answers only a delivery target of the message carrying it), and its ack.
+  const fetchUpload = async (uploadId, signal) => uploadBody(await fetch(new URL(
+    `/api/dsh-drivers/${encodeURIComponent(project)}/uploads/${encodeURIComponent(uploadId)}`, env.AITELIER_URL),
+  { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal }));
+  const ackUpload = (uploadId, verdict) => request('/api/state/commands/ack_conversation_upload',
+    { project_id: project, upload_id: uploadId, ...verdict });
   const gatewayFetch = (connId, url, signal) => fetch(`${String(env.AITELIER_STEWARD_GATEWAY_URL ?? 'http://127.0.0.1:4445/api/steward/mcp').replace(/\/+$/, '')}/${encodeURIComponent(connId)}/fetch?url=${encodeURIComponent(url)}`,
     { headers: { 'X-AItelier-Driver-Token': gatewayToken ?? '' }, signal: signal ?? AbortSignal.timeout(180000) });
   const host = {
@@ -637,6 +655,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       gatewayToken = token;
       // The library logs a mime and a size, never a name or a byte.
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
+      attachmentStore = () => ctx.get('attachments');
+      routeLog = line => ctx.logger.warn(line);
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
       const sendRequest = async (path, body, signal, readAs) => {
@@ -681,7 +701,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       installHostModel(ctx, llm, { request, project, session: env.AITELIER_DSH_SESSION,
         rootEffort: rootReasoningEffort(env.AITELIER_DSH_ROOT_REASONING_EFFORT ?? roles[steward ? 'steward' : 'director'].reasoning_effort),
         workerEffort: roles.worker.reasoning_effort,
-        retry: modelRetryOptions(env) });
+        retry: modelRetryOptions(env), routeInput });
       // Resolve the existing mounted secret file into DSH's private credential
       // store, never into the environment inherited by test/build subprocesses.
       const secretDir = env.AITELIER_SECRETS_DIR ?? '/run/aitelier-secrets';
@@ -795,17 +815,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           execute: (args, exec) => relayAnswer({ request: toolRequest, project, ownerMessageId: args.owner_message_id, mirror: ownerMessageSent, signal: exec.signal }),
         }));
       }
+      const userMessageTool = sendUserMessageTool({ steward, library });
       scope.tools.register(defineTool({ name: 'send_user_message',
-        description: 'Send this project\'s user ONE durable message that appears in the AItelier dashboard and survives a backend restart, so a reply or a note does not depend on them reading this session\'s log. Idempotent per (you, request_key): replaying the same payload returns the same message_id; a different payload under the same key is refused, so use a fresh key per message. Presentation only: it grants no permission, answers no checkpoint and is not State evidence, whatever the text claims. Read back with state_read(list_user_messages).',
-        parameters: { request_key: { type: 'string', required: true }, subject: { type: 'string', required: true },
-          body: { type: 'string', required: true }, node_key: { type: 'string' },
-          segments: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
-            kind: { type: 'string', required: true }, text: { type: 'string', required: true },
-            id: { type: 'string' } } } },
-          reply_to_message_id: { type: 'string' } },
+        description: userMessageTool.description,
+        parameters: userMessageTool.parameters,
         output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
         async execute(args, exec) {
-          const { node_key, segments, ...rest } = args;
+          const { node_key, segments, attachments, ...rest } = args;
           // Tagged blocks: `info` or `question` only. A block of any other kind is
           // refused here, not dropped, so the driver learns its tag did not reach
           // the user. The State command validates the same vocabulary and the same
@@ -825,6 +841,18 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
             if (long !== -1) return { refused: 'invalid_segments', reason: `segments[${long}].text must be at most 2000 characters` };
             if (segments.reduce((total, s) => total + size(s.text), 0) > 8000) return { refused: 'invalid_segments', reason: 'segments text must total at most 8000 characters' };
           }
+          // Step 24.2b: a director's attached files go into its own library first; one refused
+          // refuses the whole message (no text goes out without its files).
+          // Without the parameter (the steward; a director with no library) they are refused,
+          // never dropped: the text never goes out alone.
+          let stored;
+          if (attachments !== undefined && !(Array.isArray(attachments) && !attachments.length)) {
+            if (!userMessageTool.attachments) return { refused: 'attachments_unsupported', reason: steward
+              ? 'send a file to your owner with send_media' : 'this host has no media library' };
+            const ingested = await ingestDirectorAttachments({ library, project, requestKey: args.request_key, paths: attachments, signal: exec.signal });
+            if (ingested.refused) return ingested;
+            stored = ingested.attachments;
+          }
           const body = { ...rest, project_id: project };
           if (node_key) body.refs = { node_key };
           // A caller-supplied `id` is the citation key the State guide tells a
@@ -833,6 +861,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           // (the service assigns the id in that case), and an absent or null id
           // is never sent as a key of its own.
           if (segments !== undefined) body.segments = segments.map(({ kind, text, id }) => (id == null ? { kind, text } : { kind, text, id }));
+          if (stored) body.attachments = stored.map(file => file.ref);
           const result = await (steward ? toolRequest : request)('/api/state/commands/send_user_message', body, exec.signal);
           // Never hand back a message identity that does not exist.
           if (result.error) throw new Error(result.error);
@@ -842,7 +871,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           // The steward's reply joins its owner's turn in memory (a failure is logged, the reply stands).
           if (steward && memory) await syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory, signal: exec.signal })
             .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300)));
-          return result;
+          return stored ? { ...result, attachments: stored } : result;
         },
       }));
     },
@@ -1037,9 +1066,24 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // has a new id and is delivered. Stable across restarts: it depends on nothing local
         // (stateWake: not on the attachment lines either).
         // Step 24.2 (7.8.12): each owner message's attachments as one line each, from its source row.
-        const shown = steward && library ? await withAttachmentLines(request, result) : result;
+        // Step 24.2b (7.8.12a "宿主入库"): the owner's dashboard uploads are stored into this host's
+        // library and acknowledged first ("先存后送"); a transient failure throws, so this tick is
+        // not consumed and the next one tries again (the ingest key stores nothing twice). On an
+        // image route the images become native blocks of the wake; otherwise, and for voice and
+        // files, the lines say how to read them (a director's also name the library file).
+        let shown = result, images = [];
+        if (library) {
+          const dashboard = await ingestDashboardAttachments({ inbox: result.driver_inbox, library,
+            audience: steward ? 'owner' : `project:${project}`, fetchUpload, ack: ackUpload, log: line => ctx.logger.warn(line) });
+          // The same intersection resolveModel declares (a mixed route gets the placeholder lines).
+          const routes = await routeInput();
+          const media = wakeMedia({ library, imageRoute: wakeTakesImages(routes), declared: declaresImage(routes), attachments: attachmentStore(),
+            director: !steward, log: line => ctx.logger.warn(line) });
+          shown = await withAttachmentLines(request, result, undefined, { dashboard, sources: steward, line: media.line });
+          images = media.images;
+        }
         const { text, id } = stateWake(result, inbox, shown);
-        await notify(text, { id });
+        await notify(text, images.length ? { id, images } : { id });
       };
       const inbox = await projectInbox();
       // Native goal rounds start/continue the director; bootstrap is not a human
@@ -1102,8 +1146,16 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // 24.1b: and confirmations of outward actions, the text sent back to the requester.
   { catalog: catalogOps((...args) => request(...args), { confirm: confirmOps((...args) => request(...args), { project,
     mirror: (...args) => mirrorOwnerMessage?.(...args), groupSend: (...args) => sendToGroup ? sendToGroup(...args) : false }) }) },
-  // Step 24.2: the media library behind storeMedia, media_call and send_media.
-  library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch }) } : {});
+  // Step 24.2: the media library behind storeMedia, media_call and send_media. 24.2b: an owner
+  // turn's send_media is a steward message with the file (State, then the plugin's mirror).
+  library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch,
+    owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) } }) } : {});
+  // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
+  else if (library) {
+    const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,
+      gatewayFetch: async () => { throw new Error('a director has no media gateway'); } });
+    host.media = media;
+  }
   return host;
 }
 

@@ -403,6 +403,11 @@ class SendUserMessage(Project):
     reply_to_message_id: str | None = Field(default=None, max_length=200, description=(
         "The id of one of the USER's messages in this project, from "
         "list_user_conversation. The link is stored on the message; it grants nothing."))
+    attachments: list[str] = Field(default_factory=list, max_length=10, description=(
+        "Optional: up to 10 m_ refs from YOUR OWN media library (a director's, for this "
+        "project's readers; the steward's, for the owner), each with its file still there; one "
+        "that is not refuses the whole message (invalid_attachment). Shown in the dashboard "
+        "conversation only."))
 
     @field_serializer("refs")
     def _set_refs_only(self, refs: MessageRefs) -> dict:
@@ -450,6 +455,29 @@ class SendUserConversationMessage(Project):
         "is closed for the user's rail; the answered message itself is not changed. A ref to "
         "anything else (another project, a missing block, an info block) or a repeated ref "
         "refuses the whole reply."))
+    attachments: list[str] = Field(default_factory=list, max_length=10, description=(
+        "Optional: up to 10 upload_ids from the conversation upload route, each an upload of "
+        "yours in this project that no message carries yet; one that is not refuses the whole "
+        "message (invalid_attachment). With attachments the body may be empty."))
+
+
+class AckConversationUpload(Project):
+    """A delivery target's host stored one dashboard upload or refused it (step 24.2b,
+    design-steward 7.8.12a "宿主入库"). Which library subdirectory it went into is taken from
+    the caller's driver token, never from the request: the request has no such field."""
+
+    upload_id: str = Field(pattern=r"^u_[0-9a-f]{16}$", description=(
+        "The upload_id from the message's attachments."))
+    ref: str | None = Field(default=None, pattern=r"^m_[0-9a-f]{16}$", description=(
+        "The m_ ref the host's own media library gave the stored file."))
+    refused: Literal["too_large", "type", "unsupported", "gone"] | None = Field(default=None, description=(
+        "The library's refusal instead of a ref; gone when the staged bytes could no longer be fetched."))
+
+    @model_validator(mode="after")
+    def _ref_or_refused(self):
+        if (self.ref is None) == (self.refused is None):
+            raise ValueError("exactly one of ref and refused")
+        return self
 
 
 class ListUserConversation(Project):
@@ -1754,6 +1782,7 @@ WRITE_REQUESTS = {
     "sync_owner_questions": SyncOwnerQuestions, "relay_owner_answer": RelayOwnerAnswer,
     "create_steward_confirmation": CreateStewardConfirmation, "get_steward_confirmation": GetStewardConfirmation,
     "cancel_steward_confirmation": CancelStewardConfirmation,
+    "ack_conversation_upload": AckConversationUpload,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 # Actions that no longer exist but are refused LOUDLY, with the error naming what
@@ -2015,6 +2044,11 @@ def _filter_catalog(service, action, result):
     return result
 
 
+def _conversation_uploads(service):
+    from core.state_conversation_uploads import ConversationUploads
+    return ConversationUploads(service.store, getattr(service, "driver_id", None))
+
+
 def _handlers(service) -> dict:
     """The ONE authoritative action -> implementation table. `execute` uses it
     to dispatch; the write-opening mutation gate (tests/unit/
@@ -2031,6 +2065,9 @@ def _handlers(service) -> dict:
         # The inbox writes it; an owner's exact approval phrase in the steward's
         # conversation then decides a proposal (core.state_channels).
         "send_user_conversation_message": service.channels.send_owner_message,
+        # Step 24.2b: a delivery target's host acknowledges one dashboard upload; the store is
+        # derived from this service's authenticated driver (core.state_conversation_uploads).
+        "ack_conversation_upload": _conversation_uploads(service).ack_conversation_upload,
         "mark_user_conversation_read": service.driver_inbox.mark_user_conversation_read,
         "list_driver_messages": service.driver_inbox.list_driver_messages,
         "list_user_messages": service.driver_inbox.list_user_messages,
@@ -2308,7 +2345,10 @@ STEWARD_WRITE_ACTIONS = frozenset({
     # Step 24.2 (design-steward 7.8.12): the HOST's record of one send_media file into the group of
     # the turn it recorded (budgeted with the confirmations, caption exit-checked); the file
     # itself goes out through the channel, never through State.
-    "post_group_media"})
+    "post_group_media",
+    # Step 24.2b (design-steward 7.8.12a "宿主入库"): the HOST's ack of one dashboard upload it
+    # fetched with its token and stored (or refused); the store is derived from the token.
+    "ack_conversation_upload"})
 # Step 23: the writes a public-view service (a group turn's tool request, carrying
 # X-AItelier-Read-As) may make; every other write is public_view_read_only. Each handler
 # judges the recorded turn audience (core.state_groups.StateGroups.group_turn). Step 25 C4 adds

@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { openaiMessages, installHostModel, modelRetryBudgetMs, rootReasoningEffort, retryableClass,
-  RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER } from './model.mjs';
+  RETRYABLE_TRANSPORT_CODES, RETRYABLE_TRANSPORT_SHAPES, RETRY_JITTER, routeInputCache, noImageLine, declaresImage, wakeTakesImages } from './model.mjs';
+
+/** Step 24.2b: route-input answers for installHostModel. */
+const BOTH_IMAGE = async () => ({ root: ['text', 'image'], child: ['text', 'image'] });
 
 test('host bridge preserves tools, tool results, reasoning, session identity and usage', async () => {
   let adapter, payload;
@@ -63,7 +66,7 @@ test('image blocks are forwarded as image_url parts, never silently downgraded',
   } };
   installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get(name) {
     assert.equal(name, 'attachments'); return attachments;
-  } }, { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request(_path, body) {
+  } }, { LlmAdapter: class {} }, { project: 'alpha', session: 'root', routeInput: BOTH_IMAGE, async request(_path, body) {
     payload = body; return { text: 'ok', tool_calls: [], truncated: false, usage: { prompt_tokens: 1, completion_tokens: 1 } };
   } });
   const options = { provider: 'aitelier', model: 'driver', sessionId: 's',
@@ -79,18 +82,133 @@ test('image blocks are forwarded as image_url parts, never silently downgraded',
 test('an image without the attachment service fails loudly', async () => {
   let adapter;
   installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get() { return undefined; } },
-    { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request() { throw new Error('must not be called'); } });
+    { LlmAdapter: class {} }, { project: 'alpha', session: 'root', routeInput: BOTH_IMAGE, async request() { throw new Error('must not be called'); } });
   const options = { provider: 'aitelier', model: 'driver', sessionId: 's',
     messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'img-1' } }] }] };
   await assert.rejects(async () => { for await (const _ of adapter.stream(options)) { /* drain */ } }, /attachment service is not mounted/);
 });
 
-test('the route declares image input', async () => {
+// ---- Step 24.2b (design-steward 7.8.12a "路线能力", "不收图的路线"; 7.8.18 适配器与插件) ----
+
+function routedAdapter(routes, { attachments, gets } = {}) {
+  let adapter;
+  const sent = [];
+  installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } },
+    get(name) { gets?.push(name); return attachments; } }, { LlmAdapter: class {} },
+  { project: 'alpha', session: 'root', routeInput: async () => routes,
+    async request(_path, body) { sent.push(body); return { text: 'ok', tool_calls: [], truncated: false, usage: {} }; } });
+  return { adapter, sent };
+}
+
+const imageHistory = sessionId => ({ provider: 'aitelier', model: 'driver', sessionId,
+  messages: [{ role: 'user', content: [{ type: 'text', text: 'look' },
+    { type: 'image', attachment: { attachmentId: 'sha256:abc', name: 'shot.png' } }] },
+  { role: 'assistant', content: [{ type: 'tool-call', id: 'c1', name: 'read_image', arguments: '{}' }] },
+  { role: 'tool', toolCallId: 'c1', content: [{ type: 'image', attachment: { attachmentId: 'sha256:frame' } }] }] });
+
+test('no-image session: history images become one line each, no image_url, no byte read, no throw without the attachment service', async () => {
+  const gets = [];
+  const { adapter, sent } = routedAdapter({ root: ['text'], child: ['text'] }, { attachments: undefined, gets });
+  const chunks = await collect(adapter, imageHistory('root'));
+  assert.equal(chunks.at(-1).type, 'finish');
+  const body = JSON.stringify(sent[0].messages);
+  assert.ok(!body.includes('image_url'), 'nothing image-shaped reaches the provider');
+  assert.equal(sent[0].messages[0].content, 'look\n[图片 shot.png：本路线不收图，未发送]');
+  assert.equal(sent[0].messages[2].content, '[图片 sha256:frame：本路线不收图，未发送]', 'no name: the attachment id');
+  assert.deepEqual(gets, [], 'the attachment service is never even asked for');
+  // With a mounted service whose read would throw, still nothing is read.
+  const reading = { async readImageRequest() { throw new Error('must not read a byte'); } };
+  const mounted = routedAdapter({ root: ['text'], child: ['text'] }, { attachments: reading });
+  await collect(mounted.adapter, imageHistory('root'));
+  assert.ok(!JSON.stringify(mounted.sent[0].messages).includes('image_url'));
+});
+
+test('stream() decides by its own session: root on an image route sends image_url, a child on a text route sends the line', async () => {
+  const reads = [];
+  const attachments = { async readImageRequest(ref) { reads.push(ref.attachmentId); return { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) }; } };
+  const { adapter, sent } = routedAdapter({ root: ['text', 'image'], child: ['text'] }, { attachments });
+  await collect(adapter, imageHistory('root'));
+  assert.deepEqual(sent[0].messages[0].content, [{ type: 'text', text: 'look' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AQID' } }],
+    'an image route is unchanged');
+  assert.deepEqual(reads, ['sha256:abc', 'sha256:frame']);
+  await collect(adapter, imageHistory('child-1'));
+  assert.ok(!JSON.stringify(sent[1].messages).includes('image_url'));
+  assert.equal(sent[1].messages[0].content, 'look\n[图片 shot.png：本路线不收图，未发送]');
+  assert.equal(reads.length, 2, 'the text-only child read nothing');
+  // And the other way round: a text root, an image child.
+  const flipped = routedAdapter({ root: ['text'], child: ['text', 'image'] }, { attachments });
+  await collect(flipped.adapter, imageHistory('root'));
+  await collect(flipped.adapter, imageHistory('child-1'));
+  assert.ok(!JSON.stringify(flipped.sent[0].messages).includes('image_url'));
+  assert.equal(flipped.sent[1].messages[0].content[1].type, 'image_url');
+});
+
+test('inputModalities is the intersection of the root and child routes', async () => {
+  const modalities = async routes => (await routedAdapter(routes).adapter.resolveModel('aitelier', 'driver')).inputModalities;
+  assert.deepEqual(await modalities({ root: ['text', 'image'], child: ['text', 'image'] }), ['text', 'image']);
+  assert.deepEqual(await modalities({ root: ['text', 'image'], child: ['text'] }), ['text'], 'root image, child text: no image');
+  assert.deepEqual(await modalities({ root: ['text'], child: ['text', 'image'] }), ['text']);
+  assert.deepEqual(await modalities({ root: ['text'], child: ['text'] }), ['text']);
+  // No route-input reader at all: nothing is known, so nothing takes images.
   let adapter;
   installHostModel({ llm: { registerAdapter(_names, value) { adapter = value; } }, get() { return {}; } },
     { LlmAdapter: class {} }, { project: 'alpha', session: 'root', async request() { return {}; } });
-  const info = await adapter.resolveModel('aitelier', 'driver');
-  assert.deepEqual(info.inputModalities, ['text', 'image']);
+  assert.deepEqual((await adapter.resolveModel('aitelier', 'driver')).inputModalities, ['text']);
+});
+
+test('OPS-1: a table with no `_input` (measured: false) keeps the image handling from before 24.2b', async () => {
+  const unmeasured = { root: ['text'], child: ['text'], measured: false };
+  const reads = [];
+  const attachments = { async readImageRequest(ref) { reads.push(ref.attachmentId); return { mediaType: 'image/png', data: new Uint8Array([1, 2, 3]) }; } };
+  const { adapter, sent } = routedAdapter(unmeasured, { attachments });
+  assert.deepEqual((await adapter.resolveModel('aitelier', 'driver')).inputModalities, ['text', 'image'], 'read_image and MCP images stay declared');
+  await collect(adapter, imageHistory('root'));
+  await collect(adapter, imageHistory('child-1'));
+  for (const body of sent) assert.equal(body.messages[0].content[1].type, 'image_url', 'history images still go out as image_url');
+  assert.deepEqual(reads, ['sha256:abc', 'sha256:frame', 'sha256:abc', 'sha256:frame']);
+  assert.equal(wakeTakesImages(unmeasured), false, 'the new wake images stay placeholder lines until the routes are measured');
+  const cached = routeInputCache(async () => unmeasured);
+  assert.deepEqual(await cached(), unmeasured, 'the cache keeps measured: false');
+  assert.deepEqual(await routeInputCache(async () => ({ root: ['text'], child: ['text'] }))(), { root: ['text'], child: ['text'] },
+    'an answer without the key is measured');
+});
+
+test('C2: the wake attaches images only on the intersection resolveModel declares', () => {
+  assert.equal(wakeTakesImages({ root: ['text', 'image'], child: ['text', 'image'] }), true);
+  assert.equal(wakeTakesImages({ root: ['text', 'image'], child: ['text'] }), false, 'root image, child text: DSH would project the block away');
+  assert.equal(wakeTakesImages({ root: ['text'], child: ['text', 'image'] }), false);
+  for (const routes of [{ root: ['text', 'image'], child: ['text', 'image'] }, { root: ['text', 'image'], child: ['text'] }, { root: ['text'], child: ['text'] }])
+    assert.equal(wakeTakesImages(routes), declaresImage(routes), JSON.stringify(routes));
+});
+
+test('noImageLine names the image by its name, else its id', () => {
+  assert.equal(noImageLine({ name: 'a.png', attachmentId: 'sha256:1' }), '[图片 a.png：本路线不收图，未发送]');
+  assert.equal(noImageLine({ attachmentId: 'sha256:1' }), '[图片 sha256:1：本路线不收图，未发送]');
+  assert.equal(noImageLine(undefined), '[图片 ?：本路线不收图，未发送]');
+  assert.throws(() => openaiMessages({ messages: [{ role: 'user', content: [{ type: 'image', attachment: { attachmentId: 'x' } }] }] }),
+    /without the durable attachment service/, 'outside a text-only session an unresolvable image still fails loudly');
+});
+
+test('route-input is read at most once a minute, shared by concurrent callers; a failure answers the last value or text-only', async () => {
+  let clock = 0, reads = 0, fail = false, answer = { root: ['text', 'image'], child: ['image', 'text'] };
+  const logs = [];
+  const read = async () => { reads += 1; if (fail) throw new Error('backend down'); return answer; };
+  const routeInput = routeInputCache(read, { now: () => clock, log: line => logs.push(line) });
+  const [a, b] = await Promise.all([routeInput(), routeInput()]);
+  assert.equal(reads, 1, 'two callers at once share one read');
+  assert.deepEqual(a, { root: ['text', 'image'], child: ['text', 'image'] }); assert.equal(a, b);
+  clock = 59999; await routeInput(); assert.equal(reads, 1, 'cached for 60 s');
+  clock = 60000; answer = { root: ['text'], child: ['text', 'image'] };
+  assert.deepEqual(await routeInput(), { root: ['text'], child: ['text', 'image'] }); assert.equal(reads, 2);
+  clock = 130000; fail = true;
+  assert.deepEqual(await routeInput(), { root: ['text'], child: ['text', 'image'] }, 'a failed read keeps the last answer');
+  assert.equal(reads, 3);
+  await routeInput(); assert.equal(reads, 4, 'a failure is not cached: the next call reads again');
+  assert.match(logs[0], /route-input read failed \(backend down\); keeping the last answer/);
+  const fresh = routeInputCache(async () => { throw new Error('404'); }, { now: () => 0 });
+  assert.deepEqual(await fresh(), { root: ['text'], child: ['text'] }, 'never read: text-only');
+  const odd = routeInputCache(async () => ({ root: 'image', child: null }));
+  assert.deepEqual(await odd(), { root: ['text'], child: ['text'] }, 'a malformed answer takes no images');
 });
 
 // The witness for the retry is a REAL loopback HTTP server reached through a

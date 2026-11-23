@@ -27,6 +27,12 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# What a candidate can be sent. Every candidate takes text; `image` is recorded
+# per concrete candidate in the table's `_input`, and only once that candidate
+# was seen reading an image (design 7.8.12a, "route capability as measured").
+_INPUT_KINDS = frozenset({"text", "image"})
+_DEFAULT_INPUT = ("text",)
+
 
 def config_or_example(name: str) -> str:
     """`<name>` if the deployment has one, else the committed `<name>.example`.
@@ -86,6 +92,14 @@ class ModelRoutes:
         # role cannot name a string that is valid everywhere; the table states
         # the concrete string each endpoint accepts.
         self._effort: dict[str, dict[str, str]] = {}
+        # endpoint -> input kinds, from the top-level `_input` table. A
+        # candidate it does not list takes text only.
+        self._input: dict[str, list[str]] = {}
+        # Whether the table HAS an `_input` (even an empty one). Without it no
+        # candidate was measured yet, and the callers keep the behaviour from
+        # before `_input` existed (core.dsh_driver.input_measured): images are
+        # neither refused nor declared away.
+        self.measures_input = False
         self._load()
 
     def _load(self) -> None:
@@ -101,6 +115,10 @@ class ModelRoutes:
         if not isinstance(raw, dict):
             raise RuntimeError(f"{self._path}: expected an object at the top level")
         for name, candidates in raw.items():
+            if name == "_input":
+                self._input = self._parse_input(candidates)
+                self.measures_input = True
+                continue
             if name.startswith("_"):
                 continue  # "_comment" and friends
             if isinstance(candidates, str):
@@ -154,6 +172,83 @@ class ModelRoutes:
                         f"{self._path}: route '{name}' candidate {c!r} names "
                         f"another route; candidates must be concrete")
             self._routes[name] = list(candidates)
+
+    def _parse_input(self, table) -> dict[str, list[str]]:
+        """`_input`: {"provider/model": ["text", "image"]}, keyed by CANDIDATE.
+
+        A top-level `_` key rather than a key on the route or the candidate,
+        because the parser refuses anything else there and every agent would
+        fail to start. A bad shape is a RuntimeError like any other bad table:
+        a typo silently read as "text only" would quietly turn images into
+        placeholders, and one read as "image" would turn turns into 400s.
+        """
+        if not isinstance(table, dict):
+            raise RuntimeError(
+                f"{self._path}: '_input' must map 'provider/model' to a list "
+                f"of input kinds")
+        out: dict[str, list[str]] = {}
+        for endpoint, kinds in table.items():
+            if "/" not in endpoint:
+                raise RuntimeError(
+                    f"{self._path}: '_input' key {endpoint!r} must be a "
+                    f"concrete 'provider/model', not a route")
+            if not isinstance(kinds, list) or not all(
+                    isinstance(k, str) and k in _INPUT_KINDS for k in kinds):
+                raise RuntimeError(
+                    f"{self._path}: '_input' {endpoint!r} must be a list drawn "
+                    f"from {sorted(_INPUT_KINDS)}, got {kinds!r}")
+            out[endpoint] = list(kinds)
+        return out
+
+    def input_for(self, candidate: str) -> list[str]:
+        """What this concrete candidate can be sent; unlisted means text only."""
+        return list(self._input.get(candidate, _DEFAULT_INPUT))
+
+    def unlisted_input(self) -> list[str]:
+        """Every candidate of every route that `_input` does not list, sorted.
+
+        Once the table has an `_input`, each of these is text-only (input_for)
+        and so is every route that names one, even only in its fallback tail
+        (accepts_image). A project row whose `model` names such a route gives
+        its director a text-only root. An `_input` written for a few routes
+        therefore turns every other route text-only, so the `_input` must list
+        every candidate in the table. Empty while there is no `_input`, because
+        nothing has been measured yet.
+        """
+        if not self.measures_input:
+            return []
+        return sorted({c for cands in self._routes.values() for c in cands}
+                      - set(self._input))
+
+    def input_summary(self) -> str:
+        """One line for the backend's startup log: what this process read.
+
+        The table is cached per process (get_routes), so this line is how a
+        deploy checks that an `_input` it added has actually taken effect.
+        """
+        if not self.measures_input:
+            return ("model routes: no _input, image input unmeasured "
+                    "(route-input says measured:false; images are neither "
+                    "refused nor declared away)")
+        text_only = [r for r in self.names() if not self.accepts_image(r)]
+        unlisted = self.unlisted_input()
+        return (f"model routes: _input measured, {len(self._input)} candidates "
+                f"listed; text-only routes: {', '.join(text_only) or 'none'}; "
+                f"unlisted (text-only): {', '.join(unlisted) or 'none'}")
+
+    def accepts_image(self, model_name: str) -> bool:
+        """True only when EVERY candidate `model_name` resolves to takes images.
+
+        The sticky candidate is not enough: a BadRequestError is not failed
+        over (core/ai_router.py, the excluded errors), so a failover onto a
+        text-only candidate would make that turn a 400. The owner chose the
+        whole-route reading (2026-11-21, "if one model cannot see images, the
+        whole route cannot"). A concrete `provider/model` that is not a route
+        is its own single candidate and is looked up the same way. A bare
+        name that is not a route raises, as `resolve` does.
+        """
+        return all("image" in self.input_for(c)
+                   for c in self.resolve(model_name))
 
     def effort_for(self, model_name: str, endpoint: str) -> str | None:
         """The reasoning effort this route wants ON THIS ENDPOINT, or None.
@@ -220,5 +315,13 @@ def get_routes(path: str | os.PathLike | None = None) -> ModelRoutes:
 
 
 def reset_cache() -> None:
-    """Test hook: drop the cached tables so a new file is picked up."""
+    """Drop the cached tables so a new file is picked up.
+
+    A test hook, and the only way a running backend sees a changed file: the
+    model-routes API calls it after each save. A hand edit of the live
+    `model_routes.json` (for example adding `_input`) changes nothing until the
+    backend restarts or such a save happens. Only a restart prints the startup
+    line (input_summary); a save drops the cache here and prints nothing, so
+    after a save the new reading shows only in route-input and in behaviour.
+    """
     _CACHE.clear()

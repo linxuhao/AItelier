@@ -166,6 +166,23 @@ def test_steward_and_presented_only_are_optional_and_accepted_when_well_formed()
     assert with_steward["steward"] == STEWARD
 
 
+def test_the_director_presents_media_call():
+    """Step 24.2b (design-steward 7.8.12a "导演与管家的不同"): the repository's director presents
+    media_call (its own media library's refs through its own media connection); the worker does not."""
+    table = load_roles()
+    assert "media_call" in table["director"]["presented"]
+    assert "media_call" not in table["director"]["forbidden"]
+    assert "media_call" not in table["worker"]["presented"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed in this environment")
+def test_python_and_node_agree_on_the_repository_table():
+    """The file itself, as both loaders read it - the director's media_call included."""
+    verdict = _node_parse(ROLES_FILE)
+    assert verdict == ("ok", load_roles())
+    assert "media_call" in verdict[1]["director"]["presented"]
+
+
 def test_the_steward_finds_its_tools_in_its_hosts_catalog():
     """Step 24.1a (design-steward 7.8.7): the repository's steward presents search_tools
     and call_tool, no longer forbids them, and searches only its host's catalog."""

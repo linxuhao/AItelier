@@ -2487,6 +2487,96 @@ test('a confirmation text goes back exactly as written, never shaped or cut, to 
   assert.deepEqual(s.slack.sent, [{ text, options: { replyToRef: 'ts-1', to: 'U-OWNER' } }]);
 });
 
+// ---- step 24.2b (7.8.12a 出站): the steward's files mirrored with its message ----
+
+/** setup() whose slack and wechat plugins also send files: `kinds` are the kinds each can send;
+ *  every send and sendFile lands in one `order` list, so a test sees what went out first. */
+const mediaSetup = (options, { kinds = { slack: ['image', 'voice', 'file'], wechat: ['image'] }, fileFail } = {}) => {
+  const fake = fakeHost(options), logs = [], order = [];
+  const channels = createOwnerChannels({ host: fake.host, log: (event, fields) => logs.push([event, fields]),
+    owedFile: join(mkdtempSync(join(tmpdir(), 'dsh-channels-owed-')), 'owed.json') });
+  channels.ready();
+  const plugin = name => {
+    const sent = [], files = [];
+    channels.service.register({ name, status: () => ({ connected: true }), mediaKinds: kinds[name],
+      async send(body, sendOptions) { sent.push({ text: body, options: sendOptions }); order.push(['send', name]); return { ref: `${name}-text-${sent.length}` }; },
+      async sendFile(file) { files.push(file); order.push(['sendFile', name]); if (fileFail) throw new Error(fileFail); return { ref: `${name}-file-${files.length}` }; } });
+    return { sent, files };
+  };
+  return { ...fake, channels, logs, order, slack: plugin('slack'), wechat: plugin('wechat') };
+};
+const PHOTO = { kind: 'image', mime: 'image/png', name: 'image-3f9a0b1c.png', path: '/media/owner/2026-11/m_3f9a0b1c.png' };
+const VOICE = { kind: 'voice', mime: 'audio/ogg', name: 'voice-77aa0b1c.ogg', path: '/media/owner/2026-11/m_77aa0b1c.ogg' };
+
+test('24.2b: a message of one file and no text is mirrored - sendFile once, send never, one delivery row', async () => {
+  const s = mediaSetup();
+  s.sources.set('m-owner', { direction: 'in', channel: 'slack', sender_ref: 'U-OWNER', channel_message_ref: 'ts-1', at: 'a', error: null });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', '', 'm-owner', { attachments: [PHOTO] }), { mirrored: true, channel: 'slack' });
+  assert.deepEqual(s.slack.sent, []);
+  assert.deepEqual(s.slack.files, [{ ...PHOTO, to: 'U-OWNER', replyToRef: 'ts-1' }]);
+  assert.deepEqual(only(s.calls, 'recordDelivery'), [{ messageId: 'm-out', channel: 'slack', channelMessageRef: 'slack-file-1' }]);
+  // A replay of the same message sends nothing more.
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', '', 'm-owner', { attachments: [PHOTO] }), { mirrored: false, reason: 'already_mirrored' });
+  assert.equal(s.slack.files.length, 1);
+});
+
+test('24.2b: text and a file - the text is sent first, then the file, and the message is recorded once', async () => {
+  const s = mediaSetup();
+  s.sources.set('m-owner', { direction: 'in', channel: 'wechat', sender_ref: 'U-OWNER', channel_message_ref: 'wx-1', at: 'a', error: null });
+  s.bindings.wechat = 'U-OWNER';
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', '这是你要的图', 'm-owner', { attachments: [{ ...PHOTO, caption: 'ignored' }] }),
+    { mirrored: true, channel: 'wechat' });
+  assert.deepEqual(s.order, [['send', 'wechat'], ['sendFile', 'wechat']]);
+  assert.deepEqual(s.wechat.sent, [{ text: '这是你要的图', options: { replyToRef: 'wx-1', to: 'U-OWNER' } }]);
+  // The message's text is the caption: a file carries only what sendFile needs to send it.
+  assert.deepEqual(s.wechat.files, [{ ...PHOTO, to: 'U-OWNER', replyToRef: 'wx-1' }]);
+  assert.deepEqual(only(s.calls, 'recordDelivery'), [{ messageId: 'm-out', channel: 'wechat', channelMessageRef: 'wechat-text-1' }]);
+  assert.equal(s.slack.sent.length + s.slack.files.length, 0);
+});
+
+test('24.2b: a reply to a dashboard message with a file goes nowhere (reason dashboard); without replyTo it goes to the default channel', async () => {
+  const s = mediaSetup();
+  assert.deepEqual(await s.channels.ownerMessageSent('m-1', '', 'm-dashboard', { attachments: [PHOTO] }), { mirrored: false, reason: 'dashboard' });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-2', 'caption', 'm-dashboard', { attachments: [PHOTO] }), { mirrored: false, reason: 'dashboard' });
+  assert.deepEqual(s.order, []);
+  assert.equal(only(s.calls, 'recordDelivery').length, 0);
+  const d = mediaSetup({ bindings: { wechat: 'wxid-owner' }, defaultChannel: 'wechat' });
+  assert.deepEqual(await d.channels.ownerMessageSent('m-3', '', undefined, { attachments: [PHOTO] }), { mirrored: true, channel: 'wechat' });
+  assert.deepEqual(d.wechat.files, [{ ...PHOTO, to: 'wxid-owner' }]);
+  assert.deepEqual(d.wechat.sent, []);
+  assert.deepEqual(only(d.calls, 'recordDelivery'), [{ messageId: 'm-3', channel: 'wechat', channelMessageRef: 'wechat-file-1' }]);
+});
+
+test('24.2b: a channel that cannot send that kind - the failure is recorded, nothing throws, the other parts still go', async () => {
+  const s = mediaSetup({ bindings: { wechat: 'wxid-owner' }, defaultChannel: 'wechat' });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-out', 'a voice and a photo', undefined, { attachments: [VOICE, PHOTO] }),
+    { mirrored: false, reason: 'send_failed', channel: 'wechat' });
+  assert.deepEqual(s.order, [['send', 'wechat'], ['sendFile', 'wechat']]);
+  assert.deepEqual(s.wechat.files, [{ ...PHOTO, to: 'wxid-owner' }]);
+  assert.deepEqual(only(s.calls, 'recordDelivery'), [{ messageId: 'm-out', channel: 'wechat', channelMessageRef: 'wechat-text-1', error: 'channel_no_media' }]);
+  // A channel with no sendFile at all: the same recorded failure.
+  const bare = setup({ bindings: { wechat: 'wxid-owner' }, defaultChannel: 'wechat' });
+  assert.deepEqual(await bare.channels.ownerMessageSent('m-bare', '', undefined, { attachments: [PHOTO] }),
+    { mirrored: false, reason: 'send_failed', channel: 'wechat' });
+  assert.deepEqual(only(bare.calls, 'recordDelivery'), [{ messageId: 'm-bare', channel: 'wechat', error: 'channel_no_media' }]);
+  // A sendFile that throws is recorded as send_failed with its reason, still once.
+  const broken = mediaSetup({ bindings: { slack: 'U-OWNER' }, defaultChannel: 'slack' }, { fileFail: 'bridge 502' });
+  assert.deepEqual(await broken.channels.ownerMessageSent('m-broken', 'see this', undefined, { attachments: [PHOTO] }),
+    { mirrored: false, reason: 'send_failed', channel: 'slack' });
+  assert.deepEqual(only(broken.calls, 'recordDelivery'), [{ messageId: 'm-broken', channel: 'slack', channelMessageRef: 'slack-text-1', error: 'send_failed: bridge 502' }]);
+});
+
+test('24.2b: an empty body with no attachments is still nothing_to_send; malformed attachments are refused before anything is sent', async () => {
+  const s = mediaSetup({ bindings: { slack: 'U-OWNER' }, defaultChannel: 'slack' });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-1', ''), { mirrored: false, reason: 'nothing_to_send' });
+  assert.deepEqual(await s.channels.ownerMessageSent('m-2', '  ', undefined, { attachments: [] }), { mirrored: false, reason: 'nothing_to_send' });
+  assert.deepEqual(await s.channels.ownerMessageSent('', '', undefined, { attachments: [PHOTO] }), { mirrored: false, reason: 'nothing_to_send' });
+  for (const attachments of ['m_3f9a', [null], [{ ...PHOTO, kind: 'video' }], [{ ...PHOTO, path: '' }], ['m_3f9a0b1c']])
+    assert.deepEqual(await s.channels.ownerMessageSent('m-3', 'text', undefined, { attachments }), { mirrored: false, reason: 'invalid_attachments' });
+  assert.deepEqual(s.order, []);
+  assert.equal(only(s.calls, 'recordDelivery').length, 0);
+});
+
 // --- the owner's ruling of 2026-11-22 (design/steward-group-media.md): a group's medium is kept
 // without a mention, and only the mention opens a turn ------------------------------------------
 // The bridge describes a bound room's image, voice or file whether or not it calls the steward

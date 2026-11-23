@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { dshDriverConversation, sendDriverConversationMessage, markDriverConversationRead,
-    stewardMessageSources, MESSAGE_SOURCES_BATCH, type DriverConversationEntry, type MessageSource } from '../lib/api';
+    stewardMessageSources, MESSAGE_SOURCES_BATCH, uploadConversationFile, mediaUrl,
+    type DriverConversationAttachment, type DriverConversationEntry, type MessageSource } from '../lib/api';
   import { isAtNewest, mergeThread, shouldMarkReadOnPoll } from '../lib/conversationThread';
   import { railQuestions, readConversationRows, type OpenQuestion } from '../lib/questions';
   import { renderMarkdown } from '../lib/markdown';
-  import type { ConversationDraft } from '../lib/conversationDraft';
+  import type { ConversationDraft, DraftAttachment } from '../lib/conversationDraft';
   import { st } from '../lib/stateI18n.svelte';
   import { langStore } from '../stores/i18n';
-  import { formatFullTime, formatMessageTime } from '../lib/format';
+  import { formatBytes, formatFullTime, formatMessageTime } from '../lib/format';
   const { projectId, projectTitle = '', driverId = '', onclose, onread = () => {}, drafts, prefill = null, ack = null, sources = false }: {
     projectId: string; projectTitle?: string; driverId?: string;
     // The steward's receipt (owner 2026-11-18: "收到消息先ack，再处理/回复"): a host that
@@ -88,9 +90,112 @@
   let input = $state<HTMLTextAreaElement | null>(null);
   let selectedQuestion = $state('');
   let draftReady = $state(false);
+  // The project's draft entry is the only copy of the composer's attachments (design
+  // 7.8.12a "面板组件"): the cards read it and every change writes it, so they survive a
+  // switch to another project and back, and an upload still running when the user left
+  // writes back into the project it started in. A host without a draft table (the
+  // driver status page) gets one of its own for the life of this pane.
+  // svelte-ignore state_referenced_locally
+  const store: Map<string, ConversationDraft> = drafts ?? new SvelteMap<string, ConversationDraft>();
+  const attachments = $derived(store.get(projectId)?.attachments ?? []);
+  const uploading = $derived(attachments.some(item => !item.upload_id && !item.refused));
+  const staged = $derived(attachments.filter(item => item.upload_id));
   $effect(() => {
-    if (draftReady) drafts?.set(projectId, {text, replyTo, answering});
+    if (!draftReady) return;
+    const fields = {text, replyTo, answering};
+    untrack(() => store.set(projectId, {...fields, attachments: store.get(projectId)?.attachments ?? []}));
   });
+  // ── attachments (step 24.2b) ───────────────────────────────────────────────
+  // Each file is uploaded as soon as it is picked, dropped or pasted, on its own request
+  // (api.uploadConversationFile); the message later names the staged upload_ids. A file
+  // the server refused keeps its card with the reason and is never sent.
+  const MAX_ATTACHMENTS = 10;
+  let picker = $state<HTMLInputElement | null>(null);
+  function setAttachments(project: string, change: (list: DraftAttachment[]) => DraftAttachment[]) {
+    const entry = store.get(project) ?? {text: '', replyTo: null, answering: null, attachments: []};
+    store.set(project, {...entry, attachments: change(entry.attachments ?? [])});
+  }
+  function patchAttachment(project: string, key: string, fields: Partial<DraftAttachment>) {
+    setAttachments(project, list => list.map(item => item.key === key ? {...item, ...fields} : item));
+  }
+  function removeAttachment(key: string) { setAttachments(projectId, list => list.filter(item => item.key !== key)); }
+  // The name only labels the file (the server decides the kind from its bytes); it must
+  // be 1-255 characters without control characters. A pasted image may have none.
+  function uploadName(file: File): string {
+    const clean = [...(file.name || '')].filter(ch => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127).join('').trim();
+    return (clean || (file.type.startsWith('image/') ? 'pasted-image' : 'file')).slice(0, 255);
+  }
+  function addFiles(files: Iterable<File>) {
+    const project = projectId;
+    for (const file of files) {
+      const key = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      const name = uploadName(file);
+      const live = (store.get(project)?.attachments ?? []).filter(item => !item.refused).length;
+      if (live >= MAX_ATTACHMENTS) {
+        setAttachments(project, list => [...list, {key, name, size: file.size, refused: 'too_many'}]);
+        continue;
+      }
+      setAttachments(project, list => [...list, {key, name, size: file.size, progress: 0}]);
+      if (file.type.startsWith('image/')) readPreview(project, key, file);
+      void upload(project, key, file, name);
+    }
+  }
+  async function upload(project: string, key: string, file: File, name: string) {
+    try {
+      const done = await uploadConversationFile(project, file, name, fraction => patchAttachment(project, key, {progress: fraction}));
+      patchAttachment(project, key, {upload_id: done.upload_id, kind: done.kind, mime: done.mime, size: done.size,
+        name: done.name, progress: undefined});
+    } catch (e) {
+      patchAttachment(project, key, {refused: e instanceof Error ? e.message : String(e), progress: undefined});
+    }
+  }
+  // Images only: a `data:` preview is allowed by the page's img-src, not by media-src.
+  function readPreview(project: string, key: string, file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string' && reader.result.startsWith('data:image/')) patchAttachment(project, key, {preview: reader.result});
+    };
+    reader.readAsDataURL(file);
+  }
+  function pickFiles(event: Event) {
+    const element = event.currentTarget as HTMLInputElement;
+    addFiles([...(element.files ?? [])]);
+    element.value = '';
+  }
+  function dragOver(event: DragEvent) {
+    if (event.dataTransfer?.types?.includes('Files')) event.preventDefault();
+  }
+  function dropFiles(event: DragEvent) {
+    const files = [...(event.dataTransfer?.files ?? [])];
+    if (!files.length) return;
+    event.preventDefault();
+    addFiles(files);
+  }
+  // Images on the clipboard become attachments; any text on it still pastes as text.
+  function pasteFiles(event: ClipboardEvent) {
+    const files = [...(event.clipboardData?.items ?? [])]
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .map(item => item.getAsFile()).filter((file): file is File => !!file);
+    if (files.length) addFiles(files);
+  }
+  const UPLOAD_REFUSALS: Record<string, string> = {too_large: 'attachmentTooLarge', type: 'attachmentType',
+    rate_limited: 'attachmentRateLimited', staging_full: 'attachmentStagingFull', too_many: 'attachmentTooMany'};
+  const uploadRefusal = (code: string) => UPLOAD_REFUSALS[code] ? st(UPLOAD_REFUSALS[code]) : st('attachmentUploadFailed') + ': ' + code;
+  // ── attachments in the thread ──────────────────────────────────────────────
+  const KIND_LABELS: Record<string, string> = {image: 'attachmentKindImage', voice: 'attachmentKindVoice', file: 'attachmentKindFile'};
+  const kindLabel = (kind: string) => st(KIND_LABELS[kind] ?? 'attachmentKindFile');
+  const MESSAGE_REFUSALS: Record<string, string> = {too_large: 'attachmentRefusedTooLarge', type: 'attachmentRefusedType',
+    unsupported: 'attachmentRefusedUnsupported', gone: 'attachmentRefusedGone'};
+  // The refusal line of design 7.8.12, e.g. "[Image too large, not received]".
+  const refusedLine = (item: DriverConversationAttachment) => '[' + kindLabel(item.kind) + ' '
+    + (MESSAGE_REFUSALS[item.refused ?? ''] ? st(MESSAGE_REFUSALS[item.refused ?? '']) : st('attachmentRefusedOther')) + ']';
+  // An attachment whose bytes no longer load (the library cleaned it: 410) says so.
+  let expired = $state<Record<string, boolean>>({});
+  let durations = $state<Record<string, string>>({});
+  function noteDuration(id: string, event: Event) {
+    const seconds = (event.currentTarget as HTMLAudioElement).duration;
+    if (Number.isFinite(seconds)) durations[id] = Math.floor(seconds / 60) + ':' + String(Math.round(seconds % 60)).padStart(2, '0');
+  }
   function composeKey(event: KeyboardEvent) {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.isComposing) {
       event.preventDefault(); void send();
@@ -226,8 +331,14 @@
   }
   async function send() {
     const body = text.trim();
-    if (!body || sending) return;
+    // A message may be files alone; a file still uploading holds the send back.
+    if ((!body && !staged.length) || uploading || sending) return;
     sending = true; sendError = ''; decision = '';
+    const project = projectId;
+    const sentIds = staged.map(item => item.upload_id as string);
+    // Every card shown now goes with this send: the staged ones in the message, the
+    // refused ones (never part of it) cleared with them.
+    const sentKeys = new Set(attachments.map(item => item.key));
     const replying = replyTo;
     // A rail reply closes exactly the question it is bound to. The cited message
     // is never modified; the link lives on this reply's row.
@@ -237,12 +348,20 @@
       // the same options object it always was.
       const sent = await sendDriverConversationMessage(projectId, body, {
         replyToMessageId: answering?.message_id ?? replying?.message_id, targetDriverId: driverId || undefined,
-        ...(cited ? {answers: cited} : {})});
+        ...(cited ? {answers: cited} : {}), ...(sentIds.length ? {attachments: sentIds} : {})});
       decision = confirmationLine(sent);
       text = ''; replyTo = null; answering = null;
       // A response can finish after switching projects. Preserve newer text
-      // if the user returned and started another draft in the meantime.
-      if (drafts?.get(projectId)?.text.trim() === body) drafts.delete(projectId);
+      // if the user returned and started another draft in the meantime - but
+      // the upload_ids this message used are gone from the draft either way:
+      // sent again, the backend would refuse the whole message (invalid_attachment).
+      const entry = store.get(project);
+      if (entry) {
+        const rest = (entry.attachments ?? []).filter(item => !sentKeys.has(item.key));
+        const same = entry.text.trim() === body;
+        if (same && !rest.length) store.delete(project);
+        else store.set(project, same ? {text: '', replyTo: null, answering: null, attachments: rest} : {...entry, attachments: rest});
+      }
       onread();
       await loadNewest();
       await scrollToNewest();
@@ -497,6 +616,38 @@
               {/if}
             </div>
           {/if}
+          <!-- Step 24.2b: the same for the owner's, a director's and the steward's
+               messages. The bytes come from the same-origin media route (the page CSP's
+               img-src / media-src 'self'). -->
+          {#if entry.attachments?.length}
+            <div class="message-attachments" class:mine={entry.sender_kind === 'user'}>
+              {#each entry.attachments as item, index (index)}
+                {#if item.refused || !item.id}
+                  <p class="identity attachment-line" data-attachment-refused={item.refused ?? ''}>{refusedLine(item)}</p>
+                {:else if expired[item.id]}
+                  <p class="identity attachment-line" data-attachment-expired={item.id}>[{kindLabel(item.kind)} {item.name ?? ''} {st('attachmentExpired')}]</p>
+                {:else if item.kind === 'image'}
+                  {@const id = item.id}
+                  <a class="attachment-image" href={mediaUrl(projectId, id)} target="_blank" rel="noopener noreferrer"
+                    title={item.name}><img src={mediaUrl(projectId, id)} alt={item.name ?? id} loading="lazy"
+                    onerror={() => expired[id] = true} /></a>
+                {:else if item.kind === 'voice'}
+                  {@const id = item.id}
+                  <div class="attachment-card" data-attachment-voice={id}>
+                    <span class="attachment-name">{item.name ?? kindLabel(item.kind)}</span>
+                    {#if durations[id]}<span class="identity" data-attachment-duration>{durations[id]}</span>{/if}
+                    <audio controls preload="metadata" src={mediaUrl(projectId, id)}
+                      onloadedmetadata={(event) => noteDuration(id, event)} onerror={() => expired[id] = true}></audio>
+                  </div>
+                {:else}
+                  <div class="attachment-card" data-attachment-file={item.id}>
+                    <a class="attachment-name" href={mediaUrl(projectId, item.id)} download={item.name ?? ''}>{item.name ?? kindLabel(item.kind)}</a>
+                    {#if item.size != null}<span class="identity">{formatBytes(item.size)}</span>{/if}
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {/if}
         </article>
       {/each}
       {#if awaiting}<p class="ack identity" data-conversation-ack={ack?.phase ?? 'stopped'} role="status">{ackText}</p>{/if}
@@ -572,7 +723,8 @@
       </div>
     {/if}
   </details>
-  <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}>
+  <form class="composer" data-conversation-composer onsubmit={(event) => {event.preventDefault(); void send();}}
+    ondragover={dragOver} ondrop={dropFiles}>
     {#if answering}
       <p class="identity composer-echo" data-answering data-answer-message-id={answering.message_id} data-answer-segment-id={answering.segment_id}
         title={answering.text}>
@@ -585,11 +737,33 @@
     {/if}
     <div class="composer-row">
       <textarea bind:this={input} bind:value={text} maxlength="8000" rows="2" disabled={sending}
-        onkeydown={composeKey} placeholder={st('driverConversationPlaceholder')}
+        onkeydown={composeKey} onpaste={pasteFiles} placeholder={st('driverConversationPlaceholder')}
         aria-label={st('driverConversationCompose')}></textarea>
     </div>
+    {#if attachments.length}
+      <ul class="composer-attachments" data-composer-attachments>
+        {#each attachments as item (item.key)}
+          <li class="composer-attachment" class:refused={!!item.refused} data-attachment-key={item.key}
+            data-upload-id={item.upload_id ?? ''} data-refused={item.refused ?? ''}>
+            {#if item.preview}<img src={item.preview} alt={item.name} />
+            {:else if item.upload_id && item.kind === 'voice'}<audio controls preload="metadata" src={mediaUrl(projectId, item.upload_id)}></audio>{/if}
+            <span class="attachment-name" title={item.name}>{item.name}</span>
+            <span class="identity">{formatBytes(item.size)}</span>
+            {#if item.refused}<span class="attachment-refusal" role="alert">{uploadRefusal(item.refused)}</span>
+            {:else if !item.upload_id}<progress max="1" value={item.progress ?? 0} aria-label={st('attachmentUploading')}></progress>{/if}
+            <button class="outline" type="button" aria-label="{st('attachmentRemove')}: {item.name}"
+              onclick={() => removeAttachment(item.key)}>×</button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
     <div class="composer-footer"><span>{st('driverConversationShortcut')}</span>
-      <button type="submit" disabled={sending || !text.trim()}>{sending ? '…' : st('driverMessageSend')}</button>
+      <span class="composer-actions">
+        <input class="attachment-picker" type="file" multiple bind:this={picker} onchange={pickFiles}
+          aria-label={st('attachmentPick')} tabindex="-1" />
+        <button class="outline" type="button" disabled={sending} onclick={() => picker?.click()}>{st('attachmentAdd')}</button>
+        <button type="submit" disabled={sending || uploading || (!text.trim() && !staged.length)}>{sending ? '…' : st('driverMessageSend')}</button>
+      </span>
     </div>
     {#if decision}<p role="status" data-confirmation-line>{decision}</p>{/if}
     {#if sendError}<p role="alert">{sendError}</p>{/if}
@@ -644,6 +818,22 @@
   .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:8px;}
   .composer-footer span{font-size:11px;color:var(--pico-muted-color);}
   .composer-footer button{margin:0;}
+  .composer-actions{display:flex;align-items:center;gap:8px;}
+  .attachment-picker{display:none;}
+  .composer-attachments{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:8px;}
+  .composer-attachment{display:flex;align-items:center;gap:6px;max-width:100%;margin:0;padding:4px 6px;border:1px solid var(--pico-muted-border-color);border-radius:6px;font-size:12px;overflow-wrap:anywhere;}
+  .composer-attachment.refused{border-color:var(--pico-del-color);}
+  .composer-attachment img{max-width:48px;max-height:48px;object-fit:cover;border-radius:4px;}
+  .composer-attachment audio{max-width:180px;height:28px;}
+  .composer-attachment progress{width:60px;margin:0;}
+  .attachment-name{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .attachment-refusal{color:var(--pico-del-color);}
+  .message-attachments{display:flex;flex-direction:column;align-items:flex-start;gap:6px;margin-top:8px;}
+  .message-attachments.mine{align-items:flex-end;}
+  .attachment-image img{display:block;max-width:240px;max-height:240px;border-radius:6px;}
+  .attachment-card{display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%;padding:6px 10px;border:1px solid var(--pico-muted-border-color);border-radius:6px;font-size:13px;}
+  .attachment-card audio{max-width:100%;height:32px;}
+  .attachment-line{margin:0;}
   button{width:auto;font-size:12px;padding:5px 9px;margin:0;}
   .asks{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:5px;background:var(--pico-primary);color:var(--pico-primary-inverse);font-size:11px;}
   .source{display:inline-block;padding:0 6px;border-radius:5px;border:1px solid var(--pico-muted-border-color);color:var(--pico-muted-color);font-size:11px;line-height:1.5;white-space:nowrap;}

@@ -101,7 +101,10 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
       AITELIER_DRIVER_ID: 'dsh-roles', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'roles-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: base,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access' };
+      AITELIER_DSH_EXECUTION: 'host', DSH_PERMISSION_MODE: 'danger-full-access',
+      // Production's media root (core/dsh_driver.py gives every driver one): the director's
+      // media_call (24.2b) exists only with its own media library.
+      AITELIER_MEDIA_ROOT: join(directory, 'media') };
 
     /** One boot: launch, serve a full director turn around one native child, check the split under `table`, stop. */
     const serveBoot = async (boot, table) => {

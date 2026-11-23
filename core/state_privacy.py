@@ -148,6 +148,10 @@ PRIVATE_STATE_TABLES = frozenset({
     # Step 24.1b: confirmations of outward actions (the exact arguments - a mail's text - and
     # the text the requester read) and the marks of the owner's dashboard messages.
     "state_steward_confirmations", "state_steward_dashboard_messages",
+    # Step 24.2b: the dashboard's conversation uploads (core.state_conversation_uploads): which
+    # user uploaded which file (its name) into which project, and where the hosts stored it.
+    # No projection: never public.
+    "state_conversation_uploads",
 })
 
 PUBLIC_STATE_TABLES = frozenset({

@@ -43,6 +43,13 @@ test('the loader refuses unknown keys at every level, and malformed values', () 
   assert.throws(() => parseRoles('[]'), /table must be an object/);
 });
 
+test('step 24.2b: the director presents media_call (its own media library), the worker neither presents nor needs it', () => {
+  assert.ok(table.director.presented.includes('media_call'));
+  assert.ok(!table.director.forbidden.includes('media_call'));
+  assert.ok(!table.worker.presented.includes('media_call'));
+  assert.ok(aitelierRoles(table).director.presented.includes('media_call'));
+});
+
 test('the adapter adds AItelier\'s State rules to the generic table and nothing else (D3)', () => {
   const effective = aitelierRoles(table);
   // Plugin step 4: the adapter's own director tools left the generic table and are added here.

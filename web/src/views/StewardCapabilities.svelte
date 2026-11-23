@@ -26,26 +26,34 @@
     return () => { alive = false; };
   });
   function route(row: StewardCapability): string {
-    if (row.provider === 'native') return 'native' + (row.detail ? ' — ' + row.detail : '');
-    if (row.provider === 'mcp') return `mcp/tool: ${row.conn_id ?? '?'} / ${row.tool ?? '?'}`;
-    return 'missing (no route)';
+    if (row.provider === 'native') return t('steward.capNative') + (row.detail ? ' — ' + row.detail : '');
+    if (row.provider === 'mcp') return t('steward.capMcp').replace('{conn}', row.conn_id ?? '?').replace('{tool}', row.tool ?? '?');
+    return t('steward.capMissing');
+  }
+  // The name comes from 'steward.cap.<id>'; the backend's label is only the fallback for
+  // an id this build has no key for (t() returns the key itself then).
+  function name(row: StewardCapability): string {
+    const key = 'steward.cap.' + row.id;
+    const text = t(key);
+    return text === key ? row.label : text;
   }
 </script>
 
-<section class="steward-capabilities" aria-label="Basic capabilities">
+<section class="steward-capabilities" aria-label={t('steward.capAria')}>
   <table>
-    <thead><tr><th scope="col">Capability</th><th scope="col">Route</th></tr></thead>
+    <thead><tr><th scope="col">{t('steward.capColName')}</th><th scope="col">{t('steward.capColRoute')}</th></tr></thead>
     <tbody>
       {#each rows as row (row.id)}
         <tr data-capability={row.id} data-provider={row.provider}>
-          <td data-capability-label>{row.label}</td>
+          <td data-capability-label>{name(row)}</td>
           <td data-capability-route>{route(row)}</td>
         </tr>
       {/each}
     </tbody>
   </table>
   {#if !loaded && !error}<p aria-busy="true">{t('steward.loading')}</p>{/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
+  {#if loaded && !error && rows.length === 0}<p data-capabilities-empty>{t('steward.capEmpty')}</p>{/if}
+  {#if error}<p class="error" role="alert">{t('steward.capLoadFailed').replace('{code}', error)}</p>{/if}
 </section>
 
 <style>

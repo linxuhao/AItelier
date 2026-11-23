@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
+import { t } from '../../lib/i18n.svelte';
 
 const api = vi.hoisted(() => ({
   listStewardCapabilities: vi.fn(),
@@ -85,6 +86,88 @@ describe('the capabilities table', () => {
     const text = route(view.container, 'tts');
     expect(text?.length).toBeGreaterThan(0);
     expect(text).toMatch(/missing/i);
+  });
+});
+
+// The backend's ids (api/steward_routers.py CAPABILITIES). Translation is not one of
+// them: the owner ruled it is not a basic capability (2026-11-23).
+const IDS = ['vision', 'ocr', 'pdf', 'office_read', 'office_write', 'transcribe', 'tts', 'draw', 'music',
+  'sfx', 'video', 'search', 'fetch', 'email', 'calendar', 'cloud_files', 'memory', 'code'];
+const LANGS = ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr', 'de', 'es'];
+const VIEW_KEYS = ['steward.capAria', 'steward.capColName', 'steward.capColRoute', 'steward.capNative',
+  'steward.capMcp', 'steward.capMissing', 'steward.capEmpty', 'steward.capLoadFailed',
+  ...IDS.map(id => 'steward.cap.' + id)];
+const headers = (container: HTMLElement) =>
+  [...container.querySelectorAll('thead th')].map(th => th.textContent?.trim());
+const label = (container: HTMLElement, id: string) =>
+  row(container, id)?.querySelector('[data-capability-label]')?.textContent?.trim();
+
+describe('the capabilities table speaks the chosen language', () => {
+  afterEach(() => { langStore.set('en'); });
+
+  it('every key the view uses exists in all 8 languages, translated rather than copied', () => {
+    // t() falls back to English, then to the key: a key missing from one language
+    // renders English there, so "differs from en" is what proves the key is present.
+    const english: Record<string, string> = {};
+    langStore.set('en');
+    for (const key of VIEW_KEYS) {
+      english[key] = t(key);
+      expect(english[key], key).not.toBe(key);
+    }
+    const copied: string[] = [];
+    for (const lang of LANGS.slice(1)) {
+      langStore.set(lang);
+      for (const key of VIEW_KEYS) if (t(key) === english[key]) copied.push(`${lang} ${key}`);
+    }
+    expect(copied).toEqual([]);
+  });
+
+  it('headers, aria-label, names and routes come from the i18n keys in en and zh-CN', async () => {
+    api.listStewardCapabilities.mockResolvedValue(payload({vision: {label: '看图 (Vision)'}}));
+    const view = render(StewardCapabilitiesView);
+    await waitFor(() => expect(row(view.container, 'tts')).not.toBeNull());
+    const section = view.container.querySelector('.steward-capabilities') as HTMLElement;
+    expect(headers(view.container)).toEqual(['Capability', 'Route']);
+    expect(section.getAttribute('aria-label')).toBe('Basic capabilities');
+    expect(label(view.container, 'vision')).toBe('Understand images');
+    expect(label(view.container, 'transcribe')).toBe('Speech to text');
+    expect(label(view.container, 'tts')).toBe('Send voice messages');
+
+    langStore.set('zh-CN');
+    await waitFor(() => expect(headers(view.container)).toEqual(['能力', '提供方式']));
+    expect(section.getAttribute('aria-label')).toBe('基础能力');
+    // The name is the key's, never the backend's mixed label.
+    expect(label(view.container, 'vision')).toBe('看图');
+    expect(label(view.container, 'transcribe')).toBe('语音转文字');
+    expect(label(view.container, 'tts')).toBe('发语音条');
+    expect(route(view.container, 'vision')).toBe('内置 — model_routes:visionprobe');
+    expect(route(view.container, 'transcribe')).toBe('MCP 工具：agentmedia / transcribe_audio');
+    expect(route(view.container, 'tts')).toBe('缺失（无提供方式）');
+  });
+
+  it('an id with no key falls back to the backend label', async () => {
+    api.listStewardCapabilities.mockResolvedValue({capabilities: [
+      ...payload().capabilities,
+      {id: 'telepathy', label: '读心 (Telepathy)', provider: 'missing', conn_id: null, tool: null, detail: null},
+    ]});
+    langStore.set('zh-CN');
+    const view = render(StewardCapabilitiesView);
+    await waitFor(() => expect(row(view.container, 'telepathy')).not.toBeNull());
+    expect(label(view.container, 'telepathy')).toBe('读心 (Telepathy)');
+    expect(label(view.container, 'vision')).toBe('看图');
+  });
+
+  it('empty and failed answers are translated too', async () => {
+    langStore.set('zh-CN');
+    api.listStewardCapabilities.mockResolvedValue({capabilities: []});
+    const empty = render(StewardCapabilitiesView);
+    await waitFor(() => expect(empty.container.querySelector('[data-capabilities-empty]')?.textContent)
+      .toBe('没有列出任何能力。'));
+    cleanup();
+    api.listStewardCapabilities.mockRejectedValue(new Error('HTTP 503'));
+    const failed = render(StewardCapabilitiesView);
+    await waitFor(() => expect(failed.getByRole('alert').textContent).toBe('读取能力列表失败：HTTP 503'));
+    expect(failed.container.querySelector('[data-capabilities-empty]')).toBeNull();
   });
 });
 

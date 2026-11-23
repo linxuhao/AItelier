@@ -2027,13 +2027,16 @@ class AIGateway:
         self._apply_session_headers(kwargs)
         kwargs["model"] = self.litellm_model
         # DeepSeek direct reads images through the OpenAI-compatible path (owner
-        # 2026-11-23). litellm's native `deepseek/` provider collapses a content
-        # list to a string, dropping its image_url blocks with no error, unless
-        # litellm's model map (fetched at start) says the model takes images.
-        # Measured 2026-11-23: through `deepseek/` the model saw 17 prompt tokens
-        # and said it could not see an image; through `openai/` (same api_base,
-        # key and model id) it read the PNG (219 prompt tokens) and a Chinese A4
-        # page. Text-only requests keep the native provider, as before.
+        # 2026-11-23). Whether litellm's native `deepseek/` provider forwards an
+        # image depends on the litellm version and its model map: older releases
+        # always collapse a content list to a string, newer ones keep it only
+        # when the map (fetched at start) says the model takes images, and a
+        # collapse drops the image_url blocks with no error. Measured 2026-11-23:
+        # through `deepseek/` the model saw 17 prompt tokens and said it could not
+        # see an image; through `openai/` (same api_base, key and model id) it
+        # read the PNG (219 prompt tokens) and a Chinese A4 page. `openai/`
+        # forwards content lists unconditionally. Text-only requests keep the
+        # native provider, as before.
         if (self.litellm_model or "").startswith("deepseek/") and _carries_image(kwargs.get("messages")):
             kwargs["model"] = "openai/" + self.litellm_model.split("/", 1)[1]
         for k in ("api_base", "api_key", "cache_control_injection_points",

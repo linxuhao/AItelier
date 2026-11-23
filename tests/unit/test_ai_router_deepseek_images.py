@@ -1,12 +1,14 @@
 """DeepSeek direct reads images through the OpenAI-compatible path (owner 2026-11-23).
 
-litellm's native `deepseek/` provider collapses a user message's content list to
-a string - dropping its image_url blocks without an error - unless litellm's
-model map says the model supports vision. That map is fetched at backend start,
-and the host venv's older litellm always collapses: a probe on 2026-11-23 sent a
-64x32 PNG through `deepseek/deepseek-flash` and the model saw 17 prompt tokens
-("I can't see an image"). The same endpoint, key and model id through litellm's
-`openai/` path read the digits (219 prompt tokens) and a Chinese A4 page.
+Whether litellm's native `deepseek/` provider forwards an image depends on the
+litellm version and its model map: older releases always collapse a user
+message's content list to a string, newer ones keep it only when the map
+(fetched at backend start) says the model supports vision, and a collapse drops
+the image_url blocks without an error. A probe on 2026-11-23 sent a 64x32 PNG
+through `deepseek/deepseek-flash` and the model saw 17 prompt tokens ("I can't
+see an image"). The same endpoint, key and model id through litellm's `openai/`
+path, which forwards content lists unconditionally, read the digits (219 prompt
+tokens) and a Chinese A4 page.
 
 So an image-bearing request bound to a `deepseek/` model goes out as
 `openai/<model>` with the same api_base and key. A text-only request keeps the

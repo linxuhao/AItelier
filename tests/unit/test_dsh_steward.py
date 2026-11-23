@@ -15,7 +15,7 @@ import pytest
 
 from core import dsh_driver
 from core.dsh_driver import (DshDrivers, RESERVED_ROLES, compaction_config, completion_route,
-                             load_roles, role_for_project)
+                             load_roles, role_for_project, route_input)
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_service import StateService
@@ -86,8 +86,10 @@ def test_completion_route_and_compaction_follow_the_projects_role(monkeypatch):
     director = dict(steward, project_id="alpha")
     assert completion_route(steward, "root", table) == "steward-route"
     assert completion_route(director, "root", table) == table["director"]["route"]
-    # Children are workers whoever the root is; the row's model still wins for the root.
+    # An entry without child_route sends its children to the worker route, as before
+    # step 24.2c; the row's model still wins for the root only.
     assert completion_route(steward, "child", table) == table["worker"]["route"]
+    assert completion_route(director, "child", table) == table["worker"]["route"]
     assert completion_route(dict(steward, model="owner-pick"), "root", table) == "owner-pick"
     root = compaction_config(steward, table)["modelPolicies"][0]
     assert root == {"provider": "aitelier", "model": "steward-route", "thresholdRatio": 0.4, "retainTokens": 3}
@@ -95,15 +97,55 @@ def test_completion_route_and_compaction_follow_the_projects_role(monkeypatch):
         "provider": "aitelier", "model": table["director"]["route"], **table["director"]["compaction"]}
 
 
+def test_a_steward_child_takes_the_child_route_and_a_director_child_the_worker_route():
+    """Step 24.2c (design-steward 7.8.12b "九" 3): the root entry's child_route, when it has
+    one, is every child session's route; the row's model never reaches a child."""
+    table = _table()
+    table["steward"]["child_route"] = "steward-children"
+    steward = {"project_id": STEWARD_PROJECT, "session_id": "root", "provider": "aitelier", "model": ""}
+    director = dict(steward, project_id="alpha")
+    for child in ("child", "child-2", "", "ROOT"):
+        assert completion_route(steward, child, table) == "steward-children"
+        assert completion_route(dict(steward, model="owner-pick"), child, table) == "steward-children"
+        assert completion_route(director, child, table) == table["worker"]["route"]
+    assert completion_route(steward, "root", table) == "steward-route"
+    # The committed table: the steward's children take the steward route, the director's the worker route.
+    committed = load_roles()
+    assert completion_route(steward, "child", committed) == committed["steward"]["route"] == "steward"
+    assert completion_route(director, "child", committed) == committed["worker"]["route"]
+
+
+def test_route_input_child_side_follows_the_steward_route(tmp_path):
+    """route_input's `child` is the steward route for the steward project (so a text-only
+    worker route no longer blinds the steward) and still the worker route for a director."""
+    from core.model_routes import ModelRoutes
+    path = tmp_path / "model_routes.json"
+    path.write_text(json.dumps({
+        "driver": ["alpha/vis-1"], "steward": ["alpha/vis-1"], "worker": ["alpha/vis-1", "gamma/txt-2"],
+        "_input": {"alpha/vis-1": ["text", "image"], "gamma/txt-2": ["text"]}}))
+    routes = ModelRoutes(path)
+    table = load_roles()
+    steward = {"project_id": STEWARD_PROJECT, "session_id": "root", "provider": "aitelier", "model": ""}
+    director = dict(steward, project_id="alpha")
+    assert route_input(steward, table, routes) == {"root": ["text", "image"], "child": ["text", "image"]}
+    assert route_input(director, table, routes) == {"root": ["text", "image"], "child": ["text"]}
+    without = copy.deepcopy(table)
+    del without["steward"]["child_route"]
+    assert route_input(steward, without, routes) == {"root": ["text", "image"], "child": ["text"]}
+
+
 def test_a_table_without_a_steward_refuses_the_steward_and_nobody_else(monkeypatch):
     monkeypatch.delenv("AITELIER_DSH_COMPACT_RATIO", raising=False)
     table = _table(steward=False)
     steward = {"project_id": STEWARD_PROJECT, "session_id": "root", "provider": "aitelier", "model": ""}
-    for call in (lambda: completion_route(steward, "root", table), lambda: compaction_config(steward, table)):
+    # A child of the steward project is refused too (step 24.2c: children go through the root entry).
+    for call in (lambda: completion_route(steward, "root", table), lambda: completion_route(steward, "child", table),
+                 lambda: compaction_config(steward, table)):
         with pytest.raises(ValueError, match="no steward entry"):
             call()
     director = dict(steward, project_id="alpha")
     assert completion_route(director, "root", table) == table["director"]["route"]
+    assert completion_route(director, "child", table) == table["worker"]["route"]
     compaction_config(director, table)
 
 

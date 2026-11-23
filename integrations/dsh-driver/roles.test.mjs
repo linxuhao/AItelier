@@ -38,9 +38,34 @@ test('the loader refuses unknown keys at every level, and malformed values', () 
     [t => { t.worker.presented.push('bash'); }, /names a tool twice/],
     [t => { t.worker.presented.push('subagent'); }, /both presents and forbids subagent/],
     [t => { t.worker.forbidden.push('not a name'); }, /list of tool names/],
+    // Step 24.2c: child_route is a route name; image_retain has exactly four positive integers.
+    [t => { t.steward.child_routes = 'steward'; }, /roles: unknown key steward\.child_routes$/],
+    [t => { t.steward.child_route = ''; }, /roles: steward\.child_route must be a non-empty string$/],
+    [t => { t.director.child_route = 1; }, /roles: director\.child_route must be a non-empty string$/],
+    [t => { t.steward.image_retain.max_image = 4; }, /roles: unknown key steward\.image_retain\.max_image$/],
+    [t => { delete t.steward.image_retain.byte_quantum; }, /roles: missing key steward\.image_retain\.byte_quantum$/],
+    [t => { t.steward.image_retain = [4, 4, 6291456, 1048576]; }, /roles: steward\.image_retain must be an object$/],
+    [t => { t.steward.image_retain.count_quantum = 0; }, /roles: steward\.image_retain\.count_quantum must be a positive integer$/],
+    [t => { t.steward.image_retain.byte_quantum = -1; }, /roles: steward\.image_retain\.byte_quantum must be a positive integer$/],
+    [t => { t.steward.image_retain.max_images = 1.5; }, /roles: steward\.image_retain\.max_images must be a positive integer$/],
+    [t => { t.steward.image_retain.max_base64_bytes = '6291456'; }, /roles: steward\.image_retain\.max_base64_bytes must be a positive integer$/],
   ];
   for (const [edit, message] of refused) assert.throws(() => validateRoles(variant(edit)), message, String(edit));
   assert.throws(() => parseRoles('[]'), /table must be an object/);
+});
+
+test('step 24.2c: the steward sends its children to its own route and bounds its seen images; any role may carry both keys', () => {
+  assert.equal(table.steward.child_route, 'steward');
+  assert.equal(table.steward.child_route, table.steward.route);
+  assert.deepEqual(table.steward.image_retain, { max_images: 4, count_quantum: 4, max_base64_bytes: 6291456, byte_quantum: 1048576 });
+  // Not below one request image: 4 MiB raw is 5,592,408 base64 bytes.
+  assert.ok(table.steward.image_retain.max_base64_bytes >= Math.ceil(4 * 1024 * 1024 / 3) * 4);
+  for (const role of ['director', 'worker']) {
+    assert.ok(!Object.hasOwn(table[role], 'child_route'), role);
+    assert.ok(!Object.hasOwn(table[role], 'image_retain'), role);
+  }
+  const accepted = variant(t => { t.director.child_route = 'd-children'; t.worker.image_retain = { ...t.steward.image_retain, max_images: 1 }; });
+  assert.deepEqual(validateRoles(structuredClone(accepted)), accepted);
 });
 
 test('step 24.2b: the director presents media_call (its own media library), the worker neither presents nor needs it', () => {

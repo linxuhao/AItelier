@@ -87,7 +87,7 @@ const leftovers = b => (existsSync(b.tmpRoot) ? readdirSync(b.tmpRoot) : []);
 const notRunning = pid => { try { return readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1]?.[0] === 'Z'; } catch { return true; } };
 
 test('the limits are the design\'s (7.8.12b "六"), and the script is the plugin\'s pdf_read.py', () => {
-  assert.deepEqual({ ...PDF_READER_LIMITS }, { wallMs: 30000, queueWaitMs: 30000, retryMs: 600000, stdoutBytes: 262144, stderrBytes: 4096,
+  assert.deepEqual({ ...PDF_READER_LIMITS }, { wallMs: 30000, closeGraceMs: 1000, queueWaitMs: 30000, retryMs: 600000, stdoutBytes: 262144, stderrBytes: 4096,
     imageBytes: 4194304, charsPage: 4000, charsCall: 8000, pagesWithImages: 4, pagesTextOnly: 30 });
   assert.ok(PDF_READ_SCRIPT.endsWith('/integrations/dsh-director/pdf_read.py') && existsSync(PDF_READ_SCRIPT), PDF_READ_SCRIPT);
   assert.deepEqual(pdfReaderEnv('/t/x'), { PATH: '/usr/bin:/bin', LC_ALL: 'C.UTF-8', HOME: '/t/x' });
@@ -134,6 +134,61 @@ setInterval(() => {}, 1000);`);
   assert.ok(notRunning(sleeper), `grandchild ${sleeper} still runs`);
   assert.deepEqual(leftovers(b), []);
   assert.ok(h.logs.some(l => l.startsWith('pdf_read ') && JSON.parse(l.slice(9)).refused === 'timeout'), h.logs.join('\n'));
+});
+
+/** A node reader child that first starts `/bin/sleep 600` in a session of its own (it leaves the
+ *  process group, as a hijacked child's fork + setsid would) holding the child's stdout and stderr,
+ *  writes its pid to side/escapee, then runs `body`. */
+function escapingChild(b, name, body) {
+  return nodeChild(b, name, `const escapee = cp.spawn('/bin/sleep', ['600'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+fs.writeFileSync(path.join(SIDE, 'escapee'), String(escapee.pid));
+escapee.unref();
+${body}`);
+}
+const killEscapee = b => { try { process.kill(Number(readFileSync(join(b.side, 'escapee'), 'utf8')), 'SIGKILL'); } catch { /* gone */ } };
+
+test('SEC-3: a descendant that left the group holding stdout does not hold the call - the child exited: broken at the close grace, the directory removed, the slot free', { timeout: 20000 }, async () => {
+  const b = bench();
+  const h = reader(b, escapingChild(b, 'escape-exit', okBody()), { limits: { wallMs: 5000, closeGraceMs: 300, queueWaitMs: 1500 } });
+  try {
+    const started = Date.now();
+    assert.deepEqual(await read(h, {}), { refused: 'broken' }, 'what it started outlived it');
+    assert.ok(Date.now() - started < 4000, `answered at the close grace, not the wall clock (${Date.now() - started} ms)`);
+    assert.deepEqual(leftovers(b), []);
+    killEscapee(b);
+    // The slot is free: a second call on this same reader runs (and meets its own escapee).
+    assert.deepEqual(await read(h, {}), { refused: 'broken' }, 'not busy');
+    assert.deepEqual(leftovers(b), []);
+  } finally { killEscapee(b); }
+});
+
+test('SEC-3: the same escapee with a hung leader: timeout at the wall clock plus the grace; a second call is not busy', { timeout: 20000 }, async () => {
+  const b = bench();
+  const h = reader(b, escapingChild(b, 'escape-hang', 'setInterval(() => {}, 1000);'), { limits: { wallMs: 800, closeGraceMs: 300, queueWaitMs: 1500 } });
+  try {
+    const started = Date.now();
+    assert.deepEqual(await read(h, {}), { refused: 'timeout' });
+    assert.ok(Date.now() - started < 3000, `${Date.now() - started} ms`);
+    assert.deepEqual(leftovers(b), []);
+    killEscapee(b);
+    // The slot is free: a second call on this same reader runs (and times out on its own escapee).
+    assert.deepEqual(await read(h, {}), { refused: 'timeout' }, 'not busy');
+    assert.deepEqual(leftovers(b), []);
+  } finally { killEscapee(b); }
+});
+
+test('SEC-3: the same escapee, the call aborted: timeout once the grace is over, the slot free', { timeout: 20000 }, async () => {
+  const b = bench();
+  const h = reader(b, escapingChild(b, 'escape-abort', 'setInterval(() => {}, 1000);'), { limits: { wallMs: 10000, closeGraceMs: 300, queueWaitMs: 1500 } });
+  try {
+    const started = Date.now();
+    assert.deepEqual(await read(h, {}, AbortSignal.timeout(300)), { refused: 'timeout' });
+    assert.ok(Date.now() - started < 3000, `${Date.now() - started} ms`);
+    assert.deepEqual(leftovers(b), []);
+    killEscapee(b);
+    assert.deepEqual(await read(h, {}, AbortSignal.timeout(300)), { refused: 'timeout' }, 'not busy');
+    assert.deepEqual(leftovers(b), []);
+  } finally { killEscapee(b); }
 });
 
 test('exit mapping: SIGXCPU -> timeout; a SIGKILL the host did not send, SIGSEGV, SIGABRT, MemoryError -> broken; a valid {error} passes through', async () => {
@@ -449,7 +504,7 @@ test('real subprocess: the real pdf_read.py under AITELIER_PDF_TEST_PYTHON passe
     assert.equal(saved.mediaType, 'image/jpeg');
     assert.deepEqual([...saved.data.subarray(0, 3)], [0xff, 0xd8, 0xff]);
   }
-  assert.ok(['landlock', 'landlock_fs', 'none'].includes(answer.sandbox), answer.sandbox);
+  assert.ok(['landlock+seccomp', 'landlock_fs+seccomp', 'seccomp', 'landlock', 'landlock_fs', 'none'].includes(answer.sandbox), answer.sandbox);
   assert.deepEqual(await r.readDocument(fakeLibrary({ [REF]: pdfRow(b) }), REF, { pages: '4' }), { refused: 'page_out_of_range', page_count: 3 });
   assert.deepEqual(leftovers(b), []);
   console.log(`# pdf reader smoke: sandbox=${answer.sandbox}; ${logs.join(' | ')}`);

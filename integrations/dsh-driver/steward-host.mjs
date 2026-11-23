@@ -972,6 +972,7 @@ export function mediaOps({ request, library, gatewayFetch, owner, reader, routeI
  *  own copies too, and the plugin holds the per-call and per-turn page counts. */
 export const PDF_READER_LIMITS = Object.freeze({
   wallMs: 30000, // the child's wall clock; then SIGKILL to its whole process group
+  closeGraceMs: 1000, // once the child exited or was killed, how long its pipes may stay open
   queueWaitMs: 30000, // one child per host; a call that waits longer answers busy
   retryMs: 10 * 60 * 1000, // a failed self-check is tried again by a call at most this often
   stdoutBytes: 256 * 1024, stderrBytes: 4096, // stdout over the cap is broken; stderr keeps its tail
@@ -986,7 +987,8 @@ export const pdfReaderEnv = home => ({ PATH: '/usr/bin:/bin', LC_ALL: 'C.UTF-8',
 const PDF_ERRORS = new Set(['encrypted', 'unsupported_security', 'broken', 'page_out_of_range', 'too_many_pages', 'invalid_request']);
 const SELFCHECK_ERRORS = new Set(['selfcheck_failed']);
 const PAGES_SPEC = /^([1-9]\d{0,5})(?:-([1-9]\d{0,5}))?$/;
-const SANDBOXES = new Set(['landlock', 'landlock_fs', 'none']);
+// The layers pdf_read.py reports in place, joined by "+" (its docstring).
+const SANDBOXES = new Set(['landlock+seccomp', 'landlock_fs+seccomp', 'seccomp', 'landlock', 'landlock_fs', 'none']);
 const sandboxOf = value => (SANDBOXES.has(value) ? value : 'unknown');
 
 /** The reader: `python` (AITELIER_MEDIA_PYTHON) runs `script` with `-I`, one child at a time, in a
@@ -1016,26 +1018,39 @@ export function createPdfReader({ python, script = PDF_READ_SCRIPT, tmpRoot, att
     return release;
   }
 
-  /** One child: its own process group, stdin closed, cwd and HOME the call's directory. */
+  /** One child: its own process group, stdin closed, cwd and HOME the call's directory. The call
+   *  ends when the pipes close, or closeGraceMs after the child exited or was killed, whichever
+   *  is first (review SEC-3): a descendant that left the group and still holds stdout must not
+   *  hold the call, the call's directory or the host's one slot. Its pipes are then destroyed
+   *  and a child that had exited is answered as broken (`lingering`): something it started outlived it. */
   function runChild(args, cwd, signal) {
     return new Promise(resolve => {
-      let child, done = false, killedByUs = false, overflow = false, outBytes = 0, exit;
+      let child, done = false, killedByUs = false, overflow = false, lingering = false, outBytes = 0, exit, grace;
       const out = [];
       let errTail = Buffer.alloc(0);
       try {
         child = spawn(python, ['-I', script, ...args], { cwd, env: pdfReaderEnv(cwd), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       } catch { resolve({ spawnError: true }); return; }
       const killGroup = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } };
-      const ours = () => { killedByUs = true; killGroup(); };
-      const wall = setTimeout(ours, limits.wallMs);
-      signal?.addEventListener?.('abort', ours, { once: true });
       const finish = fields => {
         if (done) return;
         done = true;
         clearTimeout(wall);
+        clearTimeout(grace);
         signal?.removeEventListener?.('abort', ours);
-        resolve({ ...fields, killedByUs, overflow, stdout: Buffer.concat(out), stderrTail: errTail });
+        resolve({ ...fields, killedByUs, overflow, lingering, stdout: Buffer.concat(out), stderrTail: errTail });
       };
+      const abandon = () => {
+        if (done) return;
+        lingering = exit !== undefined;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish({ code: exit?.code ?? null, signal: exit?.signal ?? (killedByUs ? 'SIGKILL' : null) });
+      };
+      const armGrace = () => { grace ??= setTimeout(abandon, limits.closeGraceMs); };
+      const ours = () => { killedByUs = true; killGroup(); armGrace(); };
+      const wall = setTimeout(ours, limits.wallMs);
+      signal?.addEventListener?.('abort', ours, { once: true });
       child.on('error', () => { if (child.pid === undefined) finish({ spawnError: true }); });
       child.stdout.on('data', chunk => {
         if (overflow) return;
@@ -1049,7 +1064,7 @@ export function createPdfReader({ python, script = PDF_READ_SCRIPT, tmpRoot, att
         errTail = Buffer.from(joined.subarray(Math.max(0, joined.length - limits.stderrBytes)));
       });
       // The leader's exit takes whatever it left behind in its group with it.
-      child.on('exit', (code, sig) => { exit = { code, signal: sig }; killGroup(); });
+      child.on('exit', (code, sig) => { exit = { code, signal: sig }; killGroup(); armGrace(); });
       child.on('close', (code, sig) => finish({ code: exit?.code ?? code, signal: exit?.signal ?? sig }));
       if (signal?.aborted) ours();
     });
@@ -1059,6 +1074,7 @@ export function createPdfReader({ python, script = PDF_READ_SCRIPT, tmpRoot, att
   function outcome(run, errors) {
     if (run.spawnError || run.overflow) return { refused: 'broken' };
     if (run.killedByUs || run.signal === 'SIGXCPU') return { refused: 'timeout' };
+    if (run.lingering) return { refused: 'broken' };
     if (run.signal) return { refused: 'broken' };
     const text = run.stdout.toString('utf8').trim();
     let parsed;

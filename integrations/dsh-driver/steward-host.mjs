@@ -1120,7 +1120,8 @@ export async function ingestDirectorAttachments({ library, project, requestKey, 
  *  request failed - so the runtime does not consume the tick and the next one tries again. A
  *  verdict (gone, too_large, type, unsupported) is acknowledged and shown; an ack the backend
  *  answers 404 (this driver is not a target) cannot succeed later, so it is logged, not thrown.
- *  An attachment the backend already refused (swept) is shown as refused and not fetched.
+ *  An attachment the backend already refused (swept, or the first target's ack refused it - the
+ *  backend then waits for no other target) is shown as refused and not fetched.
  *  @returns Map message_id -> one entry per attachment: {ref, kind, mime, size, durationMs?}
  *    or {kind, refused}. */
 export async function ingestDashboardAttachments({ inbox, library, audience, fetchUpload, ack, log = () => {} }) {

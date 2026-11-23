@@ -386,7 +386,9 @@ class ConversationUploads:
         refused it (`refused`, the library's code). The store is the token's driver's
         subdirectory (store_for). The first ack decides what is shown (state stored with
         store and ref, or refused - then the message shows the refusal); later acks only stop
-        waiting for their target. Once no target is waiting the staged file is removed. A
+        waiting for their target. A first ack that refuses ends the waiting for every target
+        (they read the refusal on the message and do not fetch). Once no target is waiting the
+        staged file is removed. A
         repeated ack changes nothing. A driver that is not a target of the message carrying
         this project's upload gets the same unknown_upload as an unknown id."""
         if not self.driver_id:
@@ -409,6 +411,10 @@ class ConversationUploads:
                     else:
                         state, kept_refused = "refused", refused
                         _mark_refused(conn, row["message_id"], upload_id, refused)
+                        # C3: the refusal is now on the message every target reads, and a host
+                        # never fetches an attachment marked refused - so nobody waits any more
+                        # and the staged file goes now, not after the 7-day sweep.
+                        pending = []
                 conn.execute(f"UPDATE {TABLE} SET state=?, store=?, ref=?, refused=?, pending_json=? "
                              "WHERE upload_id=?",
                              (state, store, kept_ref, kept_refused, json.dumps(pending), upload_id))

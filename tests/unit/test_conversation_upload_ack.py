@@ -155,6 +155,31 @@ def test_with_two_targets_the_file_survives_the_first_ack_and_is_gone_after_the_
     assert row(world, upload_id) == done
 
 
+def test_with_two_targets_a_first_ack_that_refuses_ends_the_waiting_and_drops_the_file(world, client):
+    """C3: the refusal goes onto the message row both targets read, and a host does not fetch an
+    attachment marked refused - so the second target is not waited for: the staged file goes at
+    the first ack, not after the 7-day sweep. The second target's late ack changes nothing."""
+    second_target(world)
+    upload_id = uploaded(client)
+    send(client, [upload_id])
+    first = ack(client, world.tokens["director"], upload_id, refused="too_large")
+    assert first.status_code == 200, first.text
+    assert first.json() == {"upload_id": upload_id, "project_id": "alpha", "state": "refused", "waiting": 0,
+                            "refused": "too_large"}
+    assert upload_id not in staged(world)
+    got = row(world, upload_id)
+    assert (got["state"], got["refused"], json.loads(got["pending_json"])) == ("refused", "too_large", [])
+    # The second target reads the refusal (and so does not fetch); a fetch would be gone anyway.
+    inbox = client.post("/api/state/query/list_driver_messages", json={}, headers=token_headers(world.tokens["ada"]))
+    (entry,) = [m for m in inbox.json()["messages"] if m.get("attachments")]
+    assert entry["attachments"][0]["refused"] == "too_large"
+    r = fetch(client, world.tokens["ada"], upload_id)
+    assert (r.status_code, r.json()["detail"]) == (410, "gone")
+    late = ack(client, world.tokens["ada"], upload_id, ref=REF2)
+    assert late.status_code == 200 and late.json()["state"] == "refused" and late.json()["waiting"] == 0
+    assert row(world, upload_id) == got
+
+
 def test_the_store_comes_from_the_token_never_from_the_host(world, client):
     # The steward's project: the steward is the delivery target, its store is its memory user.
     upload_id = uploaded(client, project=HOME)

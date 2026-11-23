@@ -20,8 +20,17 @@ one runs the setup, the rest skip it once it is recorded.
 What is NOT covered here: the attempt foreign-key verification stays on every
 request (``core.state_attempt_schema.initialize(..., references_only=True)``,
 iss-5de9f15b64f54027), so FK-OFF corruption still reaches the loud path on the
-next call. A schema mutated behind a handle's back (a dropped index or column)
-is repaired by the next handle (the next process start), or after ``forget``.
+next call. That verification is the one data-dependent step left in a request's
+construction: after any commit it re-runs the anti-join scan over the attempt
+tables, one caller per file at a time, so its cost grows with the live database.
+Moving it off the request path needs an owner ruling (latency study item (d)).
+
+A schema mutated behind a handle's back (a dropped index or column) is repaired
+by the next handle (the next process start), or after ``forget``. The same holds
+for a file whose CONTENT is replaced under a running process without a new inode
+(``cp backup.db aitelier.db``, ``sqlite3 .restore`` into the live path): its
+structural setup is not re-run until the backend restarts, so such a restore
+needs a restart. Before this module the next request repaired it.
 
 ``:memory:`` and URI names have no file identity; they keep a per-call setup.
 """
@@ -100,6 +109,7 @@ def forget(db=None) -> None:
         if db is None:
             _DONE.clear()
             _SHARED.clear()
+            _LOCKS.clear()
         elif _weakrefable(db):
             _DONE.pop(db, None)
         else:

@@ -50,7 +50,7 @@ def test_the_steward_instance_is_on_the_backends_network_with_its_own_profile(tm
     flags = shlex.split(run[-1])
     assert flags[0] == "exec"
     assert flags[flags.index("--host") + 1] == "0.0.0.0" and flags[flags.index("--port") + 1] == "8921"
-    assert flags[flags.index("--allowed-hosts") + 1].split(",")[0] == "steward-pwmcp:8921"
+    assert flags[flags.index("--allowed-hosts") + 1] == "steward-pwmcp:8921"
     assert flags[flags.index("--user-data-dir") + 1] == str(profile_root / "profile")
     for absent in ("--allowed-origins", "--caps", "--snapshot-mode", "--save-session"):
         assert absent not in flags, absent
@@ -65,4 +65,4 @@ def test_the_network_and_the_profile_dir_can_be_named(tmp_path):
     assert run[run.index("--network") + 1] == "aitelier_other"
     assert (where / "profile").is_dir()
     flags = shlex.split(run[-1])
-    assert flags[flags.index("--allowed-hosts") + 1].split(",")[0] == "steward-pwmcp:8922"
+    assert flags[flags.index("--allowed-hosts") + 1] == "steward-pwmcp:8922"

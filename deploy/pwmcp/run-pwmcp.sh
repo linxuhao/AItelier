@@ -38,7 +38,7 @@ if [ "$DRIVER" = steward ]; then
   PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --headless --browser chromium --no-sandbox \
  --executable-path /ms-playwright/chromium-1254/chrome-linux64/chrome \
- --host 0.0.0.0 --port $PORT --allowed-hosts steward-pwmcp:$PORT,127.0.0.1:$PORT,localhost:$PORT \
+ --host 0.0.0.0 --port $PORT --allowed-hosts steward-pwmcp:$PORT \
  --viewport-size 1280x720 --image-responses allow \
  --user-data-dir $PROFILE --output-dir $OUT \
  --config $B/pwmcp-config.json $EXTRA_FLAGS"

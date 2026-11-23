@@ -4,9 +4,10 @@ What it runs: one ``node --test`` invocation from the repository root, and nothi
 Its argv is ``[<node>, "--test", "integrations/wechat-bridge/bridge.test.mjs"]`` -- the file
 named explicitly, with the path the package's own npm script uses (``package.json``'s
 ``test`` script), so the suite is run exactly the way its author runs it. The floor is
-``\u2139 tests 68`` / ``\u2139 pass 68`` / ``\u2139 fail 0``, measured in the shipped image on
-2026-11-23 (tree bb1e2cfca5, node v24.22.3, 5.3 s on the suite's own timer and 6.5 s for
-the whole container run).
+``\u2139 tests 110`` / ``\u2139 pass 110`` / ``\u2139 fail 0``, measured in the shipped image on
+2026-11-23 (tree 0272e4bafd3fc928f54b3255bd0f621f96ef7d1f, node v24.22.3, 13.1 s on the
+suite's own timer). The earlier floor, 68, was the same suite before the bridge's media
+store and its group media path grew it.
 
 The counts are floors, not guesses: a run that prints fewer ``tests`` or fewer ``pass``
 than the numbers above has silently dropped cases, and this row goes RED and says so.
@@ -94,8 +95,8 @@ class Suite:
 BRIDGE = Suite(
     name="wechat-bridge",
     file="integrations/wechat-bridge/bridge.test.mjs",
-    expected_tests=68,
-    expected_pass=68,
+    expected_tests=110,
+    expected_pass=110,
 )
 
 

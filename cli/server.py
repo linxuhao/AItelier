@@ -171,6 +171,15 @@ def _ensure_host_dirs() -> None:
     except OSError:
         pass          # let Docker report it in its own terms
     try:
+        # Step 24.2b: the DSH hosts' media library (mounted :ro) and the dashboard
+        # uploads' staging dir (rw), at the paths compose mounts them from
+        # (core.dsh_driver.MEDIA_ROOT_DEFAULT, core.media_library.STAGING_DEFAULT).
+        for rel in (".local/share/dsh-director/media",
+                    ".local/share/aitelier/media-staging"):
+            (Path.home() / rel).mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        pass          # let Docker report it in its own terms
+    try:
         env_dir = os.environ.get("AITELIER_SECRETS_DIR")
         if env_dir == "/run/aitelier-secrets":
             # The CONTAINER-side value, copy-pasted to the host (it is visible

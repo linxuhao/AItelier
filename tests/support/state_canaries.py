@@ -264,6 +264,12 @@ def _plan():
         "state_pending_groups": (
             ("INSERT INTO state_pending_groups(channel,room_ref,mention_prefix,code_hash,at) VALUES('wechat',?,?,?,?)"),
             (c("state_pending_groups"), c("state_pending_groups"), c("state_pending_groups"), now)),
+        # design/steward-group-media.md section 6: one purge receipt, the canary in its ids and reason.
+        "state_group_media_purges": (
+            ("INSERT INTO state_group_media_purges(purge_id,channel,group_ref,epoch,reason,backend_rows,rows_before,"
+             "rows_after,files_unlinked,files_shared,bytes_freed,at) VALUES(?,'wechat',?,?,?,0,0,0,0,0,0,?)"),
+            (c("state_group_media_purges"), c("state_owner_groups"), c("state_group_media_purges"),
+             c("state_group_media_purges"), "2999-01-01T00:00:00+00:00")),
         # Step 25 C4 (core/state_lists.py): one family list item, the canary in its text and names.
         "state_steward_list_items": (
             ("INSERT INTO state_steward_list_items(item_id,list,text,added_by_role,added_by_ref,added_by_label,"

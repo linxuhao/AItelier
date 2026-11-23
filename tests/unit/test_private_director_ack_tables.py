@@ -53,7 +53,9 @@ CHANNEL_PRIVATE={'state_owner_channels','state_owner_channel_codes','state_messa
                  'state_owner_question_pushes','state_owner_question_answers'}
 # Step 23: the family group's tables (core/state_groups.py) are PRIVATE, each with a canary.
 GROUP_PRIVATE={'state_owner_groups','state_group_messages','state_group_members','state_family_memory',
-               'state_family_note','state_steward_turn_audience','state_pending_groups'}
+               'state_family_note','state_steward_turn_audience','state_pending_groups',
+               # design/steward-group-media.md: the purge ledger of a group's kept media.
+               'state_group_media_purges'}
 # Step 25 C4: the family lists (core/state_lists.py) are PRIVATE, with a canary.
 LIST_PRIVATE={'state_steward_list_items'}
 # Step 24.1a: the steward's own MCP connections - addresses, the owner's ticks, tool

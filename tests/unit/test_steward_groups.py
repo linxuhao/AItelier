@@ -96,7 +96,10 @@ def test_group_limits_are_pinned_code_constants_that_no_environment_variable_cha
                                         # Step 23.1 (7.7.24, owner 2026-11-22): groups per channel.
                                         "groups_per_channel": 3,
                                         # r44w (7.7.7, director 583): owner lines per group and hour.
-                                        "withheld_owner_lines_per_hour": 3}
+                                        "withheld_owner_lines_per_hour": 3,
+                                        # design/steward-group-media.md (owner 2026-11-23): kept media
+                                        # a mention turn's recent lists.
+                                        "kept_recent_items": 20}
     with pytest.raises(TypeError):
         fresh.GROUP_LIMITS["group_per_hour"] = 1
     assert dict(fresh.FAMILY_LIMITS) == {"entries": 100, "entry_chars": 200, "note_chars": 1000, "show_chars": 20000}
@@ -961,3 +964,357 @@ def test_another_bound_group_never_stops_a_pick_only_the_same_room_or_a_full_cha
     refused(lambda: execute(world.steward, "bind_owner_group", {**args, "code": code, "request_key": "p2",
                                                                 "group_ref": ROOM}, allow_write=True),
             "group_already_bound")
+
+
+
+# --- design/steward-group-media.md, owner rulings 2026-11-23: the per-group media switch ----------
+
+READER_HEADERS = {"X-Test-Email": "reader@example.com"}
+
+
+def listed(world, room=ROOM):
+    return next(g for g in execute(world.steward, "list_owner_groups", {})["groups"] if g["group_ref"] == room)
+
+
+def switch(world, room=ROOM):
+    return rows(world, "SELECT media_keep, media_keep_at, media_keep_attempts, media_keep_note, media_purge_reason, "
+                       "media_purged_at, media_purge_rows FROM state_owner_groups WHERE group_ref=?", (room,))[0]
+
+
+def notice(world, which, phase, room=ROOM, epoch=None, key=None, **extra):
+    epoch = epoch or switch(world, room)[1]
+    return execute(world.steward, "group_media_notice",
+                   {"request_key": key or f"gmn:{room}:{epoch}:{which}:{phase}", "channel": "wechat", "group_ref": room,
+                    "epoch": epoch, "notice": which, "phase": phase, **extra}, allow_write=True)
+
+
+def receipt(world, room=ROOM, epoch=None, key=None, **counts):
+    epoch = epoch or switch(world, room)[1]
+    body = {"rows_before": 0, "rows_after": 0, "files_unlinked": 0, "files_shared": 0, "bytes_freed": 0, **counts}
+    return execute(world.steward, "record_group_media_purge",
+                   {"request_key": key or f"gmp:{room}:{epoch}", "channel": "wechat", "group_ref": room, "epoch": epoch,
+                    "receipt": body}, allow_write=True)
+
+
+def turn_on(world, room=ROOM):
+    """The owner's click and the host's sent on-notice: the switch is on."""
+    world.owner.groups.set_group_media_keep("wechat", room, True)
+    assert notice(world, "on", "check", room=room, key=f"chk-{room}")["may_post"] is True
+    assert notice(world, "on", "sent", room=room)["state"] == "on"
+
+
+def kept_media(world, ref, room=ROOM, sender=MEMBER, at=NOW, media="m_0123456789abcdef"):
+    if at is NOW:
+        at = state_channels._now().isoformat()
+    return execute(world.steward, "relay_group_message",
+                   {"request_key": f"k-{room}-{ref}", "channel": "wechat", "group_ref": room, "sender_ref": sender,
+                    "channel_message_ref": ref, "body": "[图片]", "channel_at": at, "kept": True,
+                    "attachments": [{"kind": "image", "ref": media, "mime": "image/png", "size": 33}]},
+                   allow_write=True)
+
+
+def clock(monkeypatch):
+    start = state_channels._now()
+    return lambda delta: monkeypatch.setattr(state_channels, "_now", lambda: start + delta)
+
+
+def test_r2_a_new_group_starts_off_and_unbind_and_rebind_return_it_to_off_with_a_fresh_epoch(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    assert switch(world)[:2] == ("off", None)
+    assert listed(world)["media_keep"] == "off" and "media_notice" not in listed(world), "bound alone stores nothing (d)"
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    assert listed(world)["media_keep"] == "off", "on_pending stores nothing"
+    assert listed(world)["media_notice"]["phase"] == "on"
+    notice(world, "on", "sent")
+    assert listed(world)["media_keep"] == "on"
+    at(timedelta(minutes=1))
+    world.owner.groups.unbind_owner_group("wechat", ROOM)
+    unbound = switch(world)
+    assert unbound[0] == "off" and unbound[4] == "unbind"
+    purges = execute(world.steward, "list_owner_groups", {})["media_purges"]
+    assert purges == [{"channel": "wechat", "group_ref": ROOM, "epoch": unbound[1]}], "the revoked group still owes its purge"
+    at(timedelta(minutes=2))
+    bound_group(world, key="bg-again", label="家庭群")
+    rebound = switch(world)
+    assert rebound[0] == "off" and rebound[4] == "rebind" and rebound[1] != unbound[1], "a fresh epoch"
+    assert listed(world)["media_keep"] == "off" and "media_notice" not in listed(world)
+    # The switch is the owner's alone: neither the steward nor a director turns it.
+    for service in (world.steward, world.director):
+        refused(lambda: service.groups.set_group_media_keep("wechat", ROOM, True), "owner_session_required")
+    refused(lambda: world.owner.groups.set_group_media_keep("wechat", ROOM2, True), "group_not_bound")
+
+
+def test_r2_every_switch_transition(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    assert world.owner.groups.set_group_media_keep("wechat", ROOM, False) == {"state": "off"}
+    assert switch(world)[1] is None, "off while off is a no-op"
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    pending = switch(world)
+    at(timedelta(seconds=5))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    assert switch(world)[:2] == pending[:2] == ("on_pending", pending[1]), "on while on_pending keeps the epoch"
+    # Off while the on-notice is still owed: off, nothing announced, nothing owed.
+    assert world.owner.groups.set_group_media_keep("wechat", ROOM, False) == {"state": "off"}
+    assert switch(world)[0] == "off" and switch(world)[4] is None
+    assert "media_notice" not in listed(world) and execute(world.steward, "list_owner_groups", {})["media_purges"] == []
+    turn_on(world)
+    kept_media(world, "k1")
+    ask(world, "q1")
+    at(timedelta(seconds=10))
+    # Off from on: the kept rows go in this transaction, the questions stay; the purge is owed.
+    assert world.owner.groups.set_group_media_keep("wechat", ROOM, False) == {"state": "off_notice", "backend_rows_deleted": 1}
+    assert rows(world, "SELECT kind FROM state_group_messages WHERE direction='in'") == [("question",)]
+    off = switch(world)
+    assert (off[0], off[4], off[6]) == ("off_notice", "off", 1)
+    assert listed(world)["media_notice"]["phase"] == "off"
+    assert notice(world, "off", "check", key="c1") == {"refused": "purge_owed"}
+    assert switch(world)[2:4] == (0, "purge_owed"), "a refusal before sending spends no attempt"
+    # On during off_notice: on_pending, the off-notice dropped, the purge still owed first.
+    at(timedelta(seconds=20))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    assert switch(world)[0] == "on_pending" and listed(world)["media_notice"]["phase"] == "on"
+    assert notice(world, "on", "check", key="c2") == {"refused": "purge_owed"}
+    assert receipt(world, rows_before=1, files_unlinked=1, bytes_freed=33)["settled"] is True
+    assert notice(world, "on", "check", key="c3")["may_post"] is True
+
+
+def test_r2_the_notice_check_sent_and_failed(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    # Refusals decided before a send: written as the note, no attempt counted.
+    moment = state_channels._now().isoformat()
+    with world.db.get_connection() as conn:
+        for i in range(state_groups.GROUP_LIMITS["group_sends_per_hour"]):
+            conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,body,at) "
+                         "VALUES(?,'wechat',?,'out','media',1,'[图片]',?)", (f"o{i}", ROOM, moment))
+        conn.commit()
+    assert notice(world, "on", "check", key="b1") == {"refused": "group_send_budget"}
+    assert switch(world)[2:4] == (0, "group_send_budget")
+    assert notice(world, "on", "check", key="b2", channel_down=True) == {"refused": "channel_down"}
+    assert switch(world)[2:4] == (0, "channel_down")
+    with world.db.get_connection() as conn:
+        conn.execute("DELETE FROM state_group_messages WHERE kind='media'")
+        conn.commit()
+    check = notice(world, "on", "check", key="b3")
+    assert check == {"may_post": True, "text": state_groups.MEDIA_KEEP_ON_NOTICE}
+    assert "1 天" in check["text"] and "@ 管家" in check["text"] and "删除" in check["text"]
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='media_notice'") == [(0,)], "a check writes no row"
+    # Sent at the epoch: on, and one outbound row the send budget counts.
+    sent_epoch = switch(world)[1]
+    sent = notice(world, "on", "sent")
+    assert sent["state"] == "on" and listed(world)["media_keep"] == "on"
+    assert rows(world, "SELECT direction, body FROM state_group_messages WHERE kind='media_notice'") == \
+        [("out", state_groups.MEDIA_KEEP_ON_NOTICE)]
+    assert "media_notice" in state_groups.GROUP_SEND_KINDS
+    with world.db.get_connection() as conn:
+        for i in range(state_groups.GROUP_LIMITS["group_sends_per_hour"] - 1):
+            conn.execute("INSERT INTO state_group_messages(message_id,channel,group_ref,direction,kind,accepted,body,at) "
+                         "VALUES(?,'wechat',?,'out','media',1,'[图片]',?)", (f"p{i}", ROOM, moment))
+        assert world.steward.groups.send_refusal(conn, "wechat", ROOM, state_channels._now()) == "group_send_budget", \
+            "the notice counts toward the group's send budget"
+        conn.rollback()
+    # A late commit for the epoch it already committed (now 'on') changes nothing.
+    assert notice(world, "on", "check", key="b4", epoch=sent_epoch) == {"refused": "superseded"}
+    # An on-notice that went out after the owner turned the switch off: the group must read off.
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    receipt(world)
+    notice(world, "off", "check", key="o1")
+    notice(world, "off", "sent")
+    assert switch(world)[0] == "off"
+    at(timedelta(minutes=1))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    racing = switch(world)[1]
+    at(timedelta(minutes=2))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    late = notice(world, "on", "sent", epoch=racing)
+    after = switch(world)
+    assert late["state"] == "off_notice" and after[0] == "off_notice" and after[1] not in (racing, None)
+    assert (after[4], after[6]) == ("off", 0), "its purge removes nothing and its receipt will say 0"
+    # Three failed sends fall back to off with notice_not_sent.
+    receipt(world)
+    notice(world, "off", "sent")
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    epoch = switch(world)[1]
+    for attempt in (1, 2):
+        assert notice(world, "on", "failed", key=f"f{attempt}", epoch=epoch) == {"attempts": attempt, "state": "on_pending"}
+    assert notice(world, "on", "failed", key="f3", epoch=epoch) == {"attempts": 3, "state": "off"}
+    assert switch(world)[0] == "off" and switch(world)[3] == "notice_not_sent"
+    # A notice for a superseded epoch is refused before any send.
+    assert notice(world, "on", "check", key="stale", epoch=epoch) == {"refused": "superseded"}
+    # The commands are the steward's host's alone.
+    refused(lambda: execute(world.director, "group_media_notice", {"request_key": "d", "channel": "wechat",
+                                                                   "group_ref": ROOM, "epoch": epoch, "notice": "on",
+                                                                   "phase": "check"}, allow_write=True),
+            "steward_role_required")
+
+
+def test_r2_the_sent_commit_retried_after_a_lost_answer_is_the_first_answer(world):
+    bound_group(world)
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    epoch = switch(world)[1]
+    first = notice(world, "on", "sent", key="lost", epoch=epoch)
+    second = notice(world, "on", "sent", key="lost", epoch=epoch)
+    assert second == {**first, "duplicate": True}
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='media_notice'") == [(1,)]
+
+
+def test_r2_the_off_notice_waits_for_the_purge_receipt_which_must_close(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    turn_on(world)
+    kept_media(world, "k1")
+    kept_media(world, "k2", media="m_00000000000000ff")
+    at(timedelta(seconds=30))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    epoch = switch(world)[1]
+    assert execute(world.steward, "list_owner_groups", {})["media_purges"] == [{"channel": "wechat", "group_ref": ROOM,
+                                                                                "epoch": epoch}]
+    assert notice(world, "off", "check", key="w1") == {"refused": "purge_owed"}
+    # A receipt that does not close is refused and nothing is appended.
+    refused(lambda: receipt(world, key="bad", rows_before=2, rows_after=1), "purge_incomplete")
+    assert rows(world, "SELECT COUNT(*) FROM state_group_media_purges") == [(0,)]
+    # A receipt for an older epoch is appended as superseded and settles nothing.
+    assert receipt(world, epoch="2000-01-01T00:00:00+00:00", key="old")["settled"] is False
+    assert notice(world, "off", "check", key="w2") == {"refused": "purge_owed"}
+    done = receipt(world, rows_before=2, files_unlinked=1, files_shared=1, bytes_freed=33)
+    assert done["settled"] is True
+    assert rows(world, "SELECT reason, backend_rows, rows_before, rows_after, files_unlinked, files_shared, bytes_freed "
+                       "FROM state_group_media_purges ORDER BY at, rowid") == [
+        ("superseded", 0, 0, 0, 0, 0, 0), ("off", 2, 2, 0, 1, 1, 33)]
+    assert switch(world)[4:6] == (None, epoch)
+    assert execute(world.steward, "list_owner_groups", {})["media_purges"] == []
+    assert notice(world, "off", "check", key="w3") == {"may_post": True, "text": state_groups.MEDIA_KEEP_OFF_NOTICE}
+    assert "已经删除" in state_groups.MEDIA_KEEP_OFF_NOTICE
+    refused(lambda: execute(world.director, "record_group_media_purge", {
+        "request_key": "d", "channel": "wechat", "group_ref": ROOM, "epoch": epoch,
+        "receipt": {"rows_before": 0, "rows_after": 0, "files_unlinked": 0, "files_shared": 0, "bytes_freed": 0}},
+        allow_write=True), "steward_role_required")
+
+
+def test_r1_a_kept_relay_needs_the_switch_on_and_is_never_a_question(world):
+    bound_group(world)
+    refused(lambda: execute(world.steward, "relay_group_message",
+                            {"request_key": "k-none", "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER,
+                             "channel_message_ref": "kn", "body": "[图片]", "kept": True,
+                             "channel_at": state_channels._now().isoformat()}, allow_write=True), "invalid_request")
+    assert kept_media(world, "k0") == {"refused": "media_keep_off"}
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(0,)], "no row with the switch off"
+    assert rows(world, "SELECT COUNT(*) FROM state_group_members") == [(0,)]
+    turn_on(world)
+    kept = kept_media(world, "k1", sender=MEMBER2)
+    assert kept["kept"] is True and kept["sender_label"] == "成员甲"
+    assert rows(world, "SELECT kind, accepted, sender_ref FROM state_group_messages WHERE message_id=?",
+                (kept["message_id"],)) == [("kept_media", 0, MEMBER2)]
+    assert rows(world, "SELECT sender_ref FROM state_group_members") == [(MEMBER2,)]
+    # 61 kept rows in an hour leave the 60-question window open - and do not widen it.
+    for i in range(2, 62):
+        kept_media(world, f"k{i}", sender=OWNER_WX)
+    assert "message_id" in ask(world, "q0", sender=OWNER_WX)
+    for i in range(1, state_groups.GROUP_LIMITS["group_per_hour"]):
+        assert "message_id" in ask(world, f"q{i}", sender=OWNER_WX), i
+    assert ask(world, "q-over", sender=OWNER_WX)["refused"] == "group_quota"
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='quota_notice'") == [(1,)], \
+        "the one notice is the 61st question's, never a kept row's"
+
+
+def test_r3_recent_lists_up_to_twenty_kept_media_of_the_last_day_with_who_sent_each(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-2", label="老家群")
+    turn_on(world)
+    turn_on(world, room=ROOM2)
+    kept_media(world, "old", media="m_0000000000000aaa")
+    at(timedelta(hours=24, seconds=1))
+    recent = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM})["recent"]
+    assert recent == [], "exact at read time: past the day before any sweep"
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='kept_media'") == [(1,)]
+    assert execute(world.steward, "expire_group_media", {}, allow_write=True) == {"deleted": 1}
+    for i in range(25):
+        at(timedelta(hours=25, seconds=i))
+        kept_media(world, f"k{i}", sender=MEMBER if i % 2 else MEMBER2, media=f"m_{i:016x}")
+    kept_media(world, "b0", room=ROOM2, media="m_000000000000bbbb")
+    for i in range(3):
+        at(timedelta(hours=25, minutes=1, seconds=i))
+        reply(world, ask(world, f"q{i}", body=f"问题{i}")["message_id"], f"答{i}", turn=f"t{i}")
+    addressed = execute(world.steward, "relay_group_message",
+                        {"request_key": "addr", "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER,
+                         "channel_message_ref": "addr", "body": "@管家 看这个\n[文件]",
+                         "channel_at": state_channels._now().isoformat(),
+                         "attachments": [{"kind": "file", "ref": "m_00000000000000dd"}]}, allow_write=True)
+    assert "kept" not in addressed
+    recent = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM, "limit": 2})["recent"]
+    kept = [e for e in recent if e.get("kept")]
+    assert len(kept) == 20
+    assert [e["attachments"][0]["ref"] for e in kept] == [f"m_{i:016x}" for i in range(5, 25)], "the newest twenty, oldest first"
+    assert all(e["sender"] in ("成员甲", "成员乙") and set(e) == {"at", "sender", "kept", "attachments"} for e in kept)
+    pairs = [e for e in recent if "a" in e]
+    assert [e["q"] for e in pairs] == ["问题1", "问题2"], "the pairs keep their own limit"
+    assert [e["attachments"][0]["ref"] for e in recent if "q" in e and "a" not in e] == ["m_00000000000000dd"], \
+        "an addressed unanswered medium still appears by today's rule"
+    assert "m_000000000000bbbb" not in str(recent) and "m_0000000000000aaa" not in str(recent)
+    other = execute(world.steward, "list_group_recent", {"channel": "wechat", "group_ref": ROOM2})["recent"]
+    assert [e["attachments"][0]["ref"] for e in other] == ["m_000000000000bbbb"]
+
+
+def test_r3_kept_rows_live_one_day_and_off_deletes_them_but_not_the_groups_questions(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    turn_on(world)
+    kept_media(world, "k-old")
+    at(timedelta(hours=23))
+    kept_media(world, "k-new")
+    q = ask(world, "q1")
+    reply(world, q["message_id"], "好")
+    at(timedelta(hours=24, seconds=1))
+    assert execute(world.steward, "expire_group_media", {}, allow_write=True) == {"deleted": 1}
+    assert rows(world, "SELECT channel_message_ref FROM state_group_messages WHERE kind='kept_media'") == [("k-new",)]
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    assert rows(world, "SELECT kind FROM state_group_messages ORDER BY rowid") == [("bind_notice",), ("media_notice",),
+                                                                                    ("question",), ("reply",)]
+
+
+def test_section_9_the_owner_view_shows_the_switch_and_the_last_receipt_never_a_kept_ref(world, monkeypatch):
+    at = clock(monkeypatch)
+    bound_group(world)
+    view = world.owner.groups.owner_view()["groups"][0]["media_keep"]
+    assert view == {"state": "off", "since": None, "note": None, "attempts": 0, "purge_owed": False, "kept_24h": 0,
+                    "last_purge": None}
+    turn_on(world)
+    kept_media(world, "k1", media="m_00000000000000ee")
+    ask(world, "q1")
+    card = world.owner.groups.owner_view("wechat", ROOM)["groups"][0]
+    assert card["media_keep"]["state"] == "on" and card["media_keep"]["kept_24h"] == 1
+    assert card["messages_30d"] == 3, "bind notice, on-notice and the question - never the kept row"
+    kept_line = [m for m in card["messages"] if m["kind"] == "kept_media"]
+    assert [(m["sender_label"], m["body"]) for m in kept_line] == [("成员甲", "[图片]")]
+    assert "m_00000000000000ee" not in str(card), "never a kept ref"
+    at(timedelta(minutes=1))
+    world.owner.groups.set_group_media_keep("wechat", ROOM, False)
+    assert world.owner.groups.owner_view()["groups"][0]["media_keep"]["purge_owed"] is True
+    receipt(world, rows_before=1, files_unlinked=1, bytes_freed=33)
+    last = world.owner.groups.owner_view()["groups"][0]["media_keep"]
+    assert (last["state"], last["purge_owed"], last["kept_24h"]) == ("off_notice", False, 0)
+    assert {k: v for k, v in last["last_purge"].items() if k != "at"} == {
+        "reason": "off", "backend_rows": 1, "rows_before": 1, "files_unlinked": 1, "files_shared": 0, "bytes_freed": 33}
+
+
+def test_section_9_the_media_keep_route_is_the_owners_alone(world, client):
+    bound_group(world)
+    room = ROOM.replace("@", "%40")
+    steward = {"X-AItelier-Driver-Token": world.tokens["steward"]}
+    for headers in (steward, READER_HEADERS):
+        assert client.put(f"/api/steward/groups/wechat/{room}/media-keep", json={"on": True},
+                          headers=headers).status_code == 403
+    assert switch(world)[0] == "off"
+    r = client.put(f"/api/steward/groups/wechat/{room}/media-keep", json={"on": True}, headers=OWNER_HEADERS)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"state": "on_pending"}
+    assert client.put("/api/steward/groups/wechat/r9%40chatroom/media-keep", json={"on": True},
+                      headers=OWNER_HEADERS).status_code == 404
+    assert client.put(f"/api/steward/groups/wechat/{room}/media-keep", json={"on": "yes"},
+                      headers=OWNER_HEADERS).status_code == 422
+    listed_view = client.get("/api/steward/groups", headers=OWNER_HEADERS).json()["groups"][0]
+    assert listed_view["media_keep"]["state"] == "on_pending"

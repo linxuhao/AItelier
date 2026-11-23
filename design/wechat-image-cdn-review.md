@@ -120,3 +120,29 @@ New factual errors in the corrected text:
 Verdicts now:
 - c1: PASS — the measured delay after `logged in` is now correct (206.96 s), the span is correct (93.26 s), the pin and limit attributions are corrected, and the missing arrival line is stated as unmeasurable with the inference labelled. The required arrival-to-fetch delay remains unmeasurable from these bytes, which the diagnosis now says plainly.
 - c2: PASS — cost, bounds and observations are present; the two new citation errors above do not change the c2 content.
+
+## 6. Second pass on 5e5744099e
+
+Previous §2 (sentences not measured):
+1. File download 107,089 bytes — still present (expectedly unmeasured).
+2. Host journal claim — corrected and now measured (see pass on 51b060337f).
+3. Channel retries — corrected: labelled as inference.
+4. Lazy fetch ruled out — corrected: labelled as inference.
+5. `MEDIA_LIMITS` attribution — corrected.
+6. Moving fetch to steward's read — corrected: labelled as inference.
+7. One library write — still misnamed `storeMedia` (channels.mjs:711, not media.mjs).
+8. Observations / undetermined items — corrected: listed in §8.
+
+Previous §3 (factual errors):
+- Delay 206.96 s — correct.
+- Span 93.26 s — correct.
+- Pin attribution — corrected: now states patch line 28 `use wechat_protocol::`, seven pinned files, no Cargo.toml tracked, Dockerfile:53 `--locked`; verified line 28 and line 53 and pin.json lists 7 files.
+- `MEDIA_LIMITS` attribution — corrected.
+- Journal counts — corrected and verified.
+
+New factual errors in this HEAD:
+- None beyond the two already noted (`bridge.mjs:727` too_large citation; `storeMedia` location).
+
+Verdicts now:
+- c1: PASS — pin paragraph is now accurate and reproducibility is stated correctly; all measured numbers correct; missing arrival line stated as unmeasurable.
+- c2: PASS — content intact; citation errors do not affect c2.

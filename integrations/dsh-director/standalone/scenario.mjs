@@ -40,7 +40,9 @@ export function apply(ctx) {
   const done = new Set(), steps = new Map();
   const once = (key, make) => done.has(key) ? undefined : (done.add(key), make());
   const plan = w => tool('plan-' + w.id, 'todo_plan', { template: 'change_files', params: { paths: ['work.txt'], scope: ['work.txt'] },
-    goal: 'write work.txt for ' + w.id, attempt_id: w.id, node_key: 'demo.' + w.id, context_hash: 'c'.repeat(64),
+    goal: 'write work.txt for ' + w.id, attempt_id: w.id,
+    // The local host's work items carry no node key or context hash: the second plan gives none.
+    ...(w === W[1] ? {} : { node_key: 'demo.' + w.id, context_hash: 'c'.repeat(64) }),
     base_sha: w.base, workspace: w.repo });
   const worker = (w, n) => [
     () => tool(w.id + '-status', 'todo_status', { attempt_id: w.id }),
@@ -66,6 +68,11 @@ export function apply(ctx) {
       else if (options.sessionId !== 'director') block = { type: 'text', text: 'Fixture session' };
       else block = once('take1', () => tool('take-w1', 'work_update', { id: W[0].id, title: 'first', holder: 'director' }))
         ?? once('take2', () => tool('take-w2', 'work_update', { id: W[1].id, title: 'second', holder: 'director' }))
+        // A background job the director's shell starts, in a session of its own (so it outlives
+        // the shell call), then watched: the job carries the director's session tag.
+        ?? once('job', () => tool('job', 'bash', { description: 'start a background job', run_in_background: false,
+          command: "(setsid sleep 1 >/dev/null 2>&1 & echo WATCH_PID=$!)" }))
+        ?? once('watch', () => tool('watch', 'watch_process', { pid: Number(/WATCH_PID=(\d+)/.exec(text)?.[1]), note: 'the sleep job' }))
         ?? once('held', () => tool('held-sleep', 'idle_dormant', { reason: 'nothing to do yet', wake_after_minutes: 60 }))
         ?? once('plan1', () => plan(W[0])) ?? once('plan2', () => plan(W[1]))
         ?? once('spawn1', () => tool('spawn-w1', 'subagent', { description: 'worker ' + W[0].id, prompt: 'WORKER_FOR ' + W[0].id + ': run your plan', cwd: W[0].repo }))
@@ -133,7 +140,7 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
       { insert: [{ id: 'fixture', name: join(directory, 'fixture-standalone-provider.mjs') },
         { id: 'dsh-director', name: join(plugin, 'index.mjs') },
         { id: 'director-local', name: join(plugin, 'hosts', 'local.mjs'), config: { root, sessionId: 'director',
-          provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100, idleReviewMs: 600000, todo: { python } } }] },
+          provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100, idleReviewMs: 600000, watchIntervalMs: 100, todo: { python } } }] },
     ]));
     // An allowlist, not a filter: the DSH process sees nothing of the caller's environment
     // but these, so no backend variable can reach it whatever the caller has set.
@@ -144,26 +151,30 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
       STANDALONE_DSH_ENTRY: entry, STANDALONE_URL: `http://127.0.0.1:${server.address().port}`, STANDALONE_WORK: JSON.stringify(work) } });
     proc.stdout.on('data', chunk => output += chunk); proc.stderr.on('data', chunk => output += chunk);
     const deadline = Date.now() + timeoutMs;
-    while (!said('ALL_DONE') && Date.now() < deadline && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 200));
+    const jobEnded = () => requests.some(r => r.session === 'director' && r.text.includes('Background job finished'));
+    while (!(said('ALL_DONE') && jobEnded()) && Date.now() < deadline && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 200));
     check(said('ALL_DONE'), 'the director never finished (ALL_DONE)');
     // The work-item half: both items were taken (created, held by the director, working)
     // before anything closed them, and dormancy was refused while they were held.
     for (const w of work) {
       const [taken] = results('take-' + w.id);
       check(taken?.item?.id === w.id && taken.item.holder === 'director' && taken.item.state === 'working',
-        `${w.id}: not taken by the director: ${JSON.stringify(taken).slice(0, 300)}`);
+        `${w.id}: not taken by the director: ${String(JSON.stringify(taken)).slice(0, 300)}`);
     }
+    const [watched] = results('watch');
+    check(watched?.watching === true, 'watch_process refused the director\'s own job: ' + String(JSON.stringify(watched)).slice(0, 300));
+    check(jobEnded(), 'the watched job\'s end never reached the director');
     const [heldSleep] = results('held-sleep');
     check(heldSleep?.refused === 'live_claims' && JSON.stringify(heldSleep.node_keys) === JSON.stringify(work.map(w => w.id)),
-      'dormancy was not refused for the held work items: ' + JSON.stringify(heldSleep).slice(0, 300));
+      'dormancy was not refused for the held work items: ' + String(JSON.stringify(heldSleep)).slice(0, 300));
     for (const w of work) {
       const [planned] = results('plan-' + w.id);
-      check(Array.isArray(planned?.items) && planned.items.join() === 'write,deliver', `${w.id}: plan not frozen as write,deliver: ${JSON.stringify(planned).slice(0, 300)}`);
+      check(Array.isArray(planned?.items) && planned.items.join() === 'write,deliver', `${w.id}: plan not frozen as write,deliver: ${String(JSON.stringify(planned)).slice(0, 300)}`);
       const writes = results(w.id + '-done-write'), delivers = results(w.id + '-done-deliver');
       check(writes.at(-1)?.outcome === 'pass', `${w.id}: write item did not pass: ${JSON.stringify(writes).slice(0, 300)}`);
       check(delivers.at(-1)?.outcome === 'pass', `${w.id}: deliver item did not pass: ${JSON.stringify(delivers).slice(0, 300)}`);
       const [finished] = results('finish-' + w.id);
-      check(finished?.candidate === true, `${w.id}: todo_finish gave no candidate: ${JSON.stringify(finished).slice(0, 300)}`);
+      check(finished?.candidate === true, `${w.id}: todo_finish gave no candidate: ${String(JSON.stringify(finished)).slice(0, 300)}`);
       if (finished?.candidate) {
         // Something was delivered: the candidate is a NEW commit (not the plan's base), it is
         // the workspace's HEAD, and the file it carries holds what the worker wrote.
@@ -181,9 +192,12 @@ export async function runStandalone(entry, { timeoutMs = 150000, keep = false, p
     const workers = new Set(events.filter(e => e.session !== 'director' && e.event.type === 'tool/result').map(e => e.session));
     check(workers.size === 2, `expected two worker sessions, saw ${workers.size}`);
     const [dormant] = results('sleep');
-    check(dormant?.dormant === true, 'dormancy refused at the end: ' + JSON.stringify(dormant).slice(0, 300));
-    const items = JSON.parse(await readFile(join(root, 'work.json'), 'utf8')).items;
-    check(items.every(i => i.state === 'completed' && !i.holder), 'work items not closed: ' + JSON.stringify(items));
+    check(dormant?.dormant === true, 'dormancy refused at the end: ' + String(JSON.stringify(dormant)).slice(0, 300));
+    const items = JSON.parse(await readFile(join(root, 'work.json'), 'utf8').catch(() => 'null'))?.items;
+    check(items?.length && items.every(i => i.state === 'completed' && !i.holder), 'work items not closed: ' + JSON.stringify(items));
+    const directorTools = requests.find(r => r.session === 'director' && r.tools.length)?.tools ?? [];
+    check(directorTools.includes('work_update') && directorTools.includes('note_write'), 'the host\'s tools are not shown to the director: ' + JSON.stringify(directorTools));
+    check(requests.some(r => r.session === 'director' && r.text.includes('built-in local host')), 'the director never read the host note');
     const workerTools = requests.find(r => r.session !== 'director' && r.tools.length)?.tools ?? [];
     check(!workerTools.includes('subagent') && !workerTools.includes('todo_plan') && workerTools.includes('todo_done'),
       'worker tool list is not the worker role: ' + JSON.stringify(workerTools));

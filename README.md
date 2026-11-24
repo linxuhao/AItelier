@@ -224,6 +224,9 @@ aitelier server                   # Backend container (start/reuse)
 
 ### Resident DSH drivers: install from a clean checkout (Linux)
 
+(To run one director with no backend at all - a single DSH process and plain files - see
+[integrations/dsh-director/README.md](integrations/dsh-director/README.md).)
+
 The optional built-in director runs **one DSH driver per State DAG on the host**;
 the AItelier backend stays in Docker. Drivers and native subagents have full
 access as the installing Linux user, use independent worktrees, and can call

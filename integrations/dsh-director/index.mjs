@@ -44,6 +44,8 @@ import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
 
 export const name = 'dsh-director';
+/** The context hash a plan binds when its host has none (config.planKeysOptional). */
+export const PLAN_KEYS_UNSET = 'unset';
 /** Step 24.2b (design-steward 7.8.12a "导演与管家的不同"): the tools a director's media_call runs on
  *  its files - its own media connection's, each taking its file as `*_base64`. */
 export const DIRECTOR_MEDIA_TOOLS = Object.freeze(['mcp__agentmcp__ocr_image', 'mcp__agentmcp__vision_critique',
@@ -152,8 +154,17 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const sessionEnv = config.sessionEnv;
   await ctx.get('loader')?.await();
   const require = createRequire(config.dshEntry);
-  const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
-  const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
+  // DSH's own libraries are found from its entry; a wrong entry is named as such (no `code`
+  // and no `cause`: it is a configuration error, not a connection-level one).
+  const dshLibrary = name => {
+    try { return require.resolve(name); }
+    catch (error) {
+      throw new Error(`cannot find ${name} from config.dshEntry ${config.dshEntry} (${String(error?.message ?? error).split('\n')[0]});`
+        + ' set dshEntry to the lib/bin.js of the DSH that runs this plugin');
+    }
+  };
+  const { defineTool } = await import(dshLibrary('@deepseek-ai/dsh-tools'));
+  const llm = await import(dshLibrary('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
   // roles() is synchronous and must return a valid table (the loaded one, extended):
   // a Promise or a broken table is refused here, naming it, not met later as a crash.
@@ -618,28 +629,37 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       },
     }));
     const planArgs = new Set(['template', 'params', 'goal', 'attempt_id', 'node_key', 'context_hash', 'base_sha', 'workspace']);
+    // A host whose work items carry no node key or context hash (config.planKeysOptional, the
+    // local host) makes both optional: the plan then binds node_key = attempt_id and the
+    // context hash PLAN_KEYS_UNSET. Any other host keeps both required, as they always were.
+    const keysOptional = config.planKeysOptional === true;
+    const planKeys = args => ['--node-key=' + (keysOptional ? args.node_key || args.attempt_id : args.node_key),
+      '--context-hash=' + (keysOptional ? args.context_hash || PLAN_KEYS_UNSET : args.context_hash)];
+    // DSH's defineTool takes `required: true` or no `required` at all.
+    const planKey = () => keysOptional ? { type: 'string' } : { type: 'string', required: true };
+    const planParameters = () => ({ template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
+      goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: planKey(),
+      context_hash: planKey(), base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } });
     scope.tools.register(defineTool({ name: 'todo_plan',
-      description: texts.tools.todo_plan ?? 'Director only. Freeze the todo plan of a work item before dispatching its native child, by expanding a repository template (see todo_templates) with params bound to that template\'s declared params. context_hash is the one your host returned when the work item started. A wrongly typed, missing or unknown param refuses the plan. Items cannot be supplied: when no template fits, add one under todo_templates/ through a reviewed code change.',
-      parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
-        goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
-        context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
+      description: texts.tools.todo_plan ?? 'Director only. Freeze the todo plan of a work item before dispatching its native child, by expanding a repository template (see todo_templates) with params bound to that template\'s declared params. '
+        + (keysOptional ? 'node_key and context_hash are optional on this host (node_key defaults to attempt_id).' : 'context_hash is the one your host returned when the work item started.')
+        + ' A wrongly typed, missing or unknown param refuses the plan. Items cannot be supplied: when no template fits, add one under todo_templates/ through a reviewed code change.',
+      parameters: planParameters(),
       output: jsonOutput,
       execute: (args, exec) => Object.keys(args).some(key => !planArgs.has(key))
         ? { refused: 'unknown_arguments', reason: `todo_plan takes only ${[...planArgs].join(', ')}; items come from the template`, brief: null }
         : todo.call(args.attempt_id, ['create', '--template=' + args.template, '--params=' + JSON.stringify(args.params),
-        '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
+        '--attempt=' + args.attempt_id, ...planKeys(args),
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
     scope.tools.register(defineTool({ name: 'todo_batch_plan',
       description: texts.tools.todo_batch_plan ?? 'Director only. Freeze a todo BATCH for a work item from a kind: batch template (todo_templates lists find_verify): one find sub-plan per dimension now, one verify sub-plan per finding once every finder passed. Same arguments as todo_plan. dispatch holds the finder prompts, cut to the batch\'s max_parallel (concurrent finders; the rest are pending), each with its prompt_sha256: give each one verbatim to its own new native subagent, followed by a last line "prompt_sha256: <that sha>". A batch template refuses todo_plan, an ordinary template refuses this tool.',
-      parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
-        goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
-        context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
+      parameters: planParameters(),
       output: jsonOutput,
       execute: (args, exec) => Object.keys(args).some(key => !planArgs.has(key))
         ? { refused: 'unknown_arguments', reason: `todo_batch_plan takes only ${[...planArgs].join(', ')}; sub-plans come from the template`, brief: null }
         : todo.call(args.attempt_id, ['batch-create', '--template=' + args.template, '--params=' + JSON.stringify(args.params),
-        '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
+        '--attempt=' + args.attempt_id, ...planKeys(args),
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
     scope.tools.register(defineTool({ name: 'todo_batch_status',
@@ -1040,6 +1060,8 @@ export function apply(ctx) {
   // Awaiting loader settlement inside apply would deadlock its own startup. A boot
   // that failed has no event stream to serve, so this process ends - and the record
   // it leaves names the failure class, not only the exit code (iss-6df19ff31a3b449b).
-  void boot(ctx, { channels }).catch(error => startupFailure(ctx, error));
+  // A host that prints no reason of its own (config.startupErrorDetail, the local host) gets the
+  // first line of the error's message printed as well.
+  void boot(ctx, { channels }).catch(error => startupFailure(ctx, error, { detail: ctx.directorHost?.config?.startupErrorDetail === true }));
 }
 

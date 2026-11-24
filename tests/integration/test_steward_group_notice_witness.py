@@ -25,6 +25,7 @@ from core import state_channels, state_steward
 from core.state_commands import execute
 from tests.integration.test_steward_group_witness import http, served  # noqa: F401
 from tests.unit.test_steward_channels import world  # noqa: F401
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_groups import ROOM, bound_group
 
 ROOT = Path(__file__).resolve().parents[2]

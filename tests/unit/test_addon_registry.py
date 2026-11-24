@@ -650,7 +650,9 @@ def test_real_empty_godot_suite_cannot_pass_final_tree_gate(dpe_game, tmp_path, 
     report = json.loads(report_path.read_text())
     # The general tool treats pytest as inapplicable to this repository. That
     # must not certify the final tree after a writer changed it.
-    assert result["passed"] is True
+    assert result["passed"] is True, {
+        k: report.get(k) for k in ("returncode", "summary", "failures", "import_error",
+                                   "storage_diagnosis", "evidence_state", "skipped_because")}
     assert report["returncode"] == 5 and report["no_tests_collected"] is True
     resolver = GraphResolver(dpe_game._graphs["dpe_game"])
     target = resolver.next_node("5_final_test", result, {},

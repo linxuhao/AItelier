@@ -38,7 +38,7 @@
                   "handoff", "idle_dormant", "ask_owner", "close_question", "grep_chat_history",
                   "family_memory_note", "family_memory_show", "list_show", "list_add", "list_check", "list_remove",
                   "group_reminder_set",
-                  "search_tools", "call_tool", "request_confirmation", "run_confirmed", "media_call", "send_media", "read_document", "make_document",
+                  "search_tools", "call_tool", "request_confirmation", "run_confirmed", "media_call", "send_media", "read_document", "make_document", "calculate",
                   "connections_list", "connection_tools", "connection_refresh", "propose_connection_change"],
     "presented_only": true,
     "catalog": "host",

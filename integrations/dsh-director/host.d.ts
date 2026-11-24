@@ -420,6 +420,15 @@ export interface DirectorHost {
    *    library under `audience` (source and channel 'generated', name `<title>.<ext>`). {ref,
    *    mime, size} or {refused: office_unavailable | busy | timeout | convert_failed | store_failed}.
    *    Absent: make_document answers office_unavailable.
+   *  - calculate (optional; step 24.4b, design-steward 7.8.24 "十"): calculate's host half - the
+   *    plugin has judged `code` (at most 32 KiB) and every ref (covers, at most 4); the host runs
+   *    the program in its sandbox (no network) with the refs' files copied in as f1.<ext>, ... and
+   *    stores each output file of a type `audience` keeps under `audience` (source and channel
+   *    'generated'). {exit_code, timed_out, stdout, stdout_truncated, stderr_tail, files: [{ref,
+   *    mime, bytes}], files_skipped?} or {refused: unknown_ref | busy | timeout | calc_unavailable
+   *    (detail: no_image_configured | selfcheck_failed | docker_unavailable) | output_too_large}.
+   *    An owner's call (`audience` 'owner') is queued before the groups' ones. Absent: calculate
+   *    answers calc_unavailable.
    *  - takesImages (optional; step 24.2c): whether this process's route takes images now (the
    *    judgement a wake's own images use); false, or absent, read_document renders no page
    *    images and says so on every page.
@@ -455,6 +464,9 @@ export interface DirectorHost {
           first_row: number; rows: string[][] }> } | { refused: string; page_count?: number }>;
     makeDocument?(spec: { format: 'pdf' | 'docx' | 'xlsx'; title: string; blocks?: object[]; sheet?: string; rows?: object[][]; widths?: number[] },
       audience: string, signal?: AbortSignal): Promise<{ ref: string; mime: string; size: number } | { refused: string }>;
+    calculate?(request: { code: string; refs: string[] }, audience: string, signal?: AbortSignal):
+      Promise<{ exit_code: number; timed_out: boolean; stdout: string; stdout_truncated: boolean; stderr_tail: string;
+        files: Array<{ ref: string; mime: string; bytes: number }>; files_skipped?: number } | { refused: string; detail?: string }>;
     takesImages?(signal?: AbortSignal): Promise<boolean>;
     keptAudiences?(): Promise<string[]>;
     purgeKept?(audience: string): Promise<{ rows_before: number; rows_after: number; files_unlinked: number; files_shared: number;

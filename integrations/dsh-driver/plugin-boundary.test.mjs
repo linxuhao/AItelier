@@ -50,6 +50,7 @@ import '../dsh-director/test/read-document.test.mjs';
 import '../dsh-director/test/group-wake-images.test.mjs';
 import '../dsh-director/test/office.test.mjs';
 import '../dsh-director/test/make-document.test.mjs';
+import '../dsh-director/test/calc-tool.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';
 import { adapterVocabulary, adapterPattern } from './plugin-vocabulary.mjs';
 

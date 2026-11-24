@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_OWNER_LANGUAGE, MIRROR_CHARS, OWNER_LANGUAGES, OWNER_TEXTS, ownerLanguage, ownerTexts, stewardPrompt } from '../lib/owner-text.mjs';
+import { DEFAULT_OWNER_LANGUAGE, MIRROR_CHARS, OWNER_LANGUAGES, OWNER_TEXTS, ownerLanguage, ownerTexts, stewardPromptInLanguage } from '../lib/owner-text.mjs';
 import { CHANNEL_LIMITS, CHANNEL_NAMES, alertText, channelReplies, channelText, MORE } from '../lib/channels.mjs';
 import { ownerChannelsFor } from '../index.mjs';
 
@@ -167,15 +167,15 @@ test('the approval phrase line is kept whole in either language: the Chinese phr
 const STEWARD_MD = new URL('../steward.md', import.meta.url);
 test('steward prompt: zh is steward.md byte for byte (as at a1416299ee); en names the English phrases and brief lines', () => {
   const md = readFileSync(STEWARD_MD, 'utf8');
-  assert.equal(createHash('sha256').update(stewardPrompt(md, 'zh')).digest('hex'),
+  assert.equal(createHash('sha256').update(stewardPromptInLanguage(md, 'zh')).digest('hex'),
     '9439656623c12e3f383adb7fac6f3762f49aa6d2319dda7aa2b411ada4385ab3', 'steward.md as at a1416299ee');
-  assert.equal(stewardPrompt(md, 'zh'), md);
+  assert.equal(stewardPromptInLanguage(md, 'zh'), md);
   // Each passage as often as steward.md has it today: the withheld sentence three times (group
   // turns, list_add, request_confirmation), every other once.
   const times = { '「这个我在群里答不了。」': 3 };
   for (const [from] of OWNER_TEXTS.en.stewardPrompt) assert.equal(md.split(from).length - 1, times[from] ?? 1, `in steward.md: ${from}`);
-  const en = stewardPrompt(md, undefined);
-  assert.equal(en, stewardPrompt(md, 'en'));
+  const en = stewardPromptInLanguage(md, undefined);
+  assert.equal(en, stewardPromptInLanguage(md, 'en'));
   assert.ok(!/同意 proposal|拒绝 proposal|今天没有要你处理的事|今早的简报没发成|这个我在群里答不了/.test(en));
   // A host that withholds a group reply posts these same words (its own test ties the two).
   assert.equal(en.split('exactly "I cannot answer that in this group."').length - 1, 2);

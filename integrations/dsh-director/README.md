@@ -184,6 +184,52 @@ printf '%s\n' '{"answer": "Yes, drop Node 18."}' > "$ROOT/inbox/answer-<question
 The plugin also registers DSH commands for this (`/questions`, `/answer <id> <text>`), but the
 profile above has no chat client to type them in; files are the way in.
 
+## A steward instead of a director
+
+The same two plugins can run a *steward*: one long-running assistant you talk to, which keeps
+your memory and looks across your projects, and never does project work itself. Add these keys
+to `director-local`'s `config`:
+
+| key | what it does |
+|---|---|
+| `rootRole: steward` | the session named by `sessionId` is the steward, not a director |
+| `memory: { userId: <name> }` | your memory: a git repository under `~/.local/share/dsh-director/memory/<name>/` (`root` puts it elsewhere; keep it outside anything mounted into containers). `timeZone` (an IANA name, default UTC) dates what it shows |
+| `projectsDir` | optional: a directory whose every subdirectory is one local host root (a project) |
+
+What a steward on this host can do:
+
+- talk with you. Every turn you write to it in a DSH client attached to its session is recorded
+  into your memory, with its replies in that turn, by the plugin itself; `memory_search` finds
+  them, `memory_note` and `memory_profile_update` keep what it concluded or what you prefer. A
+  file in `inbox/` wakes it as an event, like a director, and is not your words, so it is not
+  recorded.
+- with `projectsDir`: read every project there (`portfolio_projects`, `portfolio_project`,
+  `portfolio_conversation`) and propose one new project (`propose`, kind `create_project`). You
+  decide with `/proposals`, `/approve <id>` and `/decline <id> [reason]`; an approved project is a
+  new subdirectory with `project.json`, `notes.md` and `work.json`. Nobody works on it until you
+  start a director for it yourself (a profile of its own, `root` set to that subdirectory).
+- ask you questions (`ask_owner`), which you answer with `/questions` and `/answer <id> <text>`, or
+  a file `inbox/answer-<id>.json` as above.
+- forget, restore or purge one memory entry only when you type `/forget <id> [reason]`,
+  `/restore <id>` or `/purge <id>`; `/profile` shows your resident profile. Its own
+  `memory_forget` refuses here (a DSH command carries no message of yours it could cite).
+
+What it cannot do here, because this host does not provide it:
+
+- pass anything to a director (no `handoff`), read a director's letters, or propose to start,
+  stop, archive or unarchive a director or project;
+- reach you anywhere but this DSH: no dashboard, no Slack or WeChat (the channel plugins do not
+  load next to this host), no family groups, no daily brief and no reminders;
+- use connections: no MCP servers through a catalog, no confirmations, no attachments, PDF or
+  office files, no `make_document` or `calculate`.
+
+Its prompt is cut to match: `steward.md` is written for the fullest host, and each passage about
+something this host does not provide (the dashboard, chat channels, the brief, family groups,
+handoffs and letters, the connection catalog) is left out or replaced with what to do here
+(`lib/steward-prompt.mjs`). The owner's language (`ownerLanguage`) then swaps the reply phrases
+and fixed lines that are left (`lib/owner-text.mjs`). A `zh` host that provides everything gets
+`steward.md` unchanged.
+
 ## When it does not start
 
 DSH prints two lines and exits:

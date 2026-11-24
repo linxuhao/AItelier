@@ -14,6 +14,8 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
+import { stewardPromptFor, stewardPromptFeatures } from '../dsh-director/lib/steward-prompt.mjs';
+import { localHost } from '../dsh-director/hosts/local.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -66,7 +68,11 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
   const entry = await measuredEntryForTest(t);
   if (!entry) return;
   const here = dirname(fileURLToPath(import.meta.url));
-  const stewardSkill = await readFile(join(here, '../dsh-director/steward.md'), 'utf8');
+  const stewardFile = await readFile(join(here, '../dsh-director/steward.md'), 'utf8');
+  // Overfit review 2026-11-24 (重-11): the local host's steward gets the passages its host can
+  // do (lib/steward-prompt.mjs) - this one has memory and no projectsDir - in its owner's language ('zh' below).
+  const stewardSkill = stewardPromptFor(stewardFile, { language: 'zh', features: stewardPromptFeatures(
+    localHost({ root: '/tmp/x', provider: 'p', model: 'm' }).capabilities, { memory: { userId: 'owner' } }) });
   const directorSkill = await readFile(join(here, '../dsh-director/director.md'), 'utf8');
   const directory = await mkdtemp(join(homedir(), 'dsh-steward-'));
   const root = join(directory, 'steward'), memRoot = join(directory, 'memory');
@@ -130,6 +136,7 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
         // reach its tool table - beside the exact set above, no presented name is an MCP one.
         assert.deepEqual(r.tools.filter(name => name.startsWith('mcp__')), [], `boot ${boot}: the steward is presented an MCP tool`);
         assert.ok(r.system.includes(stewardSkill.trim()), `boot ${boot}: the steward's system prompt lacks steward.md`);
+        assert.ok(!r.system.includes('dashboard') && !r.system.includes('WeChat'), `boot ${boot}: the standalone steward is told about the dashboard or WeChat`);
         assert.ok(!r.system.includes(directorSkill.split('\n')[0]), `boot ${boot}: the steward's system prompt carries director.md`);
         assert.ok(r.recent, `boot ${boot}: the steward's request lacks the recent conversation from memory`);
       for (const [name, description] of r.descriptions)
@@ -158,10 +165,10 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
     // The tools/post-execute hook is registered in the real pipeline: with the gap at 1 ms, a
     // successful tool result ends with its own clock block.
     assert.match(resultText('n1'), /\[system clock\] now \d{4}-\d\d-\d\dT\d\d:\d\dZ \(after tool\)"/, 'the tool result\'s clock block');
-    assert.ok(stewardSkill.includes('Times: a line that starts with `[system clock]` is written by your host, not by your'), 'steward.md: who writes the clock');
+    assert.ok(stewardFile.includes('Times: a line that starts with `[system clock]` is written by your host, not by your'), 'steward.md: who writes the clock');
     for (const phrase of ['Only the most recent such line is the current time', '`channel_at`, when present, is when your owner sent it',
       'Never copy the `[system clock]` line or its format into anything you'])
-      assert.ok(stewardSkill.replace(/\s+/g, ' ').includes(phrase), phrase);
+      assert.ok(stewardFile.replace(/\s+/g, ' ').includes(phrase), phrase);
     const before = rootRequests().length;
     proc.kill('SIGTERM'); await once(proc, 'exit');
 

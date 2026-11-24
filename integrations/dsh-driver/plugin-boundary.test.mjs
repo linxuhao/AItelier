@@ -37,6 +37,8 @@ import '../dsh-director/test/memory-vector.test.mjs';
 import '../dsh-director/test/memory-perf.test.mjs';
 import '../dsh-director/test/memory-grep-helper.test.mjs';
 import '../dsh-director/test/steward-tools.test.mjs';
+import '../dsh-director/test/steward-prompt.test.mjs';
+import '../dsh-director/test/memory-turns.test.mjs';
 import '../dsh-director/test/channels.test.mjs';
 import '../dsh-director/test/owner-text.test.mjs';
 import '../dsh-director/test/clock.test.mjs';

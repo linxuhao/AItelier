@@ -36,10 +36,12 @@ import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches 
 import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from './lib/resume.mjs';
 import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
+import { turnRecorderFor } from './lib/memory/turns.mjs';
+import { stewardPromptFor, stewardPromptFeatures } from './lib/steward-prompt.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
 import { CHANNEL_LIMITS, createOwnerChannels, GROUP_LIMITS, GROUP_WAKE_IMAGE_LIMIT, trimRecent } from './lib/channels.mjs';
-import { ownerTexts, stewardPrompt } from './lib/owner-text.mjs';
+import { ownerTexts } from './lib/owner-text.mjs';
 import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
@@ -183,10 +185,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const rootOnly = rootRole === 'director' ? 'Director only. ' : '';
   if (!roles[rootRole]) throw new Error(`directorHost refused: config.rootRole is ${rootRole} but the role table has no ${rootRole}`);
   const promptDir = dirname(config.rolesFile);
-  // The steward's prompt names the reply phrases and the brief's fixed lines in the owner's
-  // language (lib/owner-text.mjs; 'zh' leaves steward.md as it is).
-  const rootPrompt = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
-  const runtimeSkill = rootRole === 'steward' ? stewardPrompt(rootPrompt, config.ownerLanguage) : rootPrompt;
+  // Overfit review 2026-11-24: the steward is told only about what its host can do (重-11), and
+  // the reply phrases and the brief's fixed lines are in the owner's language (重-18); both in
+  // lib/steward-prompt.mjs stewardPromptFor. A 'zh' host with every feature gets its prompt file unchanged.
+  const rolePrompt = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
+  const runtimeSkill = rootRole === 'steward' ? stewardPromptFor(rolePrompt, {
+    features: stewardPromptFeatures(host.capabilities, { memory: config.memory }), language: config.ownerLanguage }) : rolePrompt;
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
   // Step 24.1a (design-steward 7.8.7): a role with `catalog: "host"` (the steward) finds and
   // calls its further tools only in the catalog its host gives for the turn; without such a
@@ -330,6 +334,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // that cannot start is {error}: its tools answer that, everything else runs.
   const memory = config.memory ? await openMemory(config.memory, { sessionId: config.sessionId,
     logger: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) }) : undefined;
+  // Overfit review 2026-11-24 (重-10): a host without `memory` has no conversation source of its
+  // own (it records no turn), so the root session's own turns go into memory from here.
+  const turnRecorder = turnRecorderFor({ capabilities: host.capabilities, store: memory?.store, log: line => ctx.logger.warn(line) });
+  if (turnRecorder) ctx.on('session/event', (session, event) => { if (session?.id === config.sessionId) turnRecorder.observe(event); });
   // The plans, and what the host says about the work item each one is named after.
   // The two are read together because every view of "unfinished work" needs both: a
   // plan whose work has settled is not work, and one whose work the host could not
@@ -1033,6 +1041,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     await handle.dispose();
     await ctx.sessionPersistence.flush();
     await activity.catch(() => {});
+    await turnRecorder?.settled();
     await memory?.store?.close().catch(() => {});
   };
   ctx.on('dispose', close);

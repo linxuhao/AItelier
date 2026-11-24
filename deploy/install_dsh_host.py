@@ -87,8 +87,8 @@ def prepare(repo, home, secrets_dir):
             found = True
     if not found:
         lines.append('AITELIER_DRIVER_IDENTITY=on')
-    # What the caller reports as "identity enabled": the identity line, not the
-    # uid/gid lines below (those alone need no backend recreate).
+    # What the caller reports as "identity enabled": the identity line only. The
+    # uid/gid lines below have their own note (container_user_note).
     identity_changed = not env.exists() or lines != original.splitlines()
     # docker-compose.yml runs every container as AITELIER_UID:AITELIER_GID, default
     # 1000:1000. The `aitelier` CLI fills both in from the login; a bare `docker
@@ -114,6 +114,18 @@ def prepare(repo, home, secrets_dir):
     values['mode'] = 'host'
     atomic_text(config, json.dumps(values) + '\n')
     return changed
+
+
+def container_user_note(repo):
+    """docker-compose.yml interpolates `user: ${AITELIER_UID:-1000}:${AITELIER_GID:-1000}`
+    only when it creates a container, so a backend created without these values
+    keeps running as 1000:1000 and cannot write this user's ~/.AItelier."""
+    user = setting(repo, 'AITELIER_UID', '1000') + ':' + setting(repo, 'AITELIER_GID', '1000')
+    if user == '1000:1000':
+        return None
+    return (f'Containers run as {user} (AITELIER_UID:AITELIER_GID), not the compose default 1000:1000. '
+            'Compose applies this only when it creates a container: if the backend was created '
+            'without it, recreate it (docker compose up -d aitelier) before starting project drivers.')
 
 
 def install_runtime(repo, destination):
@@ -249,6 +261,9 @@ def main():
     print('Service: ' + str(unit))
     if changed:
         print('Driver identity enabled in .env. Start/recreate the backend with this configuration before starting project drivers.')
+    note = container_user_note(repo)
+    if note:
+        print(note)
     for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
         if setting(repo, name, str(value)) != str(value):
             print(f'Note: .env sets {name}={setting(repo, name, "")}, but this user is {value}; the containers run as the .env value.')

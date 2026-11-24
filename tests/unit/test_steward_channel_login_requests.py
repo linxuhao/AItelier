@@ -14,6 +14,7 @@ import pytest
 
 from core import state_channels
 from core.state_commands import STEWARD_WRITE_ACTIONS, WRITER_ONLY_READS, execute
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import HOME, OWNER_HEADERS, client, refused, world  # noqa: F401 (fixtures)
 
 

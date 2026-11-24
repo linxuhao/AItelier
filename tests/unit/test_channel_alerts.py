@@ -24,6 +24,7 @@ from core import state_channels, state_schema_setup
 from core.state_commands import execute
 from core.state_database import StateDatabase
 from core.state_service import StateService
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import HOME, SLACK_USER, bind, refused, world  # noqa: F401 (fixture)
 
 WECHAT_USER = "wxid_owner"

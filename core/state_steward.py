@@ -721,6 +721,13 @@ class StateSteward:
         return self._record(conn, "create_steward_proposal", request_key, request_hash,
                             {"proposal_id": proposal_id, "version": 1, "status": "open", **(extra or {})})
 
+    def _proposal_projector(self):
+        """The caller's projection of a proposal row (7.8.24 "五"): a steward
+        credential gets the card-free view; the owner and everyone else keep
+        `_proposal`'s row. One choice for reads and for a conflict's carried row.
+        """
+        return _steward_proposal if self.is_steward() and not self.is_owner_session() else _proposal
+
     def withdraw_proposal(self, project_id, request_key, proposal_id, reason):
         """The steward takes back one of its own OPEN proposals."""
         reason = reason.strip()
@@ -736,7 +743,7 @@ class StateSteward:
             if row["created_by"] != self.actor:
                 raise StateGraphError("not_your_proposal")
             if row["status"] != "open":
-                raise ProposalConflict(_proposal(row))
+                raise ProposalConflict(self._proposal_projector()(row))
             conn.execute("UPDATE state_steward_proposals SET status='withdrawn',version=version+1,"
                          "decided_at=?,decided_by=?,result_json=? WHERE proposal_id=?",
                          (now(), self.actor, canonical({"reason": reason}), proposal_id))
@@ -755,9 +762,7 @@ class StateSteward:
     @writer_only_read("list_steward_proposals")
     def list_proposals(self, status="open", limit=50):
         self._owner_or_steward()
-        # A steward-credentialled read is the one that must not carry the card; the
-        # owner's browser session keeps `_proposal`'s row unchanged (7.8.24 "五").
-        project = _steward_proposal if self.is_steward() and not self.is_owner_session() else _proposal
+        project = self._proposal_projector()
         where = "" if status == "all" else "WHERE status='open'"
         with self.store.transaction() as conn:
             rows = conn.execute(f"SELECT * FROM state_steward_proposals {where} "
@@ -767,7 +772,7 @@ class StateSteward:
     @writer_only_read("list_steward_proposals")
     def get_proposal(self, proposal_id):
         self._owner_or_steward()
-        project = _steward_proposal if self.is_steward() and not self.is_owner_session() else _proposal
+        project = self._proposal_projector()
         with self.store.transaction() as conn:
             return project(self._get(conn, proposal_id))
 

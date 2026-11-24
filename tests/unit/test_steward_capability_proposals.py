@@ -368,6 +368,45 @@ def test_a_steward_proposal_read_never_carries_the_upstream_card(world):
     assert DESCRIPTION in owner_text and "paint_v2" in owner_text
 
 
+def test_a_withdraw_conflict_also_keeps_the_card_from_the_steward(world, monkeypatch):
+    """iss-0778ec1dbe744a1b, second carrier: `withdraw_proposal` carries a row in
+    its conflict. The steward's own write must not use that error as a card read;
+    the owner's unchanged projection still carries the frozen card."""
+    from core.state_steward import ProposalConflict
+    ready(world)
+    pid = propose(world, "draw", [PAINT])["proposal_id"]
+    execute(world.steward, "withdraw_steward_proposal",
+            {"request_key": key("w"), "proposal_id": pid, "reason": "later"}, allow_write=True)
+    assert proposal(world, pid)["status"] == "withdrawn"
+
+    with pytest.raises(ProposalConflict) as conflict:
+        execute(world.steward, "withdraw_steward_proposal",
+                {"request_key": key("w2"), "proposal_id": pid, "reason": "again"}, allow_write=True)
+    row = conflict.value.row
+    assert row["proposal_id"] == pid and row["status"] == "withdrawn"
+    assert row["payload"] == {"cap_id": "draw", "entries": ["conn"]}
+    text = json.dumps(row, ensure_ascii=False)
+    for word in (DESCRIPTION, UPSTREAM, LABEL, "根据文字描述", "paint_v2", "card", "raw_name",
+                 "conn_id", "source", "expect_version", "description"):
+        assert word not in text, (word, text)
+
+    # The production role and ownership doors bar an owner from withdrawing; bypass
+    # just those two checks here so the conflict's projection choice itself is
+    # judged for the owner credential too (the stored card is left untouched).
+    owner = world.owner.steward
+    real_get = owner._get
+    monkeypatch.setattr(owner, "_steward", lambda conn, project_id=None: None)
+    monkeypatch.setattr(owner, "_get", lambda conn, pid: dict(real_get(conn, pid), created_by=owner.actor))
+    with pytest.raises(ProposalConflict) as owner_conflict:
+        owner.withdraw_proposal(None, key("w3"), pid, "again")
+    owner_row = owner_conflict.value.row
+    assert owner_row["proposal_id"] == pid and owner_row["status"] == "withdrawn"
+    assert owner_row["payload"] == proposal(world, pid)["payload"]
+    owner_text = json.dumps(owner_row, ensure_ascii=False)
+    assert DESCRIPTION in owner_text and "paint_v2" in owner_text
+    assert proposal(world, pid)["status"] == "withdrawn"  # neither conflict changed the row
+
+
 def test_the_answer_and_the_wakes_carry_no_upstream_words(world):
     """c5: the card keeps the description for the owner; the propose answer and the wake
     bodies (done and failed) carry kinds and codes only."""

@@ -51,6 +51,9 @@ def _tool(name, read_only=None):
 # read-only, which must not matter.
 DEV_TOOLS = [_tool("list_dir", True), _tool("read_file", True), _tool("search", True), _tool("apply_patch"),
              _tool("bash", True)] + [_tool(name) for name in SUBAGENTS]
+# The names among them that are dev-mcp TOOLS (`sc.dev_mcp_tool`): its subagent_* names are
+# not - the lock never allows one, so nothing may serve one and discovery stores no row for it.
+DEV_MCP_TOOLS = tuple(t["name"] for t in DEV_TOOLS if not t["name"].startswith(sc.DEV_MCP_SUBAGENT))
 
 
 class NamedUpstream(FakeUpstream):
@@ -99,6 +102,17 @@ def sql(world, statement, *params):
     with world.db.get_connection() as conn:
         conn.execute(statement, params)
         conn.commit()
+
+
+def legacy_subagent_row(world, name="subagent_start", conn_id="dev", allowed=1):
+    """A row an older version stored for a subagent_* name (discovery stores none now), with
+    its flags leaned the wrong way: allowed, and neither outward nor egress. It stands for a
+    database written before the fix, or for a direct write, and the lock must hold anyway."""
+    text, digest = sc.definition_json(_tool(name)), sc.sha256_text(sc.definition_json(_tool(name)))
+    sql(world, "INSERT INTO state_steward_connection_tools(conn_id,raw_name,gw_name,definition_json,schema_sha256,"
+               "allowed,allowed_sha256,outward,egress,blocked_args,daily_cap,first_seen_at,last_seen_at) "
+               "VALUES(?,?,?,?,?,?,?,0,0,'[]',NULL,'2026-01-01T00:00:00.000000Z','2026-01-01T00:00:00.000000Z')",
+        conn_id, name, sc.gw_name(conn_id, name), text, digest, allowed, digest)
 
 
 def ready_dev(world, names=("list_dir", "read_file", "bash", "apply_patch")):
@@ -244,11 +258,14 @@ def test_dev_mcp_tools_pin_on_code_only_and_only_the_pinnable_ones(world):
     ready_dev(world)
     assert caps.DEV_MCP_PINNABLE == ("list_dir", "read_file", "search", "bash", "apply_patch")
     for cap_id, route in (("search", [{"kind": "conn", "conn_id": "dev", "raw_name": "search"}]),
-                          ("code", [{"kind": "conn", "conn_id": "dev", "raw_name": "subagent_start"}]),
                           ("memory", [{"kind": "native"}, {"kind": "conn", "conn_id": "dev", "raw_name": "read_file"}]),
                           ("fetch", [{"kind": "conn", "conn_id": "dev", "raw_name": "bash"}])):
         with pytest.raises(StateGraphError, match="dev_mcp_not_allowed"):
             put(world, cap_id, route)
+    # A subagent_* name is not one of dev-mcp's tools at all (`dev_mcp_tool`), so a route
+    # naming one is refused before "only the pinnable ones" is reached (iss-01aa74d937994601).
+    with pytest.raises(StateGraphError, match="unknown_tool"):
+        put(world, "code", [{"kind": "conn", "conn_id": "dev", "raw_name": "subagent_start"}])
     with world.db.get_connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM state_steward_capabilities").fetchone()[0] == 0
     saved = pin(world, "bash", host=True)["setting"]["route"]
@@ -280,7 +297,10 @@ def test_discovery_ignores_dev_mcps_hints_and_every_new_tool_is_outward(world):
     dev(world)
     discover(world, "dev", tools=DEV_TOOLS)
     assert {n: (r["outward"], r["egress"], r["allowed"]) for n, r in rows(world).items()} == {
-        n["name"]: (1, 1, 0) for n in DEV_TOOLS}
+        name: (1, 1, 0) for name in DEV_MCP_TOOLS}
+    # Its subagent_* tools are not dev-mcp tools (`dev_mcp_tool`): discovery stores no row for
+    # one, so the panel cannot offer a tick nothing may allow or serve.
+    assert set(rows(world)) == set(DEV_MCP_TOOLS) and not set(rows(world)) & set(SUBAGENTS)
 
 
 def test_dev_mcps_own_annotations_are_not_stored_served_or_shown(world):
@@ -336,9 +356,13 @@ def test_a_write_tools_outward_and_egress_are_locked(world, item):
 @pytest.mark.parametrize("name", SUBAGENTS)
 def test_a_subagent_tool_is_never_allowed(world, name):
     ready_dev(world)
+    # Not one of dev-mcp's tools, so there is no row to allow - and the write guard refuses
+    # the name itself, whatever row a database holds (the lock is checked before the row).
+    assert name not in rows(world)
+    assert sc.dev_mcp_locked_flags(name) == ("allowed",)
     with pytest.raises(StateGraphError, match="locked: dev_mcp"):
-        allow(world, [name])
-    assert not rows(world)[name]["allowed"]
+        tools_set(world, [{"raw_name": name, "allowed": True, "schema_sha256": "0" * 64}])
+    assert name not in rows(world)
 
 
 def test_a_read_tools_outward_is_the_owners_choice(world):
@@ -348,19 +372,18 @@ def test_a_read_tools_outward_is_the_owners_choice(world):
 
 
 def test_flags_loosened_around_the_lock_are_put_back_and_never_served(world):
-    """A row changed by another path (a direct write, a connection moved onto dev_mcp) is
-    locked again at the next discovery and is never served loosened meanwhile."""
+    """A row changed by another path (a direct write, an older version, a connection moved
+    onto dev-mcp) is locked again at the next discovery and is never served loosened
+    meanwhile."""
     ready_dev(world)
-    hashes = shown(world, "dev")
     sql(world, "UPDATE state_steward_connection_tools SET outward=0, egress=0 WHERE conn_id='dev' AND raw_name='bash'")
-    sql(world, "UPDATE state_steward_connection_tools SET allowed=1, allowed_sha256=? WHERE conn_id='dev' "
-               "AND raw_name='subagent_start'", hashes["subagent_start"])
+    legacy_subagent_row(world, "subagent_start")  # allowed, outward=0, egress=0
     served = {t["raw_name"]: t for t in listed(world)["connections"][0]["tools"]}
     assert "subagent_start" not in served
     assert (served["bash"]["outward"], served["bash"]["egress"]) == (True, True)
     discover(world, "dev", tools=DEV_TOOLS)
-    assert (rows(world)["bash"]["outward"], rows(world)["bash"]["egress"], rows(world)["subagent_start"]["allowed"]) \
-        == (1, 1, 0)
+    assert (rows(world)["bash"]["outward"], rows(world)["bash"]["egress"]) == (1, 1)
+    assert "subagent_start" not in rows(world)  # not a dev-mcp tool: the row goes with discovery
 
 
 def test_a_connection_moved_onto_dev_mcp_keeps_no_loosened_flag(world):
@@ -515,9 +538,7 @@ def test_a_subagent_tool_is_refused_even_allowed_and_pinned_behind_the_commands(
     uid = ready_dev(world)
     owner_turn(world)
     caps.ensure_schema(world.db)
-    hashes = shown(world, "dev")
-    sql(world, "UPDATE state_steward_connection_tools SET allowed=1, allowed_sha256=?, outward=0 WHERE conn_id='dev' "
-               "AND raw_name='subagent_start'", hashes["subagent_start"])
+    legacy_subagent_row(world, "subagent_start", allowed=1)  # a database written before the fix
     sql(world, "INSERT INTO state_steward_capabilities(cap_id,route_json,version,set_via,proposal_id,updated_at) "
                "VALUES('code',?,1,'dashboard',NULL,'2026-11-24T00:00:00Z')",
         json.dumps([{"kind": "conn", "conn_id": "dev", "conn_uid": uid, "raw_name": "subagent_start"}]))
@@ -562,7 +583,10 @@ def test_the_dev_mcp_row_must_be_dev_mcp_itself(world, server, upstream):
     assert rows(world) == {}
     upstream.name = sc.DEV_MCP_SERVER_NAME
     listed_tools = execute(world.owner, "steward_connection_probe", {"conn_id": "dev"}, allow_write=True)["tools"]
-    assert {t["raw_name"] for t in listed_tools} == {t["name"] for t in DEV_TOOLS}
+    # The probe answers dev-mcp's TOOLS, not the upstream's raw list: its subagent_* names are
+    # not tools of this connection (iss-01aa74d937994601).
+    assert {t["raw_name"] for t in listed_tools} == set(DEV_MCP_TOOLS)
+    assert not {t["raw_name"] for t in listed_tools} & set(SUBAGENTS)
     assert rows(world)["bash"]["outward"] == 1
 
 
@@ -666,8 +690,9 @@ def test_compose_passes_the_tunnel_names_to_the_backend():
 
 def test_the_panel_sees_the_same_lock_the_write_guard_enforces(world):
     """The projection must say which ticks the write path refuses, on both sides of the line:
-    a dev-mcp write tool is locked for outward/egress, a subagent_* tool for `allowed`, a
-    dev-mcp read tool and every tool of an ordinary connection stay editable."""
+    a dev-mcp write tool is locked for outward/egress, a subagent_* name has no row at all
+    (and stays locked for `allowed` if one exists), a dev-mcp read tool and every tool of an
+    ordinary connection stay editable."""
     ready_dev(world)
     add(world, conn_id="box", visibility="private")
     discover(world, "box", tools=DEV_TOOLS)
@@ -679,8 +704,9 @@ def test_the_panel_sees_the_same_lock_the_write_guard_enforces(world):
         assert name in shown_dev
         assert shown_dev[name]["locked"] == ["outward", "egress"]
         assert shown_dev[name]["locked_reason"] == "dev_mcp"
-    assert shown_dev["subagent_start"]["locked"] == ["allowed"]
-    assert shown_dev["subagent_start"]["locked_reason"] == "dev_mcp"
+    for name in SUBAGENTS:
+        assert name not in shown_dev  # not one of dev-mcp's tools: nothing to tick
+        assert sc.dev_mcp_locked_flags(name) == ("allowed",)
     assert shown_dev["list_dir"]["locked"] == []  # an accepted dev-mcp edit
     assert shown_dev["list_dir"]["locked_reason"] is None
     assert all(t["locked"] == [] and t["locked_reason"] is None for t in shown_box.values())
@@ -689,8 +715,44 @@ def test_the_panel_sees_the_same_lock_the_write_guard_enforces(world):
     with pytest.raises(StateGraphError, match="locked: dev_mcp"):
         tools_set(world, [{"raw_name": "bash", "outward": False, "schema_sha256": hashes["bash"]}])
     with pytest.raises(StateGraphError, match="locked: dev_mcp"):
-        tools_set(world, [{"raw_name": "subagent_start", "allowed": True,
-                           "schema_sha256": hashes["subagent_start"]}])
+        tools_set(world, [{"raw_name": "subagent_start", "allowed": True, "schema_sha256": "0" * 64}])
+
+
+def test_the_probe_answer_and_the_served_catalog_name_the_same_dev_mcp_tools(world, server, upstream):
+    """iss-01aa74d937994601: the probe wrote and answered the upstream's RAW tool list, so the
+    private dev_mcp row's panel showed its subagent_* tools - which the lock never allows, the
+    catalog never serves and the gateway answers `tool_not_allowed` for. Discovery now treats
+    those names as non-tools, so the probe answer, the panel and the served catalog name the
+    same dev-mcp tools; the lock is exactly as strong as before (nothing subagent_* is stored,
+    allowed, outward, egress or served)."""
+    dev(world)
+    probed = {t["raw_name"] for t in execute(world.owner, "steward_connection_probe", {"conn_id": "dev"},
+                                             allow_write=True)["tools"]}
+    assert probed == set(DEV_MCP_TOOLS)          # dev-mcp's tools, not the upstream's 11 names
+    assert not probed & set(SUBAGENTS)
+    allow(world, list(DEV_MCP_TOOLS))            # the owner's next step on the panel
+    probe = execute(world.owner, "steward_connection_probe", {"conn_id": "dev"}, allow_write=True)
+    assert {t["raw_name"] for t in probe["tools"]} == probed
+    catalogue = listed(world)
+    served = {t["raw_name"] for t in catalogue["connections"][0]["tools"]}
+    assert served == {name.rsplit("__", 1)[1] for name in catalogue["effective_tools"]} == probed
+    panel = {t["raw_name"] for t in execute(world.owner, "list_steward_connection_tools",
+                                            {"conn_id": "dev"})["tools"]}
+    assert panel == probed
+    # The lock's own predicate: a subagent_* name may never be allowed.
+    assert {name: sc.dev_mcp_locked_flags(name) for name in SUBAGENTS} == {
+        name: ("allowed",) for name in SUBAGENTS}
+    # A row an older version wrote for one - allowed, neither outward nor egress - is not
+    # served either, cannot be allowed again, and the next discovery drops it.
+    legacy_subagent_row(world, "subagent_start", allowed=1)
+    with world.db.get_connection() as conn:
+        assert not [e for e in sc.effective(conn) if e["raw_name"].startswith(sc.DEV_MCP_SUBAGENT)]
+    row = rows(world)["subagent_start"]
+    assert (row["allowed"], row["outward"], row["egress"]) == (1, 0, 0)  # a read never touches a row
+    with pytest.raises(StateGraphError, match="locked: dev_mcp"):
+        tools_set(world, [{"raw_name": "subagent_start", "allowed": True, "schema_sha256": "0" * 64}])
+    discover(world, "dev", tools=DEV_TOOLS)
+    assert "subagent_start" not in rows(world)
 
 
 def test_a_locked_flag_in_a_mixed_save_refuses_the_batch_and_keeps_every_row(world):

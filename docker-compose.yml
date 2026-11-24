@@ -61,6 +61,9 @@ services:
       # docker gateways are reserved without them) no steward connection may resolve
       # to. Set in .env; see .env.example.
       AITELIER_STEWARD_HOST_ADDRESSES: "${AITELIER_STEWARD_HOST_ADDRESSES:-}"
+      # Step 24.4c (design-steward 7.8.24): dev-mcp's tunnel hostnames; a steward connection
+      # written with one is always refused (reserved_endpoint). Set in .env; see .env.example.
+      AITELIER_DEV_MCP_HOSTS: "${AITELIER_DEV_MCP_HOSTS:-}"
       # Step 24.1a (design-steward 7.8.5, director 487): the steward's MCP gateway
       # (/api/steward/mcp) is served ONLY on this second listener, which the backend
       # opens in its own process; 4444 answers 404 for it. Published below on the

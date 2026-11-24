@@ -122,6 +122,12 @@ HOST_TOOLS = frozenset(tool for cap in CAPABILITIES for tool in cap["host_tools"
 # agentmcp", video_* excepted by the owner 2026-11-24): pinned on a private connection only.
 SHARED_STATE_TOOLS = re.compile(r"^(actor_tts|create_[a-z_]+|delete_[a-z_]+)$")
 MAX_ENTRIES = 8
+# Step 24.4c (7.8.24 "九" 5): the dev-mcp tools the owner may pin - on `code` alone, from the
+# dashboard alone (a proposal naming one is `needs_dashboard: dev_mcp`). The gateway forwards
+# a dev-mcp call only for a tool pinned there (`code_pin`); subagent_* is never one of them.
+DEV_MCP_PINNABLE = ("list_dir", "read_file", "search", "bash", "apply_patch")
+DEV_MCP_CAPABILITY = "code"
+NEEDS_DASHBOARD_DEV_MCP = "needs_dashboard: dev_mcp"
 CARD_DESCRIPTION_CHARS = 500
 # Decision 38 (the draft's recommendation): at most one open capability_route per job, at
 # most five open in all, and a route the owner declined is not proposed again for 30 days.
@@ -179,8 +185,9 @@ def check_route(cap_id, route, conn, via="dashboard") -> list[dict]:
     {kind: native} | {kind: missing} | {kind: host, tool} | {kind: conn, conn_id, raw_name,
     conn_uid?}. A connection entry is resolved against the registry as it is NOW, its
     conn_uid taken from it (a conn_uid given must be that one). `via` is who writes it
-    (`dashboard` or `proposal`): the same rules for both in 24.4; 24.4c's dev-mcp rule
-    answers a proposal differently."""
+    (`dashboard` or `proposal`): the same rules for both, except a dev-mcp tool (24.4c):
+    a proposal naming one is `needs_dashboard: dev_mcp`; the dashboard may pin only
+    DEV_MCP_PINNABLE, only on `code` (else `dev_mcp_not_allowed`)."""
     from core import state_steward_connections as sc
     cap = _spec(cap_id)
     if via not in ("dashboard", "proposal"):
@@ -219,14 +226,19 @@ def check_route(cap_id, route, conn, via="dashboard") -> list[dict]:
             same = ("host", entry["tool"])
             item = {"kind": "host", "tool": entry["tool"]}
         else:
-            row = conn.execute("SELECT conn_uid,visibility FROM state_steward_connections WHERE conn_id=?",
+            row = conn.execute("SELECT conn_uid,visibility,url FROM state_steward_connections WHERE conn_id=?",
                                (entry["conn_id"],)).fetchone() if sc._has_tables(conn) else None
             if row is None or entry.get("conn_uid", row["conn_uid"]) != row["conn_uid"]:
                 raise _refused("unknown_connection", f"entry {index}")
             if conn.execute("SELECT 1 FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?",
                             (entry["conn_id"], entry["raw_name"])).fetchone() is None:
                 raise _refused("unknown_tool", f"entry {index}")
-            if row["visibility"] != "private" and (cap["private_only"] or SHARED_STATE_TOOLS.match(entry["raw_name"])):
+            dev = sc.is_dev_mcp(row)
+            if dev and via == "proposal":
+                raise StateGraphError(NEEDS_DASHBOARD_DEV_MCP)
+            if dev and (cap["id"] != DEV_MCP_CAPABILITY or entry["raw_name"] not in DEV_MCP_PINNABLE):
+                raise _refused("dev_mcp_not_allowed", f"entry {index}")
+            if row["visibility"] != "private" and (dev or cap["private_only"] or SHARED_STATE_TOOLS.match(entry["raw_name"])):
                 raise _refused("pin_must_be_private", f"entry {index}")
             same = ("conn", entry["conn_id"], entry["raw_name"])
             item = {"kind": "conn", "conn_id": entry["conn_id"], "conn_uid": row["conn_uid"],
@@ -254,6 +266,16 @@ def route_target(cap_id, entries) -> str:
 def _route_key(entries) -> list:
     """A route as the owner sees it (a pin by connection and tool name, never its conn_uid)."""
     return [[e["kind"], e.get("tool"), e.get("conn_id"), e.get("raw_name")] for e in entries]
+
+
+def code_pin(conn, conn_uid, raw_name) -> bool:
+    """Whether the owner's route for `code` pins the tool `raw_name` of the connection
+    `conn_uid` (the gateway's condition for any dev-mcp call, 24.4c): a job not set, set
+    `missing`, or pinning other tools - or another conn_uid - is no."""
+    row = _stored(conn).get(DEV_MCP_CAPABILITY)
+    return row is not None and raw_name in DEV_MCP_PINNABLE and any(
+        e.get("kind") == "conn" and e.get("conn_uid") == conn_uid and e.get("raw_name") == raw_name
+        for e in json.loads(row["route_json"]))
 
 
 def private_pins(conn, conn_uid) -> bool:
@@ -579,7 +601,9 @@ def execute_proposal(conn, payload, proposal_id) -> dict:
     try:
         checked = check_route(cap_id, entries, conn, via="proposal")
     except StateGraphError as exc:
-        raise ExecutionRefused(str(exc).split(":")[0]) from None
+        # A code alone - but dev-mcp's refusal keeps what it is (24.4c).
+        raise ExecutionRefused(NEEDS_DASHBOARD_DEV_MCP if str(exc) == NEEDS_DASHBOARD_DEV_MCP
+                               else str(exc).split(":")[0]) from None
     version = payload["expect_version"] + 1
     conn.execute("INSERT INTO state_steward_capabilities(cap_id,route_json,version,set_via,proposal_id,updated_at) "
                  "VALUES(?,?,?,'proposal',?,?) ON CONFLICT(cap_id) DO UPDATE SET route_json=excluded.route_json, "

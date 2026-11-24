@@ -1183,3 +1183,70 @@ test('apply registers sendGroup and setRooms for the host\'s group path', () => 
   assert.equal(typeof registered[0].sendGroup, 'function');
   assert.equal(typeof registered[0].setRooms, 'function');
 });
+
+// ---- step 23 review round (rv-sg): bind replays, the paused group named, the bind notice's thread ----
+
+test('a redelivered bind envelope after the bind took is dropped, never a group question (Socket Mode retry)', async () => {
+  const code = 'G-7K2M-Q9XD';
+  let channel;
+  // What the director does on a bind it took: refreshRooms -> setRooms with the new room, before inbound answers.
+  const ownerChannels = registry(async message => {
+    if (message.groupBind) await channel.setRooms({ ownerRef: 'U1', rooms: [{ room_ref: 'C9', prefix: `<@${BOT}>`, label: '家' }] });
+    return { accepted: true };
+  });
+  ({ channel } = await started(ownerChannels));
+  const socket = FakeSocket.last;
+  await channel.setRooms({ ownerRef: 'U1', rooms: [] });
+  const bind = () => groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> ${code}` }));
+  await deliver(socket, bind());
+  await until(() => ownerChannels.calls.length === 1);
+  const again = bind();
+  again.body.retry_attempt = 1;
+  await deliver(socket, again);
+  await deliver(socket, bind());
+  await settle();
+  assert.equal(ownerChannels.calls.length, 1, 'the same message ref is not taken a second time');
+  assert.ok(ownerChannels.calls[0].groupBind);
+  // A later question in the bound channel is taken as usual.
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', ts: '1763481700.000100' })));
+  await until(() => ownerChannels.calls.length === 2);
+  assert.equal(ownerChannels.calls[1].messageRef, 'C9:1763481700.000100');
+  assert.equal(ownerChannels.calls[1].asked, true);
+  await channel.stop();
+});
+
+test('D5 (a): a paused group is named in the status by the name the dashboard shows, so the owner knows which to unbind', async () => {
+  const { channel, socket, web } = await started();
+  await channel.setRooms({ ownerRef: 'U1', rooms: [{ room_ref: 'C1', prefix: `<@${BOT}>`, label: '家人' },
+    { room_ref: 'C2', prefix: `<@${BOT}>`, label: '工作' }, { room_ref: 'C0000ABCDEF', prefix: `<@${BOT}>` }] });
+  await deliver(socket, groupEnvelope(mention({ channel: 'C2' }), { is_ext_shared_channel: true }));
+  await settle();
+  const detail = channel.status().detail;
+  assert.match(detail, /「工作」/);
+  assert.doesNotMatch(detail, /家人/);
+  assert.match(detail, /unbind/);
+  // A group with no name is named as the dashboard names it: its ref's last six.
+  web.infos.C0000ABCDEF = { id: 'C0000ABCDEF', ...PRIVATE_CHANNEL, is_private: false };
+  await assert.rejects(channel.sendGroup('C0000ABCDEF', 'x'), { code: 'room_paused' });
+  assert.match(channel.status().detail, /「工作」 shared/);
+  assert.match(channel.status().detail, /「ABCDEF」 not_private/);
+  await channel.stop();
+});
+
+test('D8: the bind notice goes into the thread the owner posted the code in (its root, not the code message)', async () => {
+  const code = 'G-7K2M-Q9XD';
+  let channel;
+  const ownerChannels = registry(async message => {
+    if (message.groupBind) await channel.setRooms({ ownerRef: 'U1', rooms: [{ room_ref: 'C9', prefix: `<@${BOT}>` }] });
+    return { accepted: true };
+  });
+  ({ channel } = await started(ownerChannels));
+  const socket = FakeSocket.last, web = FakeWeb.last;
+  await channel.setRooms({ ownerRef: 'U1', rooms: [] });
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> ${code}`, ts: '1763481700.000100',
+    thread_ts: '1763481500.000100' })));
+  await until(() => ownerChannels.calls.length === 1);
+  await channel.sendGroup('C9', 'NOTICE', { replyToRef: 'C9:1763481700.000100' });
+  assert.equal(web.posted[0].thread_ts, '1763481500.000100');
+  await channel.stop();
+});

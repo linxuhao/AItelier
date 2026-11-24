@@ -921,7 +921,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     return (listed?.groups ?? []).some(group => group.channel === channel && group.group_ref === groupRef
       && group.media_keep === 'on');
   };
-  /** The bridge's whitelist from the host: each channel's bound account and its bound group.
+  /** The bridge's whitelist from the host: each channel's bound account and its bound group
+   *  (with its dashboard name when it has one, which the Slack channel names a paused group by).
    *  Answers what the host listed, or undefined when it could not be read. */
   const refreshRooms = async () => {
     if (typeof groups?.list !== 'function') return undefined;
@@ -932,7 +933,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       for (const [channel, entry] of registered) {
         if (!entry.setRooms) continue;
         await entry.setRooms({ ownerRef: listed?.owner_refs?.[channel] ?? null,
-          rooms: (listed?.groups ?? []).filter(g => g.channel === channel).map(g => ({ room_ref: g.group_ref, prefix: g.mention_prefix })) });
+          rooms: (listed?.groups ?? []).filter(g => g.channel === channel).map(g => ({ room_ref: g.group_ref, prefix: g.mention_prefix,
+            ...(text(g.label) ? { label: g.label } : {}) })) });
       }
     } catch (error) { log('group_rooms_failed', { error: short(error) }); }
     return listed;

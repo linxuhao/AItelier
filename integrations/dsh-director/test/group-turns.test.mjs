@@ -980,3 +980,18 @@ test('group reply (D8): the question\'s channel ref the backend answers goes to 
   await r.done;
   assert.deepEqual(r.sent, [['wechat', 'r1', '「Q2」\n答。']]);
 });
+
+test('channels (D5 a): the whitelist carries each group\'s dashboard name, so a channel can name a paused group', async () => {
+  const rooms = [];
+  const groups = { list: async () => ({ owner_refs: { slack: 'U1' }, groups: [
+    { channel: 'slack', group_ref: 'C1', mention_prefix: '<@UBOT>', label: '家人' },
+    { channel: 'slack', group_ref: 'C2', mention_prefix: '<@UBOT>', label: null }] }) };
+  const host = { sourceOf: async () => null, recordDelivery: async () => ({}), list: async () => ({ channels: [] }) };
+  const channels = createOwnerChannels({ host, groups, owedFile: join(mkdtempSync(join(tmpdir(), 'rooms-label-')), 'owed.json') });
+  channels.service.register({ name: 'slack', send: async () => ({}), status: () => ({ connected: true }),
+    sendGroup: async () => ({}), setRooms: async r => { rooms.push(r); } });
+  channels.ready();
+  await channels.refreshRooms();
+  assert.deepEqual(rooms.at(-1), { ownerRef: 'U1', rooms: [{ room_ref: 'C1', prefix: '<@UBOT>', label: '家人' },
+    { room_ref: 'C2', prefix: '<@UBOT>' }] });
+});

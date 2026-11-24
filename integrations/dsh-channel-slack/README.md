@@ -95,9 +95,11 @@ only this platform layer changed).
   in a public channel, a Slack Connect channel, a DM or a group DM binds nothing (logged
   `a group code in <channel> not taken: <why>`). A bound channel found shared or public is
   **paused**: its events are dropped and nothing is sent into it (`room_paused`) for the rest
-  of the process, and the channel's status says `n group(s) paused (...): unbind on the
-  dashboard`; unbinding it lifts the pause. A restart judges it again on its next message or
-  send.
+  of the process, and the channel's status names it: `n group(s) paused - unbind on the
+  dashboard: 「<name>」 <why>` (the group's name on the dashboard, else its ref's last six);
+  unbinding it lifts the pause. A restart judges it again on its next message or send.
+- A group code message passed on as a bind is never taken again: a Socket Mode redelivery
+  of it (an ack Slack did not see) is dropped, not asked as a question of the new group.
 - `sendGroup(channel, text, {replyToRef?})` → posts into a bound group: under the thread of
   the message it answers (`replyToRef`, a group `messageRef`; a question asked inside a
   thread is answered in that thread, D8), else into the channel (a reminder); `unfurl_links`

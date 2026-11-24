@@ -137,8 +137,9 @@ export interface DirectorApi {
   /** Step 25 C11 (capability `groups`): send one line into a bound group (a group reminder the
    *  host posted with post_group_notice) through the channel's group send and the bridge's one
    *  queue, like a group reply. true when the channel took it; never rejects; false without
-   *  channels. */
-  groupSend(channel: string, groupRef: string, text: string): Promise<boolean>;
+   *  channels. `options.replyToRef` (step 23 Slack, D8): the group message the line answers (a
+   *  confirmation text answers its asker's question), which Slack threads under. */
+  groupSend(channel: string, groupRef: string, text: string, options?: { replyToRef?: string }): Promise<boolean>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -643,8 +644,9 @@ export interface OwnerChannels {
      *  room_paused} or {status: 429, code: room_backstop}. */
     sendGroup?(groupRef: string, text: string, options?: { replyToRef?: string }): Promise<{ ref?: string }>;
     /** Step 23 (optional): the host's whitelist, set whole - the channel's bound account and each
-     *  bound group with its @ prefix (the bridge's PUT /rooms; Slack keeps it in memory). */
-    setRooms?(rooms: { ownerRef: string | null; rooms: Array<{ room_ref: string; prefix: string }> }): Promise<void> }): () => void;
+     *  bound group with its @ prefix and, when it has one, its dashboard name (the bridge's PUT
+     *  /rooms; Slack keeps it in memory and names a paused group by it). */
+    setRooms?(rooms: { ownerRef: string | null; rooms: Array<{ room_ref: string; prefix: string; label?: string }> }): Promise<void> }): () => void;
   /** Step 24.2: `attachments` (optional) - what storeMedia answered for each of the message's
    *  files: each EXACTLY one of `ref` (an m_ library ref storeMedia gave; a channel's own ids
    *  never come here) or `refused` (too_large | type | unsupported | gone - a channel writes

@@ -469,7 +469,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     /** Step 25 C11: one line into a bound group (a group reminder the host posted), through the
      *  same channel send and bridge queue as a group reply: true when the channel took it. */
-    groupSend: (channel, groupRef, text) => channels ? channels.sendGroup(channel, groupRef, text) : Promise.resolve(false),
+    groupSend: (channel, groupRef, text, options) => channels ? channels.sendGroup(channel, groupRef, text, options) : Promise.resolve(false),
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },

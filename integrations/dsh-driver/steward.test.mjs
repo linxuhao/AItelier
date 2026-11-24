@@ -1315,6 +1315,9 @@ test('step 24 (7.8.9): a group requester\'s confirmation goes only into that gro
     requester_message_id: 'gq2', audience: 'group', question_ids: ['gq1', 'gq2'] }]]);
   assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }), { group_ref: 'r1', sent: true });
   assert.deepEqual(groupSent, [['wechat', 'r1', 'T']]);
+  // Step 23 Slack (D8): the asker's question's channel ref goes with it, so a channel that threads answers under it.
+  await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'slack', groupRef: 'C1', replyToRef: 'C1:1763481600.000300' });
+  assert.deepEqual(groupSent.at(-1), ['slack', 'C1', 'T', { replyToRef: 'C1:1763481600.000300' }]);
   assert.equal(calls.length, 1, 'nothing written into the owner\'s conversation');
   took = false;
   assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }),

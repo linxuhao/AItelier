@@ -64,10 +64,14 @@ export const FILES_PER_MESSAGE = 10;
 /** Step 23: a group code as the owner posts it after the mention, G-XXXX-XXXX (Crockford base32),
  *  the bridge's own pattern (integrations/wechat-bridge/bridge.mjs GROUP_CODE). */
 export const GROUP_CODE = /^[Gg](?:[\s-]*[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]){8}$/;
-// The threads of the group questions this process saw (messageRef -> the thread's root ts), so a
+// The threads of the group questions and codes this process saw (messageRef -> the thread's root ts), so a
 // reply to a question asked inside a thread lands in that thread; past this many the oldest go
 // (a reply to a forgotten one threads on the question's own ts).
 export const THREADS_KEPT = 1000;
+// The message refs of the group codes this process passed on as binds: Socket Mode sends an event
+// again when its ack was not seen, and by then the bind has made the channel a group, so the same
+// code message would come back as a question (review rv-sg 1). Past this many the oldest go.
+export const BINDS_KEPT = 100;
 const BOT_ID = /^[UW][A-Z0-9]+$/;
 const OWN_MENTION = /^<@[UW][A-Z0-9]+>$/;
 // The answers of conversations.info that say Slack will not describe this conversation to the app
@@ -197,11 +201,12 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   const lanes = new Map(); // user, or group:<channel> -> { run: the delivery of its latest message, held: messages waiting }
   // Step 23: the host's whitelist (setRooms), in memory: a restart starts with none and waits for
   // the host's first list before any mention is judged.
-  let ownerRef, rooms = new Map(); // bound channel -> the bot's mention the backend keeps as its prefix
+  let ownerRef, rooms = new Map(); // bound channel -> {prefix: the bot's mention the backend keeps, label: the group's name}
   let roomsListed, roomsKnown = false;
   const listed = new Promise(resolve => { roomsListed = resolve; });
   const paused = new Map(); // bound channel -> why it is paused (shared, not_private, ...)
-  const threads = new Map(); // `${channel}:${ts}` of a group question -> its thread's root ts
+  const threads = new Map(); // `${channel}:${ts}` of a group question or code -> its thread's root ts
+  const binds = new Set(); // `${channel}:${ts}` of the group codes passed on as binds
   let botAsked;
 
   /** storeMedia's `open` for one Slack file: GET its url_private_download with the bot
@@ -394,6 +399,8 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
     return enqueue({ key: 'group:' + room, who: `${event.user} in ${room}`, length: event.text.length }, async () => {
       if (!roomsKnown) await Promise.race([listed, new Promise(resolve => stopping.signal.addEventListener('abort', resolve, { once: true }))]);
       if (stopping.signal.aborted) return undefined;
+      // A code message passed on as a bind is never taken again, as a bind or as a question.
+      if (binds.has(messageRef)) return undefined;
       const bot = await persist('reading the bot\'s own id', () => botOf(body));
       if (!bot) return undefined;
       const text = unescapeSlack(withoutMention(event.text, bot));
@@ -403,6 +410,9 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
         const verdict = shared ? 'shared' : await persist(`checking ${room}`, () => judge(room));
         if (verdict === undefined) return undefined;
         if (verdict !== 'ok') { log.warn(`slack: a group code in ${room} not taken: ${verdict}`); return undefined; }
+        binds.add(messageRef);
+        while (binds.size > BINDS_KEPT) binds.delete(binds.values().next().value);
+        remember(messageRef, event); // the bind notice answers it in its thread
         return { files: [], message: { channel: 'slack', senderRef: event.user, messageRef, text: code, at,
           conversationRef: room, groupBind: { prefix: `<@${bot}>`, code } } };
       }
@@ -412,10 +422,15 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
       const verdict = await persist(`checking ${room}`, () => judge(room));
       if (verdict === undefined) return undefined;
       if (verdict !== 'ok') { suspend(room, verdict); return undefined; }
-      threads.set(messageRef, typeof event.thread_ts === 'string' && event.thread_ts ? event.thread_ts : event.ts);
-      while (threads.size > THREADS_KEPT) threads.delete(threads.keys().next().value);
+      remember(messageRef, event);
       return { files, message: { channel: 'slack', senderRef: event.user, messageRef, text, at, conversationRef: room, asked: true } };
     });
+  }
+
+  // The thread a group message was written in (its root ts; its own ts when it is the root).
+  function remember(messageRef, event) {
+    threads.set(messageRef, typeof event.thread_ts === 'string' && event.thread_ts ? event.thread_ts : event.ts);
+    while (threads.size > THREADS_KEPT) threads.delete(threads.keys().next().value);
   }
 
   async function onEnvelope({ ack, type, body }) {
@@ -500,7 +515,7 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
     await usable(room);
     const ts = typeof replyToRef === 'string' && replyToRef.startsWith(room + ':') ? replyToRef.slice(room.length + 1) : '';
     const thread = ts ? threads.get(replyToRef) ?? ts : undefined;
-    const mention = rooms.get(room);
+    const mention = rooms.get(room)?.prefix;
     const refs = [];
     for (const part of splitText(text)) {
       const escaped = escapeSlack(part);
@@ -513,11 +528,13 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   }
 
   /** Step 23: the host's whitelist, set whole: the bound account (whose group code alone binds)
-   *  and each bound group with its prefix. A group no longer listed (unbound) is no longer paused. */
+   *  and each bound group with its prefix and name (`label`, what the dashboard calls it, so a
+   *  paused one is named in the status). A group no longer listed (unbound) is no longer paused. */
   async function setRooms({ ownerRef: owner, rooms: list } = {}) {
     ownerRef = typeof owner === 'string' && owner ? owner : undefined;
     rooms = new Map((Array.isArray(list) ? list : []).filter(room => typeof room?.room_ref === 'string' && room.room_ref)
-      .map(room => [room.room_ref, typeof room.prefix === 'string' ? room.prefix : '']));
+      .map(room => [room.room_ref, { prefix: typeof room.prefix === 'string' ? room.prefix : '',
+        label: typeof room.label === 'string' && room.label.trim() ? room.label.trim() : undefined }]));
     for (const room of [...paused.keys()]) if (!rooms.has(room)) paused.delete(room);
     roomsKnown = true;
     roomsListed();
@@ -551,12 +568,13 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
     return typeof id === 'string' && id ? { ref: id } : {};
   }
 
-  // A paused group (step 23) is said in the channel's status, which the dashboard shows.
+  // A paused group (step 23) is said in the channel's status, which the dashboard shows, by the
+  // name the dashboard gives it (its label, else its ref's last six), so the owner knows which to unbind.
   const status = () => {
     if (!paused.size || !state.connected) return { ...state };
     const count = paused.size;
-    return { ...state, detail: `${count} group${count === 1 ? '' : 's'} paused (${[...new Set(paused.values())].join(', ')}): `
-      + 'unbind on the dashboard' };
+    const named = [...paused].map(([room, why]) => `「${rooms.get(room)?.label ?? room.slice(-6)}」 ${why}`);
+    return { ...state, detail: `${count} group${count === 1 ? '' : 's'} paused - unbind on the dashboard: ${named.join(', ')}` };
   };
   const stop = async () => {
     if (stopped) return;

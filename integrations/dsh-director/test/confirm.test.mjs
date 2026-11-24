@@ -19,7 +19,7 @@ const CACHE = {
 const wake = (...ids) => 'EVENT:\n' + JSON.stringify({ events: [], driver_inbox: ids.map(id => ({ message_id: id, sender_kind: 'user' })) });
 const userMessage = text => ({ type: 'user/message', data: { message: { content: [{ type: 'text', text }] } } });
 
-function fixture({ stateDir, turn = { kind: 'owner' }, questions, openTurn = () => '5' } = {}) {
+function fixture({ stateDir, turn = { kind: 'owner' }, questions, openTurn = () => '5', replyToRef } = {}) {
   const calls = [];
   const dir = stateDir ?? mkdtempSync(join(tmpdir(), 'confirm-'));
   const host = {
@@ -33,7 +33,8 @@ function fixture({ stateDir, turn = { kind: 'owner' }, questions, openTurn = () 
   const record = { status: 'confirmed', name: SEND, arguments: { to: 'a@example.com', body: 'stored' } };
   const confirm = {
     create: async (request) => { calls.push(['create', request]); return { code: 'K7Q2A', text: 'TEXT', reply_to_message_id: request.requesterMessageId, expires_at: 'e',
-      ...(request.audience === 'group' ? { channel: 'wechat', group_ref: 'room1' } : { channel: 'slack' }) }; },
+      ...(request.audience === 'group' ? { channel: 'wechat', group_ref: 'room1', ...(replyToRef ? { reply_to_ref: replyToRef } : {}) }
+        : { channel: 'slack' }) }; },
     deliver: async (message) => { calls.push(['deliver', message]); return delivery.answer; },
     get: async (code, _signal, options) => { calls.push(['get', code, options]); return { code, ...record }; },
     cancel: async code => { calls.push(['cancel', code]); return { code, status: 'cancelled' }; },
@@ -234,4 +235,14 @@ test('run_confirmed (step 23.1): the backend\'s not_this_conversation reaches th
   const out = await tools.get('run_confirmed').execute({ code: 'K7Q2A' }, { agent: { session: { id: 'root' } }, token: 't' });
   assert.equal(out.refused, 'not_this_conversation');
   assert.deepEqual(executed, []);
+});
+
+test('request_confirmation in a Slack group turn (D8): the text answers the asker\'s question in its thread (the backend\'s reply_to_ref)', async () => {
+  const turn = { audience: { kind: 'group', channel: 'slack', group_ref: 'room1' } };
+  const f = fixture({ turn, questions: { ids: ['gq-2'] }, replyToRef: 'room1:1763481600.000300' });
+  await f.catalog.preStep();
+  f.catalog.observe({ type: 'turn/start', seq: 1 });
+  await f.run('request_confirmation', { name: SEND, arguments: { to: 'a@example.com' } });
+  assert.deepEqual(f.calls.find(c => c[0] === 'deliver')[1], { code: 'K7Q2A', text: 'TEXT', replyTo: 'gq-2', channel: 'wechat',
+    groupRef: 'room1', replyToRef: 'room1:1763481600.000300' });
 });

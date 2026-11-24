@@ -2079,3 +2079,23 @@ test('24.2b: the steward\'s send_user_message has no attachments parameter and n
   assert.equal(steward.attachments, false);
   assert.equal(sendUserMessageTool({ steward: false, library }).attachments, true, 'a director with the same library has them');
 });
+
+test('overfit review 2026-11-24 (重-10, 重-11): on the AItelier host the steward\'s prompt is steward.md as at a1416299ee, byte for byte, and the plugin records no turn of its own', async () => {
+  const { createHash } = await import('node:crypto');
+  const { stewardPrompt, stewardPromptFeatures } = await import('../dsh-director/lib/steward-prompt.mjs');
+  const { turnRecorderFor } = await import('../dsh-director/lib/memory/turns.mjs');
+  const sha = text => createHash('sha256').update(text, 'utf8').digest('hex');
+  // What index.mjs assembled at a1416299ee: steward.md read whole (the fixture is that file, `git show`n).
+  const base = readFileSync(new URL('./test-fixtures/steward.md.a1416299ee', import.meta.url), 'utf8');
+  assert.equal(sha(base), '9439656623c12e3f383adb7fac6f3762f49aa6d2319dda7aa2b411ada4385ab3', 'the fixture is the base\'s steward.md');
+  const now = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
+  // With and without the media library (the only part of the steward's capability list an environment changes).
+  for (const extra of [{}, { AITELIER_MEDIA_ROOT: mkdtempSync(join(tmpdir(), 'steward-media-')) }]) {
+    const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', ...extra }));
+    // What index.mjs assembles now: the same two calls, on this host's capabilities and memory config.
+    const assembled = stewardPrompt(now, stewardPromptFeatures(host.capabilities, { memory: host.config.memory }));
+    assert.equal(sha(assembled), sha(base), JSON.stringify(host.capabilities));
+    // The host records its owner's turns (syncConversation): the plugin adds no second writer.
+    assert.equal(turnRecorderFor({ capabilities: host.capabilities, store: { recordTurn: async () => ({}) } }), undefined);
+  }
+});

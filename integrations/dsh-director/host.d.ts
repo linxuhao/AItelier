@@ -200,7 +200,10 @@ export interface DirectorHost {
     list(signal?: AbortSignal): Promise<Array<{ id: string; text: string }>>;
   };
   /** v1.2, plugin step 11: whether `id` names a message the owner wrote; memory_forget
-   *  needs it (the steward forgets only when the owner asked) [none: memory_forget refuses]. */
+   *  needs it (the steward forgets only when the owner asked) [none: memory_forget refuses].
+   *  A host with it owns its owner's conversation and records each turn into memory itself
+   *  (api.memory.recordTurn); without it the plugin records the root session's own turns - each
+   *  user message DSH's client sent and the root's replies in that turn (lib/memory/turns.mjs). */
   memory?: { ownerMessage(id: string, signal?: AbortSignal): Promise<boolean> };
   /** v1.2, plugin step 12: the steward's read-only view of every project, behind
    *  portfolio_projects / portfolio_project / portfolio_conversation [none: not registered].

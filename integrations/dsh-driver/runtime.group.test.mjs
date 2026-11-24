@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -718,6 +718,10 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       + JSON.stringify(systems.map(system => system.includes(LINE))) + '\n' + (systems.find(system => !system.includes(LINE)) ?? '').slice(-1500) + trace);
     assert.equal(new Set(systems.map(system => system.slice(system.indexOf('Your basic capabilities')))).size, 1, 'one text');
     assert.ok(systems.every(system => !system.includes('calme') && !system.includes('calfam')));
+    // Overfit review 2026-11-24 (重-11): on the AItelier adapter the steward's role prompt is still
+    // steward.md as it was at a1416299ee, whole (test-fixtures/steward.md.a1416299ee, `git show`n).
+    const baseSteward = await readFile(new URL('./test-fixtures/steward.md.a1416299ee', import.meta.url), 'utf8');
+    assert.ok(systems.every(system => system.includes(baseSteward.trim())), 'the adapter\'s steward prompt is steward.md unchanged');
     assert.match(resultOf('b1'), /mcp__sw__calfam__list_events/, trace);
     assert.doesNotMatch(resultOf('b1'), /calme/, trace);
   } finally {

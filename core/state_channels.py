@@ -18,11 +18,13 @@ refused body is logged by its length only, never its text (B3).
 
 Chat approval: an owner message (relayed, or written on the dashboard into the
 steward's conversation) whose body, stripped of surrounding whitespace, EQUALS
-`同意 proposal <id>` or `拒绝 proposal <id>` for an existing proposal approves or
-declines it through the dashboard's own path, as of the proposal version current
-when the message was written. This is an intent check, not authentication: no
-case folding, no full-width spaces, no synonyms, and it must never be widened into
-a fuzzy match. The model never decides: no steward command approves; this code does,
+`同意 proposal <id>` or `拒绝 proposal <id>` - or its fixed English alias
+`approve proposal <id>` / `decline proposal <id>` (overfit review 重-17) - for an
+existing proposal approves or declines it through the dashboard's own path, as of the
+proposal version current when the message was written. This is an intent check, not
+authentication: no case folding (the alias is lower case only), no full-width spaces,
+no synonyms, and it must never be widened into a fuzzy match. An alias decides exactly
+what its Chinese phrase with the same id decides, and nothing else. The model never decides: no steward command approves; this code does,
 on the owner's exact words.
 
 The host also reports each channel's status (`report_channel_status`, steward only:
@@ -188,6 +190,8 @@ CHANNEL_AT_MAX_AHEAD = timedelta(minutes=2)
 # The message is written either way; an ordinary message needs no time.
 MESSAGE_SOURCES_MAX = 200
 APPROVE, DECLINE = "同意 proposal ", "拒绝 proposal "
+APPROVE_EN, DECLINE_EN = "approve proposal ", "decline proposal "
+PHRASE_PREFIXES = ((APPROVE, "approve"), (DECLINE, "decline"), (APPROVE_EN, "approve"), (DECLINE_EN, "decline"))
 DRIVER_KINDS = ("start_driver", "stop_driver")
 # A channel's status as its host last reported it (report_channel_status): a short
 # detail line, and the WeChat login QR as an SVG while a scan is needed.
@@ -492,9 +496,10 @@ def match_phrase(conn, body):
 
     str.strip() removes Unicode whitespace at the ENDS only; inside, the one space
     is U+0020 and the id is compared byte for byte (SQLite's default BINARY
-    collation), so `同意 proposal P-1` does not name `p-1`."""
+    collation), so `同意 proposal P-1` does not name `p-1`. The English alias is matched the
+    same way, lower case only: `Approve proposal p-1` is an ordinary message."""
     phrase = body.strip()
-    for prefix, action in ((APPROVE, "approve"), (DECLINE, "decline")):
+    for prefix, action in PHRASE_PREFIXES:
         if phrase.startswith(prefix):
             row = conn.execute("SELECT version FROM state_steward_proposals WHERE proposal_id=?",
                                (phrase[len(prefix):],)).fetchone()

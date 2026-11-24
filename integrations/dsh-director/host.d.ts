@@ -42,6 +42,11 @@ export interface HostConfig {
   projectId?: string;
   /** DSH permission preset applied to the director session on start, e.g. 'danger-full-access'. */
   permissionPreset?: string;
+  /** The owner's language for the fixed lines the plugin itself sends the owner on a chat
+   *  channel (lib/owner-text.mjs: receipt, truncation tail and limit, channel-down alert, bind
+   *  and decision lines) and for the reply phrases the steward's prompt names: 'en' or 'zh', by
+   *  its primary subtag ('zh-CN' is 'zh'); absent or anything else, 'en'. */
+  ownerLanguage?: string;
   /** The worker capacity this host expects (default: DSH's own maxActiveSubagents). The guard
    *  uses the smaller of this and the limit DSH runs with, so it is never above DSH's. */
   maxActiveSubagents?: number;

@@ -41,67 +41,14 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { MEDIA_KINDS, MEDIA_REFUSALS, REF_PATTERN, placeholder } from './media.mjs';
+import { DEFAULT_OWNER_LANGUAGE, OWNER_TEXTS } from './owner-text.mjs';
 
 export const CHANNEL_NAMES = ['slack', 'wechat'];
 
-/** What an executed decision was about, in both languages: the host's own record of the
- *  proposal (its kind and target), never the message. An unknown kind reads as itself; a
- *  long target or kind is cut, so the line stays one short line. */
-const DECIDED = Object.freeze({
-  create_project: t => [`create project ${t}`, `创建 ${t} 项目`],
-  start_driver: t => [`start director of ${t}`, `启动 ${t} 项目的导演`],
-  stop_driver: t => [`stop director of ${t}`, `停止 ${t} 项目的导演`],
-  archive_project: t => [`archive project ${t}`, `归档 ${t} 项目`],
-  unarchive_project: t => [`unarchive project ${t}`, `取消归档 ${t} 项目`],
-  connection_change: t => [`change the steward's connection ${t}`, `修改管家的连接 ${t}`],
-  // Step 24.4 (design-steward 7.8.24 "五" 3): the target is the route the host resolved (cap_id ← entries).
-  capability_route: t => [`basic capability ${t}`, `基础能力 ${t}`],
-});
-const cut = (value, max) => { const s = String(value ?? ''); return s.length > max ? s.slice(0, max - 1) + '…' : s; };
-const decided = ({ kind, target }) => {
-  if (!text(kind)) return null;
-  const t = cut(target, 60), known = Object.hasOwn(DECIDED, kind);
-  return known ? DECIDED[kind](t) : Array(2).fill(`${cut(kind, 40)}${t ? ' ' + t : ''}`);
-};
-
-/** The lines a sender is answered with on the channel: short, the same in both languages,
- *  never an echo of what they wrote. */
-export const channelReplies = Object.freeze({
-  bound: 'Bound: this account now talks to the steward. 已绑定：这个账号现在可以和管家对话。',
-  received: '已收到，正在处理…',
-  bindRefused: 'Not bound: the code is wrong, expired or already used. 未绑定：验证码错误、已过期或已用过。',
-  unknowable: 'Not delivered, and it cannot be retried: please send it again. 未送达，且无法重试：请再发一次。',
-  body_too_long: 'Not delivered: the message is too long. 未送达：消息太长。',
-  approval_undated: 'Not done: the message carried no time, so it cannot approve or decline; use the dashboard. 未执行：消息没有时间，不能用来批准或拒绝，请在面板上操作。',
-  code_sent_to_bound_account: 'That was a binding code; it is now retired - issue a new one on the dashboard. 这是绑定码，已作废，请在面板重新生成。',
-  rate_limited: 'Held: too many messages at once; they reach the steward in order, a little later - no need to send them again. 消息太频繁：已留住，稍后按顺序送达管家，不必重发。',
-  refused: code => `Not delivered (${code}); the dashboard has the conversation. 未送达（${code}），对话在面板上。`,
-  approval({ proposal_id: id, action, outcome, refusal, kind, target, result }) {
-    if (outcome === 'executed') {
-      const [en, zh] = decided({ kind, target }) ?? [];
-      if (action === 'decline') return en ? `proposal ${id}: declined - ${en}. 已拒绝：${zh}。` : `proposal ${id}: declined. 已拒绝。`;
-      // An approval whose run failed (the proposal ends 'failed') is not reported as done.
-      if (result?.status === 'failed')
-        return en ? `proposal ${id}: approved, but it failed - ${en}. 已同意，但执行失败：${zh}。` : `proposal ${id}: approved, but it failed. 已同意，但执行失败。`;
-      return en ? `proposal ${id}: approved and done - ${en}. 已同意并执行：${zh}。` : `proposal ${id}: approved and done. 已同意并执行。`;
-    }
-    if (refusal === 'approval_undated') return `proposal ${id}: not done - the message carried no time, so it cannot decide; use the dashboard. 未执行：消息没有时间，不能用来决定，请在面板上操作。`;
-    if (refusal === 'needs_dashboard_confirmation') return `proposal ${id}: not done - it needs your confirmation on the dashboard. 未执行：这条需要在面板上勾选确认。`;
-    // Step 24.1c (design-steward 7.8.10a): a change that widens a connection's permissions has
-    // no chat approval - its card is on the dashboard (there is no box to tick).
-    if (refusal === 'needs_dashboard_approval') return `proposal ${id}: not done - approve it on the dashboard card. 未执行：这条要在面板的卡片上批准。`;
-    return `proposal ${id}: not done (${refusal ?? 'refused'}). 未执行（${refusal ?? 'refused'}）。`;
-  },
-  /** Step 24.1b (design-steward 7.8.9): the host decided the sender's `确认 <code>` /
-   *  `取消 <code>` for an outward action they asked for; the line is code's, never the model's. */
-  confirmation({ code, outcome, refusal }) {
-    if (outcome === 'confirmed') return `已确认 ${code}，正在执行。 (Confirmed ${code}; running it.)`;
-    if (outcome === 'cancelled') return `已取消 ${code}，不会执行。 (Cancelled ${code}.)`;
-    if (outcome === 'expired') return `${code} 已过期，未执行；请重新请求。 (${code} expired; nothing was done.)`;
-    if (refusal === 'confirmation_undated') return `${code} 未执行：消息没有时间，不能用来确认。 (${code}: not done - the message carried no time.)`;
-    return `${code} 未执行（${refusal ?? 'refused'}）。 (${code}: not done.)`;
-  },
-});
+/** The lines a sender is answered with on the channel, the truncation tail and the
+ *  channel-down alert are the owner's language's (lib/owner-text.mjs; index.mjs passes the
+ *  host's table as `replies`). These defaults are the default language's (English). */
+export const channelReplies = OWNER_TEXTS[DEFAULT_OWNER_LANGUAGE].replies;
 
 /** Refusals a BOUND sender is told about with their own line; any other refusal gets the
  *  generic `refused` line (a stranger is told none of them). A TRANSIENT refusal is not in
@@ -118,7 +65,8 @@ const TOLD = new Set(['body_too_long', 'approval_undated', 'code_sent_to_bound_a
 const RETRYABLE = new Set(['unavailable', 'rate_limited', 'approval_pending']);
 const CODE = /^[0-9]{6}$/;
 /** A phone chat shows a long message badly (owner, 2026-11-20): the steward's message goes to
- *  a channel cut to at most `mirrorChars` characters, followed by MORE. The cut falls in the
+ *  a channel cut to at most `mirrorChars` characters (the owner's language's, lib/owner-text.mjs
+ *  MIRROR_CHARS), followed by the language's tail (`replies.more`; MORE is the default's). The cut falls in the
  *  second half of what fits: before the last blank line (a paragraph's title is never the last
  *  line kept), else at the last line end, else after the last sentence end (`.` only before a
  *  space: never inside 13.6x or v1.2.3), else at the bound - stepped back before a run of
@@ -128,10 +76,10 @@ const CODE = /^[0-9]{6}$/;
  *  channel copy is shaped. An approval phrase line is never cut: it loses only the code or
  *  bold marks around it (the phrase itself has none, and a copied line must match exactly) and
  *  stays in place, or, when the text is cut, comes after what is kept, before MORE. A text with
- *  a line that is a binding code goes exactly as written. */
-export const MORE = '\n…（全文见面板）';
-const MORE_CHARS = Array.from(MORE).length;
-const VERBATIM = /同意 proposal |拒绝 proposal /;
+ *  a line that is a binding code goes exactly as written. An approval phrase line is one with
+ *  the Chinese phrase or its fixed English alias (the host decides either). */
+export const MORE = channelReplies.more;
+const VERBATIM = /同意 proposal |拒绝 proposal |approve proposal |decline proposal /;
 const CJK_END = /[。！？；]/;
 const LATIN_END = /[.!?;]/;
 const TOKEN = /[A-Za-z0-9_./:#?&=%-]/;
@@ -170,11 +118,12 @@ const cutAt = (points, budget) => {
   }
   return head.slice(0, end).join('').trimEnd();
 };
-export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars) {
+export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars, more = MORE) {
   // As written and uncapped on purpose (710ac311c0): cut or reflowed, a code line the owner
   // is asked to send back could be lost or altered.
   if (body.split('\n').some(line => CODE.test(line.trim()))) return body;
-  if (!(max > MORE_CHARS)) max = CHANNEL_LIMITS.mirrorChars;
+  const moreChars = Array.from(more).length;
+  if (!(max > moreChars)) max = CHANNEL_LIMITS.mirrorChars;
   const lines = body.split('\n').map(line => flattenLine(line, channel)).filter(line => line !== null);
   const shaped = lines.join('\n');
   // Nothing left once flattened (only rule rows or marks): the text goes as written, still capped.
@@ -183,15 +132,15 @@ export function channelText(channel, body, max = CHANNEL_LIMITS.mirrorChars) {
   if (!shaped.trim()) {
     const points = Array.from(body);
     if (points.length <= max) return body;
-    const kept = cutAt(points, max - MORE_CHARS);
-    return kept ? kept + MORE : '';
+    const kept = cutAt(points, max - moreChars);
+    return kept ? kept + more : '';
   }
   if (Array.from(shaped).length <= max) return shaped;
   const phrases = lines.filter(line => VERBATIM.test(line));
   const rest = Array.from(lines.filter(line => !VERBATIM.test(line)).join('\n').trim());
-  const budget = max - MORE_CHARS - phrases.reduce((sum, line) => sum + Array.from(line).length + 1, 0);
+  const budget = max - moreChars - phrases.reduce((sum, line) => sum + Array.from(line).length + 1, 0);
   const kept = budget > 0 ? cutAt(rest, budget) : '';
-  return [kept, ...phrases].filter(Boolean).join('\n') + MORE;
+  return [kept, ...phrases].filter(Boolean).join('\n') + more;
 }
 const text = value => typeof value === 'string' && value.length > 0;
 const short = error => String(error?.message ?? error).slice(0, 300);
@@ -228,7 +177,8 @@ const within = (promise, ms, what) => {
  *  between tries; the owed store is re-asked every owedMs, at most owedMax messages; a decision
  *  line is never sent more than lineMaxAgeMs after the owner wrote it (the earlier of the
  *  channel's time and when it was first owed here): later, the dashboard alone shows it. The
- *  steward's message reaches a channel as at most mirrorChars characters (channelText).
+ *  steward's message reaches a channel as at most mirrorChars characters (channelText); the
+ *  host's table (lib/owner-text.mjs MIRROR_CHARS, through index.mjs) replaces this default.
  *  A channel login (a new WeChat QR) accepted here at most loginPerHour times in any hour and
  *  loginPerDay in any 24 hours: the WeChat bridge keeps the same bounds (with its own 2-minute
  *  gap) in its memory, and this count, in the host's, outlives a bridge restart. */
@@ -241,15 +191,12 @@ export const CHANNEL_LIMITS = Object.freeze({ sendMs: 30000, readyMs: 120000, bi
   // day are swept (the library sweeps its own copies on the same hour).
   keptExpireMs: 3600000 });
 
-/** The fixed text of a channel-down alert (design-steward 7.9.2): which channel, for how many
- *  minutes (the host's count) and the channel's own detail line (cut to `max` characters) - or
- *  that it is back. Nothing else: no QR, no account. */
-const ALERT_NAMES = Object.freeze({ slack: 'Slack', wechat: '微信' });
-export function alertText({ channel, kind, minutes, detail }, max = CHANNEL_LIMITS.alertDetail) {
-  const name = ALERT_NAMES[channel] ?? channel, count = Math.max(0, Math.floor(Number(minutes) || 0));
-  if (kind === 'up') return `${name}恢复了（断开了 ${count} 分钟）。`;
-  const why = text(detail) ? `（${Array.from(detail).slice(0, max).join('')}）` : '';
-  return `${name}断开了 ${count} 分钟${why}。断开期间发到${name}的消息收不到；去面板「渠道」页处理。`;
+/** The fixed text of a channel-down alert (design-steward 7.9.2), in `replies`' language
+ *  (lib/owner-text.mjs alert): which channel, for how many minutes (the host's count) and the
+ *  channel's own detail line (cut to `max` characters) - or that it is back. Nothing else: no
+ *  QR, no account. */
+export function alertText(alert, max = CHANNEL_LIMITS.alertDetail, replies = channelReplies) {
+  return (replies.alert ?? channelReplies.alert)(alert, max);
 }
 /** What a channel plugin says before its first real reading (the WeChat plugin, Slack); still
  *  read placeholderMs after it was first read, it is reported as still connecting - a real
@@ -671,7 +618,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     if (!entry) error = 'via_not_running';
     else {
       try {
-        await within(Promise.resolve(entry.send(alertText({ channel, kind, minutes, detail }, limits.alertDetail), { to })),
+        await within(Promise.resolve(entry.send(alertText({ channel, kind, minutes, detail }, limits.alertDetail, replies), { to })),
           limits.sendMs, 'send_timeout');
       } catch (failure) { error = short(failure); }
     }
@@ -1483,8 +1430,9 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       if (body.trim()) {
         // A confirmation the requester must read whole (step 24.1b) goes exactly as written:
         // never shaped for a phone, never cut (the host bounds its length).
-        const sent = exact ? body : channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars);
-        if (sent.endsWith(MORE) && !body.endsWith(MORE)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
+        const more = replies.more ?? MORE;
+        const sent = exact ? body : channelText(channel, body, limits.mirrorChars ?? CHANNEL_LIMITS.mirrorChars, more);
+        if (sent.endsWith(more) && !body.endsWith(more)) log('channel_text_cut', { channel, message_id: messageId, chars: Array.from(body).length, sent_chars: Array.from(sent).length });
         try {
           ref = (await within(entry.send(sent, { ...(replyToRef ? { replyToRef } : {}), to }), limits.sendMs, 'send_timeout'))?.ref;
           receipts.delete(channel);  // the steward has answered here: the next owner message is news again

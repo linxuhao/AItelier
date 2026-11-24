@@ -5,13 +5,22 @@
  *  host.d.ts `channels` shape. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createOwnerChannels, CHANNEL_NAMES, CHANNEL_LIMITS, GROUP_LIMITS, channelReplies, channelText, MORE, alertText, trimRecent } from '../lib/channels.mjs';
+import { createOwnerChannels as createChannels, CHANNEL_NAMES, CHANNEL_LIMITS, GROUP_LIMITS, channelText as shapeText, alertText as alertLine,
+  trimRecent } from '../lib/channels.mjs';
+import { OWNER_TEXTS } from '../lib/owner-text.mjs';
 import { createMediaLibrary } from '../lib/media.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { PROPOSAL_KINDS } from '../lib/proposals.mjs';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// These tests pin the lines a 'zh' owner gets (lib/owner-text.mjs; the deployment they were
+// written for); test/owner-text.test.mjs covers the table itself and the default English.
+const channelReplies = OWNER_TEXTS.zh.replies, MORE = channelReplies.more;
+const createOwnerChannels = options => createChannels({ replies: channelReplies, ...options });
+const channelText = (channel, body, max) => shapeText(channel, body, max, MORE);
+const alertText = (alert, max) => alertLine(alert, max, channelReplies);
 
 const BODY = 'SECRET_BODY_TEXT 请帮我看看';
 // A channel time a minute ago: a decision line is never sent more than an hour after the owner

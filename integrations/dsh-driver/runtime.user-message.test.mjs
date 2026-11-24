@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { aitelierHost } from './runtime.mjs';
-import { ingestDirectorAttachments, sendUserMessageTool, DIRECTOR_ATTACHMENTS_SENTENCE } from './steward-host.mjs';
+import { ingestDirectorAttachments, ownerLanguageSetting, sendUserMessageTool, DIRECTOR_ATTACHMENTS_SENTENCE } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { registerDirectorMediaCall } from '../dsh-director/lib/media-tools.mjs';
 import { DIRECTOR_MEDIA_TOOLS } from '../dsh-director/index.mjs';
@@ -409,6 +409,31 @@ test('24.2b send_user_message schema: only a director with a media library gets 
   const bare = sendUserMessageTool({ steward: false, library: undefined });
   assert.ok(!('attachments' in bare.parameters)); assert.ok(!bare.description.includes(DIRECTOR_ATTACHMENTS_SENTENCE));
   assert.deepEqual(Object.keys(director.parameters).slice(0, -1), Object.keys(bare.parameters), 'every other parameter as before');
+});
+
+test('the owner\'s language: the environment\'s, else the .env line the entry names (dotenv_boot\'s grammar), else none', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'owner-language-')), file = join(dir, '.env');
+  assert.equal(ownerLanguageSetting({}, file), undefined, 'no .env');
+  fs.writeFileSync(file, '# AITELIER_OWNER_LANGUAGE=en\nAITELIER_PORT=4444\r\nexport AITELIER_OWNER_LANGUAGE="zh"\nAITELIER_OWNER_LANGUAGE=en\n');
+  assert.equal(ownerLanguageSetting({}, file), 'zh', 'the first assignment, export and quotes dropped');
+  assert.equal(ownerLanguageSetting({ AITELIER_OWNER_LANGUAGE: 'en' }, file), 'en', 'the environment wins');
+  assert.equal(ownerLanguageSetting({ AITELIER_OWNER_LANGUAGE: '' }, file), undefined, 'set but empty: the default');
+  fs.writeFileSync(file, 'AITELIER_OWNER_LANGUAGE=\n');
+  assert.equal(ownerLanguageSetting({}, file), undefined);
+  assert.equal(ownerLanguageSetting({}, dir), undefined, 'a directory is no .env');
+  const env = { AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 's-1', AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'm',
+    AITELIER_DSH_STATE_DIR: dir, AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv1', AITELIER_DSH_ROLE: 'steward' };
+  assert.equal(aitelierHost({ ...env, AITELIER_OWNER_LANGUAGE: 'zh' }).config.ownerLanguage, 'zh');
+  assert.equal(aitelierHost({ ...env, AITELIER_OWNER_LANGUAGE: '' }).config.ownerLanguage, undefined);
+  // Only the entry (apply) names the checkout's .env: a caller that names none - every test -
+  // never reads a file, so a checkout whose .env says zh decides no test (core/dotenv_boot.py).
+  fs.writeFileSync(file, 'AITELIER_OWNER_LANGUAGE=zh\n');
+  assert.equal(aitelierHost(env, { dotenv: file }).config.ownerLanguage, 'zh', 'the named .env');
+  assert.equal(aitelierHost({ ...env, AITELIER_OWNER_LANGUAGE: 'en' }, { dotenv: file }).config.ownerLanguage, 'en', 'the environment wins');
+  assert.equal(ownerLanguageSetting({}), undefined, 'no file named: none read');
+  // ...and the entry does name it: this checkout's .env, as before (the live fallback).
+  assert.ok(fs.readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8')
+    .includes("ctx.provide('directorHost', aitelierHost(process.env, { dotenv: new URL('../../.env', import.meta.url) }));"));
 });
 
 /** The director host's media_call, registered as index.mjs does, with a fake registry. */

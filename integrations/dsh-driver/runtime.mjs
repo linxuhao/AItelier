@@ -21,7 +21,7 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
   mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia, createPdfReader,
-  basicsFlag } from './steward-host.mjs';
+  basicsFlag, ownerLanguageSetting } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { createOfficeRunner } from './office.mjs';
 import { createCalcRunner } from './calc.mjs';
@@ -571,13 +571,14 @@ export function stateRequest(send, { log = {}, retryMs = 90000 } = {}) {
   };
 }
 
-export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
+export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime, dotenv } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
   // Plugin step 12: the backend starts the reserved steward project with this role. The
   // steward gets no full-access preset, no project work, no goal mandate and no State tools
   // beyond its own (the server enforces the same: steward_read_only).
   const steward = env.AITELIER_DSH_ROLE === 'steward';
+  const ownerLanguage = ownerLanguageSetting(env, dotenv);
   // A supplied request (tests) serves the State reads before install() runs; a
   // supplied, already initialised DriverRuntime (the conformance suite) lets context()
   // and events() run without the DSH-scoped install().
@@ -701,6 +702,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       ...(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS ? { maxActiveSubagents: Number(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS) } : {}),
       dormantMinuteMs: env.AITELIER_DSH_DORMANT_MINUTE_MS, idleReviewMs: env.AITELIER_DSH_IDLE_REVIEW_MS,
       permissionPreset: hostExecution && !steward ? 'danger-full-access' : undefined,
+      // The owner's language (ownerLanguageSetting); absent, the plugin's English.
+      ...(ownerLanguage ? { ownerLanguage } : {}),
       // The owner's memory lives on the host, outside every container mount (design 3.3).
       ...(steward ? { rootRole: 'steward', memory: { userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
         ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}),
@@ -1393,7 +1396,8 @@ export function apply(ctx) {
   // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
   dropIndexedGitConfig(process.env);
   installExitDiagnosis(process);
-  ctx.provide('directorHost', aitelierHost(process.env));
+  // The entry alone names this checkout's .env for the owner's language (ownerLanguageSetting).
+  ctx.provide('directorHost', aitelierHost(process.env, { dotenv: new URL('../../.env', import.meta.url) }));
 }
 
 /**

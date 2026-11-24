@@ -136,7 +136,7 @@ test('guard (step 24, 7.8.8): a group turn calls its PUBLIC connection tools - d
 
 test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
   assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'group_reminder_set', 'list_add',
-    'list_check', 'list_show', 'media_call', 'portfolio_project', 'portfolio_projects', 'read_document', 'request_confirmation', 'run_confirmed',
+    'list_check', 'list_show', 'make_document', 'media_call', 'portfolio_project', 'portfolio_projects', 'read_document', 'request_confirmation', 'run_confirmed',
     'search_tools', 'send_media']);
   for (const name of ['list_show', 'list_add', 'list_check']) {
     const g = turns();

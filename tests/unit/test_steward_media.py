@@ -298,6 +298,33 @@ def test_a_check_only_post_judges_like_the_post_but_uses_no_budget_and_records_n
     assert len(out_rows(world, "media")) == before
 
 
+def test_a_documents_text_is_exit_checked_with_check_only_and_never_stored(world, monkeypatch):
+    """Step 24.2d (design-steward 7.8.12c "九"): make_document sends a group file's title and body
+    as `text` with check_only before anything is made - the same exit check as a caption, its
+    reason answered withheld; no row, no budget, nothing recorded. text is refused without
+    check_only and over TEXT_CHECK_BYTES."""
+    group_ready_plain(world, monkeypatch)
+    gask(world, "q1")
+    group_turn(world)
+
+    def check(text, check_only=True, caption=None):
+        return execute(world.steward, "post_group_media", {"request_key": "doc-chk", "turn": "gt1", "kind": "file", "text": text,
+                       **({"check_only": True} if check_only else {}), **({"caption": caption} if caption else {})}, allow_write=True)
+
+    assert check("给物业的信\n三楼楼道灯坏了一周。") == {"may_post": True}
+    assert check("给物业的信\n附件在 /home/example/secret.pdf") == {"refused": "withheld", "reason": "host_path"}
+    # The caption is checked first, then the text; either withholds.
+    assert check("干净的正文", caption="见 /home/example/a.png") == {"refused": "withheld", "reason": "host_path"}
+    with pytest.raises(StateGraphError, match="invalid_request"):
+        check("干净的正文", check_only=False)
+    with pytest.raises(StateGraphError, match="invalid_request"):
+        check("字" * (state_groups.TEXT_CHECK_BYTES // 3 + 1))
+    assert check("x" * state_groups.TEXT_CHECK_BYTES) == {"may_post": True}
+    assert out_rows(world, "media") == []
+    # Nothing was recorded for the key: the real post with it is judged afresh.
+    assert post_media(world, key="doc-chk")["posted"]
+
+
 def test_the_check_only_post_and_the_post_ask_the_very_same_predicates(world, monkeypatch):
     """Review F2 (director 552): the dry run send_media asks before a fetch and the authoritative
     post are one judgement, not two copies - both modes call the same group_turn, exit_check and
@@ -416,6 +443,7 @@ class MediaUpstream(FakeUpstream):
         self.file_headers: list[dict] = []
         self.app.router.routes.extend([
             Route("/files/cat.png", self.png), Route("/files/big.png", self.big), Route("/files/doc.zip", self.zip),
+            Route("/files/letter.docx", self.docx),
             Route("/files/here", lambda r: RedirectResponse("/files/cat.png", status_code=302)),
             Route("/files/away", lambda r: RedirectResponse("http://example.com/files/cat.png", status_code=302)),
             Route("/files/badport", lambda r: RedirectResponse("http://mcp_server:99999/files/cat.png", status_code=302)),
@@ -428,6 +456,10 @@ class MediaUpstream(FakeUpstream):
 
     async def big(self, request):
         return Response(PNG + b"\x00" * (25 * 1024 * 1024), media_type="image/png")
+
+    async def docx(self, request):
+        from tests.unit.office_zips import ooxml
+        return Response(ooxml("docx"), media_type="application/octet-stream")
 
     async def zip(self, request):
         return Response(bytes.fromhex("504b0304140006000800") + b"\x00" * 100, media_type="image/png")
@@ -469,6 +501,17 @@ def test_fetch_gives_a_file_a_result_named_with_its_own_type_and_no_credentials(
     assert got.headers["x-aitelier-media-kind"] == "image"
     sent = upstream.file_headers[-1]
     assert not {"authorization", "cookie", "x-aitelier-driver-token"} & {k.lower() for k in sent}
+
+
+def test_fetch_takes_a_docx_by_its_zip_directory(world, server, upstream):
+    """Step 24.2d (7.8.12c "六"): the gateway's /fetch judges a zip as the library does."""
+    letter = "http://mcp_server:9003/files/letter.docx"
+    media_ready(world, server, upstream, letter, "http://mcp_server:9003/files/doc.zip")
+    got = fetch(server, world, letter)
+    assert got.status_code == 200, got.text
+    assert got.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert got.headers["x-aitelier-media-kind"] == "file"
+    assert fetch(server, world, "http://mcp_server:9003/files/doc.zip").status_code == 415
 
 
 def test_fetch_refuses_a_url_not_seen_in_this_turn_another_origin_or_connection_and_any_other_token(world, server, upstream):

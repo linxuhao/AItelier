@@ -41,13 +41,15 @@ export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfol
   'media_call', 'send_media',
   // Step 24.2c (7.8.12b "五"): read_document - the refs this turn covers (covers): this group's own,
   // and a kept one (a file sent without a mention) in that same group's later turns.
-  'read_document']));
+  'read_document',
+  // Step 24.2d (7.8.12c "四", "九"): make_document - the file is this group's, its text exit-checked first.
+  'make_document']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
  *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
 export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose',
   // 7.8.8: a connection change waits for the owner too.
   'propose_connection_change']));
-export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check, group_reminder_set, read_document and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
+export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check, group_reminder_set, read_document, make_document and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
 /** The tools only a group turn may call (7.7.5): the family memory (7.7.8a) and, step 23.1, a
  *  family member's reminder to their own group (7.9.4). */
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show', 'group_reminder_set']));

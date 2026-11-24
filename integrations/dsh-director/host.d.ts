@@ -370,7 +370,9 @@ export interface DirectorHost {
    *  - postGroup (optional): record one send_media file for the group of the recorded turn -
    *    group_send_budget, caption exit-checked - {posted, channel, group_ref, caption?} or {refused}.
    *    With checkOnly, the same judgement as a dry run before anything is fetched (kind may be
-   *    omitted): {may_post: true} or {refused}, no budget used and no row written.
+   *    omitted): {may_post: true} or {refused}, no budget used and no row written. `text` (step
+   *    24.2d, checkOnly only): a file make_document is about to make - its title and body run
+   *    through the same exit check; withheld with its reason.
    *  - setProtected (optional): refs the library must not clean (a relay not committed yet).
    *  - withdraw (optional): take back the `generated` row a fetch for send_media just stored when
    *    the send is then refused (a kind the channel cannot send, the group's post refused, a
@@ -398,6 +400,17 @@ export interface DirectorHost {
    *    too_many_pages | invalid_request | encrypted | unsupported_security | broken |
    *    pdf_reader_unavailable | timeout | busy, page_count?}. Absent: read_document answers
    *    pdf_reader_unavailable.
+   *    Step 24.2d (design-steward 7.8.12c "五"): a docx or pptx ref is answered the same way, read
+   *    from the PDF the host converted it to (kind 'pdf'; the page images named by the same ref);
+   *    an xlsx ref gets `{sheets: "a-b", rows: "a-b", chars}` instead and answers {kind: 'xlsx',
+   *    sheet_count, sheets: [{n, name, rows_total, cols_total, first_row, rows: [[text...]...]}]};
+   *    either may also refuse office_unavailable (no converter, not ready) or convert_failed.
+   *  - makeDocument (optional; step 24.2d, design-steward 7.8.12c "四"): make_document's host half -
+   *    `spec` is {format: 'pdf' | 'docx', title, blocks} or {format: 'xlsx', title, sheet, rows,
+   *    widths} as lib/office-blocks.mjs made them; the host makes the file and stores it in the
+   *    library under `audience` (source and channel 'generated', name `<title>.<ext>`). {ref,
+   *    mime, size} or {refused: office_unavailable | busy | timeout | convert_failed | store_failed}.
+   *    Absent: make_document answers office_unavailable.
    *  - takesImages (optional; step 24.2c): whether this process's route takes images now (the
    *    judgement a wake's own images use); false, or absent, read_document renders no page
    *    images and says so on every page.
@@ -417,17 +430,22 @@ export interface DirectorHost {
       size: number; durationMs?: number; audience: string; sha256: string; file: string; kept?: true }>;
     read(ref: string): Promise<undefined | { row: object; bytes: Uint8Array }>;
     fetch(request: { connId: string; url: string; audience: string }, signal?: AbortSignal): Promise<{ ref: string } | { refused: string; reason?: string }>;
-    postGroup?(request: { turn: string; kind?: 'image' | 'voice' | 'file'; caption?: string; checkOnly?: boolean }, signal?: AbortSignal):
+    postGroup?(request: { turn: string; kind?: 'image' | 'voice' | 'file'; caption?: string; checkOnly?: boolean; text?: string }, signal?: AbortSignal):
       Promise<{ posted: true; message_id: string; channel: string; group_ref: string; caption?: string } | { may_post: true }
         | { refused: string; reason?: string }>;
     setProtected?(refs: () => Iterable<string>): void;
     withdraw?(ref: string): { removed: number } | Promise<{ removed: number }>;
     sendToOwner?(file: { ref: string; caption?: string; replyTo?: string }, signal?: AbortSignal):
       Promise<{ message_id: string; mirror: { mirrored: boolean; channel?: string; reason?: string } } | { refused: string; reason?: string }>;
-    readDocument?(ref: string, options: { pages: string; images: boolean; maxPages: number }, signal?: AbortSignal):
+    readDocument?(ref: string, options: { pages: string; images: boolean; maxPages: number } | { sheets: string; rows: string; chars: number },
+      signal?: AbortSignal):
       Promise<{ kind: 'pdf' | 'image'; page_count: number; sandbox?: string; pages: Array<{ n: number; text: string; chars: number;
         truncated: boolean; no_text_layer: boolean; image?: { attachmentId: string; mediaType: string; bytes: number; width: number;
-        height: number; name?: string }; image_error?: string; error?: string }> } | { refused: string; page_count?: number }>;
+        height: number; name?: string }; image_error?: string; error?: string }> }
+        | { kind: 'xlsx'; sheet_count: number; sheets: Array<{ n: number; name: string; rows_total: number; cols_total: number;
+          first_row: number; rows: string[][] }> } | { refused: string; page_count?: number }>;
+    makeDocument?(spec: { format: 'pdf' | 'docx' | 'xlsx'; title: string; blocks?: object[]; sheet?: string; rows?: object[][]; widths?: number[] },
+      audience: string, signal?: AbortSignal): Promise<{ ref: string; mime: string; size: number } | { refused: string }>;
     takesImages?(signal?: AbortSignal): Promise<boolean>;
     keptAudiences?(): Promise<string[]>;
     purgeKept?(audience: string): Promise<{ rows_before: number; rows_after: number; files_unlinked: number; files_shared: number;

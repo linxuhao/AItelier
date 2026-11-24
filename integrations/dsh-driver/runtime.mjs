@@ -22,6 +22,7 @@ import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinal
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
   mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia, createPdfReader } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
+import { createOfficeRunner } from './office.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -619,6 +620,20 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const pdfReader = steward && library ? createPdfReader({ python: env.AITELIER_MEDIA_PYTHON,
     tmpRoot: typeof stateDir === 'string' && stateDir.startsWith('/') ? join(stateDir, 'pdf-tmp') : undefined,
     attachments: () => attachmentStore(), log: line => pdfLog(line) }) : undefined;
+  // Step 24.2d (design-steward 7.8.12c "三", "八"): the steward's office converter - the pinned
+  // OnlyOffice image (AITELIER_OFFICE_IMAGE, core/dsh_driver.py; unset: off) run as disposable
+  // containers, jobs in <state dir>/office-tmp, fonts in <state dir>/office-fonts. Its self-check
+  // reads its PDF back with the PDF reader above.
+  let officeLog = () => {};
+  const officeRunner = steward && library ? createOfficeRunner({ image: env.AITELIER_OFFICE_IMAGE,
+    tmpRoot: typeof stateDir === 'string' && stateDir.startsWith('/') ? join(stateDir, 'office-tmp') : undefined,
+    fontsRoot: typeof stateDir === 'string' && stateDir.startsWith('/') ? join(stateDir, 'office-fonts') : undefined,
+    verifyPdf: async path => {
+      const answer = await pdfReader?.readDocument({ lookup: () => ({ ref: 'm_0000000000000000', mime: 'application/pdf', kind: 'file',
+        ext: 'pdf', path, size: 0 }) }, 'm_0000000000000000', { pages: '1', images: false });
+      return answer?.pages?.[0]?.text;
+    },
+    log: line => officeLog(line) }) : undefined;
   // Step 23 group wake (iss-0d20ef5dd9a44cd0): the optional directorHost hook for a group
   // @-turn's images. The plugin picks this group's own kept refs (and the message's own files)
   // and calls `line`; the read/saveImage step is the same wakeMedia the owner's wake uses, so
@@ -692,6 +707,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       routeLog = line => ctx.logger.warn(line);
       pdfLog = line => (line.startsWith('pdf_reader_unavailable') ? ctx.logger.warn(line) : ctx.logger.info(line));
       pdfReader?.start().catch(error => ctx.logger.warn(`pdf_reader_unavailable: ${String(error?.code ?? 'error')}`));
+      // Started after the PDF reader (its self-check reads back through it); off without an image.
+      officeLog = line => (line.startsWith('office_unavailable') && !line.endsWith('no_image_configured') ? ctx.logger.warn(line) : ctx.logger.info(line));
+      officeRunner?.start().catch(error => ctx.logger.warn(`office_unavailable: ${String(error?.code ?? 'error')}`));
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
       const sendRequest = async (path, body, signal, readAs) => {
@@ -1194,7 +1212,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // turn's send_media is a steward message with the file (State, then the plugin's mirror).
   library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch,
     owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) },
-    reader: pdfReader, routeInput }) } : {});
+    reader: pdfReader, routeInput, office: officeRunner }) } : {});
   // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
   else if (library) {
     const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,

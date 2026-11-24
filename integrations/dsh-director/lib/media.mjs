@@ -117,9 +117,67 @@ const signatureMatches = (buffer, signature) => signature.every(({ offset, hex }
   const want = Buffer.from(hex, 'hex');
   return buffer.length >= offset + want.length && buffer.subarray(offset, offset + want.length).equals(want);
 });
-/** The type the first bytes name in the shared table, or undefined. */
+/** The type the first bytes name in the shared table, or undefined. A container row (an OOXML
+ *  file: its first bytes are any zip's) is never named by its first bytes: see identify. */
 export function sniff(buffer) {
-  return MEDIA_TYPES.find(type => type.signatures.some(signature => signatureMatches(buffer, signature)));
+  return MEDIA_TYPES.find(type => !type.container && type.signatures.some(signature => signatureMatches(buffer, signature)));
+}
+
+/** Whether the first bytes are a zip's local file header (PK\x03\x04). */
+export const isZip = buffer => buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 3 && buffer[3] === 4;
+const OOXML_TYPES = MEDIA_TYPES.filter(type => type.container === 'ooxml');
+const EOCD = 0x06054b50, CENTRAL = 0x02014b50, ZIP64_LOCATOR = 0x07064b50;
+
+/** Step 24.2d (design-steward 7.8.12c "六"): the OOXML type (docx, xlsx, pptx row) of a whole zip
+ *  file, or undefined. Only the End of Central Directory and the central directory are read -
+ *  nothing is unzipped: one EOCD within the last 64 KiB + 22 bytes, not zip64, on one disk, its
+ *  directory inside the file and before it; at most office_zip_entries entries, each parsed in
+ *  bounds, the declared unzipped sizes at most office_unzipped_bytes in all and no entry over
+ *  office_zip_ratio_floor bytes compressed more than 1:office_zip_ratio; no encrypted entry (bit
+ *  0), no name starting with / or holding .. or a backslash, no vbaProject.bin anywhere (a
+ *  macro file: docm, xlsm, pptm); [Content_Types].xml and exactly one of the main parts. A
+ *  declared size can lie: this is the first gate only (the converter's container is the next). */
+export function ooxmlType(buffer, limits = MEDIA_LIMITS) {
+  try {
+    if (!Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer);
+    if (!isZip(buffer) || buffer.length < 22) return undefined;
+    let eocd = -1;
+    for (let at = buffer.length - 22, low = Math.max(0, buffer.length - 22 - 65535); at >= low; at -= 1)
+      if (buffer.readUInt32LE(at) === EOCD && at + 22 + buffer.readUInt16LE(at + 20) === buffer.length) { eocd = at; break; }
+    if (eocd < 0) return undefined;
+    if (eocd >= 20 && buffer.readUInt32LE(eocd - 20) === ZIP64_LOCATOR) return undefined;
+    const disk = buffer.readUInt16LE(eocd + 4), cdDisk = buffer.readUInt16LE(eocd + 6);
+    const onDisk = buffer.readUInt16LE(eocd + 8), count = buffer.readUInt16LE(eocd + 10);
+    const size = buffer.readUInt32LE(eocd + 12), offset = buffer.readUInt32LE(eocd + 16);
+    if (disk !== 0 || cdDisk !== 0 || onDisk !== count || count === 0xffff || size === 0xffffffff || offset === 0xffffffff) return undefined;
+    if (count > limits.office_zip_entries || offset + size > eocd) return undefined;
+    const names = new Set();
+    let at = offset, unzipped = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (at + 46 > offset + size || buffer.readUInt32LE(at) !== CENTRAL) return undefined;
+      const flags = buffer.readUInt16LE(at + 8), packed = buffer.readUInt32LE(at + 20), plain = buffer.readUInt32LE(at + 24);
+      const nameLength = buffer.readUInt16LE(at + 28), extra = buffer.readUInt16LE(at + 30), comment = buffer.readUInt16LE(at + 32);
+      const end = at + 46 + nameLength + extra + comment;
+      if (end > offset + size) return undefined;
+      const name = buffer.toString('utf8', at + 46, at + 46 + nameLength);
+      if (flags & 1) return undefined;
+      if (name.startsWith('/') || name.includes('..') || name.includes('\\')) return undefined;
+      if (name.split('/').pop().toLowerCase() === 'vbaproject.bin') return undefined;
+      unzipped += plain;
+      if (unzipped > limits.office_unzipped_bytes) return undefined;
+      if (plain > limits.office_zip_ratio_floor && plain > packed * limits.office_zip_ratio) return undefined;
+      names.add(name);
+      at = end;
+    }
+    if (!names.has('[Content_Types].xml')) return undefined;
+    const found = OOXML_TYPES.filter(type => names.has(type.main_part));
+    return found.length === 1 ? found[0] : undefined;
+  } catch { return undefined; }
+}
+
+/** The type of a whole file: its first bytes' (sniff), or - for a zip - its OOXML type. */
+export function identify(buffer) {
+  return sniff(buffer.subarray(0, SNIFF_BYTES)) ?? (isZip(buffer) ? ooxmlType(buffer) : undefined);
 }
 
 /** {width, height} from an image's own header (png, gif, webp, jpeg), or undefined. No
@@ -189,12 +247,16 @@ export function placeholder(attachment) {
   if (attachment?.kind === 'voice' && Number.isInteger(attachment.durationMs)) return `[${name} ${clock(attachment.durationMs)}]`;
   return `[${name}]`;
 }
-/** The one line a wake shows for one attachment ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB]). */
+/** An office document's mime as the wake writes it: its extension (docx), not the long mime. */
+const MIME_WORDS = new Map(MEDIA_TYPES.filter(type => type.container).map(type => [type.mime, type.ext]));
+/** The one line a wake shows for one attachment ([语音 m_…，0:23], [图片 m_…，image/jpeg，1.2 MB],
+ *  [文件 m_…，docx，84 KB]). */
 export function attachmentLine(attachment) {
   if (!attachment?.ref) return placeholder(attachment);
   const name = KIND_NAMES[attachment.kind] ?? '文件';
   if (attachment.kind === 'voice' && Number.isInteger(attachment.durationMs)) return `[${name} ${attachment.ref}，${clock(attachment.durationMs)}]`;
-  return `[${name} ${attachment.ref}${attachment.mime ? '，' + attachment.mime : ''}${Number.isInteger(attachment.size) ? '，' + bytes(attachment.size) : ''}]`;
+  const mime = attachment.mime ? MIME_WORDS.get(attachment.mime) ?? attachment.mime : undefined;
+  return `[${name} ${attachment.ref}${mime ? '，' + mime : ''}${Number.isInteger(attachment.size) ? '，' + bytes(attachment.size) : ''}]`;
 }
 /** A group wake's `recent` as the lines the group sees: one entry the backend returns for a
  *  medium kept without a mention carries its metadata (`attachments`), which is rendered by
@@ -346,7 +408,8 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
       }
       if (source && typeof source === 'object' && MEDIA_REFUSALS.includes(source.refused)) throw new Refused(source.refused);
       const chunks = [];
-      let size = 0, type, cap = maxBytes, head = Buffer.alloc(0);
+      // zip: the first bytes are a zip's - an OOXML file is judged once all of it is in (7.8.12c "六").
+      let size = 0, type, zip = false, cap = maxBytes, head = Buffer.alloc(0);
       try {
         iterator = asIterable(source)[Symbol.asyncIterator]();
         for (;;) {
@@ -356,10 +419,11 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
           const piece = Buffer.from(step.value);
           size += piece.length;
           if (!type && head.length < SNIFF_BYTES) head = Buffer.concat([head, piece.subarray(0, SNIFF_BYTES - head.length)]);
-          if (!type && head.length >= SNIFF_BYTES) {
+          if (!type && !zip && head.length >= SNIFF_BYTES) {
             type = sniff(head);
-            if (!type) throw new Refused('type');
-            cap = capFor(type.kind, meta.source);
+            zip = !type && isZip(head);
+            if (!type && !zip) throw new Refused('type');
+            cap = capFor(type?.kind ?? 'file', meta.source);
           }
           if (size > cap) throw new Refused('too_large');
           chunks.push(piece);
@@ -369,10 +433,11 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
         if (MEDIA_REFUSALS.includes(error?.refused)) throw new Refused(error.refused);
         throw new Refused('unavailable');
       }
-      type ??= sniff(head);
+      const buffer = Buffer.concat(chunks, size);
+      if (!type) type = identify(buffer);
       if (!type) throw new Refused('type');
       if (size > capFor(type.kind, meta.source)) throw new Refused('too_large');
-      return { buffer: Buffer.concat(chunks, size), size, type };
+      return { buffer, size, type };
     } finally {
       clearTimeout(firstByte); clearTimeout(total);
       outer?.removeEventListener?.('abort', stop);
@@ -390,6 +455,9 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
 
   async function store(meta, open, signal) {
     const { buffer, size, type } = await receive(meta, open, signal);
+    // A group's un-mentioned file is kept only as an image, a voice or a PDF (7.8.12c "六"):
+    // the switch's rule did not change when office documents came in.
+    if (meta.kept === true && !limits.kept_mimes.includes(type.mime)) throw new Refused('type');
     let durationMs;
     if (type.kind === 'image') {
       const dims = imageSize(buffer, type.mime);

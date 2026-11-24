@@ -226,7 +226,9 @@ owner's IANA zone (template:
 `integrations/embed-server/systemd/21-memory-tz.conf`).
 
 The fixed words the steward's chat channels, question pushes and confirmations
-show the owner, and the reply phrases its prompt names, follow one setting:
+show the owner, the lines code posts into a bound group (bind, quota and media
+notices, the withheld sentence), and the reply phrases its prompt names, follow
+one setting:
 `AITELIER_OWNER_LANGUAGE` in the repository `.env`, `en` (the default) or `zh`
 (`core/owner_text.py`, `integrations/dsh-director/lib/owner-text.mjs`). The
 backend and the DSH host both read that line; a running steward takes it at its

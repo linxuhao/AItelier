@@ -11,8 +11,11 @@ is `en`.
 
 What is here is what code (never a model) writes to the owner, or into a confirmation the
 owner or a group member answers: the owner-question pushes, reminders and relay receipts
-(core.state_owner_questions), the outward-action confirmation text (core.state_steward_confirmations)
-and a group's confirmation line (core.state_groups). The channel layer's own lines (receipt,
+(core.state_owner_questions), the outward-action confirmation text (core.state_steward_confirmations),
+and what code posts into a group or tells the owner about one (core.state_groups: the bind,
+quota and media notices, the withheld sentence, the confirmation line, the owner's withheld line).
+Record data stays as stored (a group's default name, the 业主 / 成员X labels, message subjects
+the steward's host looks messages up by). The channel layer's own lines (receipt,
 truncation tail, channel-down alert, bind and approval lines) are in the plugin's table,
 integrations/dsh-director/lib/owner-text.mjs, chosen by the same setting.
 
@@ -44,7 +47,8 @@ def normalise(value) -> str:
 def owner_language(environ: Mapping[str, str] | None = None, dotenv: str | os.PathLike | None = None) -> str:
     """The owner's language: the environment's AITELIER_OWNER_LANGUAGE, else the repository
     `.env`'s, else DEFAULT. Read on every call (the file is small and read only when a text is
-    written), so a changed `.env` line needs no restart of this process."""
+    written), so a changed `.env` line needs no restart of this process. tests/conftest.py sets
+    the variable, so no test run falls back to a checkout's `.env`."""
     env = os.environ if environ is None else environ
     value = env.get(SETTING)
     if value is None:
@@ -108,6 +112,27 @@ TEXTS = MappingProxyType({
         "group_cancelled": "已取消 {code}，不会执行。",
         "group_expired": "{code} 已过期，未执行；请重新请求。",
         "group_refused": "{code} 未执行：消息时间不对，请重新回复。",
+        # core.state_groups: the lines code posts into a group. group_withheld is also the
+        # sentence the steward's prompt has the model use (steward.md; the plugin's English
+        # prompt, lib/owner-text.mjs EN_STEWARD_PROMPT, puts the 'en' one in its place).
+        "group_withheld": "这个我在群里答不了。",
+        "group_quota": "问得太多了，过一会儿再问。",
+        "group_bind": ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
+                       "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
+                       "让我记住的事只在本群用，30 天后删。"),
+        "group_media_on": ("本群已打开存图：群里没 @ 管家的图片、语音、文件，管家会先存下、不回话，存 1 天后自动删除。"
+                           "只有之后在本群 @ 管家时，管家才会去看（看时会交给外部模型服务处理）；业主私聊和别的群都用不到。"
+                           "业主在面板上看得到谁发过、是什么类型，看不到内容。关闭存图时，已存的一并删除。"),
+        "group_media_off": "本群已关闭存图：管家不再存群里没 @ 它的图片、语音、文件，之前存下的已经删除。",
+        # core.state_groups: the owner's one line when a group reply is withheld, and its kinds
+        # (withheld_<core.state_groups.WITHHELD_REASONS key>)
+        "withheld_owner_line": "{group}里有一条回答没发出去：{reason}。要问可以私聊我。",
+        "withheld_live_code": "含有绑定码",
+        "withheld_private_project": "涉及私有项目",
+        "withheld_host_path": "含有主机上的路径",
+        # core.state_owner_questions: in front of every line of a director's text, so no line
+        # of it starts with a question code (parse_codes reads an NFKC copy: either bar is '|')
+        "bar": "｜",
     }),
     "en": MappingProxyType({
         "push_continued": "[Waiting for your answer] (continued)",
@@ -157,6 +182,26 @@ TEXTS = MappingProxyType({
         "group_cancelled": "Cancelled {code}; it will not run.",
         "group_expired": "{code} expired; nothing was done - please ask again.",
         "group_refused": "{code} not done: the message's time is wrong - please reply again.",
+        "group_withheld": "I cannot answer that in this group.",
+        "group_quota": "Too many questions; please ask again in a while.",
+        "group_bind": ("The steward has joined this group. @ me to ask; here I answer only about public projects and "
+                       "general questions, I decide nothing for anyone and pass no messages on; I do not answer private "
+                       "messages. Messages that @ me are kept for 30 days and the owner can see them; they are processed "
+                       "by an external model service, and the steward's own conversation record may keep them longer. "
+                       "What you ask me to remember is used only in this group and deleted after 30 days."),
+        "group_media_on": ("Media keeping is on in this group: images, voice messages and files posted here without "
+                           "@ the steward are stored silently and deleted automatically after 1 day. The steward looks at "
+                           "them only when someone later @ mentions it in this group (it then hands them to an external "
+                           "model service); the owner's private chat and other groups never use them. The owner sees on "
+                           "the dashboard who posted what kind of file, never its content. Turning media keeping off "
+                           "deletes what was stored."),
+        "group_media_off": ("Media keeping is off in this group: the steward no longer stores images, voice messages "
+                            "and files posted here without @ it, and what was stored has been deleted."),
+        "withheld_owner_line": "A reply in {group} was not sent: {reason}. Ask me privately if you need it.",
+        "withheld_live_code": "it contained a binding code",
+        "withheld_private_project": "it touched a private project",
+        "withheld_host_path": "it contained a path on the host",
+        "bar": "| ",
     }),
 })
 

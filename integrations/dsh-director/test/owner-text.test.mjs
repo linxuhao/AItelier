@@ -170,10 +170,16 @@ test('steward prompt: zh is steward.md byte for byte (as at a1416299ee); en name
   assert.equal(createHash('sha256').update(stewardPrompt(md, 'zh')).digest('hex'),
     '9439656623c12e3f383adb7fac6f3762f49aa6d2319dda7aa2b411ada4385ab3', 'steward.md as at a1416299ee');
   assert.equal(stewardPrompt(md, 'zh'), md);
-  for (const [from] of OWNER_TEXTS.en.stewardPrompt) assert.equal(md.split(from).length - 1, 1, `exactly once in steward.md: ${from}`);
+  // Each passage as often as steward.md has it today: the withheld sentence three times (group
+  // turns, list_add, request_confirmation), every other once.
+  const times = { '「这个我在群里答不了。」': 3 };
+  for (const [from] of OWNER_TEXTS.en.stewardPrompt) assert.equal(md.split(from).length - 1, times[from] ?? 1, `in steward.md: ${from}`);
   const en = stewardPrompt(md, undefined);
   assert.equal(en, stewardPrompt(md, 'en'));
-  assert.ok(!/同意 proposal|拒绝 proposal|今天没有要你处理的事|今早的简报没发成/.test(en));
+  assert.ok(!/同意 proposal|拒绝 proposal|今天没有要你处理的事|今早的简报没发成|这个我在群里答不了/.test(en));
+  // A host that withholds a group reply posts these same words (its own test ties the two).
+  assert.equal(en.split('exactly "I cannot answer that in this group."').length - 1, 2);
+  assert.equal(en.split('exactly\n"I cannot answer that in this group."').length - 1, 1);
   assert.match(en, /`approve proposal <id>` to approve, `decline proposal <id>` to decline/);
   assert.match(en, /the exact reply approve proposal <id>;/);
   assert.match(en, /send\nonly "Nothing needs you today\."/);

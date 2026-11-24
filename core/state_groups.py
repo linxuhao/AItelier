@@ -161,9 +161,9 @@ FAMILY_LIMITS = MappingProxyType({"entries": 100, "entry_chars": 200, "note_char
 # owner picks on the dashboard (7.7.9 last item) instead of binding on the owner's post.
 PICK_PENDING_GROUPS = False
 
-# What the group sees instead of a withheld reply: the same words steward.md tells the model
-# to use for "no such project" and "cannot say here", so the three read alike (7.7.7).
-WITHHELD_TEXT = "这个我在群里答不了。"
+# What the group sees instead of a withheld reply is core.owner_text group_withheld: the same
+# words steward.md tells the model to use for "no such project" and "cannot say here", so the
+# three read alike (7.7.7).
 # What the owner is told when the exit check holds something back (a reminder or a list item,
 # step 25): which kind of thing it found, never the thing itself.
 WITHHELD_REASONS = MappingProxyType({"live_code": "a live binding code", "private_project":
@@ -171,12 +171,11 @@ WITHHELD_REASONS = MappingProxyType({"live_code": "a live binding code", "privat
                                      "host_path": "a path on the host"})
 # r44w (7.7.7 「业主那一侧也要知道」): the same kinds, as the owner's conversation reads them in
 # the one line code writes there when a group reply is withheld - never the reply, never what
-# it named. WITHHELD_OWNER_SUBJECT is that message's subject.
-WITHHELD_OWNER_REASONS = MappingProxyType({"live_code": "含有绑定码", "private_project": "涉及私有项目",
-                                           "host_path": "含有主机上的路径"})
-WITHHELD_OWNER_LINE = "{group}里有一条回答没发出去：{reason}。要问可以私聊我。"
+# it named: core.owner_text withheld_owner_line and withheld_<kind>, in the owner's language.
+# WITHHELD_OWNER_SUBJECT is that message's subject (record data: core.state_owner_questions
+# finds these messages by it).
 WITHHELD_OWNER_SUBJECT = "群里没发出的回答"
-QUOTA_NOTICE = "问得太多了，过一会儿再问。"
+# A member over their quota gets core.owner_text group_quota.
 # The line a group gets when the requester's reply decided a confirmation (7.8.9 step 4):
 # code's words, never the model's, in the owner's language (core.owner_text group_<outcome>).
 # The only refusals here are about the message's time (a group message is never undated):
@@ -186,17 +185,12 @@ CONFIRMATION_OUTCOMES = ("confirmed", "cancelled", "expired", "refused")
 
 def confirmation_line(outcome: str, code: str) -> str:
     return owner_text.texts()["group_" + outcome].format(code=code)
-BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
-               "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
-               "让我记住的事只在本群用，30 天后删。")
+# A group gets core.owner_text group_bind once it is bound.
 # design/steward-group-media.md (owner 2026-11-23, R2): the lines a group reads when the owner
 # turns its media switch on and off - code's words, posted by the host (group_media_notice), the
 # switch is ON only once the first was sent, and the second goes out only after the purge's
-# receipt is recorded, so 「已经删除」 is true when it is read.
-MEDIA_KEEP_ON_NOTICE = ("本群已打开存图：群里没 @ 管家的图片、语音、文件，管家会先存下、不回话，存 1 天后自动删除。"
-                        "只有之后在本群 @ 管家时，管家才会去看（看时会交给外部模型服务处理）；业主私聊和别的群都用不到。"
-                        "业主在面板上看得到谁发过、是什么类型，看不到内容。关闭存图时，已存的一并删除。")
-MEDIA_KEEP_OFF_NOTICE = "本群已关闭存图：管家不再存群里没 @ 它的图片、语音、文件，之前存下的已经删除。"
+# receipt is recorded, so 「已经删除」 is true when it is read: core.owner_text group_media_on and
+# group_media_off, in the owner's language.
 # The switch's states (section 1): only 'on' stores; the host owes the on-notice in on_pending
 # and the purge receipt, then the off-notice, in off_notice.
 MEDIA_KEEP_STATES = ("off", "on_pending", "on", "off_notice")
@@ -727,8 +721,9 @@ class StateGroups:
             self._bind(conn, channel, room_ref, code["label"] or self._free_label(conn, channel),
                        rows[0]["mention_prefix"], rows[0]["code_hash"], moment)
             conn.execute("DELETE FROM state_pending_groups WHERE channel=?", (channel,))
-            notice = self._out_row(conn, channel, room_ref, "bind_notice", BIND_NOTICE, moment)
-        return {"bound": True, "channel": channel, "group_ref": room_ref, "notice": BIND_NOTICE,
+            bind_notice = owner_text.texts()["group_bind"]
+            notice = self._out_row(conn, channel, room_ref, "bind_notice", bind_notice, moment)
+        return {"bound": True, "channel": channel, "group_ref": room_ref, "notice": bind_notice,
                 "notice_message_id": notice}
 
     def set_family_note(self, channel, group_ref, text):
@@ -880,9 +875,10 @@ class StateGroups:
             if refusal is None:
                 label = row["label"] or self._free_label(conn, channel)  # a code issued before names were required
                 self._bind(conn, channel, group_ref, label, prefix, digest, moment)
-                notice = self._out_row(conn, channel, group_ref, "bind_notice", BIND_NOTICE, moment)
+                bind_notice = owner_text.texts()["group_bind"]
+                notice = self._out_row(conn, channel, group_ref, "bind_notice", bind_notice, moment)
                 result = {"bound": True, "channel": channel, "group_ref": group_ref, "label": label,
-                          "mention_prefix": prefix, "notice": BIND_NOTICE, "notice_message_id": notice}
+                          "mention_prefix": prefix, "notice": bind_notice, "notice_message_id": notice}
                 out = self.steward._record(conn, "bind_owner_group", request_key, request_hash, result)
         if refusal is not None:
             self._log("bind refused " + refusal, channel, group_ref, sender_ref)
@@ -1057,8 +1053,9 @@ class StateGroups:
                                       "AND direction='out' AND kind='quota_notice' AND at>?", (channel, group_ref, hour))
                 result = {"refused": over, "sender_role": role, **extra}
                 if notices < GROUP_LIMITS["notice_per_hour"]:
-                    result.update(notice=QUOTA_NOTICE, notice_message_id=self._out_row(
-                        conn, channel, group_ref, "quota_notice", QUOTA_NOTICE, moment))
+                    quota = owner_text.texts()["group_quota"]
+                    result.update(notice=quota, notice_message_id=self._out_row(
+                        conn, channel, group_ref, "quota_notice", quota, moment))
                 return result
             keep("question", accepted=1, role=role, text=body)
             self._retain(conn, moment)
@@ -1103,8 +1100,8 @@ class StateGroups:
         not_this_turns_question and nothing is posted (7.7.7, review P3: with two groups a
         wrong question id would send B's answer into A). The exit check runs here, in
         this transaction; a withheld reply keeps its original for the owner and the group
-        gets WITHHELD_TEXT. In the same transaction the owner's conversation gets one line
-        code writes (WITHHELD_OWNER_LINE: this group's name and the kind, never the reply),
+        gets core.owner_text group_withheld. In the same transaction the owner's conversation gets one line
+        code writes (withheld_owner_line: this group's name and the kind, never the reply),
         a steward message the host mirrors like any other (`owner_notice`), at most
         withheld_owner_lines_per_hour per group (r44w). Formatted as one WeChat message: 「first 20 characters of the
         question」 on the first line, at most reply_chars in all, cut with '…' - on Slack
@@ -1143,7 +1140,7 @@ class StateGroups:
             reason = self.exit_check(conn, body, moment)
             # Slack threads the reply under its question (D8); WeChat quotes the question instead.
             quote = "" if channel == "slack" else "「" + "".join(question["body"].split())[:20] + "」\n"
-            text = (WITHHELD_TEXT if reason else body.strip())
+            text = (owner_text.texts()["group_withheld"] if reason else body.strip())
             room = GROUP_LIMITS["reply_chars"] - len(quote)
             text = quote + (text if len(text) <= room else text[:room - 1] + "…")
             message_id = self._out_row(conn, channel, group, "reply", text, moment, reply_to=question_id,
@@ -1190,7 +1187,7 @@ class StateGroups:
 
     def _withheld_owner_notice(self, conn, channel, group, message_id, reason, moment):
         """The owner's half of a withheld group reply (r44w, 7.7.7): one steward message in
-        the owner's conversation naming this group and the kind (WITHHELD_OWNER_REASONS), in
+        the owner's conversation naming this group and the kind (core.owner_text withheld_<kind>), in
         the caller's transaction, recorded on the withheld row; None once this group has had
         withheld_owner_lines_per_hour of them this hour. Never sent into the group."""
         hour = (moment - timedelta(hours=1)).isoformat()
@@ -1199,7 +1196,8 @@ class StateGroups:
                        (channel, group, hour)) >= GROUP_LIMITS["withheld_owner_lines_per_hour"]:
             return None
         label = self._live_group(conn, channel, group)["label"] or DEFAULT_GROUP_LABEL
-        body = WITHHELD_OWNER_LINE.format(group=label, reason=WITHHELD_OWNER_REASONS[reason])
+        t = owner_text.texts()
+        body = t["withheld_owner_line"].format(group=label, reason=t["withheld_" + reason])
         notice_id = str(uuid4())
         conn.execute("INSERT INTO driver_inbox_messages(message_id,thread_id,sender_driver_id,project_id,kind,"
                      "delivery_mode,subject,body,refs_json,reply_to_message_id,created_at,audience) "
@@ -1371,7 +1369,7 @@ class StateGroups:
             reason = "".join(char if char.isprintable() else "_" for char in reason)[:40] or None
         else:
             reason = None
-        text = MEDIA_KEEP_ON_NOTICE if notice == "on" else MEDIA_KEEP_OFF_NOTICE
+        text = owner_text.texts()["group_media_on" if notice == "on" else "group_media_off"]
         owed = "on_pending" if notice == "on" else "off_notice"
         request_hash = _hash([channel, group_ref, epoch, notice, phase])
         moment = _now()

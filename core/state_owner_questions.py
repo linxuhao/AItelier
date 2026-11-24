@@ -191,9 +191,10 @@ def _first_line(text, limit=LINE_CHARS):
     return line if len(line) <= limit else line[:limit - 1] + "…"
 
 
-def _bar(text):
-    """Every line of a director's text behind ｜, so no line of it starts with a code."""
-    return "\n".join("｜" + line for line in str(text).split("\n"))
+def _bar(text, bar):
+    """Every line of a director's text behind `bar` (core.owner_text "bar": ｜, or '| ' in
+    English), so no line of it starts with a code."""
+    return "\n".join(bar + line for line in str(text).split("\n"))
 
 
 def _utc_second(value):
@@ -532,8 +533,8 @@ class StateOwnerQuestions:
         context = context.strip()
         if len(context) > CONTEXT_CHARS:
             context = context[:CONTEXT_CHARS - 1] + "…"
-        block = t["block"].format(code=code, title=title, text=_bar(text))
-        return block + (t["block_context"].format(context=_bar(context)) if context else "")
+        block = t["block"].format(code=code, title=title, text=_bar(text, t["bar"]))
+        return block + (t["block_context"].format(context=_bar(context, t["bar"])) if context else "")
 
     # ---------------------------------------------------------------- the answer
     def relay_answer(self, project_id, request_key, source_message_id):
@@ -684,7 +685,7 @@ class StateOwnerQuestions:
         relayed = {r[0]: r[1] for r in conn.execute(
             "SELECT answer_message_id,received_at FROM state_owner_question_answers WHERE code_no=?", (code,))}
         times = [_at(relayed.get(a["message_id"]) or a["created_at"]) for a in question["answers"]]
-        later = [t for t in times if t > received]
+        later = [moment for moment in times if moment > received]
         if later:
             return {**base, "outcome": "superseded",
                     "line": t["superseded"].format(label=label, when=_local(max(later).isoformat()))}

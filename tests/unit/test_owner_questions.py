@@ -771,8 +771,9 @@ def test_m2_an_approval_phrase_closes_no_question_and_its_reminder_still_fires(w
 
 def test_an_english_owner_reads_the_push_reminders_and_receipts_in_english(world, monkeypatch):
     """Overfit review 重-18: with AITELIER_OWNER_LANGUAGE=en (the default of a new install) every
-    fixed word of the push and its receipts is English; the codes, the bars and the director's
-    own words are as they are, and the push packs to the English channel limit."""
+    fixed word of the push and its receipts is English, the bar in front of a director's line
+    included (ASCII; 'zh' keeps its ｜); the codes and the director's own words are as they are,
+    and the push packs to the English channel limit."""
     monkeypatch.setenv(owner_text.SETTING, "en")
     en = owner_text.TEXTS["en"]
     ask(world, world.alpha, "alpha", "q1", "Which plan?", context="Some background")
@@ -781,8 +782,8 @@ def test_an_english_owner_reads_the_push_reminders_and_receipts_in_english(world
     lines = body.split("\n")
     assert lines[0] == en["push_head"].format(count=en["push_new"].format(n=1), first=code).rstrip("\n")
     assert lines[1] == en["approval_phrase_push"].format(code=code)
-    assert lines[2:] == ["", f"Q{code} · 武侠存档", "Question:", "｜Which plan?", "Background:", "｜Some background"]
-    assert not re.search("[\u3000-\u303f\u3400-\u9fff]", body.replace("武侠存档", "")), body
+    assert lines[2:] == ["", f"Q{code} · 武侠存档", "Question:", "| Which plan?", "Background:", "| Some background"]
+    assert not re.search("[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]", body.replace("武侠存档", "")), body
     for phrase in (state_channels.APPROVE, state_channels.DECLINE, state_channels.APPROVE_EN, state_channels.DECLINE_EN):
         assert phrase not in body, "the mirror would move a line carrying the phrase"
     assert oq.parse_codes(body) == {"codes": [], "codes_only": False}, "a pasted push answers nothing"

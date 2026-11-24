@@ -140,14 +140,17 @@ const EN_REPLIES = Object.freeze({
 });
 
 /** The steward's prompt in the owner's language: steward.md is written for a 'zh' owner (the
- *  reply phrases and the brief's two fixed lines it has the steward send); for another language
- *  each of these exact passages (each occurs once in steward.md, which a test checks) is
- *  replaced. The host decides a reply phrase in either language; the prompt names the owner's. */
+ *  reply phrases, the brief's two fixed lines and the group's withheld sentence it has the
+ *  steward send); for another language each of these exact passages (as often as steward.md
+ *  has it, which a test checks) is replaced. The host decides a reply phrase in either
+ *  language; the prompt names the owner's. The withheld sentence is also what a host may post
+ *  itself for a withheld group reply, so the two read alike. */
 const EN_STEWARD_PROMPT = Object.freeze([
   ['`同意 proposal <id>` to approve, `拒绝 proposal <id>` to decline', '`approve proposal <id>` to approve, `decline proposal <id>` to decline'],
   ['the exact reply 同意 proposal <id>;', 'the exact reply approve proposal <id>;'],
   ['only 今天没有要你处理的事.', 'only "Nothing needs you today."'],
   ['今早的简报没发成（晚了 N 小时）', '"This morning\'s brief did not go out (N hours late)"'],
+  ['「这个我在群里答不了。」', '"I cannot answer that in this group."'],
 ].map(pair => Object.freeze(pair)));
 
 export const OWNER_TEXTS = Object.freeze({

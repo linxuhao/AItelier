@@ -8,13 +8,14 @@ audience). Every number in GROUP_LIMITS is pinned here (platform director, 2026-
 from __future__ import annotations
 
 import json
+import re
 import logging
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from core import state_channels, state_groups, state_schema_setup
+from core import owner_text, state_channels, state_groups, state_schema_setup
 from core.state_commands import ProjectPrivate, _driver_defaults, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
@@ -24,6 +25,16 @@ from tests.unit.test_steward_channels import (OWNER_HEADERS, bind, client, conve
 
 OWNER_WX, MEMBER, MEMBER2, ROOM, ROOM2 = "wxid_owner", "wxid_m1", "wxid_m2", "r1@chatroom", "r2@chatroom"
 NOW = object()
+ZH = owner_text.TEXTS["zh"]
+
+
+@pytest.fixture(autouse=True)
+def _zh_owner():
+    """These tests pin the lines a 'zh' owner's groups read (core.owner_text; this deployment's
+    owner). Its own MonkeyPatch: a test's monkeypatch.undo() must not drop it."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(owner_text.SETTING, "zh")
+        yield
 
 
 def bound_group(world, room=ROOM, key="bg-1", label="家庭群"):
@@ -139,7 +150,7 @@ def test_only_the_bound_account_with_a_group_code_binds_and_a_member_repost_coun
         == [(0, None, None)]
     bound = execute(world.steward, "bind_owner_group", {**args, "request_key": "o", "sender_ref": OWNER_WX,
                                                         "code": code.lower().replace("-", " ")}, allow_write=True)
-    assert bound["bound"] is True and bound["notice"] == state_groups.BIND_NOTICE
+    assert bound["bound"] is True and bound["notice"] == ZH["group_bind"]
     # The notice is one outbound row. Step 23.1 (7.7.24): the same room again is refused, a
     # second group binds (a second code, named apart).
     assert rows(world, "SELECT direction, kind FROM state_group_messages") == [("out", "bind_notice")]
@@ -720,7 +731,7 @@ def test_the_group_and_member_bounds_and_the_one_notice_per_hour(world):
     for i in range(20):
         assert "message_id" in ask(world, f"a{i}")
     over = ask(world, "a20")
-    assert over["refused"] == "member_quota" and over["notice"] == state_groups.QUOTA_NOTICE
+    assert over["refused"] == "member_quota" and over["notice"] == ZH["group_quota"]
     assert "notice" not in ask(world, "a21")
     # The owner is not held to 20, only to the group's 60.
     for i in range(40):
@@ -799,10 +810,10 @@ def test_exit_check_arm_one_a_body_with_a_code_a_private_project_and_a_path_send
     body = "码是 482913，他在做 secret-plan（家庭账本），文件在 /home/linxuhao/x"
     sent = reply(world, question["message_id"], body)
     assert sent["withheld"] is True
-    assert sent["text"] == "「爸爸在忙什么」\n" + state_groups.WITHHELD_TEXT
+    assert sent["text"] == "「爸爸在忙什么」\n" + ZH["group_withheld"]
     # The sentence the group gets is, byte for byte, the one steward.md tells the model to use.
     steward_md = (Path(__file__).resolve().parents[2] / "integrations/dsh-director/steward.md").read_text(encoding="utf-8")
-    assert "「" + state_groups.WITHHELD_TEXT + "」" in steward_md
+    assert "「" + ZH["group_withheld"] + "」" in steward_md
     assert rows(world, "SELECT body, original, withheld_reason FROM state_group_messages WHERE direction='out' "
                        "AND kind='reply'") == [(sent["text"], body, "live_code")]
     # The code that leaked into a reply is not secret any more: retired.
@@ -830,7 +841,7 @@ def test_a_withheld_reply_tells_the_owner_in_one_line_that_names_the_group_and_t
     question = ask(world, "m1", "爸爸的项目进度如何")
     sent = reply(world, question["message_id"], body)
     # The group: only the fixed line, the same exit check.
-    assert sent["withheld"] is True and sent["text"] == "「爸爸的项目进度如何」\n" + state_groups.WITHHELD_TEXT
+    assert sent["withheld"] is True and sent["text"] == "「爸爸的项目进度如何」\n" + ZH["group_withheld"]
     assert rows(world, "SELECT kind, body, withheld_reason FROM state_group_messages WHERE direction='out' "
                        "AND kind='reply'") == [("reply", sent["text"], "private_project")]
     # The owner: one steward message in the owner's conversation, this group's name and the kind.
@@ -869,17 +880,38 @@ def test_a_withheld_reply_tells_the_owner_in_one_line_that_names_the_group_and_t
     assert execute(world.steward, "sync_owner_questions", {}, allow_write=True)["unmirrored"] == []
 
 
+def test_an_english_owners_groups_and_the_owner_read_the_fixed_lines_in_english(world, projects, monkeypatch):
+    """Overfit review (lang round 2): with AITELIER_OWNER_LANGUAGE=en the lines code posts into a
+    group - bind notice, withheld sentence, media switch notices, quota notice - and the owner's
+    line about a withheld reply are English; the group's own name is as the owner gave it."""
+    monkeypatch.setenv(owner_text.SETTING, "en")
+    en = owner_text.TEXTS["en"]
+    cjk = re.compile("[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]")
+    bound = bound_group(world, label="Family")
+    assert bound["notice"] == en["group_bind"] and not cjk.search(bound["notice"])
+    sent = reply(world, ask(world, "m1", "how is the plan going")["message_id"], "secret-plan is at step 3")
+    assert sent["withheld"] is True and sent["text"].endswith("\n" + en["group_withheld"])
+    assert sent["owner_notice"]["body"] == "A reply in Family was not sent: it touched a private project. Ask me privately if you need it."
+    assert owner_lines(world)[-1][1] == sent["owner_notice"]["body"]
+    world.owner.groups.set_group_media_keep("wechat", ROOM, True)
+    assert notice(world, "on", "check", key="e1") == {"may_post": True, "text": en["group_media_on"]}
+    for key in ("group_quota", "group_media_off", "group_withheld", "withheld_owner_line",
+                *("withheld_" + kind for kind in state_groups.WITHHELD_REASONS)):
+        assert not cjk.search(en[key]), key
+
+
 def test_withheld_owner_lines_are_at_most_three_per_group_per_hour_and_each_group_counts_its_own(world, projects):
     """r44w: a 4th withhold in the same hour for the same group writes no line (it stays in the
     group record, withheld as ever); another group still gets its own line, with its own name."""
     assert state_groups.GROUP_LIMITS["withheld_owner_lines_per_hour"] == 3
-    assert set(state_groups.WITHHELD_OWNER_REASONS) == set(state_groups.WITHHELD_REASONS)
+    for table in owner_text.TEXTS.values():
+        assert {"withheld_" + kind for kind in state_groups.WITHHELD_REASONS} <= set(table)
     bound_group(world)
     bound_group(world, room=ROOM2, key="bg-2", label="老家群")
     for n in range(4):
         question = ask(world, f"a{n}", f"问题{n}", sender=OWNER_WX)
         sent = reply(world, question["message_id"], "secret-plan 的进度", turn=f"t-a{n}")
-        assert sent["withheld"] is True and sent["text"].endswith(state_groups.WITHHELD_TEXT)
+        assert sent["withheld"] is True and sent["text"].endswith(ZH["group_withheld"])
         assert ("owner_notice" in sent) is (n < 3), n
     assert [b for _, b, *_ in owner_lines(world)] == ["家庭群里有一条回答没发出去：涉及私有项目。要问可以私聊我。"] * 3
     assert rows(world, "SELECT COUNT(*), COUNT(owner_notice) FROM state_group_messages WHERE group_ref=? AND "
@@ -905,7 +937,7 @@ def test_the_withheld_owner_line_cap_is_a_rolling_hour_to_the_second(world, proj
     def withhold(n):
         question = ask(world, f"e{n}", f"问题{n}", sender=OWNER_WX)
         sent = reply(world, question["message_id"], "secret-plan 的进度", turn=f"t-e{n}")
-        assert sent["withheld"] is True and sent["text"].endswith(state_groups.WITHHELD_TEXT), n
+        assert sent["withheld"] is True and sent["text"].endswith(ZH["group_withheld"]), n
         return sent
 
     at(timedelta(0))
@@ -1357,7 +1389,7 @@ def test_r2_the_notice_check_sent_and_failed(world, monkeypatch):
         conn.execute("DELETE FROM state_group_messages WHERE kind='media'")
         conn.commit()
     check = notice(world, "on", "check", key="b3")
-    assert check == {"may_post": True, "text": state_groups.MEDIA_KEEP_ON_NOTICE}
+    assert check == {"may_post": True, "text": ZH["group_media_on"]}
     assert "1 天" in check["text"] and "@ 管家" in check["text"] and "删除" in check["text"]
     assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE kind='media_notice'") == [(0,)], "a check writes no row"
     # Sent at the epoch: on, and one outbound row the send budget counts.
@@ -1365,7 +1397,7 @@ def test_r2_the_notice_check_sent_and_failed(world, monkeypatch):
     sent = notice(world, "on", "sent")
     assert sent["state"] == "on" and listed(world)["media_keep"] == "on"
     assert rows(world, "SELECT direction, body FROM state_group_messages WHERE kind='media_notice'") == \
-        [("out", state_groups.MEDIA_KEEP_ON_NOTICE)]
+        [("out", ZH["group_media_on"])]
     assert "media_notice" in state_groups.GROUP_SEND_KINDS
     with world.db.get_connection() as conn:
         for i in range(state_groups.GROUP_LIMITS["group_sends_per_hour"] - 1):
@@ -1470,8 +1502,8 @@ def test_r2_the_off_notice_waits_for_the_purge_receipt_which_must_close(world, m
         ("superseded", 0, 0, 0, 0, 0, 0), ("off", 2, 2, 0, 1, 1, 33)]
     assert switch(world)[4:6] == (None, epoch)
     assert execute(world.steward, "list_owner_groups", {})["media_purges"] == []
-    assert notice(world, "off", "check", key="w3") == {"may_post": True, "text": state_groups.MEDIA_KEEP_OFF_NOTICE}
-    assert "已经删除" in state_groups.MEDIA_KEEP_OFF_NOTICE
+    assert notice(world, "off", "check", key="w3") == {"may_post": True, "text": ZH["group_media_off"]}
+    assert "已经删除" in ZH["group_media_off"]
     refused(lambda: execute(world.director, "record_group_media_purge", {
         "request_key": "d", "channel": "wechat", "group_ref": ROOM, "epoch": epoch,
         "receipt": {"rows_before": 0, "rows_after": 0, "files_unlinked": 0, "files_shared": 0, "bytes_freed": 0}},

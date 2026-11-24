@@ -64,16 +64,33 @@ TODAY = {
     "group_cancelled": lambda v: "已取消 {code}，不会执行。".format(code=v["code"]),
     "group_expired": lambda v: "{code} 已过期，未执行；请重新请求。".format(code=v["code"]),
     "group_refused": lambda v: "{code} 未执行：消息时间不对，请重新回复。".format(code=v["code"]),
+    # ... core/state_groups.py: the group's fixed lines and the owner's line about a withheld reply ...
+    "group_withheld": lambda v: "这个我在群里答不了。",
+    "group_quota": lambda v: "问得太多了，过一会儿再问。",
+    "group_bind": lambda v: ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
+                             "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
+                             "让我记住的事只在本群用，30 天后删。"),
+    "group_media_on": lambda v: ("本群已打开存图：群里没 @ 管家的图片、语音、文件，管家会先存下、不回话，存 1 天后自动删除。"
+                                 "只有之后在本群 @ 管家时，管家才会去看（看时会交给外部模型服务处理）；业主私聊和别的群都用不到。"
+                                 "业主在面板上看得到谁发过、是什么类型，看不到内容。关闭存图时，已存的一并删除。"),
+    "group_media_off": lambda v: "本群已关闭存图：管家不再存群里没 @ 它的图片、语音、文件，之前存下的已经删除。",
+    "withheld_owner_line": lambda v: "{group}里有一条回答没发出去：{reason}。要问可以私聊我。".format(
+        group=v["group"], reason=v["reason"]),
+    "withheld_live_code": lambda v: "含有绑定码",
+    "withheld_private_project": lambda v: "涉及私有项目",
+    "withheld_host_path": lambda v: "含有主机上的路径",
+    # ... and core/state_owner_questions.py _bar.
+    "bar": lambda v: "｜",
 }
 # ---- end of the copy
 
 VALUES = [
     {"n": 3, "count": "3 个新问题", "first": 12, "code": 12, "title": "alpha", "line": "用哪个方案？", "label": "Q12",
      "items": "Q1（a）、Q2（b）", "text": "｜第一行\n｜第二行", "context": "｜背景", "reason": "不需要了", "when": "11-20 11:00",
-     "tool": "send_message", "at": "", "key": "to", "confirm": "确认 ", "cancel": "取消 "},
+     "tool": "send_message", "at": "", "key": "to", "confirm": "确认 ", "cancel": "取消 ", "group": "家庭群"},
     {"n": 0, "count": "", "first": 1, "code": "K7Q2A", "title": "{x} 带括号 {0}", "line": "", "label": "Q1", "items": "",
      "text": "", "context": "", "reason": "", "when": "", "tool": "{tool}", "at": "<@管家> ", "key": "{k}",
-     "confirm": "确认 ", "cancel": "取消 "},
+     "confirm": "确认 ", "cancel": "取消 ", "group": "{group} 老家"},
 ]
 
 
@@ -128,6 +145,16 @@ def test_texts_follows_the_setting_at_call_time(monkeypatch):
     monkeypatch.setenv(owner_text.SETTING, "zh-CN")
     assert owner_text.texts() is owner_text.TEXTS["zh"]
     assert owner_text.texts("en") is owner_text.TEXTS["en"]
+
+
+def test_the_withheld_sentence_is_the_one_each_languages_steward_prompt_teaches():
+    """The group gets the same words the model is told to use for "cannot say here" (7.7.7): the
+    'zh' words are steward.md's, the 'en' words the plugin's English prompt puts in their place."""
+    steward_md = (REPO / "integrations/dsh-director/steward.md").read_text(encoding="utf-8")
+    source = (REPO / "integrations/dsh-director/lib/owner-text.mjs").read_text(encoding="utf-8")
+    zh, en = owner_text.TEXTS["zh"]["group_withheld"], owner_text.TEXTS["en"]["group_withheld"]
+    assert f"「{zh}」" in steward_md
+    assert f"['「{zh}」', '\"{en}\"']" in source, "lib/owner-text.mjs EN_STEWARD_PROMPT"
 
 
 def test_the_push_limit_is_the_plugins_channel_limit_for_each_language():

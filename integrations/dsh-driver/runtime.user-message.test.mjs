@@ -411,7 +411,7 @@ test('24.2b send_user_message schema: only a director with a media library gets 
   assert.deepEqual(Object.keys(director.parameters).slice(0, -1), Object.keys(bare.parameters), 'every other parameter as before');
 });
 
-test('the owner\'s language: the environment\'s, else this checkout\'s .env line (dotenv_boot\'s grammar), else none', () => {
+test('the owner\'s language: the environment\'s, else the .env line the entry names (dotenv_boot\'s grammar), else none', () => {
   const dir = mkdtempSync(join(tmpdir(), 'owner-language-')), file = join(dir, '.env');
   assert.equal(ownerLanguageSetting({}, file), undefined, 'no .env');
   fs.writeFileSync(file, '# AITELIER_OWNER_LANGUAGE=en\nAITELIER_PORT=4444\r\nexport AITELIER_OWNER_LANGUAGE="zh"\nAITELIER_OWNER_LANGUAGE=en\n');
@@ -425,6 +425,15 @@ test('the owner\'s language: the environment\'s, else this checkout\'s .env line
     AITELIER_DSH_STATE_DIR: dir, AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv1', AITELIER_DSH_ROLE: 'steward' };
   assert.equal(aitelierHost({ ...env, AITELIER_OWNER_LANGUAGE: 'zh' }).config.ownerLanguage, 'zh');
   assert.equal(aitelierHost({ ...env, AITELIER_OWNER_LANGUAGE: '' }).config.ownerLanguage, undefined);
+  // Only the entry (apply) names the checkout's .env: a caller that names none - every test -
+  // never reads a file, so a checkout whose .env says zh decides no test (core/dotenv_boot.py).
+  fs.writeFileSync(file, 'AITELIER_OWNER_LANGUAGE=zh\n');
+  assert.equal(aitelierHost(env, { dotenv: file }).config.ownerLanguage, 'zh', 'the named .env');
+  assert.equal(aitelierHost({ ...env, AITELIER_OWNER_LANGUAGE: 'en' }, { dotenv: file }).config.ownerLanguage, 'en', 'the environment wins');
+  assert.equal(ownerLanguageSetting({}), undefined, 'no file named: none read');
+  // ...and the entry does name it: this checkout's .env, as before (the live fallback).
+  assert.ok(fs.readFileSync(new URL('./runtime.mjs', import.meta.url), 'utf8')
+    .includes("ctx.provide('directorHost', aitelierHost(process.env, { dotenv: new URL('../../.env', import.meta.url) }));"));
 });
 
 /** The director host's media_call, registered as index.mjs does, with a fake registry. */

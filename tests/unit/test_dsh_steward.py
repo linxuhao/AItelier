@@ -340,6 +340,17 @@ def test_every_driver_gets_the_owners_language_resolved_from_the_one_setting(run
     assert runtime._environment(steward)[owner_text.SETTING] == "zh", "the environment's, resolved"
 
 
+def test_the_suite_pins_the_language_so_a_checkouts_env_never_decides_a_test(monkeypatch, tmp_path):
+    # Overfit review (lang round 2, nit): owner_language() falls back to the repository .env
+    # when the variable is unset; tests/conftest.py sets it, so a run in a checkout whose .env
+    # says zh reads what CI reads (core/dotenv_boot.py: a test never wears the deployment's file).
+    from core import owner_text
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("AITELIER_OWNER_LANGUAGE=zh\n")
+    monkeypatch.setattr(owner_text, "DOTENV_PATH", dotenv)
+    assert owner_text.owner_language() == "en"
+
+
 def test_start_defaults_the_steward_to_its_own_route_and_directors_to_theirs(runtime, roles_file):
     async def go():
         try:

@@ -1890,12 +1890,15 @@ export function stewardOps({ request, rawRequest = request, project, me, stateDi
 }
 
 /** The owner's language (core/owner_text.py, AITELIER_OWNER_LANGUAGE): the environment's -
- *  core/dsh_driver.py passes it resolved - else this checkout's .env line, read with
- *  core/dotenv_boot.py's grammar (first assignment wins; `export ` and surrounding quotes
+ *  core/dsh_driver.py passes it resolved - else the line of the .env file `dotenv` names, read
+ *  with core/dotenv_boot.py's grammar (first assignment wins; `export ` and surrounding quotes
  *  dropped), so a driver a host supervisor older than that pass starts still follows the one
- *  setting. Undefined (unset, empty, no readable .env): the plugin's default, English. */
-export function ownerLanguageSetting(env, dotenv = new URL('../../.env', import.meta.url)) {
+ *  setting. Only the entry (runtime.mjs apply) names a file - this checkout's .env - so no
+ *  test reads it (core/dotenv_boot.py: configuration belongs to the process you started).
+ *  Undefined (unset, empty, no file named or readable): the plugin's default, English. */
+export function ownerLanguageSetting(env, dotenv) {
   if (typeof env.AITELIER_OWNER_LANGUAGE === 'string') return env.AITELIER_OWNER_LANGUAGE || undefined;
+  if (dotenv === undefined) return undefined;
   let text;
   try { text = readFileSync(dotenv, 'utf8'); } catch { return undefined; }
   for (const raw of text.split('\n')) {

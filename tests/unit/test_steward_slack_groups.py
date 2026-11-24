@@ -9,7 +9,7 @@ channels only, Slack Connect refused and paused, app_mention only, messageRef <c
 unfurls off) is tested in integrations/dsh-channel-slack/test/slack.test.mjs."""
 from __future__ import annotations
 
-from core import state_channels, state_groups
+from core import owner_text, state_channels, state_groups
 from core.state_commands import execute
 from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import OWNER_HEADERS, bind, client, refused, world  # noqa: F401
@@ -74,7 +74,7 @@ def test_d11_the_slack_group_and_member_quotas_are_the_wechat_groups(world):
     for i in range(20):
         assert "message_id" in ask(world, f"1763481600.{i:06d}")
     over = ask(world, "1763481600.000020")
-    assert over["refused"] == "member_quota" and over["notice"] == state_groups.QUOTA_NOTICE
+    assert over["refused"] == "member_quota" and over["notice"] == owner_text.texts()["group_quota"]
     assert "notice" not in ask(world, "1763481600.000021")
     for i in range(40):
         assert "message_id" in ask(world, f"1763481700.{i:06d}", sender=OWNER)
@@ -106,7 +106,7 @@ def test_d8_a_slack_reply_has_no_quote_line_and_names_the_question_to_thread_und
     long = reply(world, ask(world, "1763481601.000100")["message_id"], "长" * 3000, turn="t2")
     assert len(long["text"]) == state_groups.GROUP_LIMITS["reply_chars"] and long["text"].endswith("…")
     withheld = reply(world, ask(world, "1763481602.000100")["message_id"], "家庭账本 secret-plan 的进度", turn="t3")
-    assert withheld["withheld"] is True and withheld["text"] == state_groups.WITHHELD_TEXT
+    assert withheld["withheld"] is True and withheld["text"] == owner_text.texts()["group_withheld"]
 
 
 def test_a_wechat_reply_keeps_its_quote_line_and_names_its_question_too(world):

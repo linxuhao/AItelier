@@ -571,14 +571,14 @@ export function stateRequest(send, { log = {}, retryMs = 90000 } = {}) {
   };
 }
 
-export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
+export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime, dotenv } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
   // Plugin step 12: the backend starts the reserved steward project with this role. The
   // steward gets no full-access preset, no project work, no goal mandate and no State tools
   // beyond its own (the server enforces the same: steward_read_only).
   const steward = env.AITELIER_DSH_ROLE === 'steward';
-  const ownerLanguage = ownerLanguageSetting(env);
+  const ownerLanguage = ownerLanguageSetting(env, dotenv);
   // A supplied request (tests) serves the State reads before install() runs; a
   // supplied, already initialised DriverRuntime (the conformance suite) lets context()
   // and events() run without the DSH-scoped install().
@@ -1396,7 +1396,8 @@ export function apply(ctx) {
   // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
   dropIndexedGitConfig(process.env);
   installExitDiagnosis(process);
-  ctx.provide('directorHost', aitelierHost(process.env));
+  // The entry alone names this checkout's .env for the owner's language (ownerLanguageSetting).
+  ctx.provide('directorHost', aitelierHost(process.env, { dotenv: new URL('../../.env', import.meta.url) }));
 }
 
 /**

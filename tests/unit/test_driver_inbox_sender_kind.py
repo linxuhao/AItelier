@@ -21,6 +21,7 @@ from pathlib import Path
 
 from core.driver_inbox import deliver_notice
 from core.state_commands import execute
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import HOME, bind, relay, world  # noqa: F401 (the fixture)
 
 FIXTURE = (Path(__file__).resolve().parents[2] / "integrations" / "dsh-driver" / "test-fixtures"

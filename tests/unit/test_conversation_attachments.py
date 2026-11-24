@@ -22,6 +22,7 @@ from core.state_commands import ProjectPrivate, execute
 from core.state_graph import StateGraphError
 from core.state_service import StateService
 from tests.unit.test_driver_inbox_answer_citation import BASE_ROW_KEYS
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import HOME, OWNER, bind, world  # noqa: F401 (the fixture)
 
 USER = "owner:" + OWNER

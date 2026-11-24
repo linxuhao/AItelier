@@ -4,7 +4,8 @@
 Approve / decline and the memory requests are the OWNER's: an `owner:` session that
 is no driver (core.state_steward.StateSteward.is_owner_session), on top of the
 writer verdict. A steward token never reaches them: they are not on its write
-whitelist (api/authz._steward_denial). The impact read is the owner's or the
+whitelist (api/authz._steward_denial). The dashboard's 清空媒体 (POST /media/clear,
+design-steward 7.8.12) is one more owner memory request, run by the steward's host. The impact read is the owner's or the
 steward's. Every answer is a private record: none is served to an anonymous caller.
 
 Scheduled reminders (step 16, design-steward 7.4): the owner creates, edits,
@@ -165,6 +166,16 @@ def read_memory_request(request_id: str, service=Depends(get_service)):
         return service.steward.read_memory_request(request_id)
     except StateNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/media/clear", dependencies=[Depends(authz.require_writer)])
+def clear_media(request_key: str | None = None, service=Depends(get_service)):
+    """The owner's 清空媒体 (design-steward 7.8.12 "保留 30 天"): the steward's host deletes its
+    own media subdirectory (files and index rows; never a director's). The answer is a pending
+    memory request; read its result {cleared, removed} | {refused} | {error} at
+    GET /memory-requests/{request_id}."""
+    _owner(service)
+    return _capability_call(service.steward.request_media_clear, _key(request_key))
 
 
 # --- scheduled reminders (step 16) ---------------------------------------------------------

@@ -137,6 +137,9 @@ def test_the_steward_write_whitelist_is_exactly_these_actions():
         "send_user_message", "withdraw_user_question", "send_director_message",
         "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
         "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
+        # The dashboard's 清空媒体 (design-steward 7.8.12): the HOST takes the owner's media_clear
+        # in code the moment it starts the clear (core.state_steward.take_media_clear).
+        "take_steward_media_clear",
         "acknowledge_director_message",
         # Owner 2026-11-17: replies in the private inbox, reply-only (see the both-inboxes test).
         "send_driver_message",

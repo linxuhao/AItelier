@@ -600,3 +600,124 @@ test('design/steward-group-media.md: the adapter\'s kept media - purgeKept and k
   const again = await ops.ingest({ ...meta, messageRef: 'k2' }, async () => PNG);
   assert.deepEqual(ops.withdraw(again.ref), { removed: 1 });
 });
+
+test('清空媒体 (design-steward 7.8.12): the owner\'s media_clear runs against the steward\'s own library, with counts only', async () => {
+  const { clearMedia, processMemoryRequests, mediaClearsSettled } = await import('./memory-requests.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'steward-clear-'));
+  const library = createMediaLibrary({ root, userId: 'owner' });
+  const director = createMediaLibrary({ root, userId: 'd-drv1' });
+  const stored = await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'm1', index: 0 }, async () => PNG);
+  const theirs = await director.ingest({ channel: 'dashboard', audience: 'project:p1', source: 'in' }, async () => PNG);
+  assert.ok(stored.ref && theirs.ref);
+  assert.deepEqual(await clearMedia(library), { cleared: true, removed: 1 });
+  assert.ok(!existsSync(library.home));
+  assert.ok(director.lookup(theirs.ref), 'a director\'s subdirectory stays');
+  assert.deepEqual(await clearMedia(undefined), { refused: 'media_unavailable' });
+  assert.deepEqual(await clearMedia(director), { refused: 'media_unavailable' }, 'never a director\'s d-<driver_id>/');
+  assert.ok(director.lookup(theirs.ref));
+  // A failure answers its code, never the fs message (it names a path).
+  const failing = { home: join(root, 'owner'), clear: async () => { throw Object.assign(new Error(`EACCES: ${root}/owner/2026-11/abc.png`), { code: 'EACCES' }); } };
+  assert.deepEqual(await clearMedia(failing), { error: 'EACCES' });
+  // The loop takes the request, clears with the library it was handed and writes the counts back.
+  const written = [];
+  const request = async (path, body) => {
+    if (path.endsWith('list_steward_memory_requests')) return { result: { requests: [{ request_id: 'r1', kind: 'media_clear', payload: {} }] } };
+    written.push([path.split('/').pop(), body]);
+    return path.endsWith('take_steward_media_clear') ? { result: { request_id: 'r1', taken: true } } : { result: {} };
+  };
+  await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'm2', index: 0 }, async () => PNG);
+  assert.deepEqual(await processMemoryRequests({ request, media: library }), { pending: 1, done: 0 }, 'a media clear runs beside the loop');
+  await mediaClearsSettled();
+  assert.equal(written[0][0], 'take_steward_media_clear');
+  assert.equal(written[0][1].request_id, 'r1');
+  assert.match(written[0][1].request_key, /^media-clear-take:r1:/);
+  assert.deepEqual(written[1], ['complete_steward_memory_request',
+    { request_key: 'memory-request:r1', request_id: 'r1', result: { cleared: true, removed: 1 } }]);
+  assert.equal(written.length, 2);
+});
+
+// Review clearmedia-1/2 (non-author review 2026-11-24): the clear is taken when it starts, never
+// blocks the event pump while it waits on the ingest lane, and never runs twice.
+const refusal409 = code => Object.assign(new Error(`AItelier /api/state/commands/x: HTTP 409 "${code}"`), { status: 409 });
+const clearHarness = (requestId, { take = async () => ({ result: { request_id: requestId, taken: true } }), complete = async () => ({ result: {} }) } = {}) => {
+  const calls = [];
+  const request = async (path, body) => {
+    const action = path.split('/').pop();
+    if (action === 'list_steward_memory_requests') return { result: { requests: [{ request_id: requestId, kind: 'media_clear', payload: {} }] } };
+    calls.push(action);
+    return action === 'take_steward_media_clear' ? take(body) : complete(body);
+  };
+  return { calls, request };
+};
+
+test('清空媒体 review 1: a clear waiting on the ingest lane does not hold the owner-request pass, and is taken before it waits', async () => {
+  const { processMemoryRequests, mediaClearsSettled } = await import('./memory-requests.mjs');
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-clear-lane-')), userId: 'owner' });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const slow = library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'v1', index: 0 }, async () => { await gate; return PNG; });
+  const results = [];
+  const { calls, request } = clearHarness('r-lane', { complete: async body => { results.push(body.result); return { result: {} }; } });
+  const pass = await Promise.race([processMemoryRequests({ request, media: library }),
+    new Promise(resolve => setTimeout(() => resolve('blocked'), 300))]);
+  assert.deepEqual(pass, { pending: 1, done: 0 }, 'the pass (and so the host\'s event pump) is not held by the lane');
+  assert.deepEqual(calls, ['take_steward_media_clear'], 'taken at once: the backend never lapses it under the wait');
+  // A second pass while it waits: no second take, no second clear.
+  assert.deepEqual(await processMemoryRequests({ request, media: library }), { pending: 1, done: 0 });
+  assert.deepEqual(calls, ['take_steward_media_clear']);
+  release();
+  assert.ok((await slow).ref);
+  await mediaClearsSettled();
+  assert.deepEqual(results, [{ cleared: true, removed: 1 }], 'the ingest in flight finished first, then went with the clear');
+  assert.deepEqual(calls, ['take_steward_media_clear', 'complete_steward_memory_request']);
+});
+
+test('清空媒体 review 1: a clear the backend let lapse is never run, and nothing is written back', async () => {
+  const { processMemoryRequests, mediaClearsSettled } = await import('./memory-requests.mjs');
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-clear-lapse-')), userId: 'owner' });
+  const kept = await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'k1', index: 0 }, async () => PNG);
+  const logged = [];
+  const { calls, request } = clearHarness('r-lapsed', { take: async () => { throw refusal409('memory_request_not_pending'); } });
+  await processMemoryRequests({ request, media: library, log: line => logged.push(line) });
+  await mediaClearsSettled();
+  assert.deepEqual(calls, ['take_steward_media_clear']);
+  assert.ok(library.lookup(kept.ref), 'nothing deleted');
+  assert.match(logged.join('\n'), /r-lapsed.*memory_request_not_pending/);
+});
+
+test('清空媒体 review 2: a write-back that failed is sent again as it was; the clear never runs twice', async () => {
+  const { processMemoryRequests, mediaClearsSettled } = await import('./memory-requests.mjs');
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-clear-again-')), userId: 'owner' });
+  await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'a1', index: 0 }, async () => PNG);
+  const sent = [];
+  let fail = true;
+  const { calls, request } = clearHarness('r-again', { complete: async body => {
+    sent.push(body);
+    if (fail) { fail = false; throw new TypeError('fetch failed'); }
+    return { result: {} };
+  } });
+  await processMemoryRequests({ request, media: library, log: () => {} });
+  await mediaClearsSettled();
+  // A new file arrives after the clear; the row is still pending (the write-back was lost).
+  const later = await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'a2', index: 0 }, async () => PNG);
+  await processMemoryRequests({ request, media: library, log: () => {} });
+  await mediaClearsSettled();
+  assert.deepEqual(calls, ['take_steward_media_clear', 'complete_steward_memory_request', 'complete_steward_memory_request']);
+  assert.deepEqual(sent.map(body => body.result), [{ cleared: true, removed: 1 }, { cleared: true, removed: 1 }],
+    'the same result under the same key');
+  assert.ok(library.lookup(later.ref), 'the file that came after the clear stays');
+});
+
+test('清空媒体 review 2: a request an earlier host process took is answered interrupted, never cleared again', async () => {
+  const { processMemoryRequests, mediaClearsSettled } = await import('./memory-requests.mjs');
+  const library = createMediaLibrary({ root: mkdtempSync(join(tmpdir(), 'steward-clear-restart-')), userId: 'owner' });
+  const kept = await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'n1', index: 0 }, async () => PNG);
+  const results = [];
+  const { calls, request } = clearHarness('r-restart', { take: async () => { throw refusal409('media_clear_taken'); },
+    complete: async body => { results.push(body.result); return { result: {} }; } });
+  await processMemoryRequests({ request, media: library });
+  await mediaClearsSettled();
+  assert.deepEqual(calls, ['take_steward_media_clear', 'complete_steward_memory_request']);
+  assert.deepEqual(results, [{ error: 'interrupted' }]);
+  assert.ok(library.lookup(kept.ref), 'nothing deleted');
+});

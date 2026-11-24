@@ -7,6 +7,7 @@ HTTP runs the real app with the write gate ON and test mode OFF."""
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -23,7 +24,8 @@ from core.state_commands import ProjectPrivate, execute
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphError
 from core.state_service import StateService
-from core.state_steward import EXPIRED
+from core.state_commands import STEWARD_WRITE_ACTIONS
+from core.state_steward import EXPIRED, SCHEMA
 from tests.support import state_template
 
 HOME = "aitelier-home"
@@ -224,3 +226,141 @@ def test_only_the_home_steward_lists_and_completes(world):
     with pytest.raises(StateGraphError, match="memory_request_not_pending"):
         execute(world.steward, "complete_steward_memory_request",
                 {"request_key": "k2", "request_id": request_id, "result": {}}, allow_write=True)
+
+
+# --- the dashboard's 清空媒体 (design-steward 7.8.12 "保留 30 天") ----------------------------------
+
+def test_media_clear_is_one_owner_request_the_steward_host_runs(world, client):
+    assert "steward_media_clear" not in STEWARD_WRITE_ACTIONS
+    r = client.post("/api/steward/media/clear?request_key=click-1", headers=OWNER_HEADERS)
+    assert r.status_code == 200, r.text
+    request_id = r.json()["request_id"]
+    assert r.json() == {"request_id": request_id, "status": "pending"}
+    again = client.post("/api/steward/media/clear?request_key=click-1", headers=OWNER_HEADERS)
+    assert again.json() == r.json(), "the same click is one request"
+    # The State command is the same door, for the owner session alone.
+    other = execute(world.owner, "steward_media_clear", {"request_key": "click-2"}, allow_write=True)
+    assert other["request_id"] != request_id and other["status"] == "pending"
+    with world.db.get_connection() as conn:
+        events = [json.loads(e[0]) for e in conn.execute(
+            "SELECT payload_json FROM state_events WHERE project_id=? AND "
+            "event_type='steward_memory_request_created'", (HOME,))]
+    assert {(e["request_id"], e["kind"]) for e in events} == {(request_id, "media_clear"),
+                                                              (other["request_id"], "media_clear")}
+    listed = execute(world.steward, "list_steward_memory_requests", {})["requests"]
+    assert listed == [{"request_id": request_id, "kind": "media_clear", "payload": {}},
+                      {"request_id": other["request_id"], "kind": "media_clear", "payload": {}}]
+    execute(world.steward, "complete_steward_memory_request",
+            {"request_key": "m", "request_id": request_id, "result": {"cleared": True, "removed": 3}},
+            allow_write=True)
+    r = client.get(f"/api/steward/memory-requests/{request_id}", headers=OWNER_HEADERS)
+    assert r.json() == {"request_id": request_id, "kind": "media_clear", "status": "done",
+                        "result": {"cleared": True, "removed": 3}}
+
+
+def test_media_clear_is_the_owner_sessions_alone(world, client):
+    for service, code in ((world.steward, "steward_read_only"), (world.director, "owner_session_required"),
+                          (world.anonymous, "owner_session_required")):
+        with pytest.raises(StateGraphError, match=code):
+            execute(service, "steward_media_clear", {"request_key": "k"}, allow_write=True)
+    for headers, code in ((token(world, "director"), "owner_session_required"),
+                          (token(world, "steward"), "steward_read_only")):
+        r = client.post("/api/steward/media/clear", headers=headers)
+        assert r.status_code == 403 and code in r.text, r.text
+    assert client.post("/api/steward/media/clear").status_code == 403
+    # Its one door: the general memory-request route does not take the kind.
+    assert create(client, kind="media_clear").status_code == 422
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_steward_memory_requests").fetchone()[0] == 0
+
+
+def test_a_media_clear_the_host_did_not_take_in_two_minutes_lapses(world):
+    stale = world.owner.steward.request_media_clear("k1")["request_id"]
+    fresh_memory = world.owner.steward.create_memory_request("profile_read", {})["request_id"]
+    old = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_memory_requests SET created_at=?", (old,))
+        conn.commit()
+    fresh = world.owner.steward.request_media_clear("k2")["request_id"]
+    listed = [r["request_id"] for r in execute(world.steward, "list_steward_memory_requests", {})["requests"]]
+    assert listed == [fresh_memory, fresh], "an old memory request still runs; an old media clear does not"
+    assert world.owner.steward.read_memory_request(stale) == {
+        "request_id": stale, "kind": "media_clear", "status": "done", "result": {"refused": "expired"}}
+
+
+def test_an_older_memory_requests_table_is_migrated_for_media_clear(tmp_path):
+    path = str(tmp_path / "old.sqlite")
+    old = SCHEMA.replace(",'purge','media_clear')", ",'purge')", 1)
+    assert old != SCHEMA
+    with sqlite3.connect(path) as conn:
+        conn.executescript(old)
+        conn.execute("INSERT INTO state_steward_memory_requests(request_id,kind,payload_json,status,created_at,"
+                     "created_by) VALUES('memreq-a','forget','{\"ids\": [\"x\"]}','pending','t','owner:o')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO state_steward_memory_requests(request_id,kind,payload_json,status,created_at,"
+                         "created_by) VALUES('memreq-b','media_clear','{}','pending','t','owner:o')")
+    StateService(StateDatabase(path), actor="fixture", project_read_trusted=True)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT request_id,kind,payload_json FROM state_steward_memory_requests").fetchall() \
+            == [("memreq-a", "forget", '{"ids": ["x"]}')]
+        migrated = conn.execute("SELECT sql FROM sqlite_master WHERE name='state_steward_memory_requests'").fetchone()[0]
+        assert "'media_clear'" in migrated and "taken_at" in migrated
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='state_steward_memory_requests_status'").fetchone()
+        conn.execute("INSERT INTO state_steward_memory_requests(request_id,kind,payload_json,status,created_at,"
+                     "created_by) VALUES('memreq-b','media_clear','{}','pending','t','owner:o')")
+        conn.commit()
+    StateService(StateDatabase(path), actor="fixture", project_read_trusted=True)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_steward_memory_requests").fetchone()[0] == 2
+
+
+def _age_requests(world, minutes=3):
+    old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_memory_requests SET created_at=?", (old,))
+        conn.commit()
+
+
+def take(world, request_id, key="take-1"):
+    return execute(world.steward, "take_steward_media_clear", {"request_key": key, "request_id": request_id},
+                   allow_write=True)
+
+
+def test_a_media_clear_the_host_took_never_lapses_under_it(world):
+    """Review clearmedia-1: the host takes the request (take_steward_media_clear) the moment it
+    starts the clear; a taken request is never answered expired, so a clear that waits on the
+    ingest lane past the two minutes is still the one the owner reads, and its write-back lands."""
+    request_id = world.owner.steward.request_media_clear("k1")["request_id"]
+    assert [r["request_id"] for r in execute(world.steward, "list_steward_memory_requests", {})["requests"]] \
+        == [request_id]
+    assert take(world, request_id) == {"request_id": request_id, "taken": True}
+    _age_requests(world)   # the clear waits behind a long ingest
+    assert world.owner.steward.read_memory_request(request_id) == {
+        "request_id": request_id, "kind": "media_clear", "status": "pending", "result": None}
+    execute(world.steward, "complete_steward_memory_request",
+            {"request_key": "m", "request_id": request_id, "result": {"cleared": True, "removed": 7}},
+            allow_write=True)
+    assert world.owner.steward.read_memory_request(request_id)["result"] == {"cleared": True, "removed": 7}
+
+
+def test_a_media_clear_is_taken_once_and_never_after_it_lapsed(world):
+    request_id = world.owner.steward.request_media_clear("k1")["request_id"]
+    assert take(world, request_id) == {"request_id": request_id, "taken": True}
+    assert take(world, request_id) == {"request_id": request_id, "taken": True}, "the same take is a replay"
+    # A second take (a host that restarted after its first) never clears again.
+    with pytest.raises(StateGraphError, match="media_clear_taken"):
+        take(world, request_id, key="take-2")
+    lapsed = world.owner.steward.request_media_clear("k2")["request_id"]
+    _age_requests(world)
+    with pytest.raises(StateGraphError, match="memory_request_not_pending"):
+        take(world, lapsed, key="take-3")
+    assert world.owner.steward.read_memory_request(lapsed)["result"] == {"refused": "expired"}
+    memory = world.owner.steward.create_memory_request("profile_read", {})["request_id"]
+    with pytest.raises(StateGraphError, match="not_media_clear"):
+        take(world, memory, key="take-4")
+    with pytest.raises(StateGraphError, match="unknown_memory_request"):
+        take(world, "memreq-none", key="take-5")
+    for service in (world.director, world.owner):
+        with pytest.raises(StateGraphError, match="steward_role_required"):
+            execute(service, "take_steward_media_clear", {"project_id": HOME, "request_key": "t",
+                    "request_id": request_id}, allow_write=True)

@@ -373,8 +373,34 @@ test('library: 30 days kept, then the row and (once no row points at it) the fil
   assert.equal(lib.lookup(c.ref), undefined, 'the oldest unprotected file went');
   // The index file says the same after a restart.
   assert.deepEqual(createMediaLibrary({ root: r }).rows.map(x => x.ref).sort(), [kept.ref, d.ref].sort());
-  assert.equal(lib.clear().removed, 2);
+  assert.equal((await lib.clear()).removed, 2);
   assert.ok(!existsSync(lib.home));
+});
+
+test('清空媒体 (design-steward 7.8.12): clear() deletes this writer\'s whole subdirectory - kept media and refusals too - after the ingest in flight, never a sibling', async () => {
+  const r = root();
+  const lines = [];
+  const director = createMediaLibrary({ root: r, userId: 'd-drv1' });
+  const theirs = await director.ingest({ channel: 'dashboard', audience: 'project:p1', source: 'in' }, async () => png(9, 9));
+  const lib = createMediaLibrary({ root: r, log: (event, fields) => lines.push([event, fields]) });
+  await lib.ingest({ ...owner, messageRef: 'a', index: 0, name: 'secret-plan.png' }, async () => png(1, 1));
+  await lib.ingest({ channel: 'wechat', audience: 'group:wechat:r1', source: 'in', kept: true, messageRef: 'k', index: 0 }, async () => png(2, 2));
+  assert.equal((await lib.ingest({ ...owner, messageRef: 'x', index: 0 }, async () => exe())).refused, 'type');
+  // An ingest still reading when the owner clicks finishes first; the clear takes it too.
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const slow = lib.ingest({ ...owner, messageRef: 'b', index: 0 }, async () => { await gate; return png(3, 3); });
+  const cleared = lib.clear();
+  release();
+  assert.ok((await slow).ref);
+  assert.deepEqual(await cleared, { removed: 3 });
+  assert.ok(!existsSync(lib.home)); assert.deepEqual(lib.rows, []);
+  assert.deepEqual(createMediaLibrary({ root: r }).rows, [], 'the index is gone too');
+  // The refusal went with it: the same key is fetched again.
+  assert.equal((await lib.ingest({ ...owner, messageRef: 'x', index: 0 }, async () => png(4, 4))).refused, undefined);
+  assert.ok(director.lookup(theirs.ref), 'a director\'s subdirectory is another writer\'s');
+  assert.deepEqual(lines.filter(([event]) => event === 'media_cleared'), [['media_cleared', { rows: 3 }]]);
+  assert.ok(!JSON.stringify(lines).includes('secret-plan'), 'no file name is logged');
 });
 
 test('library: logs carry a mime and a size, never a name or a byte', async () => {

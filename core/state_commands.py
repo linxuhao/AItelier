@@ -1238,6 +1238,14 @@ class CompleteStewardMemoryRequest(Project):
     result: dict[str, Any]
 
 
+# The steward's HOST takes the owner's media_clear the moment it starts the clear (the
+# dashboard's 清空媒体, design-steward 7.8.12): within two minutes of the click, once
+# (core.state_steward.take_media_clear).
+class TakeStewardMediaClear(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    request_id: str = Field(min_length=1, max_length=200)
+
+
 # Step 16: the steward's scheduled reminders (core.state_steward, design-steward 7.4).
 _SCHEDULE = ("{kind: 'once', at: ISO time} or {kind: 'cron', expr: 5-field cron 'min hour day month weekday'}; "
              "runs at least 15 minutes apart")
@@ -1415,6 +1423,13 @@ class StewardCapabilitySet(Request):
 
 
 class StewardCapabilitiesClear(Request):
+    request_key: str = Field(min_length=1, max_length=320)
+
+
+# The dashboard's 清空媒体 (design-steward 7.8.12 "保留 30 天"): the owner session's alone (the
+# service checks; never the steward's - not in STEWARD_WRITE_ACTIONS). It records one pending
+# media_clear request the steward's HOST runs in code (core.state_steward.request_media_clear).
+class StewardMediaClear(Request):
     request_key: str = Field(min_length=1, max_length=320)
 
 
@@ -1827,6 +1842,7 @@ WRITE_REQUESTS = {
     "create_steward_proposal": CreateStewardProposal,
     "withdraw_steward_proposal": WithdrawStewardProposal,
     "complete_steward_memory_request": CompleteStewardMemoryRequest,
+    "take_steward_media_clear": TakeStewardMediaClear,
     "create_steward_schedule": CreateStewardSchedule,
     "update_steward_schedule": UpdateStewardSchedule,
     "delete_steward_schedule": DeleteStewardSchedule,
@@ -1849,6 +1865,7 @@ WRITE_REQUESTS = {
     "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
     "steward_tools_resync_due": StewardToolsResyncDue,
     "steward_capability_set": StewardCapabilitySet, "steward_capabilities_clear": StewardCapabilitiesClear,
+    "steward_media_clear": StewardMediaClear,
     "sync_owner_questions": SyncOwnerQuestions, "relay_owner_answer": RelayOwnerAnswer,
     "create_steward_confirmation": CreateStewardConfirmation, "get_steward_confirmation": GetStewardConfirmation,
     "cancel_steward_confirmation": CancelStewardConfirmation,
@@ -2218,6 +2235,7 @@ def _handlers(service) -> dict:
         "list_steward_proposals": service.steward.list_proposals,
         "list_steward_memory_requests": service.steward.list_memory_requests,
         "complete_steward_memory_request": service.steward.complete_memory_request,
+        "take_steward_media_clear": service.steward.take_media_clear,
         "list_steward_schedules": service.steward.list_schedules,
         "create_steward_schedule": service.steward.create_schedule,
         "update_steward_schedule": service.steward.update_schedule,
@@ -2264,6 +2282,7 @@ def _handlers(service) -> dict:
         "steward_tools_resync_due": service.steward_connections.tools_resync_due,
         "steward_capability_set": service.steward_capabilities.set,
         "steward_capabilities_clear": service.steward_capabilities.clear,
+        "steward_media_clear": service.steward.request_media_clear,
         "sync_owner_questions": service.owner_questions.sync,
         "relay_owner_answer": service.owner_questions.relay_answer,
         "list_pushed_owner_questions": service.owner_questions.list_pushed,
@@ -2391,10 +2410,15 @@ def _driver_defaults(service, action, arguments):
 # Step 24.4 (design-steward 7.8.24): steward_capability_set and steward_capabilities_clear are
 # deliberately absent - the basic-capabilities table is the owner's; the steward only proposes
 # a capability_route (create_steward_proposal), which the owner approves.
+# steward_media_clear (the dashboard's 清空媒体, design-steward 7.8.12) is deliberately absent too:
+# the steward's host only runs the owner's request - take_steward_media_clear, in code, the
+# moment it starts the clear (within two minutes of the click, once) - and writes the result
+# back (complete_steward_memory_request).
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
     "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
+    "take_steward_media_clear",
     "acknowledge_director_message",
     # Owner 2026-11-17 ("state dag的inbox和导演的私人inbox都要能回复"): the steward may answer a
     # letter in its private inbox - only as a reply, to that letter's sender (below).

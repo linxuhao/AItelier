@@ -7,7 +7,7 @@
  *  not flash into a list before the driver table has arrived.
  */
 import {
-  ApiError, createStewardMemoryRequest, stewardMemoryRequest,
+  ApiError, clearStewardMedia, createStewardMemoryRequest, stewardMemoryRequest,
   type DriverStatusResponse, type StewardImpact, type StewardMemoryKind, type StewardSchedule,
 } from './api';
 
@@ -56,9 +56,23 @@ export async function runMemoryRequest(
   kind: StewardMemoryKind, payload: Record<string, unknown> = {},
   options: {timeoutMs?: number; intervalMs?: number} = {},
 ): Promise<Record<string, any> | null> {
+  return awaitMemoryRequest(await createStewardMemoryRequest(kind, payload), options);
+}
+
+/** The owner's 清空媒体 (design-steward 7.8.12), run by the steward's host like a memory
+ *  request: {cleared, removed} | {refused} | {error}, or `null` while the steward is offline. */
+export async function runMediaClear(
+  options: {timeoutMs?: number; intervalMs?: number} = {},
+): Promise<Record<string, any> | null> {
+  return awaitMemoryRequest(await clearStewardMedia(), options);
+}
+
+async function awaitMemoryRequest(
+  created: {request_id: string; status: string; result?: Record<string, any>},
+  options: {timeoutMs?: number; intervalMs?: number},
+): Promise<Record<string, any> | null> {
   const timeoutMs = options.timeoutMs ?? MEMORY_REQUEST_TIMEOUT_MS;
   const intervalMs = options.intervalMs ?? MEMORY_REQUEST_POLL_MS;
-  const created = await createStewardMemoryRequest(kind, payload);
   if (created.status === 'done') return created.result ?? {};
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

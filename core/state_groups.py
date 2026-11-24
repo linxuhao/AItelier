@@ -933,16 +933,21 @@ class StateGroups:
                 answer = {"refused": "group_not_bound"}
             elif written is None:
                 answer = {"refused": "undated"}
-            elif moment - written > timedelta(minutes=GROUP_LIMITS["fresh_minutes"]):
-                answer = {"refused": "stale"}
+            if answer is None:
+                # A replay of a message this group already recorded is a duplicate whatever its
+                # age: deciding staleness first would withdraw media kept for a recorded message
+                # that the bridge re-delivers after a restart.
+                seen = conn.execute("SELECT message_id,accepted,sender_role FROM state_group_messages "
+                                    "WHERE direction='in' AND channel=? AND group_ref=? AND channel_message_ref=?",
+                                    (channel, group_ref, channel_message_ref)).fetchone()
+                if seen is not None:
+                    return {"duplicate": True, "message_id": seen["message_id"],
+                            "accepted": bool(seen["accepted"])}
+                if moment - written > timedelta(minutes=GROUP_LIMITS["fresh_minutes"]):
+                    answer = {"refused": "stale"}
             if answer is not None:
                 self._log("message dropped " + answer["refused"], channel, group_ref, sender_ref, size)
                 return answer
-            seen = conn.execute("SELECT message_id,accepted,sender_role FROM state_group_messages WHERE direction='in' "
-                                "AND channel=? AND group_ref=? AND channel_message_ref=?",
-                                (channel, group_ref, channel_message_ref)).fetchone()
-            if seen is not None:
-                return {"duplicate": True, "message_id": seen["message_id"], "accepted": bool(seen["accepted"])}
             if kept and group_row["media_keep"] != "on":
                 # The authoritative half of the store gate: only a group whose switch is on (its
                 # notice sent) keeps an un-mentioned file; the host takes back what it stored.

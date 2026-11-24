@@ -7,6 +7,7 @@ memory is accepted only from a group turn (the public-read header and a recorded
 audience). Every number in GROUP_LIMITS is pinned here (platform director, 2026-11-20)."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import timedelta
 from pathlib import Path
@@ -529,6 +530,38 @@ def test_a_message_is_taken_once_and_an_undated_or_stale_one_is_dropped(world, m
     old = (state_channels._now() - timedelta(minutes=11)).isoformat()
     assert ask(world, "m3", at=old) == {"refused": "stale"}
     assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(1,)]
+
+
+def test_a_recorded_message_replayed_hours_later_is_a_duplicate_not_stale(world):
+    """A bridge/channel restart re-delivers the event ring: a message this group already kept
+    comes back with an hours-old channel timestamp. The recorded row and its media refs must
+    survive the replay - it is a duplicate at any age, not a stale message to withdraw."""
+    bound_group(world)
+    turn_on(world)
+    ref = "m_0123456789abcdef"
+    first = kept_media(world, "k-replay", media=ref)
+    sql = "SELECT message_id, attachments_json FROM state_group_messages WHERE direction='in' " \
+          "AND channel_message_ref=?"
+    before = rows(world, sql, ("k-replay",))
+    assert json.loads(before[0][1]) == [{"kind": "image", "ref": ref, "mime": "image/png", "size": 33}]
+    old = (state_channels._now() - timedelta(hours=5)).isoformat()
+    replay = execute(world.steward, "relay_group_message",
+                     {"request_key": "k-replay-after-restart", "channel": "wechat", "group_ref": ROOM,
+                      "sender_ref": MEMBER, "channel_message_ref": "k-replay", "body": "[图片]",
+                      "channel_at": old, "kept": True,
+                      "attachments": [{"kind": "image", "ref": ref, "mime": "image/png", "size": 33}]},
+                     allow_write=True)
+    assert replay["duplicate"] is True and replay["message_id"] == first["message_id"]
+    assert "refused" not in replay
+    assert rows(world, sql, ("k-replay",)) == before  # one row, same id and same attachment refs
+
+
+def test_a_never_recorded_message_five_hours_old_is_still_stale(world):
+    """The stale freshness gate still refuses a message the group has never recorded."""
+    bound_group(world)
+    old = (state_channels._now() - timedelta(hours=5)).isoformat()
+    assert ask(world, "never-seen", at=old) == {"refused": "stale"}
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(0,)]
 
 
 def test_a_live_account_code_in_a_group_message_is_retired_and_never_kept(world, monkeypatch):

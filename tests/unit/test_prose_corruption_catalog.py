@@ -73,16 +73,38 @@ def test_each_edit_entry_applies_to_its_own_surface():
 
 
 def _head_core_tree(root):
-    """`root/core` rebuilt from HEAD: names and bytes both committed."""
+    """`root/core` rebuilt from HEAD: names and bytes both committed.
+
+    The modules come from the same one-time bulk extraction `_head_read`
+    serves (`git archive HEAD core templates`), walked on disk. A non-recursive
+    `git ls-tree HEAD core` prints just the tree entry `core`, so filtering its
+    lines for `.py` used to write NO module at all while claiming to rebuild
+    the tree; walking the extracted directory makes the docstring true.
+
+    The rebuilt set is then checked against `git ls-tree -r --name-only HEAD
+    core`: the listing is git's own, so a builder that writes nothing or a
+    subset of the committed modules fails here rather than passing quietly.
+    """
+    snapshot = MOD._head_tree()
+    source = snapshot / "core"
+    target = root / "core"
+    target.mkdir(parents=True, exist_ok=True)
+    modules = sorted(source.rglob("*.py"))
+    assert modules, f"no HEAD core modules in {source}"
+    for module in modules:
+        rel = module.relative_to(snapshot).as_posix()
+        (root / rel).write_bytes(module.read_bytes())
     listing = subprocess.run(
-        ["git", "ls-tree", "--name-only", "HEAD", "core"],
+        ["git", "ls-tree", "-r", "--name-only", "HEAD", "core"],
         cwd=REPO_ROOT, capture_output=True, text=True)
     assert listing.returncode == 0, listing.stderr
-    (root / "core").mkdir(parents=True, exist_ok=True)
-    for line in listing.stdout.splitlines():
-        rel = line.strip()
-        if rel.endswith(".py"):
-            (root / rel).write_text(MOD._head_read(rel), encoding="utf-8")
+    committed = {line.strip() for line in listing.stdout.splitlines()
+                 if line.strip().endswith(".py")}
+    written = {path.relative_to(root).as_posix() for path in target.rglob("*.py")}
+    assert written == committed, (
+        f"rebuilt core/ does not match HEAD: "
+        f"{sorted(committed - written)[:5]} not written, "
+        f"{sorted(written - committed)[:5]} not committed")
 
 
 def _tree_with_new_module(tmp_path, entry):

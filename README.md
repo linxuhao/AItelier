@@ -266,6 +266,15 @@ systemctl --user enable --now aitelier-dsh-host.service
 loginctl enable-linger "$USER"     # start the user service at boot without login
 ```
 
+**Before starting any driver, decide its mandate.** Directors run with full
+access and no approval prompts, so their standing goal is an authorization you
+grant. The repository ships a neutral default
+(`integrations/dsh-driver/goal.md`) that asks the owner before any push,
+publish, deploy or other outward or irreversible action. To grant more, write
+your own mandate to `~/.AItelier/director-goal.md` (`chmod 600`); it replaces the
+default for every director on this host at its next start. See
+[Standing director goal](docs/dsh-driver.md#standing-director-goal-and-connection-recovery).
+
 The installer creates the identity pepper secret if absent, enables driver
 identity in `.env`, and selects host mode in `~/.AItelier/dsh-drivers/runtime.json`.
 It preserves existing credentials, sessions and cursors. It does not create

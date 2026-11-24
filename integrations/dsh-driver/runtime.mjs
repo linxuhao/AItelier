@@ -28,7 +28,7 @@ import { createCalcRunner } from './calc.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
-import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
+import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit, loadGoalTemplate } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
 import * as core from '../dsh-director/lib/core.mjs';
@@ -50,9 +50,14 @@ export const inject = [];
  *  generic director.md, and the worker's State limits after the generic worker.md. */
 const stateSkill = await readFile(new URL('./state.md', import.meta.url), 'utf8');
 const workerStateSkill = await readFile(new URL('./worker-state.md', import.meta.url), 'utf8');
-const goalFile = fileURLToPath(new URL('./goal.md', import.meta.url));
-const goalTemplate = await readFile(goalFile, 'utf8');
-export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
+// The director mandate: the deployment's override (goal.mjs goalOverrideFile) when
+// present, else the repository's neutral goal.md. An override that exists but cannot
+// be used is held as an error: a director's install() then refuses to start.
+const goalLoad = await loadGoalTemplate(fileURLToPath(new URL('./goal.md', import.meta.url)));
+export const driverGoal = project => {
+  if (goalLoad.error) throw goalLoad.error;
+  return goalLoad.text.replaceAll('{{project_id}}', project);
+};
 export { stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource, askTheUser, continuationQuestion, reviewInstruction };
 
 /** Does an event tick carry anything worth waking the driver for?
@@ -718,6 +723,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
     async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent, turnAudience: audienceOf,
       externalContent: external, groupSend }) {
+      // A director whose mandate override cannot be read does not start (the steward has no mandate).
+      if (!steward && goalLoad.error) throw goalLoad.error;
       if (steward) mirrorOwnerMessage = ownerMessageSent;
       if (steward && typeof groupSend === 'function') sendToGroup = groupSend;
       if (typeof audienceOf === 'function') turnAudience = audienceOf;
@@ -1210,7 +1217,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // Session observers cannot append reentrantly to their own log.
         queueMicrotask(() => { if (!isDisposed()) ctx.agents.withoutInitiator(deliverInbox); });
       });
-      const objective = driverGoal(project);
+      const objective = steward ? undefined : driverGoal(project);
       let seeded;
       const goal = steward ? undefined : bindDriverGoal(ctx.goals, agent, objective, { onSeed: (after, before) => { seeded = { after, before }; } });
       if (seeded) {
@@ -1231,7 +1238,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           const record = { at: new Date().toISOString(), goal_id: after.id, old_revision: before.revision, new_revision: after.revision,
             old_objective_sha256: sha(before.objective), new_objective_sha256: sha(after.objective),
             rounds_started: after.roundsStarted, old_max_goal_rounds: before.maxGoalRounds, new_max_goal_rounds: after.maxGoalRounds,
-            goal_md_sha256: sha(goalTemplate), goal_md_commit: await goalMdCommit(goalFile, { cwd: env.AITELIER_TODO_CWD }) };
+            goal_md_file: goalLoad.file, goal_md_override: goalLoad.override, goal_md_sha256: sha(goalLoad.text),
+            // An override outside a repository has no commit; never report the default's in its place.
+            goal_md_commit: await goalMdCommit(goalLoad.file, { cwd: goalLoad.override ? undefined : env.AITELIER_TODO_CWD }) };
           ctx.logger.info(`director goal ${after.id} re-seeded: ${JSON.stringify(record)}`);
           const written = await appendGoalSeedRecord(env.AITELIER_DSH_STATE_DIR, record);
           if (!written.written) ctx.logger.error(`director goal ${after.id} was re-seeded but its trace was NOT written (${written.error})`);

@@ -76,7 +76,9 @@ PROJECTLESS = {action: "the request names no project: the steward's connection r
                               "create_steward_confirmation", "get_steward_confirmation",
                               "cancel_steward_confirmation",
                               # Step 24.4: the owner's basic-capabilities routes.
-                              "steward_capability_set", "steward_capabilities_clear")}
+                              "steward_capability_set", "steward_capabilities_clear",
+                              # The owner's 清空媒体 (design-steward 7.8.12).
+                              "steward_media_clear")}
 _PROJECT_FIELDS = {"project_id", "sender_project_id", "target_project_id", "attempt_id", "delivery_id",
                    "node_key", "driver_id"}
 

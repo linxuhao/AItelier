@@ -954,6 +954,11 @@ export function createStewardMemoryRequest(kind: StewardMemoryKind, payload: Rec
 export function stewardMemoryRequest(requestId: string): Promise<StewardMemoryRequest> {
   return _get('/api/steward/memory-requests/' + encodeURIComponent(requestId));
 }
+/** The owner's 清空媒体 (design-steward 7.8.12): the steward's host deletes its own media
+ *  subdirectory. Answered as a pending memory request; poll `stewardMemoryRequest`. */
+export function clearStewardMedia(requestKey: string = crypto.randomUUID()): Promise<StewardMemoryRequest> {
+  return _post('/api/steward/media/clear?request_key=' + encodeURIComponent(requestKey));
+}
 
 // ── Scheduled reminders (plugin step 16). The backend computes every run time;
 //    409 carries {code: 'version_conflict', schedule: current row} in `detail`,

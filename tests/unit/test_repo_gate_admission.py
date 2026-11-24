@@ -426,6 +426,8 @@ GATE_POST_DEADLINE_SEC = 60
 # A slow-POST arm: the directory exists this much longer than the hold before
 # the gate actually POSTs. On a witness that slept from the marker the request
 # would arrive after the lock was released and the contention would be zero.
+# Every `_contended_red_run` uses this delay by default, so the two contended-
+# red tests below run with it too, not only the named witness.
 SLOW_POST_DELAY_SEC = RENDER_HOLD_SEC + 0.75
 
 
@@ -436,17 +438,23 @@ def _contended_red_run(tmp_path, monkeypatch, *, gate_program=None):
     posted while the holder renders, so the harness queues it and answers with
     `render_owner_waited_for_owner_ids` = the holder's owner id once the test
     releases the lock. The gate then measures a red, so the report is a red.
-    Nothing here supplies a gate dict. `gate_program`, when given, replaces the
-    gate written by `write_gate` (the slow-POST arm embeds its delay in it).
+    Nothing here supplies a gate dict. Every caller runs the SLOW-POST gate
+    unless it explicitly overrides `gate_program`: the delayed POST is the
+    DEFAULT shape of this rig, not a property of one witness test, so both
+    contended-red nodeids below exercise it too.
     """
+    if gate_program is None:
+        # The executor scrubs the child environment, so the knob must travel
+        # INSIDE the gate program the child runs, never on the pytest parent.
+        gate_program = embed_env(
+            GATE_PY, FIXTURE_GATE_POST_DELAY_SEC=str(SLOW_POST_DELAY_SEC))
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     rig.script_report = red_report()
     install_entry_executor(monkeypatch)
     repo = _repo(tmp_path)
-    if gate_program is not None:
-        (repo / "gate.py").write_text(gate_program, encoding="utf-8")
+    (repo / "gate.py").write_text(gate_program, encoding="utf-8")
     out = tmp_path / "out"
     results: dict = {}
 
@@ -532,18 +540,16 @@ def test_the_real_gate_path_with_a_slow_post_still_reports_the_queued_owner(
         tmp_path, monkeypatch):
     """Both contended-red surfaces, with the POST delayed past the hold window.
 
-    `FIXTURE_GATE_POST_DELAY_SEC` lives inside `GATE_PY` and is delivered with
-    `embed_env` (the executor scrubs the child environment). The report
+    `FIXTURE_GATE_POST_DELAY_SEC` lives inside `GATE_PY` and `_contended_red_run`
+    delivers it with `embed_env` by default (the executor scrubs the child
+    environment), so this witness needs no special setup of its own. The report
     directory exists `SLOW_POST_DELAY_SEC` before the POST, so a witness that
     slept from that marker would release the holder before the request ever
     queued: the wait would be zero and both surfaces would read `none`. The rig
     now waits for the harness's own arrival observation, so the delay only
     moves the marker -- the measured wait is still the product's.
     """
-    program = embed_env(GATE_PY,
-                        FIXTURE_GATE_POST_DELAY_SEC=str(SLOW_POST_DELAY_SEC))
-    result, report, holder = _contended_red_run(tmp_path, monkeypatch,
-                                                gate_program=program)
+    result, report, holder = _contended_red_run(tmp_path, monkeypatch)
 
     # Structured surface: the gate result the fold receives.
     gate = report["repo_gate"]

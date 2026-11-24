@@ -72,7 +72,61 @@ modules went from 12 rows in 367 s to 11 rows in 121 s.
 The node suites need `integrations/dsh-driver/node_modules` to resolve. In the
 image that is `/opt/aitelier-dsh/node_modules`; a worktree mounted into a test
 container needs the (untracked) symlink
-`integrations/dsh-driver/node_modules -> /opt/aitelier-dsh/node_modules`.
+`integrations/dsh-driver/node_modules -> /opt/aitelier-dsh/node_modules`. The
+SPA job also needs `web/node_modules` linked to the same directory.
+
+## Gate modes (2026-11-24)
+
+`scripts/gate_modes.py` prints the mode plan as JSON and executes nothing by
+default; `--run` executes its jobs in order, fail-fast. A refusal is a JSON
+plan with `allowed: false`, `offending_path` and `prescribed_mode`.
+
+| Mode | Jobs (in order) | Measured wall seconds |
+|---|---|---|
+| `targeted` (diff rule below) | `affected-tests`, `whole-tree-guards` | affected-tests: 10.797 s (delivered tree, gate-modes-1124, 2026-11-24); whole-tree-guards: 174.420 s (delivered tree, gate-modes-1124, 2026-11-24) |
+| `merge` / `full` | `python-tree`, `driver-node-suite`, `web-vitest-suite` | python-tree: not measured here (the whole ~2.9 h tree; no number invented); driver-node-suite: 253.140 s (delivered tree, gate-modes-1124, 2026-11-24); web-vitest-suite: 89.235 s (delivered tree, gate-modes-1124, 2026-11-24) |
+
+Every job entry is `{name, argv, why}`. The argv are:
+
+```bash
+# affected-tests — changed pytest files only; no deselection
+python -m pytest -q -p no:cacheprovider tests/unit/test_documented_gate_paths_exist.py tests/unit/test_gate_modes_plan.py
+# whole-tree-guards — prose/structure guards read HEAD and every core module
+python -m pytest -q -p no:cacheprovider tests/unit/test_truncation_is_not_a_formatting_mistake.py tests/unit/test_prose_corruption_catalog.py
+# driver-node-suite — driver + director JS, its own job
+python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py
+# web-vitest-suite — SPA vitest, its own job
+python -m pytest -q -p no:cacheprovider tests/integration/test_web_suite_runs.py
+# python-tree — exactly plain pytest's selection; pytest.ini is unchanged
+python -m pytest tests
+```
+
+The container argv used for the measurements (each tree mounted at the same
+`/app` path; the two GitHub-object-reading jobs also mount the shared `.git`
+read-only at its host path) is:
+
+```bash
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_documented_gate_paths_exist.py tests/unit/test_gate_modes_plan.py
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_truncation_is_not_a_formatting_mistake.py tests/unit/test_prose_corruption_catalog.py
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/integration/test_web_suite_runs.py
+```
+
+Wall seconds are whole-container wall time measured on the delivered
+gate-modes-1124 worktree on 2026-11-24, not pytest's internal summary; the only
+difference between that measured tree and the final commit is these four table
+values. The retained logs live under
+`/home/linxuhao/.AItelier/director/reports/gate-modes-1124/logs/`. `python-tree`
+was not run here: the whole suite takes hours; no estimate is presented as a
+measurement.
+
+Targeted rule: a diff may take the `targeted` path only when every changed path
+is under `tests/`, `docs/` or `design/`, is a `.md` file anywhere, or is a
+Python file whose executable AST is unchanged (each docstring replaced with
+`ast.Pass` on both blobs before comparison, so comments and docstring prose do
+not count). Any other path refuses the targeted mode, names the offending path
+and prescribes `merge`. `merge` and `full` both keep the whole Python
+selection; nothing is deselected, skipped or made conditional.
 
 ## Parallel runs (pytest-xdist)
 

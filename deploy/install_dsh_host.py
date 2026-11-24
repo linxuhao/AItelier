@@ -87,6 +87,9 @@ def prepare(repo, home, secrets_dir):
             found = True
     if not found:
         lines.append('AITELIER_DRIVER_IDENTITY=on')
+    # What the caller reports as "identity enabled": the identity line, not the
+    # uid/gid lines below (those alone need no backend recreate).
+    identity_changed = not env.exists() or lines != original.splitlines()
     # docker-compose.yml runs every container as AITELIER_UID:AITELIER_GID, default
     # 1000:1000. The `aitelier` CLI fills both in from the login; a bare `docker
     # compose` does not, and any other uid then cannot write ~/.AItelier. A value
@@ -96,7 +99,7 @@ def prepare(repo, home, secrets_dir):
     for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
         if name not in present:
             lines.append(f'{name}={value}')
-    changed = atomic_text(env, '\n'.join(lines) + '\n')
+    changed = atomic_text(env, '\n'.join(lines) + '\n') and identity_changed
     # What docker-compose.yml bind-mounts from HOME, created as this user: Docker
     # creates a missing bind source as root, and the backend (this uid) then
     # cannot write it (sqlite crash loop, 503 on uploads, no connection secrets).
@@ -159,6 +162,24 @@ def unit_quote(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
 
 
+def default_api_url(repo):
+    """The backend as docker-compose.yml publishes it: loopback, host port AITELIER_PORT."""
+    return 'http://127.0.0.1:' + setting(repo, 'AITELIER_PORT', '4444')
+
+
+def install_pdf_reader(python, repo):
+    """The steward reads PDFs with pypdfium2 in the host venv (the backend image has its
+    own copy). requirements-pdf.txt pins one wheel's hash (x86_64 manylinux), so on other
+    platforms pip refuses it: say so and go on, like a missing ffprobe."""
+    try:
+        run(python, '-m', 'pip', 'install', '-r', repo / 'requirements-pdf.txt')
+    except subprocess.CalledProcessError:
+        print('pypdfium2 could not be installed from requirements-pdf.txt (its hash pins the x86_64 '
+              'manylinux wheel): the steward cannot read PDF attachments until pypdfium2 is installed in .venv.')
+        return False
+    return True
+
+
 def render_unit(repo, home, runtime, secrets_dir, api_url):
     values = {
         'REPO': repo, 'PYTHON': repo / '.venv/bin/python', 'HOME_ENV': 'HOME=' + str(home),
@@ -186,7 +207,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--runtime-dir', type=Path, help='Default: ~/.local/share/aitelier-dsh')
-    parser.add_argument('--api-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--api-url', help='Default: http://127.0.0.1:$AITELIER_PORT (4444 when unset)')
     parser.add_argument('--service-name', default='aitelier-dsh-host.service')
     parser.add_argument('--no-start', action='store_true', help='Prepare files without enabling/starting the service (initial install before backend startup)')
     args = parser.parse_args()
@@ -212,11 +233,10 @@ def main():
             raise ValueError('This Python has no ensurepip. Install its venv package (Ubuntu/Debian: sudo apt install python3.12-venv), then rerun; an incomplete .venv will be repaired.')
         run(sys.executable, '-m', 'venv', repo / '.venv')
     run(python, '-m', 'pip', 'install', '-e', repo)
-    # The steward reads PDFs with pypdfium2 in THIS venv (the backend image has its own copy).
-    run(python, '-m', 'pip', 'install', '-r', repo / 'requirements-pdf.txt')
+    install_pdf_reader(python, repo)
     runtime = install_runtime(repo, (args.runtime_dir or home / '.local/share/aitelier-dsh').expanduser().resolve())
     unit = Path(os.environ.get('XDG_CONFIG_HOME', str(home / '.config'))) / 'systemd/user' / args.service_name
-    unit_changed = atomic_text(unit, render_unit(repo, home, runtime, secrets_dir, args.api_url), mode=0o644)
+    unit_changed = atomic_text(unit, render_unit(repo, home, runtime, secrets_dir, args.api_url or default_api_url(repo)), mode=0o644)
     if not args.no_start:
         was_running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', args.service_name]).returncode == 0
         run('systemctl', '--user', 'daemon-reload')

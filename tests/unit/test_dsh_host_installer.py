@@ -113,7 +113,37 @@ def test_install_creates_the_bind_sources_and_names_the_container_user(paths, mo
     assert (repo / '.env').read_bytes() == before
 
     (repo / '.env').write_text('AITELIER_UID=4242\nAITELIER_DRIVER_IDENTITY=on\n')
-    installer.prepare(repo, home, secrets)
+    # Only AITELIER_GID is appended: identity was already on, so prepare() does not
+    # report it (main() would otherwise tell the operator to recreate the backend).
+    assert not installer.prepare(repo, home, secrets)
     env = (repo / '.env').read_text().splitlines()
     assert 'AITELIER_UID=4242' in env and f'AITELIER_UID={os.getuid()}' not in env
     assert f'AITELIER_GID={os.getgid()}' in env
+
+
+def test_a_pdf_reader_install_failure_is_a_note_not_an_aborted_install(paths, monkeypatch, capsys):
+    """Overfit fix round: requirements-pdf.txt pins the x86_64 wheel's hash only, so
+    pip fails on aarch64/musl. The installer goes on (unit, runtime) and says so,
+    as it does for a missing ffprobe."""
+    import subprocess
+    repo, _, _ = paths
+    calls = []
+    def failing_run(*args, **kwargs):
+        calls.append([str(a) for a in args])
+        raise subprocess.CalledProcessError(1, args)
+    monkeypatch.setattr(installer, 'run', failing_run)
+    assert installer.install_pdf_reader(repo / '.venv/bin/python', repo) is False
+    assert calls and calls[0][-2:] == ['-r', str(repo / 'requirements-pdf.txt')]
+    assert 'pypdfium2' in capsys.readouterr().out
+    monkeypatch.setattr(installer, 'run', lambda *a, **k: None)
+    assert installer.install_pdf_reader(repo / '.venv/bin/python', repo) is True
+
+
+def test_the_default_api_url_follows_aitelier_port(paths, monkeypatch):
+    """Overfit fix round (次-5): compose publishes the backend on AITELIER_PORT, so the
+    unit's AITELIER_DSH_API_URL defaults to the same port, 4444 when unset."""
+    repo, _, _ = paths
+    monkeypatch.delenv('AITELIER_PORT', raising=False)
+    assert installer.default_api_url(repo) == 'http://127.0.0.1:4444'
+    (repo / '.env').write_text('AITELIER_PORT=5555\n')
+    assert installer.default_api_url(repo) == 'http://127.0.0.1:5555'

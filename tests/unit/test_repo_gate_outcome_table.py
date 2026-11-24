@@ -23,15 +23,11 @@ rewrite the doc's table with `python -m tests.unit.test_repo_gate_outcome_table`
 """
 from __future__ import annotations
 
-import atexit
 import ctypes
 import errno
-import hashlib
 import json
 import os
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
@@ -42,7 +38,8 @@ import yaml
 from aitelier.gate_coverage import full_coverage
 from aitelier.tools.run_tests import impl as rt
 from tests.gate_fixture import (RUN_TESTS_SH, HarnessRig, embed_env,
-                                install_entry_executor, red_report)
+                                install_entry_executor, red_report,
+                                short_gate_home)
 
 _ROOT = Path(__file__).resolve().parents[2]
 _GRAPH = _ROOT / "configs" / "coding_impl.yaml"
@@ -384,56 +381,8 @@ ROWS = {
 # sit inside pytest's tmp tree, which repeats the row id -- so the longest ids
 # overran the budget before the gate ever launched, and the row read "no gate
 # call". `--basetemp=/tmp/t` made the same ids pass (5 sampled, 5 passed).
-#
-# That is the FIXTURE's environment, not the product's: the deployed home is
-# short (`~/.AItelier`). Each row gets a home of its own under one short root
-# outside the pytest tmp tree (`_row_home`), named by a digest of its row id so
-# the homes stay distinct and short enough for the longest id. The root is
-# removed when the session ends.
-_HOMES_ROOT: Path | None = None
-# What `_run_repo_gate` appends to the home: `/r/` + 32 hex digits + `.s`.
-_RELAY_SOCKET_BYTES = len("/r/") + 32 + len(".s")
-
-
-def _home_name(row_id: str) -> str:
-    """A short, stable directory name for one row's home (10 hex chars)."""
-    return hashlib.blake2s(row_id.encode("utf-8"), digest_size=5).hexdigest()
-
-
-def _homes_root() -> Path:
-    """The one short root the rows' homes live under; removed at session end.
-
-    Chosen by MEASURING the socket path the longest row id will actually get,
-    so a too-long temp root fails here -- naming the budget and the measured
-    bytes -- instead of quietly turning every gate into "not started" again.
-    """
-    global _HOMES_ROOT
-    if _HOMES_ROOT is None:
-        longest = max(ROWS, key=len)
-        measured = []
-        # The environment's temp dir first, then the short conventional ones.
-        for candidate in dict.fromkeys((tempfile.gettempdir(), "/tmp", "/var/tmp")):
-            if not os.path.isdir(candidate):
-                continue
-            root = Path(tempfile.mkdtemp(prefix="rt-homes-", dir=candidate)).resolve()
-            probe = root / _home_name(longest) / "r" / ("0" * 32 + ".s")
-            measured.append((len(os.fsencode(probe)), str(root)))
-            if len(os.fsencode(probe)) < 108:
-                _HOMES_ROOT = root
-                atexit.register(shutil.rmtree, root, ignore_errors=True)
-                return root
-            shutil.rmtree(root, ignore_errors=True)
-        raise RuntimeError(
-            f"no temp root short enough for the longest row id {longest!r}: its "
-            f"owned relay socket needs {_RELAY_SOCKET_BYTES} bytes under the home "
-            f"and Linux allows 107; measured {measured}")
-    return _HOMES_ROOT
-
-
-def _row_home(row_id: str) -> Path:
-    """One row's own `AITELIER_HOME`, below the AF_UNIX socket path budget."""
-    return _homes_root() / _home_name(row_id)
-
+# Each row now takes a short home of its own from
+# `tests.gate_fixture.short_gate_home`, which explains the budget.
 
 NODE_SKIPPED = {"passed": True, "skipped": True, "dir": ".", "checks": {},
                 "summary": "npm not available — node gate skipped "
@@ -516,7 +465,7 @@ def _next_node(result: dict, report: dict) -> str:
 
 def _drive_row(tmp_path, monkeypatch, row_id):
     row = ROWS[row_id]
-    monkeypatch.setenv("AITELIER_HOME", str(_row_home(row_id)))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(row_id)))
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
     inotify = "real"
     if row.leg in _INOTIFY_LEGS:

@@ -33,7 +33,8 @@ import pytest
 from aitelier import gate_admission
 from aitelier.tools.run_tests import impl as rt
 from core import gate_deferral
-from tests.gate_fixture import RUN_TESTS_SH, HarnessRig, embed_env, write_gate
+from tests.gate_fixture import (RUN_TESTS_SH, HarnessRig, embed_env,
+                                short_gate_home, write_gate)
 
 
 # A gate with the game gate's report layout that can be told to measure a red
@@ -90,7 +91,7 @@ def busy(tmp_path, monkeypatch):
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
     monkeypatch.setenv("AITELIER_REPO_GATE_RENDER_WAIT_SECONDS", "0.3")
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     rig.hold()
     yield rig
     rig.close()

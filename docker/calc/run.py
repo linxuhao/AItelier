@@ -41,29 +41,31 @@ MPL_CACHE = "/opt/calc/mpl"
 
 
 def _keep_head(stream, limit, out):
-    """Read `stream` to its end, keeping its first `limit` bytes in out["data"]."""
-    kept = bytearray()
+    """Read `stream` to its end, keeping its first `limit` bytes in out["data"]. `out` is
+    updated as each chunk is read, so a join that times out still has what was read."""
+    kept = b""
     seen = 0
     while True:
-        chunk = stream.read(65536)
+        chunk = stream.read1(65536)
         if not chunk:
             break
         seen += len(chunk)
         if len(kept) < limit:
             kept += chunk[: limit - len(kept)]
-    out["data"] = bytes(kept)
-    out["truncated"] = seen > limit
+            out["data"] = kept
+        out["truncated"] = seen > limit
 
 
 def _keep_tail(stream, limit, out):
-    """Read `stream` to its end, keeping its last `limit` bytes in out["data"]."""
+    """Read `stream` to its end, keeping its last `limit` bytes in out["data"] (updated as each
+    chunk is read)."""
     kept = b""
     while True:
-        chunk = stream.read(65536)
+        chunk = stream.read1(65536)
         if not chunk:
             break
         kept = (kept + chunk)[-limit:]
-    out["data"] = kept
+        out["data"] = kept
 
 
 def _kill_group(proc):

@@ -80,6 +80,26 @@ def test_a_program_past_its_time_is_killed_with_its_children(run, tmp_path: Path
     assert time.monotonic() - started < 15, "a grandchild holding the pipe did not keep the wrapper waiting"
 
 
+def test_what_was_read_comes_back_when_a_new_session_keeps_the_pipes(run, tmp_path: Path) -> None:
+    # A grandchild in its own session is outside the group the wrapper kills: it holds the pipes
+    # open past both reader joins, and what the program printed before still comes back.
+    pid_file = tmp_path / "grandchild.pid"
+    main = _program(tmp_path, "import os, sys, time\nprint('ANSWER 42', flush=True)\n"
+                              "sys.stderr.write('WARN 7\\n'); sys.stderr.flush()\n"
+                              "if os.fork() == 0:\n    os.setsid()\n"
+                              f"    open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n    time.sleep(30)\n")
+    try:
+        code, timed_out, stdout, truncated, stderr = run.run_child(main, str(tmp_path / "out"), seconds=20)
+        assert (code, timed_out, truncated) == (0, False, False)
+        assert stdout == b"ANSWER 42\n"
+        assert stderr == b"WARN 7\n"
+    finally:
+        try:
+            os.kill(int(pid_file.read_text()), 9)
+        except (OSError, ValueError):
+            pass
+
+
 def test_only_regular_files_come_back_at_most_four_within_the_bound(run, tmp_path: Path) -> None:
     out = tmp_path / "out"
     out.mkdir()

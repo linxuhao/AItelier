@@ -554,9 +554,21 @@ def check_visibility(url, visibility) -> None:
 DEV_MCP_HOST = "dev_mcp"
 # What dev-mcp's own `initialize` reports (its FastMCP server name).
 DEV_MCP_SERVER_NAME = "dev-tools-mcp"
-DEV_MCP_WRITES = ("bash", "apply_patch")
+# The read-only dev-mcp tools. Everything else that `DEV_MCP_PINNABLE` may name is a write
+# tool for the lock: `dev_mcp_writes` derives the locked set from the pin's own list, so a
+# tool added there is outward and egress without a second edit here (a hardcoded name pair
+# that a widened `DEV_MCP_PINNABLE` does not follow leaves the new tool served and pinned
+# unlocked).
+DEV_MCP_READ = ("list_dir", "read_file", "search")
 DEV_MCP_SUBAGENT = "subagent_"
 DEV_MCP_LOCKED = "locked: dev_mcp"
+
+
+def dev_mcp_writes() -> tuple[str, ...]:
+    """The pinnable dev-mcp tools that write: what the pin's list names, minus the read-only
+    ones. Read at call time, so the lock and the pin cannot drift apart."""
+    from core.state_steward_capabilities import DEV_MCP_PINNABLE
+    return tuple(name for name in DEV_MCP_PINNABLE if name not in DEV_MCP_READ)
 
 
 def dev_mcp_hosts() -> set[str]:
@@ -590,8 +602,9 @@ def dev_mcp_server_ok(row, server_name) -> bool:
 def _lock_dev_mcp(conn, conn_id) -> None:
     """The flags no path may loosen on the dev-mcp connection: its write tools outward
     and egress, its subagent_* tools not allowed."""
+    writes = dev_mcp_writes()
     conn.execute(f"UPDATE state_steward_connection_tools SET outward=1, egress=1 WHERE conn_id=? AND raw_name IN "
-                 f"({','.join('?' * len(DEV_MCP_WRITES))})", (conn_id, *DEV_MCP_WRITES))
+                 f"({','.join('?' * len(writes))})", (conn_id, *writes))
     conn.execute("UPDATE state_steward_connection_tools SET allowed=0 WHERE conn_id=? AND substr(raw_name,1,?)=?",
                  (conn_id, len(DEV_MCP_SUBAGENT), DEV_MCP_SUBAGENT))
 
@@ -705,7 +718,7 @@ def effective(conn) -> list[dict]:
             from core.state_steward_capabilities import DEV_MCP_PINNABLE
             if c["visibility"] != "private" or row["raw_name"] not in DEV_MCP_PINNABLE:
                 continue
-        write = locked and row["raw_name"] in DEV_MCP_WRITES
+        write = locked and row["raw_name"] in dev_mcp_writes()
         definition = json.loads(row["definition_json"])
         tool = {"name": f"{row['conn_id']}__{row['gw_name']}", "description": definition.get("description", ""),
                 "inputSchema": definition.get("inputSchema", {"type": "object"})}
@@ -1100,7 +1113,7 @@ class StateStewardConnections:
                     raise StateGraphError("invalid_tools")
                 # Step 24.4c (7.8.24 "九" 5): dev-mcp's write tools stay outward and egress (every
                 # call confirmed by the owner); its subagent_* tools are never allowed.
-                if locked and ((item["raw_name"] in DEV_MCP_WRITES and False in (item.get("outward"), item.get("egress")))
+                if locked and ((item["raw_name"] in dev_mcp_writes() and False in (item.get("outward"), item.get("egress")))
                                or (item["raw_name"].startswith(DEV_MCP_SUBAGENT) and item.get("allowed") is True)):
                     raise StateGraphError(DEV_MCP_LOCKED)
                 row = conn.execute("SELECT * FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?",
@@ -1351,14 +1364,21 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
         if row is None:
             return {"conn_id": conn_id, "gone": True}
         before = current_hash(conn)
+        locked = is_dev_mcp(row)
         for raw, (text, definition) in parsed.items():
+            if locked and "annotations" in definition:
+                # Step 24.4c: dev-mcp's own hints are not read, so they are not stored either -
+                # neither the steward's `tools/list` nor the owner's panel shows dev-mcp's claim
+                # about itself (its `bash` claims `readOnlyHint: true`).
+                definition = {k: v for k, v in definition.items() if k != "annotations"}
+                text = definition_json(definition)
             digest = sha256_text(text)
             old = conn.execute("SELECT definition_json,blocked_args FROM state_steward_connection_tools "
                                "WHERE conn_id=? AND raw_name=?", (conn_id, raw)).fetchone()
             if old is None:
                 annotations = definition.get("annotations") or {}
                 # Step 24.4c: dev-mcp's own hints are not read; every new tool starts outward.
-                outward = 0 if annotations.get("readOnlyHint") is True and not is_dev_mcp(row) else 1
+                outward = 0 if annotations.get("readOnlyHint") is True and not locked else 1
                 blocked = _url_params(definition["inputSchema"]) if row["visibility"] == "public" else []
                 conn.execute("INSERT INTO state_steward_connection_tools(conn_id,raw_name,gw_name,definition_json,"
                              "schema_sha256,allowed,allowed_sha256,outward,egress,blocked_args,daily_cap,first_seen_at,"

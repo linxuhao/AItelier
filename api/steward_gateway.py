@@ -790,7 +790,7 @@ class Gateway:
                     if (row["visibility"] != "private" or entry["raw_name"].startswith(sc.DEV_MCP_SUBAGENT)
                             or not caps.code_pin(conn, row["conn_uid"], entry["raw_name"])):
                         return "tool_not_allowed", None, None, None, None, None
-                    if entry["raw_name"] in sc.DEV_MCP_WRITES:
+                    if entry["raw_name"] in sc.dev_mcp_writes():
                         entry = {**entry, "outward": True, "egress": True}
                 if sc.blocked_present(arguments, entry["blocked_args"]) or (
                         row["visibility"] == "public"

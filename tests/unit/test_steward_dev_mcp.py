@@ -283,6 +283,45 @@ def test_discovery_ignores_dev_mcps_hints_and_every_new_tool_is_outward(world):
         n["name"]: (1, 1, 0) for n in DEV_TOOLS}
 
 
+def test_dev_mcps_own_annotations_are_not_stored_served_or_shown(world):
+    """dev-mcp's `bash` claims `readOnlyHint: true`; 24.4c's "dev-mcp's own hints are not read"
+    holds for what is SERVED too: the stored definition carries no annotations, so neither the
+    steward's `tools/list` nor the owner's panel (`list_connection_tools` copies the stored
+    annotations) describes the host shell as read-only. Another connection keeps its own."""
+    dev(world)
+    discover(world, "dev", tools=DEV_TOOLS)
+    allow(world, ["bash", "list_dir"])
+    with world.db.get_connection() as conn:
+        served = {e["raw_name"]: e["tool"] for e in sc.effective(conn)}
+    assert "annotations" not in served["bash"] and "annotations" not in served["list_dir"]
+    with world.db.get_connection() as conn:
+        stored = {r["raw_name"]: json.loads(r["definition_json"]) for r in conn.execute(
+            "SELECT raw_name, definition_json FROM state_steward_connection_tools WHERE conn_id='dev'")}
+    assert stored and all("annotations" not in definition for definition in stored.values())
+    add(world, conn_id="media", visibility="private")
+    discover(world, "media", tools=[_tool("read_file", True)])
+    allow(world, ["read_file"], conn_id="media")
+    with world.db.get_connection() as conn:
+        media = {e["raw_name"]: e["tool"] for e in sc.effective(conn) if e["conn_id"] == "media"}
+    assert media["read_file"]["annotations"] == {"readOnlyHint": True}
+
+
+def test_a_tool_added_to_the_pinnable_list_is_locked_without_a_second_edit(world, monkeypatch):
+    """The lock's set is derived from the pin's own list (`dev_mcp_writes`), so dev-mcp growing
+    a write tool takes ONE edit: a name widened into `DEV_MCP_PINNABLE` starts outward and
+    egress and the panel cannot loosen it - the pair that a widened list did not follow would
+    otherwise be served and pinnable unlocked."""
+    ready_dev(world)
+    monkeypatch.setattr(caps, "DEV_MCP_PINNABLE", caps.DEV_MCP_PINNABLE + ("write_file",))
+    discover(world, "dev", tools=DEV_TOOLS + [_tool("write_file")])
+    assert (rows(world)["write_file"]["outward"], rows(world)["write_file"]["egress"]) == (1, 1)
+    for item in ({"raw_name": "write_file", "outward": False}, {"raw_name": "write_file", "egress": False}):
+        with pytest.raises(StateGraphError, match="locked: dev_mcp"):
+            tools_set(world, [item])
+    assert (rows(world)["write_file"]["outward"], rows(world)["write_file"]["egress"]) == (1, 1)
+    assert "write_file" in sc.dev_mcp_writes()
+
+
 @pytest.mark.parametrize("item", [{"raw_name": "bash", "outward": False}, {"raw_name": "bash", "egress": False},
                                   {"raw_name": "apply_patch", "outward": False},
                                   {"raw_name": "apply_patch", "egress": False, "outward": True}])
@@ -605,7 +644,7 @@ def test_the_judge_refuses_a_public_dev_mcp_row_even_leaked(world, server, upstr
     assert "tools/call" not in upstream.methods
 
 
-@pytest.mark.parametrize("name", sc.DEV_MCP_WRITES)
+@pytest.mark.parametrize("name", sc.dev_mcp_writes())
 def test_the_judge_confirms_a_write_tool_even_served_not_outward(world, server, upstream, monkeypatch, name):
     ready_dev(world)
     owner_turn(world)

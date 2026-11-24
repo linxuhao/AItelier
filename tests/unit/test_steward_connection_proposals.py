@@ -177,10 +177,49 @@ def test_the_stewards_own_browser_is_never_made_public_by_a_proposal(world):
     assert facts(world, "browser")["visibility"] == "private"
 
 
-def test_egress_is_never_taken_off_by_a_proposal(world):
-    ready(world)
-    with pytest.raises(StateGraphError, match="egress_required"):
-        propose(world, "update", **version(world), tools=[tool(world, "web_search", egress=False)])
+def test_a_proposal_may_take_egress_off_and_names_the_tools_for_the_card(world):
+    # An owner-local tool: the steward may propose taking egress off, but the proposal is
+    # created needs_dashboard (egress_off) and the card lists the tools that lose it.
+    ready(world, names=("web_search", "ocr_image"))
+    answer = propose(world, "update", **version(world), external_content=True,
+                     tools=[tool(world, "web_search", egress=False), tool(world, "ocr_image", outward=True)])
+    assert answer["needs_dashboard"] is True and answer["needs_dashboard_reason"] == "egress_off"
+    payload = proposal(world, answer["proposal_id"])["payload"]
+    assert payload["egress_off"] == ["web_search"]
+    assert "tools.web_search.egress" in payload["widened"] and payload["widens"] is True
+    assert payload["external_content"] is True
+    assert tool_row(world, "web_search")["egress"] == 1  # nothing written before approval
+
+
+def test_an_egress_off_proposal_is_never_approved_by_a_chat_phrase(world, monkeypatch):
+    ready(world, names=("web_search",))
+    bind_slack(world, monkeypatch)
+    pid = propose(world, "update", **version(world), tools=[tool(world, "web_search", egress=False)])["proposal_id"]
+    answer = relay(world, f"同意 proposal {pid}", key("m"))
+    assert answer["approval"]["outcome"] == "refused" and answer["approval"]["refusal"] == "needs_dashboard_approval"
+    assert proposal(world, pid)["status"] == "open" and tool_row(world, "web_search")["egress"] == 1
+    assert approve(world, pid)["status"] == "done"
+    assert tool_row(world, "web_search")["egress"] == 0
+
+
+def test_egress_off_already_off_still_needs_the_dashboard(world, monkeypatch):
+    # Nothing widens (the owner took it off already), yet a proposal saying egress: false
+    # is still the dashboard's: the chat phrase never approves an egress_off proposal.
+    ready(world, names=("web_search",))
+    execute(world.owner, "steward_connection_tools_set", {"conn_id": "media", "tools": [
+        {"raw_name": "web_search", "egress": False}]}, allow_write=True)
+    bind_slack(world, monkeypatch)
+    answer = propose(world, "update", **version(world), tools=[tool(world, "web_search", egress=False)])
+    assert answer["needs_dashboard"] is True and answer["needs_dashboard_reason"] == "egress_off"
+    reply = relay(world, f"同意 proposal {answer['proposal_id']}", key("m"))
+    assert reply["approval"]["refusal"] == "needs_dashboard_approval"
+
+
+def test_a_proposal_without_egress_off_names_no_reason(world):
+    ready(world, names=("web_search",))
+    answer = propose(world, "update", **version(world), tools=[tool(world, "web_search", egress=True)])
+    assert answer["needs_dashboard"] is False and "needs_dashboard_reason" not in answer
+    assert "egress_off" not in proposal(world, answer["proposal_id"])["payload"]
 
 
 # --- a field left out is unchanged ---------------------------------------------------------------
@@ -246,8 +285,8 @@ def test_a_new_address_marks_every_tool_egress_again(world):
 def test_every_connection_is_egress_even_on_the_docker_network(world, conn_id, url):
     ready(world, conn_id=conn_id, url=url, names=())
     assert all(t["egress"] for t in registry(world)[1] if t["conn_id"] == conn_id)
-    with pytest.raises(StateGraphError, match="egress_required"):
-        propose(world, "update", conn_id, **version(world, conn_id), tools=[tool(world, "ocr_image", conn_id, egress=False)])
+    answer = propose(world, "update", conn_id, **version(world, conn_id), tools=[tool(world, "ocr_image", conn_id, egress=False)])
+    assert answer["needs_dashboard"] is True and answer["needs_dashboard_reason"] == "egress_off"
 
 
 # --- widening -----------------------------------------------------------------------------------
@@ -269,6 +308,7 @@ def _widen_world(world):
     ({"tools": [("send_message", {"outward": False})]}, True),
     ({"tools": [("web_search", {"outward": True})]}, False),
     ({"tools": [("web_search", {"egress": True})]}, False),
+    ({"tools": [("ocr_image", {"egress": False})]}, True),
     ({"tools": [("web_search", {"blocked_args": ["a"]})]}, True),
     ({"tools": [("web_search", {"blocked_args": ["a", "b", "c"]})]}, False),
     ({"tools": [("web_search", {"daily_cap": None})]}, True),

@@ -205,6 +205,65 @@ describe('the dev-mcp lock in the connections panel', () => {
     expect(byName.list_dir.outward).toBe(true);  // the other tool's edit survives
   });
 
+  it('ticks a whole column at once, skipping locked ticks, and saves it in one call', async () => {
+    const view = await openDevTools();
+    const bulk = (flag: string) => view.container.querySelector(`[data-conn-bulk] [data-bulk="${flag}"]`) as HTMLInputElement;
+    // outward: the free ticks (subagent_start, list_dir) are off; bash's is locked on.
+    expect(bulk('outward').checked).toBe(false);
+    await fireEvent.click(bulk('outward'));
+    expect(tick(view, 'subagent_start', 'outward').checked).toBe(true);
+    expect(tick(view, 'list_dir', 'outward').checked).toBe(true);
+    expect(bulk('outward').checked).toBe(true);
+    // allowed: bash and list_dir are on, subagent_start's is locked off and stays off.
+    expect(bulk('allowed').checked).toBe(true);
+    await fireEvent.click(bulk('allowed'));
+    expect(tick(view, 'bash', 'allowed').checked).toBe(false);
+    expect(tick(view, 'list_dir', 'allowed').checked).toBe(false);
+    expect(tick(view, 'subagent_start', 'allowed').checked).toBe(false);
+    // egress: bash's is locked on and stays on.
+    expect(bulk('egress').checked).toBe(true);
+    await fireEvent.click(bulk('egress'));
+    expect(tick(view, 'list_dir', 'egress').checked).toBe(false);
+    expect(tick(view, 'bash', 'egress').checked).toBe(true);
+    await fireEvent.click(bulk('allowed'));
+    expect(tick(view, 'subagent_start', 'allowed').checked).toBe(false);
+    expect(api.setStewardConnectionTools).not.toHaveBeenCalled();  // nothing saved until Save
+    await fireEvent.click(view.container.querySelector('[data-conn-save-tools]')!);
+    await waitFor(() => expect(api.setStewardConnectionTools).toHaveBeenCalledTimes(1));
+    const byName = Object.fromEntries((api.setStewardConnectionTools.mock.calls[0][1] as {raw_name: string}[])
+      .map(c => [c.raw_name, c]));
+    expect(byName.bash).toMatchObject({allowed: true, outward: true, egress: true});
+    expect(byName.subagent_start).toMatchObject({allowed: false, outward: true, egress: false});
+    expect(byName.list_dir).toMatchObject({allowed: true, outward: true, egress: false});
+  });
+
+  it('a whole-column allow never re-ticks a tool whose description changed', async () => {
+    const view = render(StewardConnectionsView);
+    await waitFor(() => expect(conn(view.container)).not.toBeNull());
+    await fireEvent.click(conn(view.container).querySelector('[data-conn-tools-open]')!);
+    await waitFor(() => expect(view.container.querySelector('[data-tool="web_search"]')).not.toBeNull());
+    const bulk = view.container.querySelector('[data-conn-bulk] [data-bulk="allowed"]') as HTMLInputElement;
+    const allowed = (name: string) => (view.container.querySelector(`[data-tool="${name}"] [data-tick="allowed"]`) as HTMLInputElement).checked;
+    await fireEvent.click(bulk);
+    await fireEvent.click(bulk);
+    expect(allowed('ocr_image')).toBe(true);
+    expect(allowed('web_search')).toBe(false);
+  });
+
+  it('names the whole-column control and the egress-off card note in all eight languages', () => {
+    const keys = ['steward.connAllTools', 'steward.connEgressOff'];
+    langStore.set('en');
+    const english = Object.fromEntries(keys.map(k => [k, t(k)]));
+    for (const key of keys) expect(english[key], key).not.toBe(key);
+    try {
+      for (const lang of LANGS.slice(1)) {
+        langStore.set(lang);
+        for (const key of keys) expect(t(key), `${lang} ${key}`).not.toBe(english[key]);
+        expect(t('steward.connEgressOff'), lang).toContain('{tools}');
+      }
+    } finally { langStore.set('en'); }
+  });
+
   it('names the lock reason in all eight languages and translates a refusal that still arrives', async () => {
     const keys = ['steward.connToolLocked', 'steward.connToolLockedRefused'];
     langStore.set('en');

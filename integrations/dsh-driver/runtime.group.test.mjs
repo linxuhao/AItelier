@@ -722,7 +722,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
       AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory'),
-      // A 'zh' owner: steward.md's own language, so the prompt pin below is the a1416299ee file whole.
+      // A 'zh' owner: steward.md's own language, so the prompt pin below is the daf492274e file whole.
       AITELIER_OWNER_LANGUAGE: 'zh' } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);
@@ -771,8 +771,9 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     assert.equal(new Set(systems.map(system => system.slice(system.indexOf('Your basic capabilities')))).size, 1, 'one text');
     assert.ok(systems.every(system => !system.includes('calme') && !system.includes('calfam')));
     // Overfit review 2026-11-24 (重-11): on the AItelier adapter the steward's role prompt is still
-    // steward.md as it was at a1416299ee, whole (test-fixtures/steward.md.a1416299ee, `git show`n).
-    const baseSteward = await readFile(new URL('./test-fixtures/steward.md.a1416299ee', import.meta.url), 'utf8');
+    // steward.md whole, re-pinned to the text delivered with the gateway-written-error and turn-marking
+    // rules (test-fixtures/steward.md.daf492274e, `git show daf492274e:integrations/dsh-director/steward.md`).
+    const baseSteward = await readFile(new URL('./test-fixtures/steward.md.daf492274e', import.meta.url), 'utf8');
     assert.ok(systems.every(system => system.includes(baseSteward.trim())), 'the adapter\'s steward prompt is steward.md unchanged');
     assert.match(resultOf('b1'), /mcp__sw__calfam__list_events/, trace);
     assert.doesNotMatch(resultOf('b1'), /calme/, trace);

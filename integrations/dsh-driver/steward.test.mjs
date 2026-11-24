@@ -2080,14 +2080,16 @@ test('24.2b: the steward\'s send_user_message has no attachments parameter and n
   assert.equal(sendUserMessageTool({ steward: false, library }).attachments, true, 'a director with the same library has them');
 });
 
-test('overfit review 2026-11-24 (重-10, 重-11): on the AItelier host the steward\'s prompt is steward.md as at a1416299ee, byte for byte, and the plugin records no turn of its own', async () => {
+test('overfit review 2026-11-24 (重-10, 重-11): on the AItelier host the steward\'s prompt is steward.md as at daf492274e, byte for byte, and the plugin records no turn of its own', async () => {
   const { createHash } = await import('node:crypto');
   const { stewardPromptFor, stewardPromptFeatures } = await import('../dsh-director/lib/steward-prompt.mjs');
   const { turnRecorderFor } = await import('../dsh-director/lib/memory/turns.mjs');
   const sha = text => createHash('sha256').update(text, 'utf8').digest('hex');
-  // What index.mjs assembled at a1416299ee: steward.md read whole (the fixture is that file, `git show`n).
-  const base = readFileSync(new URL('./test-fixtures/steward.md.a1416299ee', import.meta.url), 'utf8');
-  assert.equal(sha(base), '9439656623c12e3f383adb7fac6f3762f49aa6d2319dda7aa2b411ada4385ab3', 'the fixture is the base\'s steward.md');
+  // What index.mjs assembles for a zh steward: steward.md read whole. The fixture is that file from the
+  // commit whose tree carries the gateway-written-error and turn-marking rules together with their prose
+  // corrections (`git show daf492274e:integrations/dsh-director/steward.md`); the pin is the file, not the assembly.
+  const base = readFileSync(new URL('./test-fixtures/steward.md.daf492274e', import.meta.url), 'utf8');
+  assert.equal(sha(base), 'b91a5b14561d39ead1523c6a15d3a6b6dcff6b46bf05924203c30c21e7427680', 'the fixture is daf492274e\'s steward.md');
   const now = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
   // With and without the media library (the only part of the steward's capability list an environment changes).
   // A 'zh' owner (AITELIER_OWNER_LANGUAGE=zh, the language steward.md is written for); the test names it, never reading a .env.

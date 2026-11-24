@@ -24,6 +24,7 @@ import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinal
   basicsFlag } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { createOfficeRunner } from './office.mjs';
+import { createCalcRunner } from './calc.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
@@ -635,12 +636,19 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       return answer?.pages?.[0]?.text;
     },
     log: line => officeLog(line) }) : undefined;
+  // Step 24.4b (design-steward 7.8.24 "十"): calculate's sandbox - the pinned calc image
+  // (AITELIER_CALC_IMAGE, the host's environment; unset: off) run as disposable containers, each
+  // job's input directory in <state dir>/calc-tmp.
+  let calcLog = () => {};
+  const calcRunner = steward && library ? createCalcRunner({ image: env.AITELIER_CALC_IMAGE,
+    tmpRoot: typeof stateDir === 'string' && stateDir.startsWith('/') ? join(stateDir, 'calc-tmp') : undefined,
+    log: line => calcLog(line) }) : undefined;
   // Step 24.4 (design-steward 7.8.24 "八"): the PDF reader's and the office converter's self-checks
   // and the owner's memory, as one closed-code flag in its own status slot (setBasicsFlag, which
   // events() hands over: until then nothing is sent; events() sends the state it finds). Read
   // again whenever either logs (each self-check logs its outcome); sent only when it changed.
   let basicsSink = () => {}, memoryError;
-  const basicsChanged = () => { if (steward) basicsSink(basicsFlag({ pdf: pdfReader?.status(), office: officeRunner?.status(), memoryError })); };
+  const basicsChanged = () => { if (steward) basicsSink(basicsFlag({ pdf: pdfReader?.status(), office: officeRunner?.status(), calc: calcRunner?.status(), memoryError })); };
   // Step 23 group wake (iss-0d20ef5dd9a44cd0): the optional directorHost hook for a group
   // @-turn's images. The plugin picks this group's own kept refs (and the message's own files)
   // and calls `line`; the read/saveImage step is the same wakeMedia the owner's wake uses, so
@@ -720,6 +728,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         basicsChanged();
       };
       officeRunner?.start().catch(error => ctx.logger.warn(`office_unavailable: ${String(error?.code ?? 'error')}`));
+      // Off without an image; its self-check runs on its own slot, beside the converter's.
+      calcLog = line => {
+        if (line.startsWith('calc_unavailable') && !line.endsWith('no_image_configured')) ctx.logger.warn(line); else ctx.logger.info(line);
+        if (!line.startsWith('calc_job ')) basicsChanged();
+      };
+      calcRunner?.start().catch(error => ctx.logger.warn(`calc_unavailable: ${String(error?.code ?? 'error')}`));
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
       const sendRequest = async (path, body, signal, readAs) => {
@@ -1232,7 +1246,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   // turn's send_media is a steward message with the file (State, then the plugin's mirror).
   library ? { media: mediaOps({ request: (...args) => request(...args), library, gatewayFetch,
     owner: { request: (...args) => toolRequest(...args), project, mirror: (...args) => mirrorOwnerMessage?.(...args) },
-    reader: pdfReader, routeInput, office: officeRunner }) } : {});
+    reader: pdfReader, routeInput, office: officeRunner, calc: calcRunner }) } : {});
   // Step 24.2b: a director's own library. It has no gateway (fetch refuses) and no group.
   else if (library) {
     const { postGroup: _group, ...media } = mediaOps({ request: (...args) => request(...args), library,

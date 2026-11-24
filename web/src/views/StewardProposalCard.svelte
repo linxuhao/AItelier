@@ -6,6 +6,7 @@
   import { stateProjectHref } from '../lib/stateGraph';
   import { t } from '../lib/i18n.svelte';
   import StewardConnectionChange from './StewardConnectionChange.svelte';
+  import StewardCapabilityRoute from './StewardCapabilityRoute.svelte';
   const { proposal, onupdate, onreload, onrevise, onconnect }: {
     proposal: StewardProposal;
     /** A newer form of this row: the decision's answer, or the current row a 409 carried. */
@@ -107,6 +108,7 @@
     {/if}
   </dl>
   {#if proposal.kind === 'connection_change'}<StewardConnectionChange {proposal} {onconnect} />{/if}
+  {#if proposal.kind === 'capability_route'}<StewardCapabilityRoute {proposal} />{/if}
   {#if isStop}
     <section class="impact" aria-label={t('steward.impactHeading')}>
       <strong>{t('steward.impactHeading')}</strong>

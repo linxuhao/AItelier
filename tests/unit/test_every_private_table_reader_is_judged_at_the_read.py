@@ -724,7 +724,9 @@ STEWARD_TABLES = ("state_steward_proposals", "state_steward_memory_requests", "s
                   "state_steward_tool_calls",
                   "state_owner_question_pushes", "state_owner_question_answers",
                   # Step 24.1b: the confirmations and the dashboard-message marks.
-                  "state_steward_confirmations", "state_steward_dashboard_messages")
+                  "state_steward_confirmations", "state_steward_dashboard_messages",
+                  # Step 24.4: the basic-capabilities routes.
+                  "state_steward_capabilities")
 
 
 def _steward_wake_with_canary(db, tmp_path):
@@ -771,6 +773,8 @@ def _steward_calls(svc):
                                                                  {"conn_id": C.STEWARD_CONNECTION}),
         "list_connections": lambda: svc.steward_connections.list_connections(),
         "list_connection_tools": lambda: svc.steward_connections.list_connection_tools(C.STEWARD_CONNECTION),
+        # Step 24.4: the owner's basic-capabilities routes (the dashboard's read).
+        "steward_capabilities rows": lambda: svc.steward_capabilities.rows(),
         "execute list_pushed_owner_questions": lambda: execute(svc, "list_pushed_owner_questions", {}),
         "list_pushed": lambda: svc.owner_questions.list_pushed(),
         # Step 24.2b: the hosts' ack of a dashboard upload (refused before any read: no driver).
@@ -928,6 +932,15 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("GET", f"/api/dsh-drivers/{C.OPEN}/conversation/media/{C.CONVERSATION_UPLOAD}", None),
             ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/client", {"client_id": "c"}),
             ("PUT", f"/api/steward/connections/{C.STEWARD_CONNECTION}/oauth/scope", {"scope": "s"}),
+            # Step 24.4: the basic-capabilities table, its writes and the two State commands.
+            ("GET", "/api/steward/capabilities", None),
+            ("PUT", "/api/steward/capabilities/draw", {"request_key": "c", "expect_version": 1,
+                                                       "route": [{"kind": "missing"}]}),
+            ("DELETE", "/api/steward/capabilities/draw?expect_version=1", None),
+            ("DELETE", "/api/steward/capabilities", None),
+            ("POST", "/api/state/commands/steward_capability_set",
+             {"request_key": "c", "cap_id": "draw", "expect_version": 1, "unset": True}),
+            ("POST", "/api/state/commands/steward_capabilities_clear", {"request_key": "c2"}),
         ]
         results = {}
         try:
@@ -969,6 +982,8 @@ class TestTheStewardReadersRefuseTheAnonymous:
             assert [tuple(r) for r in conn.execute("SELECT code_no, closed_at FROM state_owner_question_pushes")] \
                 == [(7, None)]
             assert conn.execute("SELECT COUNT(*) FROM state_owner_question_answers").fetchone()[0] == 1
+            assert [tuple(r) for r in conn.execute("SELECT cap_id, version FROM state_steward_capabilities")] \
+                == [("draw", 1)]
 
 
 def _uploads():

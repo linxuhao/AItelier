@@ -1,0 +1,57 @@
+{
+ "source": "the tool names and descriptions a media MCP server listed on 2026-11-24 (video_render_shot and vision_critique: first sentence only), plus paint_v2: a renamed tool only its description identifies (design-steward 7.8.24 step 0.4)",
+ "tools": [
+  {
+   "name": "generate_image",
+   "description": "使用 Qwen-Image-2.1 生成图片 (文生图/图生图), 保存为文件并返回下载 URL。\n\n不快: 1024x1024 文生图约 115 秒, 带参考图约 270 秒 (20 步 + 真 CFG)。换来的是\n中英文都能写对字 —— FLUX.2 Klein 那条路 22 秒出图, 但中文是假字。"
+  },
+  {
+   "name": "ocr_image",
+   "description": "使用 Qwen3.6-27B 提取图片中的文字并描述场景。"
+  },
+  {
+   "name": "ocr_pdf",
+   "description": "使用 Qwen3.6-27B 提取 PDF 中所有页面的文字。"
+  },
+  {
+   "name": "transcribe_audio",
+   "description": "使用 Qwen3-ASR 转录音频。"
+  },
+  {
+   "name": "web_search",
+   "description": "使用 SearXNG 搜索网页。"
+  },
+  {
+   "name": "web_fetch",
+   "description": "抓取网页内容并提取纯文本。自动提取页面中的图片、音频、视频、PDF 等非文本资源 URL。\n可选通过 prompt 参数调用 Qwen3.6-27B 进行内容分析,或通过 parse_media 参数自动 OCR 图片+转录音频。"
+  },
+  {
+   "name": "generate_music",
+   "description": "使用 Stable Audio Open 生成音乐, 保存为 WAV 文件并返回下载 URL。"
+  },
+  {
+   "name": "generate_speech",
+   "description": "用 Qwen3-TTS VoiceDesign 合成人声对白, 保存为 WAV 并返回下载 URL。\n\n做游戏 NPC 对白用这个。它不是克隆某个真人的嗓子 —— 虚构角色没有录音 ——\n而是从一段\"这个人听起来是什么样\"的描述直接设计出声音, 所以 voice 参数\n写得越具体, 角色越像本人。同一段 voice 描述 + 同一个 seed 可复现,\n整部游戏里同一个 NPC 用同一组参数就能保持音色一致。"
+  },
+  {
+   "name": "actor_tts",
+   "description": "让某个已铸声的角色说一句台词, 音色与他之前每一句都一致。\n\n做游戏 NPC 对白用这个, 不要用 generate_speech —— 后者每句音色会漂。\n角色不存在会告诉你先去 create_actor。"
+  },
+  {
+   "name": "gen_sfx",
+   "description": "合成一枚 sfxr/jsfxr 风格的游戏音效 (纯程序化, 不用模型), 返回 WAV 下载 URL。\n\n不要用 generate_music 做音效: 那是 Stable Audio 扩散模型, 出来的是几十秒的宽带\n糊音。游戏音效是 10~200ms 的瞬态, 要精确、即时、可复现 —— 本工具毫秒级出结果,\n同一个 seed 逐字节可复现。"
+  },
+  {
+   "name": "video_render_shot",
+   "description": "Queue an immutable candidate take; returns immediately. Reuse request_key only for an identical retry."
+  },
+  {
+   "name": "vision_critique",
+   "description": "用 Qwen3.8-27B 按你给的问题看图并作答; 可以一次给多张图 (画面点评/美术审查/多帧对比)。"
+  },
+  {
+   "name": "paint_v2",
+   "description": "根据文字描述生成图片"
+  }
+ ]
+}

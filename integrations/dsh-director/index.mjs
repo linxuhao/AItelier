@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
+import { basicsSection } from './lib/basics.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
 import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
 import { attachmentLine } from './lib/media.mjs';
@@ -182,7 +183,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, rootRole, roles,
     texts: { sectionName: labels.sectionPrefix + ':tool-discovery', section: texts.toolDiscoverySection,
       searchDescription: texts.tools.search_tools },
-    ...(stewardCatalog ? { catalog: sessionId => stewardCatalog.catalog(sessionId) } : {}) });
+    ...(stewardCatalog ? { catalog: sessionId => stewardCatalog.catalog(sessionId),
+      // Step 24.4 (design-steward 7.8.24 "七" 2): search_tools("basics:<id>") answers a row's pins.
+      pinned: id => stewardCatalog.pinned(id) } : {}) });
   // Step 24.2 (7.8.12): with the host's media library, the urls this turn's connection tools
   // returned (send_media fetches only those, through the connection that returned them).
   const mediaHost = stewardCatalog && host.capabilities.includes('media') ? host.media : undefined;
@@ -207,7 +210,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       if (event?.type === 'turn/start') urlLedger?.reset();
     });
     ctx.on('agent/pre-step', async (payload, next) => {
-      if (payload?.agent?.session?.id === config.sessionId) await stewardCatalog.preStep(payload.signal);
+      if (payload?.agent?.session?.id === config.sessionId) { await stewardCatalog.preStep(payload.signal); syncBasics(); }
       return next();
     });
   }
@@ -278,7 +281,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // it runs inner): nobody's input, never a reason to put a turn's input back.
     neutralKinds: [labels.clock],
     // Step 24 (7.8.8): the connection tools a group turn may call are the catalog's (public only then).
-    connectionTools: () => stewardCatalog?.catalog(config.sessionId) }) : undefined;
+    connectionTools: () => stewardCatalog?.catalog(config.sessionId),
+    // Step 24.4 (design-steward 7.8.24 "七" 4, pending 36): the connection tools pinned after
+    // memory's native entry wait after a group turn, reads too, until the owner writes.
+    pausedExtra: name => stewardCatalog?.pinned('memory')?.includes(name) === true }) : undefined;
   if (groupTurns) {
     // Synchronous, keyed on the caller's session; call_tool reaches the same guard. The turn DSH
     // has open keys the bookkeeping: a group turn's call count is that turn's, from 0, and counts
@@ -333,6 +339,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const dormantMinuteMs = Number(config.dormantMinuteMs) > 0 ? Number(config.dormantMinuteMs) : 60 * 1000;
   // idleReview is created after the agent; tools reach it only when called.
   let agent, agentCtx, idleReview, waiting = false, disposed = false, resolveAgent;
+  // Step 24.4: registers or removes the basic-capabilities section before each root step (runtimeSection sets it).
+  let syncBasics = () => {};
   const agentExists = new Promise(resolve => { resolveAgent = resolve; });
   // watch_process: pid -> { note, since }. One poller while any watch exists.
   const watches = new Map();
@@ -352,12 +360,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     }
     if (!watches.size) { clearInterval(watchTimer); watchTimer = undefined; }
   };
-  let hostError = '', completionError = '', routeFlag = '';
+  let hostError = '', completionError = '', routeFlag = '', basicsFlag = '';
   let activity = Promise.resolve();
   const progress = op('progress');
   // Dormant is still idle, reported apart so a dashboard can say "asleep", not "idle".
   const currentPhase = () => waiting ? completionError ? 'failed' : idleReview?.dormant ? 'dormant' : 'waiting' : 'running';
-  const report = (phase, error = statusError({ completion: completionError, host: hostError, route: routeFlag }), event) => {
+  const report = (phase, error = statusError({ completion: completionError, host: hostError, route: routeFlag, basics: basicsFlag }), event) => {
     // One report per call, in order; `phaseReport` names the live child SESSIONS,
     // reconciled against the registry, never the runIds the registry cannot answer for.
     const body = phaseReport({ phase, children, error, event });
@@ -467,6 +475,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
     // Step 24.2c (7.8.12b "九"): the steward's route flag, in a slot of its own (review MP-1).
     setRouteFlag: text => { routeFlag = typeof text === 'string' ? text : ''; return report(currentPhase()); },
+    // Step 24.4 (design-steward 7.8.24 "八"): the host's basic-capabilities self-checks, a slot of their own.
+    setBasicsFlag: text => { basicsFlag = typeof text === 'string' ? text : ''; return report(currentPhase()); },
     isDisposed: () => disposed,
     // Step 24.1a: true while the steward's turn record is marked external (lib/catalog.mjs):
     // the host marks the letters it writes then.
@@ -553,7 +563,15 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // whatever it did not call is installed right after its setup.
     let sectionDone = false, hooksDone = false;
     const runtimeSection = () => { if (sectionDone) return; sectionDone = true;
-      scope.systemPrompt.section({ name: labels.sectionPrefix + ':driver-runtime', order: 12, interpolate: false, text: runtimeSkill }); };
+      scope.systemPrompt.section({ name: labels.sectionPrefix + ':driver-runtime', order: 12, interpolate: false, text: runtimeSkill });
+      // Step 24.4 (design-steward 7.8.24 "七" 1): the owner's basic-capabilities table, right after
+      // the role prompt, in the same scope - only for a steward with a host catalog and only while
+      // the table has a row; the same bytes in an owner turn and a group turn.
+      if (stewardCatalog) {
+        syncBasics = basicsSection(scope, { name: labels.sectionPrefix + ':basics', order: 13, basics: () => stewardCatalog.basics,
+          registered: context => ctx.tools.schemas(context?.agent ?? context?.scope ?? agent).map(schema => schema.name) });
+        syncBasics();
+      } };
     const contextHooks = () => {
       if (hooksDone) return; hooksDone = true;
       scope.on('session/event', (session, event) => {
@@ -584,6 +602,9 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     await op('setup')(scope, subject, { ...api, injection, runtimeSection, contextHooks });
     runtimeSection();
     contextHooks();
+    // Step 24.4: DSH assembles a step's prompt before that step's pre-step (where the cache is read),
+    // so the cache is read once here - the first step after a start already carries the table.
+    if (stewardCatalog) { await stewardCatalog.refresh(); syncBasics(); }
     // Director-only plan tools: scope-registered, so native children never see them.
     // A plan is expanded from a reviewed repository template, never authored per
     // dispatch: there is deliberately no way to pass items through this tool.

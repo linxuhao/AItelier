@@ -500,11 +500,16 @@ export function apply(ctx) {
     async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 64000 }, defaultMaxTokens: 1024 }; }
     async *stream(options) {
       const all = JSON.stringify(options.messages), last = options.messages.at(-1);
+      if (options.sessionId === 'gcf-root' && options.purpose !== 'compaction')
+        await fetch(process.env.AITELIER_URL + '/test/system', { method: 'POST', body: JSON.stringify({ system: options.messages
+          .filter(m => m.role === 'system').map(m => typeof m.content === 'string' ? m.content : m.content.map(b => b.text ?? '').join('')).join('\n') }) }).catch(() => {});
       let block;
       if (options.purpose === 'compaction' || !options.tools?.length || options.sessionId !== 'gcf-root') block = { type: 'text', text: 'Fixture.' };
       else if (last?.role === 'tool' && CHAIN[last.toolCallId]) { const [id, name, args] = CHAIN[last.toolCallId]; block = once(id, () => tool(id, name, args)); }
       else if (last?.role === 'tool' && last.toolCallId === 'c6') block = { type: 'text', text: 'GROUP_CONFIRM_SENT' };
-      else if (last?.role === 'tool' && last.toolCallId === 'r1') block = { type: 'text', text: 'GROUP_RAN' };
+      // Step 24.4: after the confirmed call, the calendar's pins in this group turn.
+      else if (last?.role === 'tool' && last.toolCallId === 'r1') block = once('b1', () => tool('b1', 'search_tools', { query: 'basics:calendar' }));
+      else if (last?.role === 'tool' && last.toolCallId === 'b1') block = { type: 'text', text: 'GROUP_RAN' };
       else if (all.includes('CONFIRM_FLOW') && !done.has('c1')) block = once('c1', () => tool('c1', 'call_tool', read('calfam')));
       else if (all.includes('确认 K7Q2A') && !done.has('r1')) block = once('r1', () => tool('r1', 'run_confirmed', { code: 'K7Q2A' }));
       block ??= { type: 'text', text: 'Done.' };
@@ -579,7 +584,12 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       { conn_id: 'calfam', visibility: 'public', usable: true, tools: [
         { name: 'mcp__sw__calfam__list_events', outward: false, egress: false },
         { name: 'mcp__sw__calfam__create_event', outward: true, egress: true }] },
-      { conn_id: 'calme', visibility: 'private', usable: true, tools: [{ name: 'mcp__sw__calme__list_events', outward: false, egress: false }] }] };
+      { conn_id: 'calme', visibility: 'private', usable: true, tools: [{ name: 'mcp__sw__calme__list_events', outward: false, egress: false }] }],
+    // Step 24.4 (design-steward 7.8.24): the owner's table pins the private calendar first, the family one second.
+    basics: { rows: [{ id: 'calendar', route: [
+      { kind: 'conn', visibility: 'private', pinned_name: 'mcp__sw__calme__list_events', available: true },
+      { kind: 'conn', visibility: 'public', pinned_name: 'mcp__sw__calfam__list_events', available: true }] }] } };
+  const systems = [];
   let relays = 0;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -591,6 +601,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     if (url === '/test/group-send') { seen.groupSends.push(body); return send({}); }
     if (url === '/test/inbound') { seen.inbound.push(body); return send({}); }
     if (url === '/test/mcp') { seen.mcp.push(body); return send({}); }
+    if (url === '/test/system') { systems.push(body.system); return send({}); }
     if (url === '/test/wait-first-reply') { await replied; return send({}); }
     if (url.startsWith('/test/')) return send({});
     seen.state.push({ path: url, body });
@@ -699,6 +710,16 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     const groupTurns = commands('set_steward_turn_audience').filter(a => a.body.audience === 'group').map(a => a.body.turn);
     assert.ok(gets.length && gets.every(s => s.body.turn === groupTurns.at(-1)) && groupTurns.length >= 2, trace);
     assert.deepEqual(seen.mcp.filter(m => m.name === 'mcp__sw__calfam__create_event').map(m => m.args), [created]);
+    // Step 24.4 (7.8.24 "七" 1-2): the table's section is in the steward's system prompt from the first
+    // step on (registered by the plugin in a real DSH), one text for every request; it names no
+    // connection; basics:calendar in a group turn answers the public pin only.
+    const LINE = '- calendar (calendar, events, appointments): 1) connection tool - search_tools("basics:calendar") (owner turns only); 2) connection tool - search_tools("basics:calendar") (owner and group turns).';
+    assert.ok(systems.length >= 2 && systems.every(system => system.includes(LINE)), 'the basics section in every root request: '
+      + JSON.stringify(systems.map(system => system.includes(LINE))) + '\n' + (systems.find(system => !system.includes(LINE)) ?? '').slice(-1500) + trace);
+    assert.equal(new Set(systems.map(system => system.slice(system.indexOf('Your basic capabilities')))).size, 1, 'one text');
+    assert.ok(systems.every(system => !system.includes('calme') && !system.includes('calfam')));
+    assert.match(resultOf('b1'), /mcp__sw__calfam__list_events/, trace);
+    assert.doesNotMatch(resultOf('b1'), /calme/, trace);
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

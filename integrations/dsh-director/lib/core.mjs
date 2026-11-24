@@ -430,14 +430,15 @@ export class LiveChildren {
 
 /** The status error a report carries (backend `error`, at most 2000 characters): the completion's
  *  error, else the host's, and the steward's route flag on a line of its own (review MP-1: the flag
- *  has its own slot, so clearing or setting a host error never erases or hides it). The first part
- *  is cut, never the flag, when both do not fit. */
+ *  has its own slot, so clearing or setting a host error never erases or hides it), then (step
+ *  24.4, design-steward 7.8.24 "八") the host's basic-capabilities self-check flag on its own line,
+ *  in a slot of its own too. The first part is cut, never a flag, when they do not all fit. */
 export const STATUS_ERROR_MAX = 2000;
-export function statusError({ completion = '', host = '', route = '' } = {}) {
-  const first = completion || host;
-  if (!route) return first.slice(0, STATUS_ERROR_MAX);
-  if (!first) return route.slice(0, STATUS_ERROR_MAX);
-  return first.slice(0, Math.max(0, STATUS_ERROR_MAX - route.length - 1)) + '\n' + route;
+export function statusError({ completion = '', host = '', route = '', basics = '' } = {}) {
+  const first = completion || host, flags = [route, basics].filter(Boolean).join('\n');
+  if (!flags) return first.slice(0, STATUS_ERROR_MAX);
+  if (!first) return flags.slice(0, STATUS_ERROR_MAX);
+  return first.slice(0, Math.max(0, STATUS_ERROR_MAX - flags.length - 1)) + '\n' + flags;
 }
 
 /** The phase report body: what this driver is doing. `subagents` names the live

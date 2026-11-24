@@ -97,6 +97,10 @@ export interface DirectorApi {
    *  undefined to clear it. A slot of its own: the status carries it on its own line after the
    *  host error, and setHostError/clearHostError never touch it. */
   setRouteFlag(text: string | undefined): Promise<void>;
+  /** Step 24.4 (design-steward 7.8.24 "八"): the host's basic-capabilities self-check flag (closed
+   *  codes, e.g. "basics: pdf_reader_unavailable; memory_unavailable"), or undefined to clear it.
+   *  A slot of its own, on its own line after the route flag. */
+  setBasicsFlag(text: string | undefined): Promise<void>;
   isDisposed(): boolean;
   /** v1.2: the owner's memory store when config.memory is set (lib/memory/store.mjs), else
    *  undefined. A host records each owner/steward turn with memory.recordTurn(turnId,
@@ -294,7 +298,12 @@ export interface DirectorHost {
    *  catalog (lib/catalog.mjs); undeclared, it finds none.
    *  - connections: the connection cache - `{connections: [{conn_id, visibility, usable,
    *    tools: [{name, egress, outward, ...}]}], effective_tools: [public names],
-   *    effective_hash}`, the same set the host's MCP gateway serves.
+   *    effective_hash}`, the same set the host's MCP gateway serves. Step 24.4 (design-steward
+   *    7.8.24 "四"): with the owner's basic-capabilities table, also `basics: {rows: [{id, route:
+   *    [{kind: 'native'|'missing'|'host'|'conn', tool?, visibility?, pinned_name?, available}]}]}`
+   *    (only the rows set, each route in its order; a conn entry's pinned_name is its gateway
+   *    name, absent when it does not resolve; available is the configuration's word only), absent
+   *    while no row is set - then no basics section and no `basics:<id>` query.
    *  - resyncDue: effective tools still missing from the registry a minute later.
    *  - humanInput: whether one input text carries a person's message (synchronous).
    *  - writes (optional): the names of the host's own writing tools (letters, reminders) that,

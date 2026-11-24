@@ -8,6 +8,7 @@ import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wakeTakesImages } from './model.mjs';
 import { officeMediaOps } from './office.mjs';
+import { HOST_TOOLS } from '../dsh-director/lib/basics.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
  *  conversation recorded into memory, the owner-message check, the read-only portfolio
@@ -221,15 +222,43 @@ export async function boundGroupsSection(request, signal) {
   return names.length ? '\n\nYour owner\'s bound family groups (by name):\n' + JSON.stringify(names) : '';
 }
 
+/** Step 24.4 (design-steward 7.8.24 "五" 2): a capability_route's entries as the steward's
+ *  snapshot names them - each entry's kind only, and a host tool by its constant name
+ *  ("native", "missing", "host:read_document", "conn"); a connection entry never by a name (a
+ *  gateway name, raw name or anything else the steward or a server wrote). */
+export const routeEntries = route => (Array.isArray(route) ? route : []).map(entry => {
+  const kind = typeof entry === 'string' ? entry : entry?.kind, tool = typeof entry === 'string' ? entry : entry?.tool;
+  if (kind === 'native' || kind === 'missing') return kind;
+  return HOST_TOOLS.includes(tool) ? 'host:' + tool : 'conn';
+});
+
 /** The steward's open proposals, for its snapshot. A connection_change keeps only op,
  *  conn_id and widens: its stored payload carries the card's snapshot (each tool's whole
  *  definition, written by the upstream server) and tool names, the server's own text,
  *  which reaches the model only through connection_tools / connection_refresh, where
- *  the turn is marked external (7.8.4). */
+ *  the turn is marked external (7.8.4). A capability_route (step 24.4, 7.8.24 "五" 2) keeps
+ *  only {cap_id, entries} and no `card` (the upstream descriptions the dashboard card shows). */
 export async function openProposals(request, signal) {
   const listed = await request('/api/state/query/list_steward_proposals', { status: 'open', limit: 50 }, signal);
-  return ((listed.result ?? listed).proposals ?? []).map(p => p.kind !== 'connection_change' ? p
-    : { ...p, payload: { op: p.payload?.op, conn_id: p.payload?.conn_id, widens: p.payload?.widens } });
+  return ((listed.result ?? listed).proposals ?? []).map(p => {
+    if (p.kind === 'connection_change') return { ...p, payload: { op: p.payload?.op, conn_id: p.payload?.conn_id, widens: p.payload?.widens } };
+    if (p.kind !== 'capability_route') return p;
+    const { card: _card, ...rest } = p;
+    // The stored payload's resolved entries (the backend's prepare); the steward's own route list
+    // when a row carries only that.
+    return { ...rest, payload: { cap_id: p.payload?.cap_id, entries: routeEntries(p.payload?.entries ?? p.payload?.route) } };
+  });
+}
+
+/** Step 24.4 (design-steward 7.8.24 "八"): the host's basic-capabilities self-checks for the
+ *  driver status line, from closed codes only ('' when all are fine): the PDF reader's self-check
+ *  failed, the office converter's did (an office converter with no image configured is off, not
+ *  failed), the owner's memory did not open. A check still pending says nothing yet. */
+export function basicsFlag({ pdf, office, memoryError } = {}) {
+  const codes = [...(pdf?.state === 'unavailable' ? ['pdf_reader_unavailable'] : []),
+    ...(office?.state === 'unavailable' && office.reason !== 'no_image_configured' ? ['office_unavailable'] : []),
+    ...(memoryError ? ['memory_unavailable'] : [])];
+  return codes.length ? 'basics: ' + codes.join('; ') : '';
 }
 
 // ---- letters: replying to a director and marking a letter read (owner 2026-11-17) ----

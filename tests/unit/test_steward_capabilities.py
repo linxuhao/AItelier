@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import socket
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -182,9 +183,10 @@ def test_a_ticked_connection_tool_is_mcp_and_names_that_connection_and_tool(clie
     assert transcribe["tool"] == "transcribe_audio"
     assert CONN_ID in transcribe["detail"] and "transcribe_audio" in transcribe["detail"]
     # Ticking one tool does not carry the other rows with it.
-    for cap_id in ("tts", "ocr"):
-        assert table[cap_id]["provider"] == "missing"
-        assert no_name(table[cap_id])
+    assert table["tts"]["provider"] == "missing"
+    assert no_name(table["tts"])
+    # Step 24.4: reading text in an image is the model's own (the owner), like vision.
+    assert table["ocr"]["provider"] == "native"
     assert table["vision"]["provider"] == "native"
 
 
@@ -193,14 +195,17 @@ def test_no_connection_names_nobody(client, world, deployment_facts):
     assert len(table) == 18
     # The owner's list is fixed and translation is not on it ("everyone does that").
     assert "translate" not in table
-    # The only rows with a deployment fact in this fixture are vision and pdf.
-    assert [cap_id for cap_id, row in table.items() if row["provider"] == "native"] == ["vision", "pdf"]
+    # The only rows with a deployment fact in this fixture are vision, ocr, pdf and memory.
+    assert [cap_id for cap_id, row in table.items() if row["provider"] == "native"] == ["vision", "ocr", "pdf",
+                                                                                         "memory"]
     for cap_id, row in table.items():
-        if cap_id not in ("vision", "pdf"):
+        if cap_id not in ("vision", "ocr", "pdf", "memory"):
             assert row["provider"] == "missing", cap_id
             assert no_name(row)
-    for cap_id in ("transcribe", "tts", "ocr"):
+    for cap_id in ("transcribe", "tts"):
         assert no_name(table[cap_id])
+    # Step 24.4: ocr is native now - its detail is the steward route, and it names no connection.
+    assert table["ocr"]["conn_id"] is None and table["ocr"]["tool"] is None
 
 
 def test_unticking_one_tool_flips_only_that_row(client, world, connection, deployment_facts):
@@ -231,7 +236,9 @@ def test_removing_the_one_deployment_fact_flips_only_vision(client, world, conne
     after = rows(client)
     assert after["vision"]["provider"] == "missing"
     assert no_name(after["vision"])
-    for cap_id in before.keys() - {"vision"}:
+    # Step 24.4: ocr reads the same fact (the model sees the image), so it flips with vision.
+    assert before["ocr"]["provider"] == "native" and after["ocr"]["provider"] == "missing"
+    for cap_id in before.keys() - {"vision", "ocr"}:
         assert verdicts(after)[cap_id] == verdicts(before)[cap_id], cap_id
         assert after[cap_id] == before[cap_id], cap_id
 
@@ -295,3 +302,110 @@ def test_a_dual_fact_row_prefers_native_then_falls_to_the_tool(client, world, co
     assert after["pdf"]["conn_id"] == CONN_ID
     assert after["pdf"]["tool"] == "ocr_pdf"
     assert after["pdf"]["detail"] == f"{CONN_ID}: ocr_pdf"
+
+
+# --- step 24.4: the settable routes (design-steward 7.8.24) --------------------------------------
+
+SIX = ("id", "label", "provider", "conn_id", "tool", "detail")
+# The director's read-only table exactly as main had it before step 24.4, and its read: the
+# empty-table answer is compared with it field by field, on the same facts.
+PRE_24_4 = (
+    ("vision", "看图 (Vision)", None, "steward_image_route"), ("ocr", "图片转文字 (OCR)", "ocr_image", None),
+    ("pdf", "读 PDF", "ocr_pdf", "pdf_reader"), ("office_read", "读 Word/Excel/PPT", None, None),
+    ("office_write", "生成 Office 文档", None, None), ("transcribe", "语音转文字", "transcribe_audio", None),
+    ("tts", "发语音条", "generate_speech", None), ("draw", "画图", "generate_image", None),
+    ("music", "生成音乐", "generate_music", None), ("sfx", "音效", "gen_sfx", None), ("video", "视频", None, None),
+    ("search", "联网搜索", "web_search", None), ("fetch", "读网页", "web_fetch", None), ("email", "邮件", None, None),
+    ("calendar", "日历/提醒", None, None), ("cloud_files", "网盘", None, None),
+    ("memory", "记忆与历史对话", None, None), ("code", "计算/跑代码", None, None))
+MEDIA_TOOLS = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "steward_media_tools.json")
+                         .read_text(encoding="utf-8"))["tools"]
+
+
+def pre_change_rows(world):
+    listed = router._listed_connections(world.owner)
+    out = {}
+    for cap_id, label, tool_name, native_fact in PRE_24_4:
+        fact = router._native_fact(native_fact, world.owner) if native_fact else None
+        found = router._mcp_tool(listed, tool_name) if not fact and tool_name else None
+        conn_id, tool = found or (None, None)
+        out[cap_id] = {"id": cap_id, "label": label, "provider": "native" if fact else "mcp" if tool else "missing",
+                       "conn_id": conn_id, "tool": tool, "detail": fact or (f"{conn_id}: {tool}" if tool else None)}
+    return out
+
+
+def six(row):
+    return {key: row[key] for key in SIX}
+
+
+def test_an_empty_table_answers_the_six_fields_as_before_and_adds_no_basics(client, world, connection,
+                                                                            deployment_facts):
+    """c1: no row set - every row's six detection fields are the pre-24.4 read's, except the
+    three the design changes (ocr and memory are native, calendar's fallback label)."""
+    tick(world, ["transcribe_audio", "ocr_image", "generate_image"])
+    table, before = rows(client), pre_change_rows(world)
+    assert list(table) == [cap_id for cap_id, *_ in PRE_24_4]
+    for cap_id, row in table.items():
+        if cap_id not in ("ocr", "memory", "calendar"):
+            assert six(row) == before[cap_id], cap_id
+        assert row["setting"] is None and row["proposal"] is None, cap_id
+        assert row["status"] == {"dot": "grey", "reasons": ["not_set"]}, cap_id
+        assert set(row["spec"]) == {"allows", "host_tools", "private_only"}, cap_id
+    # The designed differences, and nothing else in those rows.
+    assert before["ocr"]["provider"] == "mcp" and table["ocr"]["provider"] == "native"
+    assert table["ocr"]["detail"].startswith("steward route:") and table["ocr"]["conn_id"] is None
+    assert before["memory"]["provider"] == "missing"
+    assert six(table["memory"]) == {**before["memory"], "provider": "native", "detail": "plugin"}
+    assert six(table["calendar"]) == {**before["calendar"], "label": "日历"}
+    # The steward's connection read is today's: no basics field at all.
+    listed = execute(world.owner, "list_steward_connections", {})
+    assert set(listed) == {"connections", "effective_tools", "effective_hash", "restart"}
+
+
+def test_any_connection_tool_can_be_set_as_a_route_and_detection_is_unchanged(client, world, connection,
+                                                                              deployment_facts):
+    """c2: a usable tool no capability lists (paint_v2, found only by its description) set
+    as draw's route; the row names that connection and tool, its detection is the same."""
+    sc.record_discovery(world.owner.store, CONN_ID, MEDIA_TOOLS)
+    tick(world, ["paint_v2"])
+    before = rows(client)
+    assert before["draw"]["provider"] == "missing" and before["draw"]["setting"] is None
+    answer = client.put("/api/steward/capabilities/draw", json={
+        "request_key": "c2-draw", "expect_version": 0,
+        "route": [{"kind": "conn", "conn_id": CONN_ID, "raw_name": "paint_v2"}]})
+    assert answer.status_code == 200, answer.text
+    after = rows(client)
+    route = after["draw"]["setting"]["route"]
+    assert [(e["kind"], e["conn_id"], e["raw_name"], e["reason"], e["visibility"]) for e in route] == \
+        [("conn", CONN_ID, "paint_v2", "ok", "public")]
+    assert after["draw"]["setting"]["version"] == 1 and after["draw"]["setting"]["set_via"] == "dashboard"
+    assert after["draw"]["status"] == {"dot": "green", "reasons": ["ok"]}
+    # Detection never reads the setting: every row's six fields are what they were.
+    for cap_id in before:
+        assert six(after[cap_id]) == six(before[cap_id]), cap_id
+    assert after["draw"]["provider"] == "missing" and no_name(after["draw"])
+
+
+def test_a_pin_that_stops_resolving_shows_its_reason_beside_the_live_detection(client, world, connection,
+                                                                              deployment_facts):
+    """c4: the pinned tool unticked, then its connection deleted: the entry carries the reason,
+    detection (the grey suggestion) is computed as always, and the stored route never moves."""
+    sc.record_discovery(world.owner.store, CONN_ID, MEDIA_TOOLS)
+    tick(world, ["paint_v2", "generate_image"])
+    assert client.put("/api/steward/capabilities/draw", json={
+        "request_key": "c4-draw", "expect_version": 0,
+        "route": [{"kind": "conn", "conn_id": CONN_ID, "raw_name": "paint_v2"}]}).status_code == 200
+    pinned = rows(client)["draw"]["setting"]["route"]
+    untick(world, "paint_v2")
+    draw = rows(client)["draw"]
+    assert [e["reason"] for e in draw["setting"]["route"]] == ["tool_not_allowed"]
+    assert draw["status"] == {"dot": "red", "reasons": ["tool_not_allowed"]}
+    # The suggestion is detection's, live: the ticked generate_image of the same connection.
+    assert (draw["provider"], draw["conn_id"], draw["tool"]) == ("mcp", CONN_ID, "generate_image")
+    execute(world.owner, "steward_connection_delete", {"conn_id": CONN_ID}, allow_write=True)
+    draw = rows(client)["draw"]
+    assert [e["reason"] for e in draw["setting"]["route"]] == ["tool_gone"]
+    assert draw["provider"] == "missing" and no_name(draw)
+    assert [{k: e[k] for k in ("kind", "conn_id", "conn_uid", "raw_name")} for e in draw["setting"]["route"]] == \
+        [{k: e[k] for k in ("kind", "conn_id", "conn_uid", "raw_name")} for e in pinned]
+    assert draw["setting"]["version"] == 1

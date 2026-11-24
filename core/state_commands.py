@@ -1194,7 +1194,7 @@ class CreateStewardProposal(Project):
 
     request_key: str = Field(min_length=1, max_length=320)
     kind: Literal["create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project",
-                  "connection_change"]
+                  "connection_change", "capability_route"]
     payload: dict[str, Any] = Field(description=(
         "create_project {project_id, title, goal, seed_nodes: [add_nodes node: {key, goal, acceptance, ...}]}; "
         "start_driver {project_id}; stop_driver {project_id} (what it would interrupt is recorded by the server); "
@@ -1206,7 +1206,11 @@ class CreateStewardProposal(Project):
         "visibility, enabled, tools; remove: conn_uid, expect_config_version; reenable: conn_uid, "
         "expect_config_version, tools; tools: [{raw_name, schema_sha256, allowed?, outward?, egress?, "
         "blocked_args?, daily_cap?}] (at most 64; a field left out is unchanged); never a secret} - the steward's "
-        "own MCP connections (design-steward 7.8.10a); a widening change is approved on the dashboard only."))
+        "own MCP connections (design-steward 7.8.10a); a widening change is approved on the dashboard only. "
+        "capability_route {cap_id, route: [\"native\" | \"missing\" | a host tool name | a connection tool's exact "
+        "name from search_tools] (1-8, first = main), source: {kind: owner_message, ref} | {kind: tool_search}} - "
+        "which tools do one job of your basic capabilities (design-steward 7.8.24); a tool_search one is approved "
+        "on the dashboard only."))
     reason: str = Field(min_length=1, max_length=4000)
     supersedes: str | None = Field(default=None, min_length=1, max_length=200, description=(
         "One of your OPEN proposals that this one replaces; it becomes superseded."))
@@ -1396,6 +1400,22 @@ class StewardConnectionSecretSet(Request):
 
 class StewardToolsResyncDue(Request):
     effective_hash: str = Field(min_length=64, max_length=64)
+
+
+# Step 24.4: the basic-capabilities routes (core.state_steward_capabilities, design-steward
+# 7.8.24). Both writes are the owner session's alone (the service checks); never the steward's.
+class StewardCapabilitySet(Request):
+    request_key: str = Field(min_length=1, max_length=320)
+    cap_id: str = Field(min_length=1, max_length=40)
+    expect_version: int = Field(ge=0, description="the row version read (0: not set)")
+    route: list[dict[str, Any]] | None = Field(default=None, max_length=64, description=(
+        "ordered, first = main: {kind: native} | {kind: missing} | {kind: host, tool} | "
+        "{kind: conn, conn_id, raw_name}"))
+    unset: bool = False
+
+
+class StewardCapabilitiesClear(Request):
+    request_key: str = Field(min_length=1, max_length=320)
 
 
 # Step 24.1b (design-steward 7.8.9): outward actions confirmed by the person who asked.
@@ -1828,6 +1848,7 @@ WRITE_REQUESTS = {
     "steward_connection_secret_set": StewardConnectionSecretSet,
     "steward_connection_probe": StewardConnectionRef, "steward_connection_refresh": StewardConnectionRef,
     "steward_tools_resync_due": StewardToolsResyncDue,
+    "steward_capability_set": StewardCapabilitySet, "steward_capabilities_clear": StewardCapabilitiesClear,
     "sync_owner_questions": SyncOwnerQuestions, "relay_owner_answer": RelayOwnerAnswer,
     "create_steward_confirmation": CreateStewardConfirmation, "get_steward_confirmation": GetStewardConfirmation,
     "cancel_steward_confirmation": CancelStewardConfirmation,
@@ -2241,6 +2262,8 @@ def _handlers(service) -> dict:
         "steward_connection_probe": service.steward_connections.probe,
         "steward_connection_refresh": service.steward_connections.refresh,
         "steward_tools_resync_due": service.steward_connections.tools_resync_due,
+        "steward_capability_set": service.steward_capabilities.set,
+        "steward_capabilities_clear": service.steward_capabilities.clear,
         "sync_owner_questions": service.owner_questions.sync,
         "relay_owner_answer": service.owner_questions.relay_answer,
         "list_pushed_owner_questions": service.owner_questions.list_pushed,
@@ -2365,6 +2388,9 @@ def _driver_defaults(service, action, arguments):
 # hands run_confirmed the STORED name and arguments; cancel_steward_confirmation voids a
 # PENDING record whose text did not reach the requester. None confirms anything: only the
 # requester's own exact reply does (core.state_channels), and the gateway consumes it.
+# Step 24.4 (design-steward 7.8.24): steward_capability_set and steward_capabilities_clear are
+# deliberately absent - the basic-capabilities table is the owner's; the steward only proposes
+# a capability_route (create_steward_proposal), which the owner approves.
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",

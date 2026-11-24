@@ -244,6 +244,11 @@ def _current(conn, payload):
         if op == "reenable" and _tool_state(tool) != "changed":
             raise StateGraphError(f"not_changed: {item['raw_name']} is not a tool whose description changed")
         tools[item["raw_name"]] = tool
+    if op == "update" and payload.get("visibility") == "public" and row["visibility"] != "public":
+        # Step 24.4 (7.8.24 "四"): a basic-capabilities pin that must stay private keeps it private.
+        from core.state_steward_capabilities import private_pins
+        if private_pins(conn, row["conn_uid"]):
+            raise StateGraphError("pinned_private_only")
     if (op == "update" and payload.get("visibility") == "public" and row["visibility"] != "public"
             and row["auth_kind"] == "oauth"):
         # The account is checked again for the public role (7.8.6): on the dashboard.

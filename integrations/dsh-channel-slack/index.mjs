@@ -74,10 +74,22 @@ export const THREADS_KEPT = 1000;
 export const BINDS_KEPT = 100;
 const BOT_ID = /^[UW][A-Z0-9]+$/;
 const OWN_MENTION = /^<@[UW][A-Z0-9]+>$/;
-// The answers of conversations.info that say Slack will not describe this conversation to the app
-// (a group DM without an mpim scope, a channel the bot is not in or that is gone, the app installed
-// without groups:read): final, `unreadable`. Any other failure is thrown and asked again.
-const UNREADABLE = new Set(['channel_not_found', 'missing_scope', 'not_in_channel', 'method_not_supported_for_channel_type']);
+// The answers of conversations.info that say Slack will not describe this conversation to the app:
+// final, each named by its own code. The manifest grants groups:read and no channels:read, im:read
+// or mpim:read (7.7.19), so Slack answers missing_scope for a public channel, a DM or a group DM;
+// when the token's scopes (the answer's `provided`) include groups:read that is the conversation's
+// kind, `not_private`, and only otherwise the app's own scope (`missing_scope`, an app installed
+// without groups:read). Any other failure is thrown and asked again.
+const INFO_REFUSALS = new Set(['missing_scope', 'not_allowed_token_type', 'channel_not_found', 'not_in_channel',
+  'method_not_supported_for_channel_type']);
+// What the owner does about a paused group, by why it is paused: a scope or a token is put right in
+// Slack (the pause lasts until the steward restarts); everything else is unbound.
+const REMEDIES = { missing_scope: 'reinstall the Slack app from its manifest, then restart the steward',
+  not_allowed_token_type: 'save the bot (xoxb-) token again, then restart the steward' };
+const remedyOf = why => REMEDIES[why] ?? 'unbind on the dashboard';
+// How long a mention waits for the host's first room list (the host's own start may take 2 min);
+// past it mentions are judged with no group bound, so a host that never lists holds up nothing.
+export const ROOMS_WAIT_MS = 5 * 60_000;
 const short = error => String(error?.data?.error ?? error?.message ?? error).slice(0, 200);
 // Same-host redirects followed on a download (Slack serves files from files.slack.com).
 const MAX_REDIRECTS = 3;
@@ -191,7 +203,7 @@ export function splitText(text, limit = SLACK_TEXT_LIMIT) {
 
 /** The channel itself, with the Slack clients passed in (fakes in tests). */
 export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClient, WebClient, logLevel, log, unavailable,
-  backoff = reconnectDelay, retryMs = 5000, maxRetryMs = 60_000, fetch = globalThis.fetch }) {
+  backoff = reconnectDelay, retryMs = 5000, maxRetryMs = 60_000, fetch = globalThis.fetch, roomsWaitMs = ROOMS_WAIT_MS }) {
   const configured = !unavailable && appToken && botToken && SocketModeClient && WebClient;
   let state = { connected: false, detail: configured ? 'connecting' : (unavailable ?? 'not configured') };
   let socket, web, stopped = false;
@@ -202,7 +214,7 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   // Step 23: the host's whitelist (setRooms), in memory: a restart starts with none and waits for
   // the host's first list before any mention is judged.
   let ownerRef, rooms = new Map(); // bound channel -> {prefix: the bot's mention the backend keeps, label: the group's name}
-  let roomsListed, roomsKnown = false;
+  let roomsListed, roomsKnown = false, roomsWait;
   const listed = new Promise(resolve => { roomsListed = resolve; });
   const paused = new Map(); // bound channel -> why it is paused (shared, not_private, ...)
   const threads = new Map(); // `${channel}:${ts}` of a group question or code -> its thread's root ts
@@ -357,15 +369,17 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   }
 
   /** 'ok', or why this conversation cannot be a group (groupRefusal), as Slack says now. A
-   *  conversation Slack will not describe to the app (UNREADABLE) is `unreadable`; a call that
-   *  failed otherwise throws (asked again, or the send fails). */
+   *  conversation Slack will not describe to the app (INFO_REFUSALS) is named by Slack's code; a
+   *  call that failed otherwise throws (asked again, or the send fails). */
   async function judge(room) {
     let info;
     try {
       info = (await web.conversations.info({ channel: room }))?.channel;
     } catch (error) {
-      if (error?.code === 'slack_webapi_platform_error' && UNREADABLE.has(error?.data?.error)) return 'unreadable';
-      throw error;
+      const code = error?.code === 'slack_webapi_platform_error' ? error?.data?.error : undefined;
+      if (!INFO_REFUSALS.has(code)) throw error;
+      const provided = String(error.data.provided ?? '').split(',').map(scope => scope.trim());
+      return code === 'missing_scope' && provided.includes('groups:read') ? 'not_private' : code;
     }
     return groupRefusal(info) ?? 'ok';
   }
@@ -373,7 +387,24 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   function suspend(room, why) {
     if (!rooms.has(room) || paused.has(room)) return;
     paused.set(room, why);
-    log.warn(`slack: group ${room} paused: ${why} - nothing more is taken from it or sent to it; unbind it on the dashboard`);
+    log.warn(`slack: group ${room} paused: ${why} - nothing more is taken from it or sent to it; ${remedyOf(why)}`);
+  }
+
+  /** Until the host's first room list, or ROOMS_WAIT_MS after the first mention that waited for
+   *  it (said once), or the channel stops. */
+  function roomsOrLate() {
+    roomsWait ??= new Promise(resolve => {
+      const done = () => { clearTimeout(timer); stopping.signal.removeEventListener('abort', done); resolve(); };
+      const timer = setTimeout(() => {
+        if (!roomsKnown) log.warn(`slack: no group list from the host in ${Math.round(roomsWaitMs / 1000)} s; `
+          + 'mentions are judged with no group bound until it comes');
+        done();
+      }, roomsWaitMs);
+      timer.unref?.();
+      stopping.signal.addEventListener('abort', done, { once: true });
+      void listed.then(done);
+    });
+    return roomsWait;
   }
 
   /** A send into `room` may go: it is bound and not paused, and Slack still says it is a private
@@ -397,7 +428,7 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
     const shared = body?.is_ext_shared_channel === true;
     const at = atOf(event.ts);
     return enqueue({ key: 'group:' + room, who: `${event.user} in ${room}`, length: event.text.length }, async () => {
-      if (!roomsKnown) await Promise.race([listed, new Promise(resolve => stopping.signal.addEventListener('abort', resolve, { once: true }))]);
+      if (!roomsKnown) await roomsOrLate();
       if (stopping.signal.aborted) return undefined;
       // A code message passed on as a bind is never taken again, as a bind or as a question.
       if (binds.has(messageRef)) return undefined;
@@ -569,12 +600,16 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   }
 
   // A paused group (step 23) is said in the channel's status, which the dashboard shows, by the
-  // name the dashboard gives it (its label, else its ref's last six), so the owner knows which to unbind.
+  // name the dashboard gives it (its label, else its ref's last six) and what to do about it, so the
+  // owner knows which to unbind and which needs the app put right; connected or not, after why not.
   const status = () => {
-    if (!paused.size || !state.connected) return { ...state };
-    const count = paused.size;
-    const named = [...paused].map(([room, why]) => `「${rooms.get(room)?.label ?? room.slice(-6)}」 ${why}`);
-    return { ...state, detail: `${count} group${count === 1 ? '' : 's'} paused - unbind on the dashboard: ${named.join(', ')}` };
+    if (!paused.size) return { ...state };
+    const count = paused.size, byRemedy = new Map();
+    for (const [room, why] of paused)
+      byRemedy.set(remedyOf(why), [...byRemedy.get(remedyOf(why)) ?? [], `「${rooms.get(room)?.label ?? room.slice(-6)}」 ${why}`]);
+    const line = `${count} group${count === 1 ? '' : 's'} paused: `
+      + [...byRemedy].map(([remedy, named]) => `${named.join(', ')} - ${remedy}`).join('; ');
+    return { ...state, detail: state.detail ? `${state.detail}; ${line}` : line };
   };
   const stop = async () => {
     if (stopped) return;

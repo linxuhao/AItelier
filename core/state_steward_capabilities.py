@@ -268,12 +268,20 @@ def _route_key(entries) -> list:
     return [[e["kind"], e.get("tool"), e.get("conn_id"), e.get("raw_name")] for e in entries]
 
 
+def _owner_own(row) -> bool:
+    """Whether the owner wrote the route itself (`set_via='dashboard'`) rather than approving a
+    proposal: 24.4c`s dashboard-only rule for dev-mcp pins is about who named the pin, and a
+    proposal`s pin can predate the move that makes the connection dev-mcp."""
+    return row is not None and row["set_via"] == "dashboard"
+
+
 def code_pin(conn, conn_uid, raw_name) -> bool:
     """Whether the owner's route for `code` pins the tool `raw_name` of the connection
     `conn_uid` (the gateway's condition for any dev-mcp call, 24.4c): a job not set, set
-    `missing`, or pinning other tools - or another conn_uid - is no."""
+    `missing`, or pinning other tools - or another conn_uid - is no. A route a proposal wrote
+    is no either, even when the connection only became dev-mcp afterwards (`_owner_own`)."""
     row = _stored(conn).get(DEV_MCP_CAPABILITY)
-    return row is not None and raw_name in DEV_MCP_PINNABLE and any(
+    return _owner_own(row) and raw_name in DEV_MCP_PINNABLE and any(
         e.get("kind") == "conn" and e.get("conn_uid") == conn_uid and e.get("raw_name") == raw_name
         for e in json.loads(row["route_json"]))
 
@@ -306,9 +314,11 @@ class _Facts:
         self.tools = {(r["conn_id"], r["raw_name"]): r for r in rows}
         self.lost = sc._collisions(rows)
 
-    def code(self, entry, cap_id) -> str:
+    def code(self, entry, cap_id, set_via) -> str:
         """One entry's reason code (design "八") on the job `cap_id`; `ok` and
-        `connection_error` are usable."""
+        `connection_error` are usable. `set_via` is the job row's own provenance: a pin a
+        proposal wrote is never usable on a dev-mcp connection, which only the owner's
+        dashboard writes (24.4c)."""
         if entry["kind"] in ("native", "host"):
             return "see_driver_status"
         if entry["kind"] == "missing":
@@ -318,9 +328,10 @@ class _Facts:
         if row is None or row["conn_uid"] != entry["conn_uid"] or tool is None:
             return "tool_gone"
         if self.sc.is_dev_mcp(row) and (cap_id != DEV_MCP_CAPABILITY or entry["raw_name"] not in DEV_MCP_PINNABLE
-                                        or row["visibility"] != "private"):
-            # A pin no command writes but a connection moved onto dev_mcp keeps (24.4c): the
-            # gateway refuses it, so it is never shown usable.
+                                        or row["visibility"] != "private" or set_via != "dashboard"):
+            # A pin no command writes but a connection moved onto dev_mcp keeps (24.4c), and a
+            # pin a proposal wrote before that move: the gateway refuses both, so neither is
+            # ever shown usable.
             return "tool_not_allowed"
         if not tool["allowed"]:
             return "tool_not_allowed"
@@ -373,7 +384,7 @@ def for_steward(conn):
             if e["kind"] == "host":
                 item["tool"] = e["tool"]
             if e["kind"] == "conn":
-                code = facts.code(e, cap["id"])
+                code = facts.code(e, cap["id"], row["set_via"])
                 item["visibility"] = facts.visibility(e)
                 usable = code in ("ok", "connection_error")
                 tool = facts.tools.get((e["conn_id"], e["raw_name"]))
@@ -479,7 +490,7 @@ class StewardCapabilities:
             for cap in CAPABILITIES:
                 row = stored.get(cap["id"])
                 entries = json.loads(row["route_json"]) if row else []
-                codes = [facts.code(e, cap["id"]) for e in entries]
+                codes = [facts.code(e, cap["id"], row["set_via"]) for e in entries]
                 route = [{**e, "reason": code, **({"visibility": facts.visibility(e)} if e["kind"] == "conn" else {})}
                          for e, code in zip(entries, codes)]
                 out[cap["id"]] = {

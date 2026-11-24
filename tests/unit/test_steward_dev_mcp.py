@@ -350,6 +350,38 @@ def test_a_pin_on_another_job_kept_by_a_move_onto_dev_mcp_is_shown_not_allowed(w
     assert row["route"][0]["available"] is False and row["route"][0]["pinned_name"] is None
 
 
+def test_a_pin_a_proposal_wrote_before_the_move_is_no_dev_mcp_pin(world, server, upstream):
+    # The dashboard-only rule refuses a proposal that names a dev-mcp tool when the pin is
+    # written (needs_dashboard: dev_mcp). An approved proposal`s pin written while the
+    # connection was ordinary survives the move onto dev_mcp - upsert keeps the conn_uid - so
+    # the read side judges the route`s provenance too: only the owner's own (`set_via=
+    # 'dashboard'`) `code` route forwards a dev-mcp call. Found by a non-author review of
+    # 87c7a31f56 after that branch landed its own two move cases.
+    add(world, conn_id="box", visibility="private")
+    discover(world, "box", tools=DEV_TOOLS)
+    allow(world, ["read_file"], conn_id="box")
+    pid = propose_route(world, "code", ["mcp__sw__box__read_file"])["proposal_id"]
+    approve_route(world, pid)
+    assert table(world)["code"]["setting"]["set_via"] == "proposal"
+    add(world, conn_id="box", url=DEV_URL, visibility="private", label="Box")
+    with world.db.get_connection() as conn:
+        uid = conn.execute("SELECT conn_uid FROM state_steward_connections WHERE conn_id='box'").fetchone()[0]
+        assert caps.code_pin(conn, uid, "read_file") is False
+    assert table(world)["code"]["status"] == {"dot": "red", "reasons": ["tool_not_allowed"]}
+    row = next(r for r in basics(world)["rows"] if r["id"] == "code")
+    assert row["route"][0]["available"] is False and row["route"][0]["pinned_name"] is None
+    owner_turn(world)
+    assert code_of(call(server, world, "box__read_file", {"path": "/etc/hostname"})) == "tool_not_allowed"
+    assert "tools/call" not in upstream.methods
+    # The control: the same connection and tool, pinned from the dashboard after the move.
+    version = table(world)["code"]["setting"]["version"]
+    put(world, "code", [{"kind": "conn", "conn_id": "box", "raw_name": "read_file"}], expect=version)
+    with world.db.get_connection() as conn:
+        assert caps.code_pin(conn, uid, "read_file") is True
+    answer = call(server, world, "box__read_file", {"path": "/etc/hostname"})
+    assert json.loads(answer["result"]["content"][0]["text"])["echo"]["name"] == "read_file"
+
+
 def test_only_a_private_dev_mcps_pinnable_tools_are_ever_served(world):
     ready_dev(world)
     assert sorted(t["raw_name"] for t in listed(world)["connections"][0]["tools"]) == [

@@ -362,6 +362,35 @@ def _steward_row(service):
     return row or {"project_id": project, "session_id": None, "model": None}
 
 
+# The reader's interpreter is ASKED, not this process: pdf_read.py runs under
+# AITELIER_MEDIA_PYTHON (`python -I pdf_read.py`), so only that interpreter's own modules
+# decide whether a PDF can be read - the backend may have the wheel while the reader's
+# python does not. The probe is a bare interpreter start plus find_spec (measured 55 ms on
+# /usr/bin/python3 and 90 ms on the image's default python); 2 s is the most a panel
+# request waits for an interpreter that is wedged, while a missing or non-executable path
+# fails immediately, before any wait.
+_PDF_PROBE_TIMEOUT_SECONDS = 2.0
+_PDF_PROBE = ("import importlib.util,sys;"
+              "sys.exit(0 if importlib.util.find_spec('pypdfium2') is not None else 3)")
+
+
+def _interpreter_can_read_pdf(python):
+    """Whether `python` itself has pypdfium2; every failure answers False, never raises.
+
+    The probe exits non-zero (3) without the module, and a missing path, a path that is not
+    executable, a timeout and every other OSError all mean the reader that interpreter
+    would run cannot read a PDF.
+    """
+    import subprocess
+    try:
+        answer = subprocess.run([str(python), "-c", _PDF_PROBE], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=_PDF_PROBE_TIMEOUT_SECONDS, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return answer.returncode == 0
+
+
 def _native_fact(name, service):
     """One deployment fact, or None when it is not there.
 
@@ -371,7 +400,9 @@ def _native_fact(name, service):
     for a text-only steward route. `input_measured` is false until `_input` exists; in
     that case the adapter keeps its legacy image behaviour, but we do not claim a
     measured native capability from it. `pdf_reader` is the host-side reader the steward
-    driver is given: its script, its interpreter and pypdfium2 in that interpreter.
+    driver is given: its script, and `python -c` in the media interpreter that runs it
+    (`AITELIER_MEDIA_PYTHON`, or `sys.executable` when unset) reporting pypdfium2. This
+    process's own modules are never the answer: the reader runs on the media interpreter.
     `plugin_builtin` is code inside the steward's plugin itself (its memory): always there.
     """
     if name == "plugin_builtin":
@@ -391,15 +422,14 @@ def _native_fact(name, service):
             return None
         return None
     if name == "pdf_reader":
-        import importlib.util
         import os
         import sys
         from pathlib import Path
         try:
             from core.dsh_driver import ROLES_FILE
-            python = os.environ.get("AITELIER_MEDIA_PYTHON") or sys.executable
-            if (ROLES_FILE.parent / "pdf_read.py").is_file() and Path(python).is_file() \
-                    and importlib.util.find_spec("pypdfium2") is not None:
+            python = Path(os.environ.get("AITELIER_MEDIA_PYTHON") or sys.executable)
+            if (ROLES_FILE.parent / "pdf_read.py").is_file() and python.is_file() \
+                    and _interpreter_can_read_pdf(python):
                 return "pdf_read.py"
         except (OSError, ValueError):
             return None

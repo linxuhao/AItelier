@@ -2,8 +2,9 @@
 
 Every verdict on the wire comes from a fact: the steward's own route input (the same
 reading the driver's route-input surface serves), a usable stored connection's EFFECTIVE
-tool set (the same list the gateway serves), the host PDF reader installed here, or
-nothing at all. The tests change those facts and watch the SAME row change; nothing here
+tool set (the same list the gateway serves), the host PDF reader installed here - as
+reported by the media interpreter that runs it, never by this process - or nothing at
+all. The tests change those facts and watch the SAME row change; nothing here
 reads a hardcoded provider table.
 
 The connection URL resolves to an invented public address so registration never reaches
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -302,6 +304,95 @@ def test_a_dual_fact_row_prefers_native_then_falls_to_the_tool(client, world, co
     assert after["pdf"]["conn_id"] == CONN_ID
     assert after["pdf"]["tool"] == "ocr_pdf"
     assert after["pdf"]["detail"] == f"{CONN_ID}: ocr_pdf"
+
+
+# --- the pdf fact is the MEDIA interpreter's answer (iss-800539c24a4e4022) ----------------------
+# Measured on 7c7a66cf0d, in aitelier:latest: with AITELIER_MEDIA_PYTHON=/bin/false the panel
+# still said "pdf_read.py", and so did a host whose reader interpreter has no pypdfium2 - the
+# check read THIS process's modules, not the interpreter pdf_read.py runs under. The reader's
+# interpreter is the one that must answer, and every failure to answer is "unavailable".
+
+def probe(python):
+    """The fact's own probe, run by hand: the test measures its witnesses, not its verdicts."""
+    import subprocess
+    return subprocess.run([str(python), "-c", router._PDF_PROBE], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          timeout=60, check=False).returncode
+
+
+def interpreter_without_the_wheel():
+    """A real python on this host that cannot import the reader's wheel.
+
+    Measured in aitelier:latest: /usr/bin/python3 exits 3 (no pypdfium2 in its site-packages)
+    while the default /usr/local/bin/python exits 0. No candidate is a failure, not a skip:
+    this is the unavailable direction and skipping it would leave the defect unwitnessed.
+    """
+    for candidate in ("/usr/bin/python3", "/bin/python3"):
+        if Path(candidate).is_file() and probe(candidate) != 0:
+            return candidate
+    pytest.fail("no python on this host without pypdfium2 to witness the unavailable direction")
+
+
+def test_the_pdf_fact_is_unavailable_when_the_readers_interpreter_lacks_the_wheel(
+        client, world, deployment_facts, monkeypatch):
+    """A real interpreter that answers no: the row is `missing`, not `native`."""
+    python = interpreter_without_the_wheel()
+    assert probe(python) == 3, (python, probe(python))  # the measured witness: find_spec is None
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", python)
+    assert router._native_fact("pdf_reader", world.owner) is None
+    table = rows(client)
+    assert table["pdf"]["provider"] == "missing"
+    assert no_name(table["pdf"])
+
+
+def test_a_media_interpreter_that_refuses_is_unavailable(client, world, deployment_facts, monkeypatch):
+    """The exact base-defect probe: /bin/false exits 1, so the reader cannot be claimed."""
+    assert probe("/bin/false") != 0
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", "/bin/false")
+    assert router._native_fact("pdf_reader", world.owner) is None
+    assert rows(client)["pdf"]["provider"] == "missing"
+
+
+def test_the_default_interpreter_with_the_wheel_still_reports_the_reader(
+        client, world, deployment_facts, monkeypatch):
+    """The available direction: the reader's interpreter answers yes, so the fact stands."""
+    assert probe(sys.executable) == 0, sys.executable  # this container's python has the wheel
+    monkeypatch.delenv("AITELIER_MEDIA_PYTHON", raising=False)
+    assert router._native_fact("pdf_reader", world.owner) == "pdf_read.py"
+    assert rows(client)["pdf"]["detail"] == "pdf_read.py"
+    # Naming that same interpreter explicitly is the same answer, not a second rule.
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", sys.executable)
+    assert router._native_fact("pdf_reader", world.owner) == "pdf_read.py"
+
+
+def test_a_missing_or_non_executable_media_python_is_unavailable_not_an_exception(
+        client, world, deployment_facts, monkeypatch, tmp_path):
+    """A path that cannot be run is a fact about the host, never a 500 from the panel."""
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", str(tmp_path / "no-such-python"))
+    assert router._native_fact("pdf_reader", world.owner) is None
+    assert rows(client)["pdf"]["provider"] == "missing"
+
+    plain = tmp_path / "not-executable-python"
+    plain.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    plain.chmod(0o644)
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", str(plain))
+    assert router._native_fact("pdf_reader", world.owner) is None
+    assert rows(client)["pdf"]["provider"] == "missing"
+
+
+def test_a_wedged_media_interpreter_is_unavailable_within_the_probe_bound(
+        client, world, deployment_facts, monkeypatch, tmp_path):
+    """A panel request must not hang behind an interpreter that never answers."""
+    import time
+    wedged = tmp_path / "wedged-python"
+    wedged.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    wedged.chmod(0o755)
+    monkeypatch.setenv("AITELIER_MEDIA_PYTHON", str(wedged))
+    started = time.monotonic()
+    assert router._native_fact("pdf_reader", world.owner) is None
+    returned = time.monotonic() - started
+    assert returned < router._PDF_PROBE_TIMEOUT_SECONDS + 2.0, returned
+    assert rows(client)["pdf"]["provider"] == "missing"
 
 
 # --- step 24.4: the settable routes (design-steward 7.8.24) --------------------------------------

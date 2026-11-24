@@ -571,8 +571,10 @@ def dev_mcp_writes() -> tuple[str, ...]:
     return tuple(name for name in DEV_MCP_PINNABLE if name not in DEV_MCP_READ)
 
 
-# The value each locked flag must keep. One rule, read by BOTH the write guard and the
-# owner's projection: a second copy in the panel would let a widened pin be editable here.
+# The value the dev-mcp lock REFUSES for each flag it locks: a save that sends one of these
+# is rejected, so `allowed` may never be true here and outward/egress may never be false. The
+# locked NAMES come from dev_mcp_locked_flags() - the same predicate the owner's projection
+# reports - so a widened pin cannot leave an editable tick in the panel.
 DEV_MCP_LOCKED_VALUES = {"allowed": True, "outward": False, "egress": False}
 
 

@@ -241,8 +241,9 @@ the backend and drivers. On Ubuntu/Debian, install `python3.12-venv` if
 Set `GITHUB_TOKEN` as a secret file if private GitHub clone/push is
 needed. Provider keys are read by the backend model gateway. The shipped example
 routes (`model_routes.example.json`) read these key files, tried in this order;
-every route ends with pay-as-you-go DeepSeek, so `DEEPSEEK_API_KEY` alone serves
-all three, and each other key only adds a cheaper plan in front of it:
+each of the three routes below ends with pay-as-you-go DeepSeek, so
+`DEEPSEEK_API_KEY` alone serves them, and each other key only adds a cheaper plan
+in front of it:
 
 | Route | Used by | Key files, in order |
 |---|---|---|

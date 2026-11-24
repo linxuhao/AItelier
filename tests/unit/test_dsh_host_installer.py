@@ -114,7 +114,7 @@ def test_install_creates_the_bind_sources_and_names_the_container_user(paths, mo
 
     (repo / '.env').write_text('AITELIER_UID=4242\nAITELIER_DRIVER_IDENTITY=on\n')
     # Only AITELIER_GID is appended: identity was already on, so prepare() does not
-    # report it (main() would otherwise tell the operator to recreate the backend).
+    # report it (the uid/gid recreate note is container_user_note's, tested below).
     assert not installer.prepare(repo, home, secrets)
     env = (repo / '.env').read_text().splitlines()
     assert 'AITELIER_UID=4242' in env and f'AITELIER_UID={os.getuid()}' not in env
@@ -147,3 +147,22 @@ def test_the_default_api_url_follows_aitelier_port(paths, monkeypatch):
     assert installer.default_api_url(repo) == 'http://127.0.0.1:4444'
     (repo / '.env').write_text('AITELIER_PORT=5555\n')
     assert installer.default_api_url(repo) == 'http://127.0.0.1:5555'
+
+
+def test_a_container_user_other_than_the_compose_default_asks_for_a_backend_recreate(paths, monkeypatch):
+    """Overfit fix round 2 (compose f4): docker-compose.yml interpolates
+    `user: ${AITELIER_UID:-1000}:${AITELIER_GID:-1000}` only when it creates the
+    container, so a backend created before .env named another user keeps running as
+    1000:1000. main() says so whenever the effective user is not the compose
+    default, and does not call that enabling driver identity."""
+    repo, home, secrets = paths
+    for name in ('AITELIER_UID', 'AITELIER_GID'):
+        monkeypatch.delenv(name, raising=False)
+    assert installer.container_user_note(repo) is None
+    (repo / '.env').write_text('AITELIER_UID=1000\nAITELIER_GID=1000\n')
+    assert installer.container_user_note(repo) is None
+    (repo / '.env').write_text('AITELIER_DRIVER_IDENTITY=on\nAITELIER_UID=4242\nAITELIER_GID=1000\n')
+    note = installer.container_user_note(repo)
+    assert '4242:1000' in note and 'recreate' in note and 'identity' not in note.lower()
+    monkeypatch.setenv('AITELIER_GID', '77')
+    assert '4242:77' in installer.container_user_note(repo)

@@ -376,7 +376,11 @@ fits a task, add one that way; never improvise items.
 
 The plugin ships a default set in `integrations/dsh-director/todo/todo_templates/`,
 used when the host names no directory: `change_files` (change named files inside
-a scope) and `cost_audit`. `cost_audit` is the read-only audit director.md asks
+a scope), `docs_change`, `code_change`, `test_fix`, `investigate`, the batch
+template `find_verify` and `cost_audit`. This repository's `todo_templates/`
+links to the plugin's files except `find_verify`, whose prompts here carry this
+deployment's attempt and test rules (the plugin's copy differs only in that
+wording). `cost_audit` is the read-only audit director.md asks
 for when the owner asks, a reported slowdown, or every 20 delivered work items:
 the child times the project's check commands once (given as data in
 `measure_commands`, any language or runner, or none), judges them against

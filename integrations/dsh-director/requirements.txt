@@ -1,0 +1,7 @@
+# The Python the plugin runs (todo.python, python3 by default) needs these:
+#   python3 -m pip install -r requirements.txt
+# The todo package (todo/dsh_todo) reads its templates with PyYAML; nothing else in it
+# goes beyond the standard library.
+PyYAML>=6.0.3,<7
+# pdf_read.py also needs pypdfium2 (see the repository's requirements-pdf.txt), but only a host
+# that offers document reading runs it; the built-in local host does not.

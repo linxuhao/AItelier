@@ -137,9 +137,14 @@ export function endDriverFailure({ ctx, where = 'driver', error, log } = {}) {
   return record;
 }
 
-/** Boot failed: there is no event stream, so this process cannot serve. */
-export function startupFailure(ctx, error) {
-  return endDriverFailure({ ctx, where: 'dsh-director startup', error, log: line => console.error(line) });
+/** Boot failed: there is no event stream, so this process cannot serve. With `detail` (a host
+ *  that prints no reason of its own, such as the local host) the first line of the error's
+ *  message follows the exit line: a configuration refusal ("missing config: provider") names
+ *  no credential, and without it the operator reads one word. */
+export function startupFailure(ctx, error, { detail = false } = {}) {
+  const reason = detail ? String(error?.message ?? error ?? '').split('\n')[0].slice(0, 1000) : '';
+  return endDriverFailure({ ctx, where: 'dsh-director startup', error,
+    log: line => { console.error(line); if (reason) console.error('dsh-director startup: ' + reason); } });
 }
 
 /** The event pump ended in an error: without its subscription this process cannot

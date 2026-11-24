@@ -28,8 +28,16 @@ export interface HostConfig {
   /** The todo CLI: `python -m <module>` in `cwd` (default: the process's directory) with
    *  python defaulting to python3; the CLI reads its state directory from `stateDirEnv`. */
   todo: { python?: string; cwd?: string; module: string; stateDirEnv: string };
-  /** Environment variable carrying the session id on the driver's processes (default DSH_DIRECTOR_SESSION). */
+  /** Environment variable carrying the session id on the driver's processes (default DSH_DIRECTOR_SESSION).
+   *  The host sets it on the DSH process. A DSH_-prefixed name never reaches a job a model shell
+   *  starts (DSH rebuilds that namespace per shell call); the local host uses DIRECTOR_LOCAL_SESSION. */
   sessionEnv?: string;
+  /** When the director cannot start, print the first line of the reason after the exit line
+   *  (default false: the host prints its own, redacted). The local host sets it. */
+  startupErrorDetail?: boolean;
+  /** The host's work items carry no node key or context hash: todo_plan and todo_batch_plan take
+   *  both as optional (node_key defaults to attempt_id). Default false: both required. */
+  planKeysOptional?: boolean;
   /** Included in review notices when set. */
   projectId?: string;
   /** DSH permission preset applied to the director session on start, e.g. 'danger-full-access'. */

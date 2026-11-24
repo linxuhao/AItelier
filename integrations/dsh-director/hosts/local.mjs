@@ -6,10 +6,15 @@
  *                 { id: 'director-local', name: '<dir>/dsh-director/hosts/local.mjs',
  *                   config: { root, rolesFile?, todo?: { module?, stateDirEnv?, python?, cwd? }, ... } }] }
  *
- *  Zero-config apart from `root`: `rolesFile` defaults to the plugin's own roles.json
- *  (with director.md and worker.md next to it) and `todo` to the plugin's own todo
- *  package (python -m dsh_todo in todo/, state in DSH_TODO_STATE_DIR); any of them
- *  can be overridden.
+ *  `root`, `provider` and `model` are required (README.md has a whole profile). The rest
+ *  has defaults: `rolesFile` the plugin's own roles.json (with director.md and worker.md
+ *  next to it), `todo` the plugin's own todo package (python -m dsh_todo in todo/, state in
+ *  DSH_TODO_STATE_DIR), `dshEntry` the real path of the running DSH entry (a global `dsh`
+ *  symlink resolved), `sessionEnv` LOCAL_SESSION_ENV, which this plugin sets on its own
+ *  process so every job a shell starts carries it (watch_process, idle_dormant); any of
+ *  them can be overridden. At startup (install) the host checks what the plugin needs on
+ *  this machine - not Windows, python3 with PyYAML for the todo package, git - and refuses
+ *  to start naming what is missing (README.md: Linux only).
  *
  *  An external host (the backend adapter, or anyone's) replaces this plugin;
  *  it is never active next to one. It deliberately stays small: work items with a
@@ -45,7 +50,9 @@
  *  `proposals` of the one kind it can execute itself: create_project, a new subdirectory with
  *  project.json, notes.md (the goal) and work.json (one work item per seed node). */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { dirname, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
@@ -62,6 +69,32 @@ async function writeJson(file, value) {
   await writeFile(file + '.tmp', JSON.stringify(value, null, 2) + '\n');
   await rename(file + '.tmp', file);
 }
+/** The variable that tags every process this DSH starts with the director's session id, when
+ *  the config names none. Not DSH_-prefixed: DSH rebuilds the DSH_* namespace for every
+ *  model shell call and drops ambient DSH_* values, so such a tag never reaches a job. */
+export const LOCAL_SESSION_ENV = 'DIRECTOR_LOCAL_SESSION';
+/** The DSH release this host is tested on (the repository's pin; README.md). Another one
+ *  starts with a warning, not a refusal. */
+export const TESTED_DSH_VERSION = '0.2.1-rc.5';
+/** The plugin's python requirements (PyYAML, for the todo package). */
+const REQUIREMENTS = fileURLToPath(new URL('../requirements.txt', import.meta.url));
+/** The running DSH entry, its symlinks resolved: a global install starts from
+ *  <prefix>/bin/dsh, a link from which DSH's own libraries cannot be found. */
+const runningEntry = () => { try { return realpathSync(process.argv[1]); } catch { return process.argv[1]; } };
+/** What the director reads about this host, after its role prompt (director root only). */
+export const HOST_NOTE = `This director runs on the built-in local host: plain files under one root directory, no
+dashboard, no steward and no other director. Where your role prompt speaks of the steward, a dashboard
+or chat channels, none of them exist here.
+- Work items are in work.json under that root. Record them with work_update (id; title; state working,
+  input_required, completed, failed or cancelled; holder, empty to release) and keep notes with
+  note_write: both come back in every context snapshot. A new task arrives as a file in inbox/; take it
+  as a work item before you plan it. A work item's id is the attempt_id you plan, dispatch and finish
+  under; node_key and context_hash are optional here (node_key defaults to the attempt_id).
+- Your plans and the runtime's own records are in the state/ directory under that root, not in your
+  working directory. Your role prompt's list of entries never to delete names another host's files; here
+  never delete, move or overwrite anything under that root except through these tools.
+- Your owner reads progress.jsonl and questions.json there and answers a question with the /answer
+  command or a file inbox/answer-<id>.json; the answer comes back to you as an event.`;
 /** Who answered when nothing says: the owner of this local host (plugin step 15). */
 export const LOCAL_OWNER = 'owner:local';
 /** What the standalone steward tells its owner to type (the commands in local-commands.mjs). */
@@ -117,8 +150,9 @@ function createProjectProblem(payload) {
   return undefined;
 }
 
-/** @param options - root (required), sessionId, provider, model, dshEntry, rolesFile,
- *  objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv }, projectsDir (step 15). */
+/** @param options - root, provider, model (required), sessionId, dshEntry, rolesFile, sessionEnv,
+ *  permissionPreset, objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv },
+ *  projectsDir (step 15). */
 export function localHost(options = {}) {
   const root = options.root;
   if (!root) throw new Error('directorHost refused: missing config: root (the local host keeps its files there)');
@@ -138,7 +172,7 @@ export function localHost(options = {}) {
   const lockedProposals = fn => { const run = proposalsLock.then(fn); proposalsLock = run.catch(() => {}); return run; };
   const projectsDir = options.projectsDir;
   const items = async () => (await readJson(files.work, { items: [] })).items ?? [];
-  let timer, finish;
+  let timer, finish, lastFailure = '';
 
   /** The owner's answer (plugin step 15, /answer): the answer file first - it is the wake event
    *  and survives a crash before questions.json is written; the sweep records it then - and
@@ -393,14 +427,18 @@ export function localHost(options = {}) {
 
   return {
     version: '1.0.0',
-    capabilities: ['progress', 'workState', 'heldWork', 'setup', 'attention', ...(projectsDir ? ['portfolio', 'proposals'] : [])],
+    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'attention', ...(projectsDir ? ['portfolio', 'proposals'] : [])],
     config: {
       sessionId: options.sessionId ?? 'director',
       provider: options.provider, model: options.model,
       stateDir: options.stateDir ?? join(root, 'state'),
-      dshEntry: options.dshEntry ?? process.argv[1],
+      dshEntry: options.dshEntry ?? runningEntry(),
       rolesFile: options.rolesFile ?? fileURLToPath(new URL('../roles.json', import.meta.url)),
-      sessionEnv: options.sessionEnv,
+      sessionEnv: options.sessionEnv ?? LOCAL_SESSION_ENV,
+      // This host prints nothing of its own when the director cannot start: the plugin prints
+      // the first line of the reason. A plan here binds to a work item by its id alone.
+      startupErrorDetail: true, planKeysOptional: true,
+      ...(options.permissionPreset ? { permissionPreset: options.permissionPreset } : {}),
       todo: { python: 'python3', cwd: fileURLToPath(new URL('../todo', import.meta.url)), module: 'dsh_todo',
         stateDirEnv: 'DSH_TODO_STATE_DIR', ...(options.todo ?? {}) },
       idleReviewMs: options.idleReviewMs, dormantMinuteMs: options.dormantMinuteMs, watchIntervalMs: options.watchIntervalMs,
@@ -424,6 +462,12 @@ export function localHost(options = {}) {
     async progress(body) {
       await mkdir(root, { recursive: true });
       await appendFile(files.progress, JSON.stringify({ at: new Date().toISOString(), ...body }) + '\n');
+      // A failed model call (no key, an unknown model) is the commonest first error, and with no
+      // dashboard it would sit unseen in progress.jsonl: its first line goes to stderr too, once
+      // per distinct error.
+      const failure = body?.phase === 'failed' && typeof body.error === 'string' ? body.error : '';
+      if (failure && failure !== lastFailure) console.error('dsh-director failed: ' + failure.split('\n')[0].slice(0, 500));
+      lastFailure = failure;
     },
     async workState(id) {
       const item = (await items()).find(entry => entry.id === id);
@@ -458,8 +502,25 @@ export function localHost(options = {}) {
         return Object.entries(await questions()).filter(([, q]) => q.status === 'open').map(([id, q]) => ({ id, text: q.text }));
       },
     },
+    /** The table as loaded, with this host's two recording tools shown to the director (they
+     *  are registered in its scope only; without this they would be deferred behind search_tools). */
+    roles: table => ({ ...table, director: { ...table.director, presented: [...table.director.presented, 'work_update', 'note_write'] } }),
+    /** Before the director exists: refuse to start, naming each one, when something the plugin
+     *  needs is missing here; warn on a DSH release this host is not tested on. */
+    async install(api) {
+      const problems = await prerequisiteProblems({ todo: api.todo, director: (options.rootRole ?? 'director') === 'director',
+        memory: !!options.memory });
+      if (problems.length) throw new Error('dsh-director local host cannot start here: ' + problems.join('; '));
+      const version = dshVersion(api.config.dshEntry);
+      if (version !== TESTED_DSH_VERSION)
+        api.ctx.logger.warn(`dsh-director local host: tested on DSH ${TESTED_DSH_VERSION}, running ${version ?? 'an unknown version'}`);
+    },
     /** The director records with two small tools: a work item's state, and a note. */
-    async setup(scope, _subject, { defineTool, jsonOutput }) {
+    async setup(scope, _subject, { defineTool, jsonOutput, runtimeSection }) {
+      if ((options.rootRole ?? 'director') === 'director') {
+        runtimeSection();
+        scope.systemPrompt.section({ name: 'dsh-director:local-host', order: 12.5, interpolate: false, text: HOST_NOTE });
+      }
       scope.tools.register(defineTool({ name: 'work_update',
         description: 'Director only. Create or update one work item in the local work list: id, and any of title, state (working, input_required, completed, failed, cancelled), holder (empty to release).',
         parameters: { id: { type: 'string', required: true }, title: { type: 'string' }, state: { type: 'string' }, holder: { type: 'string' } },
@@ -573,6 +634,55 @@ export function localHost(options = {}) {
   };
 }
 
+/** What this machine lacks for the plugin, one sentence each (empty: nothing). The director
+ *  needs python3 with PyYAML for its todo package (`python -m dsh_todo templates` is run once)
+ *  and git for plans and their delivery; a steward needs git for its memory, when it has one. */
+export async function prerequisiteProblems({ todo, director = true, memory = false, platform = process.platform, git = 'git' }) {
+  const problems = [];
+  if (platform === 'win32') problems.push('Windows is not supported (the todo package needs fcntl and workers need a POSIX shell); run it on Linux');
+  if (director) {
+    // The CLI lists a template it cannot load with that template's error, so a missing PyYAML
+    // shows as an error on every template, not as a failed run.
+    const noYaml = text => /No module named '?yaml/.test(text);
+    const yamlProblem = `PyYAML is missing for ${todo.python} (pip install -r ${REQUIREMENTS})`;
+    try {
+      const { code, result } = await todo.run(['templates'], undefined, 60000);
+      if (code !== 0) problems.push(`the todo package refused to list its templates: ${JSON.stringify(result).slice(0, 300)}`);
+      else if ((result?.templates ?? []).some(t => noYaml(String(t?.error ?? '')))) problems.push(yamlProblem);
+    } catch (error) {
+      const text = String(error?.message ?? error);
+      if (/spawn .*ENOENT/.test(text)) problems.push(`python not found: ${todo.python} (install python3, or set todo.python)`);
+      else if (noYaml(text)) problems.push(yamlProblem);
+      else problems.push(`the todo package does not run with ${todo.python}: ${text.split('\n')[0].slice(0, 300)}`);
+    }
+  }
+  if (director || memory) {
+    const missing = await new Promise(resolve => execFile(git, ['--version'], error => resolve(error)));
+    if (missing) problems.push(`git not found (${missing.code === 'ENOENT' ? `no ${git} on PATH` : String(missing.message).split('\n')[0]}): install git`);
+  }
+  return problems;
+}
+
+/** The version of the DSH whose entry is `entry` (its package.json above it), or undefined. */
+export function dshVersion(entry) {
+  try {
+    for (let dir = dirname(realpathSync(entry)); dir !== dirname(dir); dir = dirname(dir)) {
+      let manifest;
+      try { manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')); } catch { continue; }
+      if (manifest.name === '@deepseek-ai/dsh') return manifest.version;
+    }
+  } catch { /* an entry that does not resolve has no version */ }
+  return undefined;
+}
+
 export function apply(ctx, config) {
-  ctx.provide('directorHost', localHost(config ?? {}));
+  const host = localHost(config ?? {});
+  // Every process this DSH starts - a job the director's or a worker's shell runs, detached or
+  // not - carries the director's session in its environment: watch_process accepts it and
+  // idle_dormant sees it (lib/core.mjs processSession, backgroundProcesses).
+  const { sessionEnv, sessionId } = host.config;
+  const before = process.env[sessionEnv];
+  process.env[sessionEnv] = sessionId;
+  ctx.on('dispose', () => { if (before === undefined) delete process.env[sessionEnv]; else process.env[sessionEnv] = before; });
+  ctx.provide('directorHost', host);
 }

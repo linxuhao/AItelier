@@ -87,6 +87,8 @@ export function validateHost(host) {
       problems.push(`config: rootRole must be one of ${ROOT_ROLES.join(', ')} when given, got ${JSON.stringify(config.rootRole)}`);
     for (const key of ['sessionEnv', 'projectId', 'permissionPreset'])
       if (config[key] !== undefined && !isText(config[key])) problems.push(`config: ${key} must be a non-empty string when given`);
+    for (const key of ['startupErrorDetail', 'planKeysOptional'])
+      if (config[key] !== undefined && typeof config[key] !== 'boolean') problems.push(`config: ${key} must be true or false when given`);
     // v1.2 (plugin step 11): the owner's memory; absent, no memory and no memory tools.
     const memory = config.memory;
     if (memory !== undefined) {

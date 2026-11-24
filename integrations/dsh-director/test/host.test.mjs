@@ -78,6 +78,7 @@ test('every config field is type-checked, not only checked for presence (review 
     for (const bad of [42, {}, [], true]) refused({ [key]: bad }, new RegExp(`config: ${key} must be a non-empty string`));
   }
   for (const key of ['sessionEnv', 'projectId', 'permissionPreset']) refused({ [key]: 7 }, new RegExp(`config: ${key} must be a non-empty string when given`));
+  for (const key of ['startupErrorDetail', 'planKeysOptional']) refused({ [key]: 'yes' }, new RegExp(`config: ${key} must be true or false when given`));
 });
 
 test('capabilities is required and must be an array of op names; a string is named as such', () => {

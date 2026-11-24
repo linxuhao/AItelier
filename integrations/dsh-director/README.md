@@ -97,12 +97,12 @@ EOF
 | key | default | what it does |
 |---|---|---|
 | `sessionId` | `director` | the director's DSH session; a restart resumes it. Give each director on one machine its own |
-| `objective` | none | the director's standing goal (its DSH goal), set once on the first start |
+| `objective` | none | the director's standing goal (its DSH goal), set once on the first start. This is the only standing goal of a director started here: the backend's mandate (`integrations/dsh-driver/goal.md` and any deployment override of it) is read only by backend-managed directors |
 | `permissionPreset` | none | a DSH permission preset for the director and its workers (below) |
 | `dshEntry` | the running `dsh`, symlinks resolved | DSH's `lib/bin.js`; set it when DSH's libraries are not found from there |
 | `todo` | `{ python: 'python3' }` and the plugin's own todo package | `python` names another interpreter |
 | `pollMs` | `2000` | how often `inbox/` is read |
-| `sessionEnv` | `DIRECTOR_LOCAL_SESSION_<hash of root>` | the variable that tags every process this DSH starts with the director's session; the plugin sets it itself. One per `root`, so two directors do not count each other's jobs |
+| `sessionEnv` | `DIRECTOR_LOCAL_SESSION_<hash of root>` | the variable that tags every process this DSH starts with the director's session; the plugin sets it itself. One per `root`, so two directors started side by side do not count each other's jobs. One exception, one way: a director B started from inside director A's job (A's shell) inherits A's variable as well as its own, so A counts B's DSH and every job B starts as A's own background jobs, and A's `idle_dormant` is refused with `background_processes` while they run; B does not count A's. Start each director from its own shell. A name you set must not start with `DSH_`: DSH drops those from every model shell |
 
 ## 3. Permissions
 

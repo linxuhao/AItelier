@@ -108,7 +108,9 @@ const LANGS = ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr', 'de', 'es'];
 const REASONS = ['ok', 'fallback_in_use', 'tool_gone', 'tool_not_allowed', 'tool_changed', 'tool_collision',
   'connection_off', 'connection_error', 'see_driver_status', 'missing', 'not_set'];
 const ERRORS = ['unknown_capability', 'route_empty', 'too_many_entries', 'entry_not_allowed', 'duplicate_entry',
-  'host_tool_not_allowed', 'unknown_connection', 'unknown_tool', 'pin_must_be_private', 'version_conflict'];
+  'host_tool_not_allowed', 'unknown_connection', 'unknown_tool', 'pin_must_be_private', 'version_conflict',
+  // Step 24.4c: the dev-mcp opening's refusal.
+  'dev_mcp_not_allowed'];
 const VIEW_KEYS = ['steward.capAria', 'steward.capColName', 'steward.capColRoute', 'steward.capNative',
   'steward.capMcp', 'steward.capMissing', 'steward.capEmpty', 'steward.capLoadFailed',
   ...IDS.map(id => 'steward.cap.' + id),
@@ -124,7 +126,7 @@ const VIEW_KEYS = ['steward.capAria', 'steward.capColName', 'steward.capColRoute
   'steward.capError.unknown_capability', 'steward.capError.route_empty', 'steward.capError.too_many_entries',
   'steward.capError.entry_not_allowed', 'steward.capError.duplicate_entry', 'steward.capError.host_tool_not_allowed',
   'steward.capError.unknown_connection', 'steward.capError.unknown_tool', 'steward.capError.pin_must_be_private',
-  'steward.capError.version_conflict'];
+  'steward.capError.version_conflict', 'steward.capError.dev_mcp_not_allowed'];
 const headers = (container: HTMLElement) =>
   [...container.querySelectorAll('thead th')].map(th => th.textContent?.trim());
 const label = (container: HTMLElement, id: string) =>

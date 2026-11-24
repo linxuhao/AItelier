@@ -15,12 +15,15 @@ from core import run_isolation, repository_host_launcher as host, repository_exe
 from core import repository_executor_entry as entry
 from aitelier import gate_admission as admission
 from aitelier.tools.run_tests import impl as rt
+from tests.gate_fixture import short_gate_home
 
 
 @pytest.fixture
 def owned(tmp_path, monkeypatch):
-    # CPU controller's private scratch mounts occupy the NORMAL Linux home paths.
-    home = Path('/home/linxuhao/.AItelier')
+    # CPU controller's private scratch mounts occupy the NORMAL Linux home paths:
+    # a short home outside the pytest tmp tree, as the deployed ~/.AItelier is.
+    # One per row, removed at session end, never the operator's real home.
+    home = short_gate_home(str(tmp_path))
     monkeypatch.setenv('AITELIER_HOME', str(home))
     repo = tmp_path / 'source'
     repo.mkdir()
@@ -129,7 +132,13 @@ def test_overlong_namespace_is_typed_before_bind_and_preserves_existing_peer(tmp
     script = repo / 'run_tests.sh'
     script.write_text('#!/bin/sh\nexit 0\n')
     script.chmod(0o755)
-    peer_path = Path('/home/linxuhao/.AItelier/r/peer.sock')
+    # An existing listener in the DEFAULT home's namespace (~/.AItelier/r), where
+    # a fallback away from the overlong home would land; HOME is a short temp
+    # dir so the operator's real namespace is never touched.
+    monkeypatch.setenv('HOME', str(short_gate_home(str(tmp_path) + '-default')))
+    default_home = Path.home() / '.AItelier'
+    default_home.mkdir(parents=True)
+    peer_path = admission.relay_socket_namespace(default_home, create=True) / 'peer.sock'
     peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     peer.bind(str(peer_path))
     peer.listen(1)

@@ -22,7 +22,7 @@ from aitelier.gate_coverage import (
     PROVISIONAL_PURPOSE, full_coverage, provisional_producer,
     publication_scope_refusal)
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import embed_env, install_entry_executor
+from tests.gate_fixture import embed_env, install_entry_executor, short_gate_home
 
 
 GATE = r"""
@@ -81,7 +81,7 @@ def run_gate(tmp_path, monkeypatch, mode, coverage=None):
     script = repo / "run_tests.sh"
     script.write_text(f"#!/bin/sh\nexec {sys.executable} gate.py\n")
     script.chmod(0o755)
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     # Real subprocess through the real executor entry; no canned verdict.
     calls = install_entry_executor(monkeypatch)
     result = rt._run_repo_gate(repo)
@@ -252,7 +252,7 @@ def _provisional_round(tmp_path, monkeypatch, *, pytest_red, gate_measured_pass=
         script = repo / "run_tests.sh"
         script.write_text(f"#!/bin/sh\nexec {sys.executable} gate.py\n")
         script.chmod(0o755)
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     install_entry_executor(monkeypatch)
     out = tmp_path / ("graph-" + suffix) / "test"
     result = rt.run_tests(project_root=str(repo), out_dir=str(out),

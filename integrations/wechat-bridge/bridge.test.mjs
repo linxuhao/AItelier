@@ -2332,6 +2332,29 @@ test('send-file: a prepared bubble the puppet refuses falls back to the ORIGINAL
   } finally { await s.bridge.close(); }
 });
 
+test('send-file: the bridge keeps its own record of what left and as what', async () => {
+  // The .bin complaint (iss-cee4c9f19e76400f) was a send nobody but the caller could see: the
+  // answer named the carrier and no record outlived the request, so "did a picture go out as a
+  // picture" needed the owner's screenshot. These two lines are that record.
+  const lines = [];
+  const s = await mediaBridge({ log: line => lines.push(line), sendLimits: { sendGapMs: 0, backstopPerHour: 10 },
+    prepare: bot => { bot.Room = { load: id => ({ say: async box => ({ id: await bot.puppet.messageSendFile(id, box) }) }) }; } });
+  try {
+    await s.login();
+    await withRooms(s);
+    assert.deepEqual(await postFile(s, { room: ROOM, kind: 'image', mime: 'image/png', name: 'image-ab12.png' }, generatedPng()),
+      [200, { ref: 'file-out-1', sent_as: 'image' }]);
+    const picture = Buffer.from('not a picture');
+    assert.deepEqual(await postFile(s, { room: ROOM, kind: 'image', mime: 'image/png', name: 'broken.png' }, picture),
+      [200, { ref: 'file-out-2', sent_as: 'file' }]);
+    const records = lines.filter(line => /^sent /.test(line));
+    assert.equal(records.length, 2, lines.join(' | '));
+    assert.match(records[0], /^sent image\.jpg \(\d+ bytes\)$/, records[0]);
+    assert.match(records[1], new RegExp(`^sent file\\.file \\(${picture.length} bytes\\)$`), records[1]);
+    assert.ok(!lines.some(line => line.includes('image-ab12')), 'the file name does not go into the log');
+  } finally { await s.bridge.close(); }
+});
+
 test('send-file: a voice goes as a voice bar - encodeVoice\'s SILK named <durationMs>.silk; refused at any step it goes as a file', async () => {
   const s = await mediaBridge();
   try {

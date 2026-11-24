@@ -1348,6 +1348,12 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         // the original bytes, under the original name (with a .file carrier suffix when needed).
         const box = step.as === 'voice' ? await voiceBox(step.pcm) : makeFileBox(step.bytes ?? bytes, step.name);
         const sent = await say(box);
+        // The bridge's own record of what left and as what. The `.bin` complaint was a send only
+        // the caller could see: /send-file's answer names the carrier and nothing kept it. The
+        // file's stem stays out of the log; the carrier and the bytes are what answer "did this
+        // go out as a picture".
+        const carrier = String(step.name ?? '').includes('.') ? `.${String(step.name).split('.').pop()}` : '';
+        log(`sent ${step.as}${carrier} (${(step.bytes ?? bytes).length} bytes)`);
         return [200, { ref: sent?.id ?? null, sent_as: step.as }];
       } catch (error) {
         if (/observed peer/.test(String(error?.message))) return [409, { error: 'recipient_unknown' }];

@@ -168,6 +168,15 @@ test('steward.md (step 24 7.8.9 group confirmations, 25.3 calendar 7.9.6): the l
     assert.ok(calendar.includes(words), `the calendar lines lack: ${words}`);
 });
 
+test('steward.md (7.8.8): what holds an egress tool, and outward is not egress', () => {
+  const flat = readFileSync(new URL('../steward.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
+  for (const words of ['Outward and egress are two different marks: outward means the requester confirms first (above); egress means the tool is held after outside content.',
+    "Once any connection tool's result has come back - your own generate_image's too - or you read a file with read_document or ran calculate on files, every tool marked egress is refused (external_content_seen, naming what was read and when) until the next message from a person",
+    'request_confirmation does not release it', "Images and files that arrive with a person's message hold nothing by themselves"])
+    assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
+  assert.ok(!flat.includes('web and fetch tools wait'), 'steward.md still says only web and fetch tools wait');
+});
+
 test('steward.md (step 23.1, design-steward 7.7.15 r44v): several groups - each its own memory, lists and reminders, never another group', () => {
   const flat = readFileSync(new URL('../steward.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
   for (const words of ["your host may bind one or more group chats of your owner's family; each group wake names its group",

@@ -172,7 +172,10 @@ test('steward.md (7.8.8): what holds an egress tool, and outward is not egress',
   const flat = readFileSync(new URL('../steward.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
   for (const words of ['Outward and egress are two different marks: outward means the requester confirms first (above); egress means the tool is held after outside content.',
     "Once any connection tool's result has come back - your own generate_image's too - or you read a file with read_document or ran calculate on files, every tool marked egress is refused (external_content_seen, naming what was read and when) until the next message from a person",
-    'request_confirmation does not release it', "Images and files that arrive with a person's message hold nothing by themselves"])
+    'request_confirmation does not release it', "Images and files that arrive with a person's message hold nothing by themselves",
+    'An error the gateway itself wrote is not outside content',
+    'connection_tools and connection_refresh count as outside content',
+    'connections_list holds nothing'])
     assert.ok(flat.includes(words), `steward.md lacks: ${words}`);
   assert.ok(!flat.includes('web and fetch tools wait'), 'steward.md still says only web and fetch tools wait');
 });

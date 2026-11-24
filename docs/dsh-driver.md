@@ -186,6 +186,20 @@ POST /api/dsh-drivers/{project_id}/start   {"provider":"...", "model":"..."}
 POST /api/dsh-drivers/{project_id}/stop
 ```
 
+The dashboard's Start button posts `{}` to the start endpoint. An ABSENT `model`
+is not the same as naming `driver`: with no model named, the start takes the
+project's role route — director -> `driver` for every ordinary project, and
+steward -> `steward` for the reserved project `aitelier-home`. Naming a `model`
+still overrides that project's row, so the previous workaround of sending a
+hand-written request naming `steward` is no longer needed:
+
+```bash
+curl -X POST .../api/dsh-drivers/aitelier-home/start -H 'X-AItelier-Admin-Token: ...' -d '{}'
+# provisions aitelier-home with model=steward (ordinary projects get driver)
+curl -X POST .../api/dsh-drivers/aitelier-home/start -H 'X-AItelier-Admin-Token: ...' -d '{"provider":"aitelier","model":"my-route"}'
+# an explicitly named model wins for that project's row
+```
+
 The runtime-only context/activity/heartbeat endpoints authenticate the exact
 managed driver token. For a local development installation, `AITELIER_DSH_BIN`
 can select an installed DSH executable and `AITELIER_DSH_API_URL` overrides the

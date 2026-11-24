@@ -34,6 +34,7 @@ import sqlite3
 import threading
 import time
 from core.off_loop_sqlite import close_connection
+from core.state_bundle_limits import MAX_BUNDLE_BYTES
 from core.state_schema_migration import add_column_if_missing
 
 ATTEMPT_TABLE = """
@@ -83,7 +84,7 @@ CREATE TABLE {name} (
 )
 """
 
-EXTRA_SCHEMA = """
+EXTRA_SCHEMA = f"""
 CREATE INDEX IF NOT EXISTS state_attempts_executor_key ON state_attempts(execution_kind,attempt_id);
 CREATE INDEX IF NOT EXISTS state_acceptances_attempt_key ON state_acceptances(attempt_id);
 CREATE TABLE IF NOT EXISTS state_git_artifacts (
@@ -103,7 +104,7 @@ CREATE TABLE IF NOT EXISTS state_git_bundle_store (
     codec TEXT NOT NULL CHECK(codec IN ('raw','zstd-prefix')),
     base_sha256 TEXT REFERENCES state_git_bundle_store(bundle_sha256),
     raw_size INTEGER NOT NULL
-        CHECK(typeof(raw_size)='integer' AND raw_size > 0 AND raw_size <= 268435456),
+        CHECK(typeof(raw_size)='integer' AND raw_size > 0 AND raw_size <= {MAX_BUNDLE_BYTES}),
     payload BLOB NOT NULL CHECK(typeof(payload)='blob'), created_at TEXT NOT NULL,
     CHECK ((codec='raw' AND base_sha256 IS NULL)
         OR (codec='zstd-prefix' AND base_sha256 IS NOT NULL AND base_sha256 <> bundle_sha256))

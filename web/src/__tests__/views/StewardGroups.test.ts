@@ -215,4 +215,32 @@ describe('StewardGroups', () => {
     expect(help).toContain('/invite @AItelier Steward');
     expect(help).toContain('Slack Connect');
   });
+
+  it('a paused group shows the 已暂停 badge from its projection field, and none when it is null', async () => {
+    api.listOwnerGroups.mockResolvedValue({groups: [{...group(), paused: {reason: 'shared', at: '2026-11-24T10:00:00Z'}}],
+      groups_per_channel: 3});
+    langStore.set('zh-CN');
+    const view = render(StewardGroups, {channel: 'wechat', bound: true});
+    const badge = await waitFor(() => {
+      const el = view.container.querySelector('[data-group-paused]') as HTMLElement;
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(badge.textContent?.trim()).toBe('已暂停');
+    expect(badge.title).toBe('shared');
+    const titleLine = view.container.querySelector('[data-group-bound]')?.textContent ?? '';
+    expect(titleLine).toContain('家庭群');
+    expect(titleLine).toContain('已暂停');
+    cleanup();
+    api.listOwnerGroups.mockResolvedValue({groups: [{...group(), paused: null}], groups_per_channel: 3});
+    langStore.set('en');
+    const clear = render(StewardGroups, {channel: 'wechat', bound: true});
+    await waitFor(() => expect(clear.container.querySelector('[data-group-bound]')).not.toBeNull());
+    expect(clear.container.querySelector('[data-group-paused]')).toBeNull();
+    cleanup();
+    api.listOwnerGroups.mockResolvedValue({groups: [group()], groups_per_channel: 3});
+    const absent = render(StewardGroups, {channel: 'wechat', bound: true});
+    await waitFor(() => expect(absent.container.querySelector('[data-group-bound]')).not.toBeNull());
+    expect(absent.container.querySelector('[data-group-paused]')).toBeNull();
+  });
 });

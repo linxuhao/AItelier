@@ -1204,14 +1204,18 @@ class StateChannels:
             return self.steward._record(conn, "record_channel_delivery", request_key, request_hash,
                                         {"recorded": True, "message_id": message_id, "channel": channel})
 
-    def report_channel_status(self, project_id, request_key, channel, connected, detail=None, qr_svg=None):
+    def report_channel_status(self, project_id, request_key, channel, connected, detail=None, qr_svg=None,
+                              paused_groups=None):
         """The host's latest view of a channel: connected or not, a short detail and,
         while the WeChat login needs a scan, its QR as an SVG. The row is replaced each
-        time; the dashboard shows it (the owner's GET /api/steward/channels). Neither the
+        time; the dashboard shows it (the owner's GET /api/steward/channels). A present
+        pause snapshot replaces the pause of every group bound to this channel (so an
+        empty one clears them all); an omitted one leaves them as they were. Neither the
         detail nor the image is ever logged."""
         _require_utf8("detail", detail)
         _require_utf8("qr_svg", qr_svg, "qr_svg_refused")
-        request_hash = _hash([channel, connected, detail, qr_svg])
+        snapshot = None if paused_groups is None else [(g["group_ref"], g["reason"], g["at"]) for g in paused_groups]
+        request_hash = _hash([channel, connected, detail, qr_svg, snapshot])
         with self.store.transaction(write=True) as conn:
             self.steward._steward(conn, project_id)
             replay = self.steward._replay(conn, "report_channel_status", request_key, request_hash)
@@ -1251,6 +1255,17 @@ class StateChannels:
                              "up_since=excluded.up_since",
                              (channel, int(bool(connected)), detail, None if connected else qr_svg, stamp, down_since,
                               up_since))
+            if paused_groups is not None:
+                # Full snapshot: set the named bound groups' pause, clear every other bound
+                # group of this channel. A group not bound here is not ours to touch.
+                named = {g["group_ref"]: g for g in paused_groups}
+                for row in conn.execute("SELECT group_ref FROM state_owner_groups WHERE channel=? AND revoked_at IS NULL",
+                                        (channel,)).fetchall():
+                    entry = named.get(row["group_ref"])
+                    conn.execute("UPDATE state_owner_groups SET paused_reason=?, paused_at=? "
+                                 "WHERE channel=? AND group_ref=?",
+                                 ((entry["reason"], entry["at"]) if entry else (None, None))
+                                 + (channel, row["group_ref"]))
             return self.steward._record(conn, "report_channel_status", request_key, request_hash,
                                         {"recorded": True, "channel": channel, "connected": bool(connected),
                                          "at": stamp})

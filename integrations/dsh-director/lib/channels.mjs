@@ -528,6 +528,13 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // channel's start placeholder was first read: cleared by any other reading and when the
   // channel is taken back (a plugin loaded again starts its own clock).
   const placeholderSince = new Map();
+  // A plugin's structured pause snapshot, normalised on the boundary: unknown shapes are
+  // dropped, not passed through, and no snapshot means none paused (which clears old badges).
+  const pausedGroupsOf = value => Array.isArray(value) ? value.flatMap(row =>
+    row && typeof row.groupRef === 'string' && row.groupRef && row.groupRef.length <= 200
+      && typeof row.reason === 'string' && row.reason && row.reason.length <= 40
+      && typeof row.at === 'string' && row.at
+      ? [{ groupRef: row.groupRef, reason: row.reason, at: row.at }] : []).slice(0, 20) : [];
   const statusOf = (channel, entry) => {
     let raw;
     try { raw = entry.status(); } catch { raw = { connected: false, detail: 'status unavailable' }; }
@@ -538,9 +545,10 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       if (clock() - placeholderSince.get(channel) >= limits.placeholderMs) detail = `still connecting (${detail})`;
     } else placeholderSince.delete(channel);
     return { connected, ...(detail ? { detail: detail.slice(0, limits.statusDetail) } : {}),
-      ...(text(raw?.qrSvg) ? { qrSvg: raw.qrSvg } : {}) };
+      ...(text(raw?.qrSvg) ? { qrSvg: raw.qrSvg } : {}), pausedGroups: pausedGroupsOf(raw?.pausedGroups) };
   };
-  const statusKey = status => JSON.stringify([status.connected, status.detail ?? null, status.qrSvg ?? null]);
+  const statusKey = status => JSON.stringify([status.connected, status.detail ?? null, status.qrSvg ?? null,
+    status.pausedGroups ?? null]);
   // What the host last took per channel. One report at a time; only a change is reported.
   // A refusal is the host's answer to that status (not reported again); a failure to reach
   // it is tried again at the next poll. `accepted` is what the host last wrote per channel - a
@@ -662,7 +670,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
         if (registered.get(channel.name) !== entry) return;
         registered.delete(channel.name);
         placeholderSince.delete(channel.name);
-        void reportStatus(channel.name, { connected: false, detail: 'channel plugin stopped' });
+        void reportStatus(channel.name, { connected: false, detail: 'channel plugin stopped', pausedGroups: [] });
       };
     },
 

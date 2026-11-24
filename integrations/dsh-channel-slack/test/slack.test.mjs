@@ -291,17 +291,17 @@ test('splitText: parts end at a line break in their second half, and no code poi
 test('the socket is made without the SDK reconnect; status follows it: connecting, connected, disconnected', async () => {
   const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-1', botToken: 'xoxb-1',
     SocketModeClient: FakeSocket, WebClient: FakeWeb, log: quiet, backoff: () => 60_000 });
-  assert.deepEqual(channel.status(), { connected: false, detail: 'connecting' });
+  assert.deepEqual(channel.status(), { connected: false, detail: 'connecting', pausedGroups: [] });
   await channel.start();
   const socket = FakeSocket.last;
   assert.equal(socket.options.autoReconnectEnabled, false);
-  assert.deepEqual(channel.status(), { connected: true });
+  assert.deepEqual(channel.status(), { connected: true, pausedGroups: [] });
   socket.emit('disconnected'); // dropped: shown at once, not after the SDK's reconnect delay
-  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected' });
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected', pausedGroups: [] });
   socket.emit('connected');
   await channel.stop();
   assert.equal(socket.disconnected, true);
-  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected' });
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected', pausedGroups: [] });
 });
 
 // A socket shaped like the SDK's with its reconnect off: start() resolves on 'connected'
@@ -333,14 +333,14 @@ test('a drop is reconnected by the plugin; a failing reconnect is caught, shown 
       backoff: attempt => (delays.push(attempt), 0) });
     await channel.start();
     const socket = FakeSocket.last;
-    assert.deepEqual(channel.status(), { connected: true });
+    assert.deepEqual(channel.status(), { connected: true, pausedGroups: [] });
     socket.emit('disconnected'); // Slack refreshed the connection
     await tick(); // first reconnect: invalid_auth (the token was revoked meanwhile)
     assert.equal(socket.starts, 2);
-    assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth' });
+    assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth', pausedGroups: [] });
     await tick(); await tick(); // second reconnect fails too, the third connects
     assert.equal(socket.starts, 4);
-    assert.deepEqual(channel.status(), { connected: true });
+    assert.deepEqual(channel.status(), { connected: true, pausedGroups: [] });
     assert.deepEqual(delays, [0, 1, 2], 'the backoff grows with each failure in a row');
     socket.emit('disconnected');
     await tick();
@@ -374,7 +374,7 @@ test('after stop nothing reconnects, and a start still in flight is closed when 
   await tick(5);
   assert.equal(socket.open, false, 'the connection made after stop was closed');
   assert.equal(socket.starts, 1, 'and no reconnect followed');
-  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected' });
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected', pausedGroups: [] });
 });
 
 test('a socket that cannot start reports why, without the token, and does not crash', async () => {
@@ -383,7 +383,7 @@ test('a socket that cannot start reports why, without the token, and does not cr
     SocketModeClient: scripted([invalidAuth()]), WebClient: FakeWeb, backoff: () => 60_000,
     log: { info() {}, warn: line => warnings.push(line) } });
   await channel.start();
-  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth' });
+  assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth', pausedGroups: [] });
   assert.doesNotMatch(warnings.join('\n'), /SECRET/);
   await channel.stop();
 });
@@ -441,7 +441,7 @@ test('with the real SDK, a dropped socket whose reconnect Slack refuses does not
     const channel = slackChannel({ ownerChannels: registry(), appToken: 'xapp-test', botToken: 'xoxb-test',
       SocketModeClient: Refused, WebClient: slack.WebClient, logLevel: 'error', log: quiet, backoff: () => 5 });
     await channel.start();
-    assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth' });
+    assert.deepEqual(channel.status(), { connected: false, detail: 'disconnected: invalid_auth', pausedGroups: [] });
     Refused.last.emit('close'); // what the SDK's websocket emits when the connection drops
     await tick(60);
     await channel.stop();
@@ -480,7 +480,8 @@ test('apply with no token files: registers slack as disconnected, opens no socke
   assert.deepEqual(inject, ['ownerChannels']);
   assert.equal(registered.length, 1);
   assert.equal(registered[0].name, 'slack');
-  assert.deepEqual(registered[0].status(), { connected: false, detail: 'not configured: slack-app-token / slack-bot-token missing' });
+  assert.deepEqual(registered[0].status(), { connected: false, detail: 'not configured: slack-app-token / slack-bot-token missing',
+    pausedGroups: [] });
   await assert.rejects(registered[0].send('hi'), /not configured/);
   assert.equal(FakeSocket.last, undefined);
   await Promise.all(disposers.map(fn => fn()));
@@ -1043,6 +1044,9 @@ test('D5: a bound channel that became shared drops its events and is paused - no
   assert.deepEqual(ownerChannels.calls, []);
   assert.match(channel.status().detail, /1 group paused/);
   assert.equal(channel.status().connected, true);
+  const [paused] = channel.status().pausedGroups;
+  assert.deepEqual({ groupRef: paused.groupRef, reason: paused.reason }, { groupRef: 'C1', reason: 'shared' });
+  assert.match(paused.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/, 'the moment of the suspend, UTC');
   assert.ok(warnings.some(line => /C1 paused: shared/.test(line)) && warnings.every(line => !line.includes('secret')));
   // Paused: a later event (whatever the envelope says now) is dropped, a send is refused before Slack is asked.
   await deliver(socket, groupEnvelope(mention({ ts: '1763481601.000100' })));
@@ -1058,6 +1062,7 @@ test('D5: a bound channel that became shared drops its events and is paused - no
   // The owner unbinds it: the host's next list no longer has it, and the pause goes with it.
   await channel.setRooms({ ownerRef: 'U1', rooms: [] });
   assert.equal(channel.status().detail, undefined);
+  assert.deepEqual(channel.status().pausedGroups, [], 'unbinding clears the structured snapshot too');
   await channel.stop();
 });
 
@@ -1285,8 +1290,11 @@ test('sg-f2: a paused group stays named in the status while the socket is down, 
   await deliver(socket, groupEnvelope(mention(), { is_ext_shared_channel: true }));
   await settle();
   socket.emit('disconnected');
-  assert.deepEqual(channel.status(), { connected: false,
+  const reported = channel.status();
+  assert.deepEqual({ connected: reported.connected, detail: reported.detail }, { connected: false,
     detail: 'disconnected; 1 group paused: 「C1」 shared - unbind on the dashboard' });
+  assert.deepEqual(reported.pausedGroups.map(({ groupRef, reason }) => ({ groupRef, reason })),
+    [{ groupRef: 'C1', reason: 'shared' }], 'the structured snapshot survives a drop, independent of the prose');
   await channel.stop();
 });
 

@@ -971,6 +971,12 @@ test('chat channels: a status change is one report_channel_status, each under it
     ['/api/state/commands/report_channel_status', { channel: 'wechat', connected: false, detail: 'scan needed', qr_svg: svg }]]);
   assert.equal(new Set(calls.map(([, body]) => body.request_key)).size, 3, 'a status that comes back is a new report, not a replay');
   assert.ok(calls.every(([, body]) => body.request_key.length <= 320 && !body.request_key.includes('svg')));
+  const paused = [{ groupRef: 'C1', reason: 'shared', at: '2026-11-24T10:00:00.000Z' }];
+  await channels.reportStatus({ channel: 'wechat', connected: true, pausedGroups: paused });
+  assert.deepEqual(calls.at(-1)[1].paused_groups, paused, 'the structured snapshot rides in the command body');
+  await channels.reportStatus({ channel: 'wechat', connected: true, pausedGroups: [] });
+  assert.deepEqual(calls.at(-1)[1].paused_groups, [], 'an empty snapshot clears it at State too');
+  assert.equal(new Set(calls.slice(3).map(([, body]) => body.request_key)).size, 2, 'each snapshot gets its own key');
   answer = Object.assign(new Error('AItelier /api/state/commands/report_channel_status: HTTP 422 "qr_svg_refused: no"'), { status: 422 });
   assert.deepEqual(await channels.reportStatus({ channel: 'wechat', connected: false, qrSvg: '<svg onload="x"></svg>' }), { refused: 'qr_svg_refused' });
   answer = Object.assign(new Error('AItelier /api/state/commands/report_channel_status: HTTP 503'), { status: 503 });

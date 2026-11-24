@@ -1337,6 +1337,25 @@ class RecordChannelDelivery(Project):
     error: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
+class PausedGroup(BaseModel):
+    """One row of a channel's authoritative pause snapshot (a bound group's ref, a short
+    reason code and the moment it was suspended)."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    group_ref: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=40)
+    at: str = Field(min_length=1, max_length=64)
+
+    @field_validator("at")
+    @classmethod
+    def _iso_at(cls, value):
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("at must be an ISO-8601 timestamp") from None
+        return value
+
+
 class ReportChannelStatus(Project):
     request_key: str = Field(min_length=1, max_length=320)
     channel: _CHANNEL
@@ -1344,6 +1363,9 @@ class ReportChannelStatus(Project):
     # Bounded and checked by the service (detail_too_long, qr_svg_too_large, qr_svg_refused).
     detail: str | None = None
     qr_svg: str | None = None
+    # The whole snapshot, empty when nothing is paused. Omitted means "leave group pauses as
+    # they were" (older callers); a present list replaces them for this channel's bound groups.
+    paused_groups: list[PausedGroup] | None = Field(default=None, max_length=20, json_schema_extra=_omit_default)
 
 
 class ClaimChannelAlert(Project):

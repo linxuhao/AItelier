@@ -1682,3 +1682,32 @@ def test_f7_clearing_a_groups_records_while_its_switch_is_on_owes_a_purge_of_its
     receipt(world, key="off-receipt")
     world.owner.groups.clear_group_messages("wechat", ROOM)
     assert switch(world)[4] is None
+
+
+def test_a_channels_pause_snapshot_marks_only_its_bound_groups_and_clears_on_unbind(world):
+    bound_group(world)
+    bound_group(world, room=ROOM2, key="bg-paused-2", label="老家群")
+
+    def report(key, paused_groups):
+        return execute(world.steward, "report_channel_status", {"request_key": key, "channel": "wechat",
+            "connected": True, "paused_groups": paused_groups}, allow_write=True)
+
+    def cards():
+        return {g["group_ref"]: g for g in world.owner.groups.owner_view()["groups"]}
+
+    assert all(card["paused"] is None for card in cards().values()), "nothing paused yet"
+    at = "2026-11-24T10:00:00.000Z"
+    report("paused-1", [{"group_ref": ROOM, "reason": "shared", "at": at},
+                        {"group_ref": "unbound-room", "reason": "not_private", "at": at}])
+    view = cards()
+    assert view[ROOM]["paused"] == {"reason": "shared", "at": at}, "the reported group carries the projection"
+    assert view[ROOM2]["paused"] is None, "the other bound group of this channel is cleared"
+    report("paused-2", [])
+    assert all(card["paused"] is None for card in cards().values()), "a later empty snapshot clears it"
+    report("paused-3", [{"group_ref": ROOM2, "reason": "missing_scope", "at": at}])
+    assert cards()[ROOM2]["paused"] == {"reason": "missing_scope", "at": at}
+    world.owner.groups.unbind_owner_group("wechat", ROOM2)
+    assert ROOM2 not in cards()
+    assert rows(world, "SELECT paused_reason,paused_at FROM state_owner_groups WHERE group_ref=?", (ROOM2,)) == [(None, None)]
+    with pytest.raises(StateGraphError, match="paused_groups"):
+        report("paused-too-many", [{"group_ref": ROOM, "reason": "shared", "at": at}] * 21)

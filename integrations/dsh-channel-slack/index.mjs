@@ -216,7 +216,8 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   let ownerRef, rooms = new Map(); // bound channel -> {prefix: the bot's mention the backend keeps, label: the group's name}
   let roomsListed, roomsKnown = false, roomsWait;
   const listed = new Promise(resolve => { roomsListed = resolve; });
-  const paused = new Map(); // bound channel -> why it is paused (shared, not_private, ...)
+  const paused = new Map(); // bound channel -> {reason, at}: why it is paused (shared, not_private, ...)
+  const PAUSED_SNAPSHOT_MAX = 20; // what the host and State accept in one status report
   const threads = new Map(); // `${channel}:${ts}` of a group question or code -> its thread's root ts
   const binds = new Set(); // `${channel}:${ts}` of the group codes passed on as binds
   let botAsked;
@@ -386,7 +387,7 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
 
   function suspend(room, why) {
     if (!rooms.has(room) || paused.has(room)) return;
-    paused.set(room, why);
+    paused.set(room, { reason: why, at: new Date().toISOString() });
     log.warn(`slack: group ${room} paused: ${why} - nothing more is taken from it or sent to it; ${remedyOf(why)}`);
   }
 
@@ -602,14 +603,17 @@ export function slackChannel({ ownerChannels, appToken, botToken, SocketModeClie
   // A paused group (step 23) is said in the channel's status, which the dashboard shows, by the
   // name the dashboard gives it (its label, else its ref's last six) and what to do about it, so the
   // owner knows which to unbind and which needs the app put right; connected or not, after why not.
+  // The structured snapshot is the authoritative per-group fact for the group cards: empty when
+  // nothing is paused, so a plugin restart clears the badges without an explicit resume event.
   const status = () => {
-    if (!paused.size) return { ...state };
+    const pausedGroups = [...paused].slice(0, PAUSED_SNAPSHOT_MAX).map(([groupRef, { reason, at }]) => ({ groupRef, reason, at }));
+    if (!paused.size) return { ...state, pausedGroups };
     const count = paused.size, byRemedy = new Map();
-    for (const [room, why] of paused)
-      byRemedy.set(remedyOf(why), [...byRemedy.get(remedyOf(why)) ?? [], `「${rooms.get(room)?.label ?? room.slice(-6)}」 ${why}`]);
+    for (const [room, { reason }] of paused)
+      byRemedy.set(remedyOf(reason), [...byRemedy.get(remedyOf(reason)) ?? [], `「${rooms.get(room)?.label ?? room.slice(-6)}」 ${reason}`]);
     const line = `${count} group${count === 1 ? '' : 's'} paused: `
       + [...byRemedy].map(([remedy, named]) => `${named.join(', ')} - ${remedy}`).join('; ');
-    return { ...state, detail: state.detail ? `${state.detail}; ${line}` : line };
+    return { ...state, detail: state.detail ? `${state.detail}; ${line}` : line, pausedGroups };
   };
   const stop = async () => {
     if (stopped) return;

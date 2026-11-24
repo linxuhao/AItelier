@@ -74,6 +74,7 @@
   {#each groups as group (group.group_ref)}
     <div class="group" data-group={group.group_ref}>
       <p data-group-bound><strong>{t('steward.groupTitle')}</strong> {group.label ?? group.group_ref.slice(-6)}
+        {#if group.paused}<span class="paused" data-group-paused={group.group_ref} title={group.paused.reason}>{t('steward.groupPaused')}</span>{/if}
         · {t('steward.groupCount').replace('{n}', String(group.messages_30d))}
         {#if group.last_message_at}· <small>{new Date(group.last_message_at).toLocaleString()}</small>{/if}</p>
       {#if group.media_keep}
@@ -151,6 +152,7 @@
   .code{margin:0 0 8px;padding:8px 10px;border-radius:6px;background:var(--pico-code-background-color);}
   .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}.error{color:var(--pico-del-color);}
   .muted{color:var(--pico-muted-color);font-size:12px;}
+  .paused{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--pico-del-color, #c62828);color:#fff;}
   .keep{display:flex;flex-direction:column;gap:2px;margin:4px 0 6px;font-size:12px;}.keep label{font-size:12px;margin:0;}
   .keep small{color:var(--pico-muted-color);}
   h4{font-size:13px;margin:8px 0 4px;}

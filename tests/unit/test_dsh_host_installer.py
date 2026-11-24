@@ -1,6 +1,7 @@
 """Actual fresh/repeated filesystem installation without production data."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shlex
 import sqlite3
@@ -15,7 +16,8 @@ spec.loader.exec_module(installer)
 
 @pytest.fixture
 def paths(tmp_path, monkeypatch):
-    for name in ('DPE_DB_PATH', 'AITELIER_SECRETS_DIR', 'AITELIER_HOME'):
+    for name in ('DPE_DB_PATH', 'AITELIER_SECRETS_DIR', 'AITELIER_HOME',
+                 'AITELIER_UID', 'AITELIER_GID', 'AITELIER_STEWARD_SECRETS_HOST_DIR'):
         monkeypatch.delenv(name, raising=False)
     repo = tmp_path / 'checkout space %test'; repo.mkdir()
     (repo / 'deploy').mkdir()
@@ -169,3 +171,62 @@ def test_a_container_user_other_than_the_compose_default_asks_for_a_backend_recr
     assert '4242:1000' in note and 'recreate' in note and 'identity' not in note.lower()
     monkeypatch.setenv('AITELIER_GID', '77')
     assert '4242:77' in installer.container_user_note(repo)
+
+
+def test_empty_uid_gid_assignments_are_filled_from_the_running_process(paths):
+    """Compose's ${VAR:-1000} treats AITELIER_UID=/AITELIER_GID= as unset, so
+    prepare() must write this process's real uid/gid instead of leaving an empty
+    line that silently keeps the backend running as 1000:1000. A real value is
+    left untouched."""
+    repo, home, secrets = paths
+    (repo / '.env').write_text('AITELIER_DRIVER_IDENTITY=on\nAITELIER_UID=\nAITELIER_GID=\n')
+    installer.prepare(repo, home, secrets)
+    lines = (repo / '.env').read_text().splitlines()
+    assert 'AITELIER_UID=' not in lines and 'AITELIER_GID=' not in lines
+    assert f'AITELIER_UID={os.getuid()}' in lines
+    assert f'AITELIER_GID={os.getgid()}' in lines
+    assert installer.setting(repo, 'AITELIER_UID', 'unset') == str(os.getuid())
+    assert installer.setting(repo, 'AITELIER_GID', 'unset') == str(os.getgid())
+
+    (repo / '.env').write_text('AITELIER_DRIVER_IDENTITY=on\nAITELIER_UID=4321\nAITELIER_GID=\n')
+    installer.prepare(repo, home, secrets)
+    lines = (repo / '.env').read_text().splitlines()
+    assert 'AITELIER_UID=4321' in lines
+    assert f'AITELIER_UID={os.getuid()}' not in lines
+    assert 'AITELIER_GID=' not in lines
+    assert f'AITELIER_GID={os.getgid()}' in lines
+    assert installer.setting(repo, 'AITELIER_UID', 'unset') == '4321'
+
+
+def test_identity_report_says_nothing_for_empty_values_but_names_real_ones(paths):
+    """The lines main() prints come from identity_notes(): an empty assignment
+    resolves to compose's default and must not produce the false sentence, while
+    AITELIER_UID=4321 must still be named in the report."""
+    repo, _, _ = paths
+    (repo / '.env').write_text('AITELIER_UID=\nAITELIER_GID=\n')
+    report = installer.identity_notes(repo)
+    assert report == []
+    assert not any('the containers run as the .env value' in line for line in report)
+    assert not any('AITELIER_UID=' in line for line in report)
+
+    (repo / '.env').write_text('AITELIER_UID=4321\nAITELIER_GID=\n')
+    report = installer.identity_notes(repo)
+    assert any('AITELIER_UID=4321' in line for line in report)
+    assert not any('AITELIER_GID=' in line for line in report)
+
+
+def test_empty_path_settings_fall_back_to_the_host_defaults(paths):
+    """The same empty-means-unset rule also stops DPE_DB_PATH and
+    AITELIER_STEWARD_SECRETS_HOST_DIR from resolving to the current directory."""
+    repo, home, secrets = paths
+    (repo / '.env').write_text('DPE_DB_PATH=\nAITELIER_STEWARD_SECRETS_HOST_DIR=\n')
+    assert installer.setting(repo, 'DPE_DB_PATH', 'default db') == 'default db'
+    assert installer.setting(repo, 'AITELIER_STEWARD_SECRETS_HOST_DIR', 'default secrets') == 'default secrets'
+    installer.prepare(repo, home, secrets)
+    assert (home / '.local/share/aitelier/steward-mcp-secrets').is_dir()
+    unit = installer.render_unit(repo, home, home / 'runtimes/release', secrets,
+                                 'http://127.0.0.1:5444')
+    assignments = [shlex.split(line.split('=', 1)[1])[0].replace('%%', '%')
+                   for line in unit.splitlines() if line.startswith('Environment=')]
+    env = dict(value.split('=', 1) for value in assignments)
+    assert env['DPE_DB_PATH'] == str(home / '.AItelier/aitelier.db')

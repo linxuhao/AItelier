@@ -28,7 +28,7 @@ export interface HostConfig {
   /** The todo CLI: `python -m <module>` in `cwd` (default: the process's directory) with
    *  python defaulting to python3; the CLI reads its state directory from `stateDirEnv`. */
   todo: { python?: string; cwd?: string; module: string; stateDirEnv: string };
-  /** Environment variable carrying the session id on the driver's processes (default DSH_DIRECTOR_SESSION).
+  /** Environment variable carrying the session id on the driver's processes (default DIRECTOR_SESSION).
    *  The host sets it on the DSH process. A DSH_-prefixed name never reaches a job a model shell
    *  starts (DSH rebuilds that namespace per shell call); the local host uses DIRECTOR_LOCAL_SESSION_<hash of its root>. */
   sessionEnv?: string;

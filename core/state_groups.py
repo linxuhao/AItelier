@@ -57,7 +57,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from core.message_body_guard import refuse_credential_body
-from core import media_types, state_channels
+from core import media_types, owner_text, state_channels
 from core import state_steward_confirmations as confirmations
 from core.state_channels import (BODY_MAX_BYTES, CHANNELS, CODE_TTL, _code_hash, _require_utf8, _written_at,
                                  digit_windows, require_bound)
@@ -178,13 +178,14 @@ WITHHELD_OWNER_LINE = "{group}里有一条回答没发出去：{reason}。要问
 WITHHELD_OWNER_SUBJECT = "群里没发出的回答"
 QUOTA_NOTICE = "问得太多了，过一会儿再问。"
 # The line a group gets when the requester's reply decided a confirmation (7.8.9 step 4):
-# code's words, never the model's.
-CONFIRMATION_LINES = MappingProxyType({
-    "confirmed": "已确认 {code}，正在执行。", "cancelled": "已取消 {code}，不会执行。",
-    "expired": "{code} 已过期，未执行；请重新请求。",
-    # The only refusals here are about the message's time (a group message is never undated):
-    # fixed words, never the internal token (review F4).
-    "refused": "{code} 未执行：消息时间不对，请重新回复。"})
+# code's words, never the model's, in the owner's language (core.owner_text group_<outcome>).
+# The only refusals here are about the message's time (a group message is never undated):
+# fixed words, never the internal token (review F4).
+CONFIRMATION_OUTCOMES = ("confirmed", "cancelled", "expired", "refused")
+
+
+def confirmation_line(outcome: str, code: str) -> str:
+    return owner_text.texts()["group_" + outcome].format(code=code)
 BIND_NOTICE = ("管家已加入本群。@ 我提问即可；我在群里只回答公开项目和一般问题，不能替任何人做决定，也不传话；私聊我不会回复。"
                "@ 我的消息会保存 30 天，业主看得到；它们会交给外部模型服务处理，管家自己的会话记录里可能留得更久。"
                "让我记住的事只在本群用，30 天后删。")
@@ -1039,7 +1040,7 @@ class StateGroups:
             if decided is not None:
                 extra["confirmation"] = decided
                 if self.send_refusal(conn, channel, group_ref, moment) is None:
-                    line = CONFIRMATION_LINES[decided["outcome"]].format(code=decided["code"])
+                    line = confirmation_line(decided["outcome"], decided["code"])
                     extra.update(confirmation_line=line, confirmation_line_message_id=self._out_row(
                         conn, channel, group_ref, "confirmation_line", line, moment))
             asked = self._count(conn, "SELECT COUNT(*) FROM state_group_messages WHERE channel=? AND group_ref=? AND "

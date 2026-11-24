@@ -225,6 +225,16 @@ host's own time zone unless the unit sets `AITELIER_DSH_MEMORY_TZ` to the
 owner's IANA zone (template:
 `integrations/embed-server/systemd/21-memory-tz.conf`).
 
+The fixed words the steward's chat channels, question pushes and confirmations
+show the owner, and the reply phrases its prompt names, follow one setting:
+`AITELIER_OWNER_LANGUAGE` in the repository `.env`, `en` (the default) or `zh`
+(`core/owner_text.py`, `integrations/dsh-director/lib/owner-text.mjs`). The
+backend and the DSH host both read that line; a running steward takes it at its
+next start. Either language's phrase decides: `approve proposal <id>` or
+`同意 proposal <id>`, `decline proposal <id>` or `拒绝 proposal <id>`, and
+`confirm <code>` / `cancel <code>` or `确认 <code>` / `取消 <code>` - always the
+whole message, exactly, lower case.
+
 **Restarting the steward** (after adding channel tokens, for example): its
 profile is written at start, so stop and start the `aitelier-home` driver from
 the dashboard's driver controls, or with the same API:

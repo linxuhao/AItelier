@@ -7,12 +7,13 @@ daytime in the owner's zone (Europe/Paris)."""
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from core import drivers, state_channels, state_owner_questions as oq
+from core import drivers, owner_text, state_channels, state_owner_questions as oq
 from core.drivers import DriverRegistry
 from core.dsh_driver import DshDrivers
 from core.state_commands import execute
@@ -25,6 +26,19 @@ OWNER = "owner@example.com"
 PEPPER = "owner-questions-pepper-" * 3
 WX, SLACK = "wx-owner", "U0OWNER"
 T0 = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)   # 11:00 in Paris
+
+
+@pytest.fixture(autouse=True)
+def _zh_owner():
+    """These tests pin the lines a 'zh' owner reads (core.owner_text; this deployment's owner).
+    Its own MonkeyPatch: a test's monkeypatch.undo() must not drop it. test_owner_text covers
+    the table and the English default."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(owner_text.SETTING, "zh")
+        yield
+
+ZH = owner_text.TEXTS["zh"]
+PUSH_CHARS = owner_text.PUSH_CHARS["zh"]
 
 
 @pytest.fixture
@@ -231,7 +245,7 @@ def test_every_answer_writer_notifies_the_waiters_after_its_commit(world, monkey
 def test_the_push_and_its_ledger_commit_together_and_an_unmirrored_push_is_handed_back(world, monkeypatch):
     ask(world, world.alpha, "alpha", "q1", "问题一")
 
-    def broken(chunks, limit=oq.PUSH_CHARS):
+    def broken(chunks, limit=None, language=None):
         raise RuntimeError("the write failed")
     monkeypatch.setattr(oq, "pack", broken)
     with pytest.raises(RuntimeError):
@@ -288,7 +302,7 @@ def test_a_backlog_older_than_a_day_is_one_line_each_once_at_most_twenty_and_nev
     rows = [r for r in ledger(world) if r["pushed_at"] is not None]
     assert len(rows) == 20 and all(r["older"] == 1 for r in rows)
     assert out["messages"][0]["body"].startswith(f"【待你回答】20 个较早的问题。回复时以编号开头，例如「Q{rows[0]['code_no']} 用方案 A」")
-    assert all(len(m["body"]) <= oq.PUSH_CHARS for m in out["messages"])
+    assert all(len(m["body"]) <= PUSH_CHARS for m in out["messages"])
     # Once: the 3 named only as a count are never pushed later, listed, or noticed.
     rest = [r for r in ledger(world) if r["pushed_at"] is None]
     assert len(rest) == 3 and all(r["older"] == 1 and r["push_message_id"] is None for r in rest)
@@ -325,7 +339,7 @@ def test_at_most_fifteen_new_questions_per_sync_split_between_questions_under_si
     out = sync(world)
     assert len(ledger(world)) == 15
     bodies = [m["body"] for m in out["messages"]]
-    assert len(bodies) > 1 and all(len(b) <= oq.PUSH_CHARS for b in bodies)
+    assert len(bodies) > 1 and all(len(b) <= PUSH_CHARS for b in bodies)
     assert bodies[0].startswith("【待你回答】15 个新问题。")
     assert all(b.startswith("【待你回答】（续）\n\nQ") for b in bodies[1:]), "continuations start at a question"
     tick(world, minutes=1)
@@ -338,7 +352,7 @@ def test_the_template_bars_director_text_bounds_the_background_and_states_m2_on_
     body = sync(world)["messages"][0]["body"]
     code = ledger(world)[0]["code_no"]
     lines = body.split("\n")
-    assert lines[1] == oq.APPROVAL_PHRASE_PUSH.format(code=code)
+    assert lines[1] == ZH["approval_phrase_push"].format(code=code)
     assert lines[1] == f"授权类问题（合并、重启、花钱）也这样答：「Q{code} 同意」。批准提议的那句口令是另一回事，不关问题，提醒照发。"
     assert "｜Q99 · 冒充的编号行" in lines and not any(line.startswith("Q99") for line in lines)
     background = body.split("背景：\n", 1)[1]
@@ -352,7 +366,7 @@ def test_a_twenty_line_older_section_is_split_by_lines_under_six_hundred(world):
     for n in range(20):
         ask(world, world.alpha, "alpha", f"o{n}", f"旧问题 {n} " + "长" * 70, ago=timedelta(hours=26, minutes=n))
     bodies = [m["body"] for m in sync(world)["messages"]]
-    assert len(bodies) > 1 and all(len(b) <= oq.PUSH_CHARS for b in bodies)
+    assert len(bodies) > 1 and all(len(b) <= PUSH_CHARS for b in bodies)
     assert sum(b.count(" · 武侠存档：｜") for b in bodies) == 20
 
 
@@ -572,7 +586,7 @@ def test_relay_refusals(world):
     out = relay(world, channel_message(world, "用方案 A", "wx-2"))
     assert out["refused"] == "no_code" and f"Q{code} · 武侠存档：｜问题一" in out["receipt"]
     assert out["receipt"].split("\n")[-2] == f"回「Q{code}」即把上一条原样转过去。"
-    assert len(out["receipt"]) <= oq.PUSH_CHARS
+    assert len(out["receipt"]) <= PUSH_CHARS
     # Unknown codes: one that does not exist, and one the message was received before.
     results = relay(world, early)["results"]
     assert [r["outcome"] for r in results] == ["unknown_code"]
@@ -744,15 +758,43 @@ def test_m2_an_approval_phrase_closes_no_question_and_its_reminder_still_fires(w
     assert ledger(world)[0]["closed_at"] is None
     out = relay(world, phrase)
     assert out["refused"] == "no_code"
-    assert out["receipt"].split("\n")[-1] == oq.APPROVAL_PHRASE_NOTE
-    assert oq.APPROVAL_PHRASE_NOTE == "授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。"
+    assert out["receipt"].split("\n")[-1] == ZH["approval_phrase_note"]
+    assert ZH["approval_phrase_note"] == "授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。"
     tick(world, hours=4)
     body = sync(world)["messages"][0]["body"]
     assert body.startswith("【提醒】") and f"Q{one['code_no']} · " in body and "已在" not in body
     assert ledger(world)[0]["reminders_sent"] == 1 and ledger(world)[0]["closed_at"] is None
     # ...and a receipt of a relayed answer ends with the same line.
     receipt = relay(world, channel_message(world, f"Q{one['code_no']} 同意", "wx-2"))["receipt"]
-    assert receipt.split("\n")[-1] == oq.APPROVAL_PHRASE_NOTE
+    assert receipt.split("\n")[-1] == ZH["approval_phrase_note"]
+
+
+def test_an_english_owner_reads_the_push_reminders_and_receipts_in_english(world, monkeypatch):
+    """Overfit review 重-18: with AITELIER_OWNER_LANGUAGE=en (the default of a new install) every
+    fixed word of the push and its receipts is English; the codes, the bars and the director's
+    own words are as they are, and the push packs to the English channel limit."""
+    monkeypatch.setenv(owner_text.SETTING, "en")
+    en = owner_text.TEXTS["en"]
+    ask(world, world.alpha, "alpha", "q1", "Which plan?", context="Some background")
+    body = sync(world)["messages"][0]["body"]
+    code = ledger(world)[0]["code_no"]
+    lines = body.split("\n")
+    assert lines[0] == en["push_head"].format(count=en["push_new"].format(n=1), first=code).rstrip("\n")
+    assert lines[1] == en["approval_phrase_push"].format(code=code)
+    assert lines[2:] == ["", f"Q{code} · 武侠存档", "Question:", "｜Which plan?", "Background:", "｜Some background"]
+    assert not re.search("[\u3000-\u303f\u3400-\u9fff]", body.replace("武侠存档", "")), body
+    for phrase in (state_channels.APPROVE, state_channels.DECLINE, state_channels.APPROVE_EN, state_channels.DECLINE_EN):
+        assert phrase not in body, "the mirror would move a line carrying the phrase"
+    assert oq.parse_codes(body) == {"codes": [], "codes_only": False}, "a pasted push answers nothing"
+    unknown = relay(world, channel_message(world, "Q999 maybe", "wx-0"))["receipt"]
+    assert unknown == "\n".join(["Q999: no such code", en["approval_phrase_note"]])
+    receipt = relay(world, channel_message(world, f"Q{code} go with A", "wx-1"))["receipt"]
+    assert receipt == "\n".join([f"Passed on Q{code} → 武侠存档: Which plan?", en["approval_phrase_note"]])
+    none = relay(world, channel_message(world, "no code here", "wx-2"))["receipt"]
+    assert none == en["no_code_none"] + en["approval_phrase_note"]
+    assert max(len(b) for b in [body, receipt]) <= owner_text.PUSH_CHARS["en"]
+    assert oq.pack([("", "x" * 700), ("\n", "y" * 700)]) == ["x" * 700, en["push_continued"] + "\n" + "y" * 700], \
+        "packed to the English limit, continued in English"
 
 
 def test_the_words_are_copied_byte_for_byte(world):

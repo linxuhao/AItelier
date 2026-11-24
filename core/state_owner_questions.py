@@ -6,7 +6,7 @@ just after WAIT, and every minute as the fallback - never its model)
 reads the open questions of every project but the steward's own (the one rule,
 core.driver_questions), and - when a default channel is set and it is not the quiet hours
 (23:00-08:00 in core.state_steward.default_tz()) - writes at most one push (split into
-messages of at most PUSH_CHARS) as the steward's own message in its conversation, with
+messages of at most core.owner_text.PUSH_CHARS) as the steward's own message in its conversation, with
 subject PUSH_SUBJECT, in the SAME transaction that records it in the ledger
 `state_owner_question_pushes`: a question gets its code `Q<code_no>` the first time it is
 pushed, and the code is never reused. The host mirrors each message to the channel
@@ -24,7 +24,11 @@ in the order the owner wrote them: one received before an existing answer is not
 (`superseded`).
 
 The approval phrase of 7.2 is another mechanism: it decides a proposal and closes no
-question. An authorization answer is `Q<code> <words>` (APPROVAL_PHRASE_NOTE).
+question. An authorization answer is `Q<code> <words>` (owner_text approval_phrase_note).
+
+Every fixed line the owner reads here is in core.owner_text, in the owner's language
+(AITELIER_OWNER_LANGUAGE); the subjects below are not: the steward's host finds these
+messages by them (integrations/dsh-driver/steward-host.mjs).
 
 Both tables are private State tables (core.state_privacy.PRIVATE_STATE_TABLES)."""
 from __future__ import annotations
@@ -36,6 +40,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from core import owner_text
 from core.driver_questions import all_questions, conversation_rows
 from core.state_channels import require_bound
 from core.state_graph import ARCHIVED_PROJECT_SQL, StateGraphError
@@ -65,10 +70,6 @@ CREATE TABLE IF NOT EXISTS state_owner_question_answers (
 
 PUSH_SUBJECT = "待答问题"
 RECEIPT_SUBJECT = "转达回执"
-# A channel copy of a steward message is cut past 600 characters (lib/channels.mjs
-# CHANNEL_LIMITS.mirrorChars): a push is split between two questions to stay under it.
-PUSH_CHARS = 600
-CONTINUED = "【待你回答】（续）"
 WAIT = timedelta(seconds=30)         # a new question waits this long (an asker often asks several);
 #                                      the host's OWNER_QUESTIONS_WAIT_MS (steward-host.mjs) is this
 QUESTION_EVENT = "owner_question_changed"   # in the steward's project: a question asked, withdrawn or answered
@@ -83,10 +84,9 @@ CONTEXT_CHARS, LINE_CHARS = 200, 80
 CODES_ONLY_WINDOW = timedelta(minutes=10)
 CHANNEL_NAMES = {"wechat": "WeChat", "slack": "Slack"}
 # M2 (owner: the cheap option): an authorization answer is `Q<code> <words>`; the 7.2 approval
-# phrase decides a proposal and closes no question. The push's second line and every receipt's
-# last line say so. Neither names the phrase itself: the mirror moves such a line (VERBATIM).
-APPROVAL_PHRASE_PUSH = "授权类问题（合并、重启、花钱）也这样答：「Q{code} 同意」。批准提议的那句口令是另一回事，不关问题，提醒照发。"
-APPROVAL_PHRASE_NOTE = "授权类问题也只认「Q编号 你的话」；批准提议的那句口令不关问题。"
+# phrase decides a proposal and closes no question. The push's second line (owner_text
+# approval_phrase_push) and every receipt's last line (approval_phrase_note) say so. Neither
+# names the phrase itself: the mirror moves such a line (VERBATIM).
 
 def question_changed(store, conn, project_id, change):
     """Tell the steward's host that a director's question in `project_id` was `change`d
@@ -204,11 +204,15 @@ def _local(value):
     return _at(value).astimezone(ZoneInfo(default_tz())).strftime("%m-%d %H:%M")
 
 
-def pack(chunks, limit=PUSH_CHARS):
-    """Messages of at most `limit` characters from ordered (separator, text) chunks: split only
-    between two chunks (two questions, or two lines of a list). A continuation starts with
-    CONTINUED; a chunk longer than `limit` alone (one long question) is a message of its own,
-    its first line first - the channel's own cut keeps it."""
+def pack(chunks, limit=None, language=None):
+    """Messages of at most `limit` characters (default: the language's PUSH_CHARS) from ordered
+    (separator, text) chunks: split only between two chunks (two questions, or two lines of a
+    list). A continuation starts with the language's push_continued; a chunk longer than `limit`
+    alone (one long question) is a message of its own, its first line first - the channel's own
+    cut keeps it."""
+    language = owner_text.owner_language() if language is None else language
+    limit = owner_text.PUSH_CHARS[language] if limit is None else limit
+    continued = owner_text.texts(language)["push_continued"]
     messages, current = [], None
     for sep, chunk in chunks:
         if len(chunk) > limit:
@@ -218,7 +222,7 @@ def pack(chunks, limit=PUSH_CHARS):
             current = None
             continue
         if current is None:
-            candidate = chunk if not messages else CONTINUED + sep + chunk
+            candidate = chunk if not messages else continued + sep + chunk
             if len(candidate) > limit:
                 candidate = chunk
             current = candidate
@@ -226,7 +230,7 @@ def pack(chunks, limit=PUSH_CHARS):
             current += sep + chunk
         else:
             messages.append(current)
-            current = CONTINUED + sep + chunk
+            current = continued + sep + chunk
             if len(current) > limit:
                 current = chunk
     if current is not None:
@@ -442,43 +446,46 @@ class StateOwnerQuestions:
                                                       question["segment_id"], asker["sender_driver_id"] if asker else None))
         full = [(q["code_no"], q["project_id"], q["message_id"], q["text"]) for q in fresh]
         full += [(r["code_no"], r["project_id"], r["message_id"], self._text(found, r)) for r in owed_now]
+        language = owner_text.owner_language()
+        t = owner_text.texts(language)
         chunks = []
         if full or older:
             # The push's head: how to answer (an older-only push says it too), and M2.
             first = full[0][0] if full else older[0]["code_no"]
-            count = f"{len(full)} 个新问题" if full else f"{len(older)} 个较早的问题"
-            chunks.append(("", f"【待你回答】{count}。回复时以编号开头，例如「Q{first} 用方案 A」，"
-                               "你的原话会转给提问的导演；改主意就再发一条，以后来的为准。也可以在面板回答。\n"
-                           + APPROVAL_PHRASE_PUSH.format(code=first)))
+            count = t["push_new"].format(n=len(full)) if full else t["push_older"].format(n=len(older))
+            chunks.append(("", t["push_head"].format(count=count, first=first)
+                           + t["approval_phrase_push"].format(code=first)))
             for code, project, message_id, text in full:
-                chunks.append(("\n\n", self._block(conn, code, titles.get(project, project), message_id, text)))
+                chunks.append(("\n\n", self._block(conn, code, titles.get(project, project), message_id, text, t)))
         if reminded:
-            chunks.append(("\n\n", f"【提醒】还有 {len(reminded)} 个问题等你回答："))
+            chunks.append(("\n\n", t["reminder_head"].format(n=len(reminded))))
             for row, _ in reminded:
                 text = self._text(found, row)
                 title = titles.get(row["project_id"], row["project_id"])
                 if row["push_failed"]:
-                    chunks.append(("\n\n", self._block(conn, row["code_no"], title, row["message_id"], text)))
+                    chunks.append(("\n\n", self._block(conn, row["code_no"], title, row["message_id"], text, t)))
                 else:
-                    chunks.append(("\n", f"Q{row['code_no']} · {title}：｜{_first_line(text)}"))
-            chunks.append(("\n", f"回复「Q{reminded[0][0]['code_no']} 你的回答」即可，也可以在面板回答。"))
+                    chunks.append(("\n", t["question_line"].format(code=row["code_no"], title=title, line=_first_line(text))))
+            chunks.append(("\n", t["reminder_tail"].format(code=reminded[0][0]["code_no"])))
         if older:
-            chunks.append(("\n\n", "较早的问题："))
+            chunks.append(("\n\n", t["older_head"]))
             for question in older:
-                chunks.append(("\n", f"Q{question['code_no']} · {titles.get(question['project_id'], question['project_id'])}："
-                                     f"｜{_first_line(question['text'])}"))
+                chunks.append(("\n", t["question_line"].format(
+                    code=question["code_no"], title=titles.get(question["project_id"], question["project_id"]),
+                    line=_first_line(question["text"]))))
             if older_rest:
-                chunks.append(("\n", f"另有 {len(older_rest)} 个，见面板。"))
+                chunks.append(("\n", t["more_on_dashboard"].format(n=len(older_rest))))
         if notices:
-            labels = {"dashboard": "已在面板回答", "withdrawn": "已撤回", "wechat": "已在微信回答", "slack": "已在 Slack 回答"}
             groups = {}
             for row in sorted(notices, key=lambda r: r["code_no"]):
-                groups.setdefault(row["closed_how"], []).append(
-                    f"Q{row['code_no']}（{titles.get(row['project_id'], row['project_id'])}）")
-            chunks.append(("\n\n", "".join(f"{labels[how]}：{'、'.join(items)}。" for how, items in groups.items())))
+                groups.setdefault(row["closed_how"], []).append(t["closed_item"].format(
+                    code=row["code_no"], title=titles.get(row["project_id"], row["project_id"])))
+            chunks.append(("\n\n", t["closed_join"].join(
+                t["closed_group"].format(label=t["closed_" + how], items=t["closed_sep"].join(items))
+                for how, items in groups.items())))
         # The first chunk of a message never starts with a separator.
         chunks[0] = ("", chunks[0][1])
-        bodies = pack(chunks)
+        bodies = pack(chunks, language=language)
         written = []
         for body in bodies:
             message_id = str(uuid4())
@@ -517,16 +524,16 @@ class StateOwnerQuestions:
     def _text(found, row):
         return (found.get((row["message_id"], row["segment_id"])) or {}).get("text") or ""
 
-    def _block(self, conn, code, title, message_id, text):
+    def _block(self, conn, code, title, message_id, text, t):
         """One question in full: the code line, the question, and the background (the
-        asking message's body, at most CONTEXT_CHARS)."""
+        asking message's body, at most CONTEXT_CHARS), in the table `t`'s words."""
         message = self._message(conn, message_id)
         context = (message or {}).get("body") or ""
         context = context.strip()
         if len(context) > CONTEXT_CHARS:
             context = context[:CONTEXT_CHARS - 1] + "…"
-        block = f"Q{code} · {title}\n问：\n{_bar(text)}"
-        return block + (f"\n背景：\n{_bar(context)}" if context else "")
+        block = t["block"].format(code=code, title=title, text=_bar(text))
+        return block + (t["block_context"].format(context=_bar(context)) if context else "")
 
     # ---------------------------------------------------------------- the answer
     def relay_answer(self, project_id, request_key, source_message_id):
@@ -573,7 +580,7 @@ class StateOwnerQuestions:
                 results.append(result)
             out = {"source_message_id": source_message_id, "relayed_message_id": text["message_id"],
                    "channel": source["channel"], "results": results,
-                   "receipt": "\n".join([r["line"] for r in results] + [APPROVAL_PHRASE_NOTE])}
+                   "receipt": "\n".join([r["line"] for r in results] + [owner_text.texts()["approval_phrase_note"]])}
             self.steward._record(conn, "relay_owner_answer", request_key, request_hash, out)
         if written:
             self.steward._notify()
@@ -616,33 +623,37 @@ class StateOwnerQuestions:
         return row
 
     def _candidates(self, conn):
-        """The no_code receipt: the pushed questions still waiting, under PUSH_CHARS."""
+        """The no_code receipt: the pushed questions still waiting, under the language's PUSH_CHARS."""
+        language = owner_text.owner_language()
+        t = owner_text.texts(language)
         found, _ = self._scan(conn)
         titles = self._titles(conn)
         rows = [r for r in conn.execute("SELECT * FROM state_owner_question_pushes WHERE closed_at IS NULL "
                                         "AND pushed_at IS NOT NULL ORDER BY code_no")
                 if found.get((r["message_id"], r["segment_id"]), {}).get("status") == "open"]
         if not rows:
-            return "没有认出编号，现在也没有等你回答的已推问题。\n" + APPROVAL_PHRASE_NOTE
-        head = "没有认出编号。你是在回答下面哪个问题？"
-        tail = f"回「Q{rows[0]['code_no']}」即把上一条原样转过去。\n{APPROVAL_PHRASE_NOTE}"
-        lines = [f"Q{r['code_no']} · {titles.get(r['project_id'], r['project_id'])}：｜"
-                 f"{_first_line(found[(r['message_id'], r['segment_id'])]['text'])}" for r in rows]
+            return t["no_code_none"] + t["approval_phrase_note"]
+        head = t["no_code_head"]
+        tail = t["no_code_tail"].format(code=rows[0]["code_no"]) + t["approval_phrase_note"]
+        lines = [t["question_line"].format(code=r["code_no"], title=titles.get(r["project_id"], r["project_id"]),
+                                           line=_first_line(found[(r["message_id"], r["segment_id"])]["text"]))
+                 for r in rows]
         shown = list(lines)
         while True:
             rest = len(lines) - len(shown)
-            body = "\n".join([head, *shown, *([f"另有 {rest} 个，见面板。"] if rest else []), tail])
-            if len(body) <= PUSH_CHARS or not shown:
+            body = "\n".join([head, *shown, *([t["more_on_dashboard"].format(n=rest)] if rest else []), tail])
+            if len(body) <= owner_text.PUSH_CHARS[language] or not shown:
                 return body
             shown.pop()
 
     def _relay_one(self, conn, code, source, text, titles, moment):
         """One code of the message: judged, and written when it is an answer."""
         label = f"Q{code}"
+        t = owner_text.texts()
         row = conn.execute("SELECT * FROM state_owner_question_pushes WHERE code_no=?", (code,)).fetchone()
         # The codes this message could see: pushed before the message naming them was received.
         if row is None or row["pushed_at"] is None or _at(source["at"]) < _at(row["pushed_at"]):
-            return {"code": label, "outcome": "unknown_code", "line": f"{label} 找不到这个编号"}
+            return {"code": label, "outcome": "unknown_code", "line": t["unknown_code"].format(label=label)}
         row = dict(row)
         title = titles.get(row["project_id"], row["project_id"])
         question = next((q for q in all_questions(conversation_rows(conn, row["project_id"]))
@@ -650,22 +661,23 @@ class StateOwnerQuestions:
         base = {"code": label, "project_id": row["project_id"], "message_id": row["message_id"],
                 "segment_id": row["segment_id"]}
         if question is None:
-            return {**base, "outcome": "unknown_code", "line": f"{label} 找不到这个编号"}
+            return {**base, "outcome": "unknown_code", "line": t["unknown_code"].format(label=label)}
         first = _first_line(question["text"])
         if question["status"] == "withdrawn":
             reason = _first_line((question.get("withdrawn") or {}).get("reason"), 60)
             newer = conn.execute("SELECT * FROM state_owner_question_pushes WHERE asker_driver_id IS ? AND code_no>? "
                                  "AND closed_at IS NULL AND pushed_at IS NOT NULL ORDER BY code_no DESC LIMIT 1",
                                  (row["asker_driver_id"], code)).fetchone()
-            line = f"{label} 已撤回（{reason}），面板上仍可以答"
+            line = t["withdrawn"].format(label=label, reason=reason)
             if newer is not None:
                 found = next((q for q in all_questions(conversation_rows(conn, newer["project_id"]))
                               if q["message_id"] == newer["message_id"] and q["segment_id"] == newer["segment_id"]), None)
-                line = f"{label} 已撤回（{reason}）；导演改问了 Q{newer['code_no']}：{_first_line(found['text'] if found else '')}"
+                line = t["withdrawn_newer"].format(label=label, reason=reason, code=newer["code_no"],
+                                                   line=_first_line(found["text"] if found else ""))
             return {**base, "outcome": "question_withdrawn", "line": line}
         if conn.execute("SELECT 1 FROM state_owner_question_answers WHERE source_message_id=? AND code_no=?",
                         (text["message_id"], code)).fetchone():
-            return {**base, "outcome": "duplicate", "line": f"{label} 这条已经转过了"}
+            return {**base, "outcome": "duplicate", "line": t["duplicate"].format(label=label)}
         # M1: answers reach the director in the order the owner wrote them; a relayed answer
         # dates by when its channel message was received, any other by its own row.
         received = _at(text["at"])
@@ -675,7 +687,7 @@ class StateOwnerQuestions:
         later = [t for t in times if t > received]
         if later:
             return {**base, "outcome": "superseded",
-                    "line": f"{label} 没有转：你之后又答过（{_local(max(later).isoformat())}），以后来的为准"}
+                    "line": t["superseded"].format(label=label, when=_local(max(later).isoformat()))}
         further = bool(question["answers"])
         asker = self._message(conn, row["message_id"])["sender_driver_id"]
         member = conn.execute("SELECT 1 FROM project_drivers p JOIN drivers d USING(driver_id) WHERE p.project_id=? "
@@ -684,7 +696,7 @@ class StateOwnerQuestions:
             "SELECT p.driver_id FROM project_drivers p JOIN drivers d USING(driver_id) WHERE p.project_id=? "
             "AND p.status='member' ORDER BY p.driver_id", (row["project_id"],))]
         if not targets:
-            return {**base, "outcome": "no_recipients", "line": f"{label} 没有转：这个项目现在没有导演"}
+            return {**base, "outcome": "no_recipients", "line": t["no_recipients"].format(label=label)}
         subject = (f"{label} = your question {row['segment_id']}: {'a further answer, ' if further else ''}"
                    f"your owner's words, relayed verbatim from {CHANNEL_NAMES[source['channel']]} "
                    f"(received {_utc_second(text['at'])})")
@@ -700,4 +712,4 @@ class StateOwnerQuestions:
                      "AND closed_at IS NULL", (moment.isoformat(), source["channel"], code))
         return {**base, "outcome": "relayed_further" if further else "relayed", "answer_message_id": message_id,
                 "subject": subject, "recipients": [d["target_driver_id"] for d in deliveries],
-                "line": f"已转达 {label}{'（补充回答）→' if further else ' →'} {title}：{first}"}
+                "line": t["relayed_further" if further else "relayed"].format(label=label, title=title, line=first)}

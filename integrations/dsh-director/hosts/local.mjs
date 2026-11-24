@@ -103,7 +103,7 @@ export const LOCAL_OWNER = 'owner:local';
 /** What the standalone steward tells its owner to type (the commands in local-commands.mjs). */
 const STEWARD_OWNER_COMMANDS = 'Your owner is in this DSH, with no Slack, WeChat or dashboard: they list your open questions with /questions and answer one with /answer <id> <text>';
 const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason].'
-  + ' When you ask them to decide a proposal, give them that command instead of a 同意/拒绝 proposal line';
+  + ' When you ask them to decide a proposal, give them that command instead of an approval phrase line';
 /** With memory: memory_forget refuses here (no_owner_channel - a DSH command carries no owner
  *  message to cite), so the steward sends its owner to the commands that forget and restore. */
 const STEWARD_MEMORY_COMMANDS = '; they see their resident profile with /profile, forget one memory entry with /forget <id> [reason]'
@@ -452,6 +452,8 @@ export function localHost(options = {}) {
       ...(options.memory ? { memory: options.memory } : {}),
       // Plugin step 12: run the root session as the steward (needs roles.json's steward).
       ...(options.rootRole ? { rootRole: options.rootRole } : {}),
+      // The owner's language (lib/owner-text.mjs), passed through as given (absent: English).
+      ...(options.ownerLanguage ? { ownerLanguage: options.ownerLanguage } : {}),
     },
     /** The startup / post-compaction snapshot: the work items and the notes; for the steward
      *  also how its owner answers and decides here (step 15: steward.md speaks of Slack,

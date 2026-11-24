@@ -323,6 +323,23 @@ def test_every_driver_gets_this_venv_python_for_the_pdf_reader(runtime, roles_fi
         assert env["AITELIER_MEDIA_ROOT"]
 
 
+def test_every_driver_gets_the_owners_language_resolved_from_the_one_setting(runtime, roles_file, monkeypatch, tmp_path):
+    # Overfit review 重-18: the plugin's channel lines follow AITELIER_OWNER_LANGUAGE
+    # (core/owner_text.py), which this host resolves - its unit does not carry .env.
+    from core import owner_text
+    dotenv = tmp_path / ".env"
+    monkeypatch.setattr(owner_text, "DOTENV_PATH", dotenv)
+    monkeypatch.delenv(owner_text.SETTING, raising=False)
+    steward = runtime._provision(STEWARD_PROJECT, "aitelier", "steward-route", "fixture")
+    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
+    assert runtime._environment(steward)[owner_text.SETTING] == "en", "unset: English"
+    dotenv.write_text("AITELIER_OWNER_LANGUAGE=zh\n")
+    for row in (steward, director):
+        assert runtime._environment(row)[owner_text.SETTING] == "zh", "the repository .env's line"
+    monkeypatch.setenv(owner_text.SETTING, "zh-CN")
+    assert runtime._environment(steward)[owner_text.SETTING] == "zh", "the environment's, resolved"
+
+
 def test_start_defaults_the_steward_to_its_own_route_and_directors_to_theirs(runtime, roles_file):
     async def go():
         try:

@@ -38,7 +38,8 @@ import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
-import { createOwnerChannels, GROUP_LIMITS, GROUP_WAKE_IMAGE_LIMIT, trimRecent } from './lib/channels.mjs';
+import { CHANNEL_LIMITS, createOwnerChannels, GROUP_LIMITS, GROUP_WAKE_IMAGE_LIMIT, trimRecent } from './lib/channels.mjs';
+import { ownerTexts, stewardPrompt } from './lib/owner-text.mjs';
 import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
@@ -78,7 +79,11 @@ export function ownerChannelsFor(ctx, host) {
   // The owed store lives in the director's own state dir: a message that still owes a line
   // outlives the process, and it does so in the one directory this session already owns.
   const stateDir = host.config?.stateDir;
+  // The owner's language (HostConfig.ownerLanguage; overfit review 重-18): the lines the
+  // channel layer sends and how long a mirrored message may be.
+  const owner = ownerTexts(host.config?.ownerLanguage);
   return createOwnerChannels({ host: host.channels, ...(host.groups ? { groups: host.groups } : {}),
+    replies: owner.replies, limits: { ...CHANNEL_LIMITS, mirrorChars: owner.mirrorChars },
     // Step 24.2 (7.8.12): storeMedia stores into the host's media library, when it has one.
     ...(host.capabilities.includes('media') && host.media ? { media: host.media } : {}),
     ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
@@ -178,7 +183,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const rootOnly = rootRole === 'director' ? 'Director only. ' : '';
   if (!roles[rootRole]) throw new Error(`directorHost refused: config.rootRole is ${rootRole} but the role table has no ${rootRole}`);
   const promptDir = dirname(config.rolesFile);
-  const runtimeSkill = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
+  // The steward's prompt names the reply phrases and the brief's fixed lines in the owner's
+  // language (lib/owner-text.mjs; 'zh' leaves steward.md as it is).
+  const rootPrompt = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
+  const runtimeSkill = rootRole === 'steward' ? stewardPrompt(rootPrompt, config.ownerLanguage) : rootPrompt;
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
   // Step 24.1a (design-steward 7.8.7): a role with `catalog: "host"` (the steward) finds and
   // calls its further tools only in the catalog its host gives for the turn; without such a

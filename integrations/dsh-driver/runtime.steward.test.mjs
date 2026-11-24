@@ -108,7 +108,9 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
         { id: 'director', name: join(here, '../dsh-director/index.mjs') },
         { id: 'director-local', name: join(here, '../dsh-director/hosts/local.mjs'), config: { root, sessionId: 'stw-root',
           provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100, idleReviewMs: 600000,
-          dormantCompactMinTokens: 0, clockToolGapMs: 1, rootRole: 'steward', memory: { userId: 'owner', root: memRoot, ...memory } } }] },
+          dormantCompactMinTokens: 0, clockToolGapMs: 1, rootRole: 'steward',
+          // A 'zh' owner's steward reads steward.md exactly as written (lib/owner-text.mjs).
+          ownerLanguage: 'zh', memory: { userId: 'owner', root: memRoot, ...memory } } }] },
     ]));
     await writePatch({});
     const environment = withoutHostWiring(process.env);

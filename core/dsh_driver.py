@@ -19,6 +19,7 @@ from core.datadir import owner_secrets_dir
 from core.driver_credentials import read_token_file
 from core.dsh_todo_hooks import CLI_ENV as TODO_CLI_ENV, TODO_ROOT
 from core.off_loop_sqlite import retry_while_locked
+from core.owner_text import owner_language
 from core.state_graph import STATE_WRITE_BUSY_CODE, STATE_WRITE_BUSY_RETRY_AFTER, StateWriteBusy, now
 from core.state_schema_migration import add_column_if_missing
 
@@ -827,7 +828,11 @@ class DshDrivers:
                    AITELIER_MEDIA_ROOT=media_root(),
                    # Step 24.2c (design-steward 7.8.12b "三"): the python that runs the steward's
                    # PDF reader (integrations/dsh-director/pdf_read.py) - this venv's, with pypdfium2.
-                   AITELIER_MEDIA_PYTHON=sys.executable)
+                   AITELIER_MEDIA_PYTHON=sys.executable,
+                   # The owner's language for the fixed lines the plugin sends the owner (its
+                   # lib/owner-text.mjs): the one setting core.owner_text reads, given resolved -
+                   # this host's unit does not carry the repository .env.
+                   AITELIER_OWNER_LANGUAGE=owner_language())
         if role == "steward":
             # The plugin's root role (HostConfig.rootRole); a director gets no
             # variable at all. The memory owner is the one owner for now.

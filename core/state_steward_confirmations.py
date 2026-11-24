@@ -21,7 +21,8 @@ that asked for it (`create_steward_confirmation`); this module
 - writes, by code, the text the requester reads: a fixed header that alone carries the
   reply phrase, then every argument (short ones first), every control, bidirectional or
   zero-width character shown as an escape;
-- matches the requester's exact reply `确认 <code>` / `取消 <code>` inside the
+- matches the requester's exact reply `确认 <code>` / `取消 <code>`, or its fixed English
+  alias `confirm <code>` / `cancel <code>` (same match, nothing looser), inside the
   transaction that writes the reply message (core.state_channels; a group's:
   core.state_groups.relay_group_message, before its quotas), on the same channel,
   conversation and sender, within 10 minutes;
@@ -55,6 +56,7 @@ import sqlite3
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
 
+from core import owner_text
 from core.state_graph import StateGraphError, StateNotFound
 from core.state_privacy import UntrustedDatabase
 
@@ -86,6 +88,10 @@ SHORT_MAX = 200
 CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE = re.compile(r"K[0-9A-HJKMNP-TV-Z]{4}")
 CONFIRM, CANCEL = "确认 ", "取消 "
+# The fixed English aliases (overfit review 重-17): the same whole-message exact match as the
+# Chinese words - lower case only, one U+0020 space, the code as issued; never a synonym.
+CONFIRM_EN, CANCEL_EN = "confirm ", "cancel "
+REPLY_PREFIXES = ((CONFIRM, "confirm"), (CANCEL, "cancel"), (CONFIRM_EN, "confirm"), (CANCEL_EN, "cancel"))
 DASHBOARD = "dashboard"
 # Shown as an escape wherever they occur: C0/C1 controls and DEL, the bidirectional
 # controls and marks (LRM, RLM, ALM), the zero-width characters, the line and paragraph
@@ -148,18 +154,21 @@ def confirmation_text(code: str, label: str, raw_name: str, arguments: dict, men
     """Written by code, never the model: the header (the only place the reply phrase is),
     then the short fields (one line, at most 200 characters) and then the long ones. In a
     group the reply phrase starts with the group's @ prefix (`mention`): only an @-message
-    reaches the steward, and the bridge compares what follows it."""
+    reaches the steward, and the bridge compares what follows it. The words, and which of the
+    two reply phrases (Chinese or its English alias; both are accepted) the header shows, are
+    the owner's language's (core.owner_text)."""
+    t = owner_text.texts()
     short, long = [], []
     for key in sorted(arguments):
         text = _value_text(arguments[key])
         if not any(b in text for b in _BREAKS) and len(text) <= SHORT_MAX:
-            short.append(f"{_shown(key)}：{_shown(text)}")
+            short.append(t["confirm_short"].format(key=_shown(key), text=_shown(text)))
         else:
-            long.append(f"{_shown(key)}（长文）：\n{_shown(text, keep_newlines=True)}")
+            long.append(t["confirm_long"].format(key=_shown(key), text=_shown(text, keep_newlines=True)))
     at = f"{_shown(mention)} " if mention else ""
-    header = (f"请确认（{code}，10 分钟内有效）：用「{_shown(label)}」执行 {_shown(raw_name)}。"
-              f"回复「{at}{CONFIRM}{code}」执行，「{at}{CANCEL}{code}」作废。")
-    return "\n".join([header, *short, *long, "—— 以上是全部内容 ——"])
+    header = t["confirm_header"].format(code=code, label=_shown(label), tool=_shown(raw_name), at=at,
+                                        confirm=t["confirm_phrase"], cancel=t["cancel_phrase"])
+    return "\n".join([header, *short, *long, t["confirm_footer"]])
 
 
 def _new_code(conn) -> str:
@@ -232,7 +241,8 @@ def _requester_key(record) -> tuple:
 def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | None, message_id: str | None = None,
                 conversation_ref=None):
     """In the transaction that writes a person's message: when the whole message (ends
-    stripped) is `确认 <code>` / `取消 <code>` for a PENDING record of this very requester
+    stripped) is `确认 <code>` / `取消 <code>` - or `confirm <code>` / `cancel <code>`, the same
+    exact match in lower case - for a PENDING record of this very requester
     (channel, conversation and sender; the dashboard: the owner's browser session, server
     time), decide it. None for an ordinary message - also a code of someone else, of
     another channel or conversation (a group's code answered in a private chat, or the
@@ -243,7 +253,7 @@ def match_reply(conn, body, *, channel: str, sender_ref, written_at: datetime | 
     if not isinstance(body, str) or not _has_tables(conn):
         return None
     phrase = body.strip()
-    for prefix, action in ((CONFIRM, "confirm"), (CANCEL, "cancel")):
+    for prefix, action in REPLY_PREFIXES:
         if phrase.startswith(prefix) and CODE.fullmatch(phrase[len(prefix):]):
             code = phrase[len(prefix):]
             break

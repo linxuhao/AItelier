@@ -23,13 +23,20 @@ def run(*args, **kwargs):
 
 
 def setting(repo, name, default):
+    """Read a setting the way compose's ${VAR:-default} does: empty means unset.
+
+    The last assignment wins (matching compose's dotenv precedence), but an
+    empty last assignment falls back to ``default`` instead of being a value.
+    """
     if name in os.environ:
-        return os.environ[name]
+        value = os.environ[name]
+        return value if value else default
     path = repo / '.env'
     for line in reversed(path.read_text().splitlines() if path.exists() else []):
         match = re.match(r'\s*(?:export\s+)?' + re.escape(name) + r'\s*=\s*(.*)', line)
         if match:
-            return ' '.join(shlex.split(match[1], comments=True))
+            value = ' '.join(shlex.split(match[1], comments=True))
+            return value if value else default
     return default
 
 
@@ -92,11 +99,23 @@ def prepare(repo, home, secrets_dir):
     identity_changed = not env.exists() or lines != original.splitlines()
     # docker-compose.yml runs every container as AITELIER_UID:AITELIER_GID, default
     # 1000:1000. The `aitelier` CLI fills both in from the login; a bare `docker
-    # compose` does not, and any other uid then cannot write ~/.AItelier. A value
-    # already in .env is kept (main() warns when it is not this user's).
-    present = {match[1] for match in (re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
-                                      for line in lines) if match}
-    for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
+    # compose` does not, and any other uid then cannot write ~/.AItelier. A real
+    # value already in .env is kept (main() warns when it is not this user's);
+    # an empty assignment is unset, exactly as ${VAR:-1000} treats it, so it is
+    # filled in with this user's value instead of silently becoming 1000:1000.
+    identities = {'AITELIER_UID': os.getuid(), 'AITELIER_GID': os.getgid()}
+    present = set()
+    for index, line in enumerate(lines):
+        match = re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)', line)
+        if not match:
+            continue
+        name, raw = match[1], ' '.join(shlex.split(match[2], comments=True))
+        if raw:
+            present.add(name)
+        elif name in identities:
+            lines[index] = f'{name}={identities[name]}'
+            present.add(name)
+    for name, value in identities.items():
         if name not in present:
             lines.append(f'{name}={value}')
     changed = atomic_text(env, '\n'.join(lines) + '\n') and identity_changed
@@ -129,6 +148,21 @@ def container_user_note(repo):
     return (f'Containers run as {user} (AITELIER_UID:AITELIER_GID), not the compose default 1000:1000. '
             'Compose applies this only when it creates a container: if the backend was created '
             'without it, recreate it (docker compose up -d aitelier) before starting project drivers.')
+
+
+def identity_notes(repo):
+    """Lines main() prints about a configured uid/gid that differs from this user.
+
+    An empty AITELIER_UID=/AITELIER_GID= line is unset: compose resolves it to
+    1000, so it must not produce a note at all. A real, different value is named.
+    """
+    notes = []
+    for name, process_value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
+        configured = setting(repo, name, str(process_value))
+        if configured != str(process_value):
+            notes.append(f'Note: .env sets {name}={configured}, but this user is {process_value}; '
+                         f'compose runs the containers with {name}={configured}.')
+    return notes
 
 
 def install_runtime(repo, destination):
@@ -267,9 +301,8 @@ def main():
     note = container_user_note(repo)
     if note:
         print(note)
-    for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
-        if setting(repo, name, str(value)) != str(value):
-            print(f'Note: .env sets {name}={setting(repo, name, "")}, but this user is {value}; the containers run as the .env value.')
+    for note in identity_notes(repo):
+        print(note)
     if shutil.which('ffprobe') is None:
         print('ffprobe not found: the steward refuses voice and video messages until it is installed (Debian/Ubuntu: sudo apt install ffmpeg).')
     print('Backend lifecycle remains separate; this installer does not restart Docker services.')

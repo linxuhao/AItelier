@@ -16,6 +16,8 @@
     tools?: Record<string, any>[]; source?: Record<string, any>});
   const widened = $derived(new Set<string>(Array.isArray(p.widened) ? p.widened : []));
   const isAdd = $derived(p.op === 'add');
+  // The tools this change takes egress off (the backend's `egress_off`): dashboard approval only.
+  const egressOff = $derived<string[]>(Array.isArray(p.egress_off) ? p.egress_off.map(String) : []);
   const before = $derived((snap.connection ?? {}) as Record<string, unknown>);
   function after(key: string): unknown {
     if (isAdd) return key === 'enabled' ? false : key === 'auth_identity' ? null : p[key] ?? null;
@@ -62,6 +64,7 @@
   <p class="title"><strong>{t('steward.connOp.' + p.op)}</strong> <code>{p.conn_id}</code>{#if host} · <code data-host>{host}</code>{/if}</p>
   {#if p.widens}<p class="widen-note" data-widen-note>{t('steward.connWidens')}</p>{/if}
   {#if p.external_content}<p class="external" data-external>{t('steward.connExternal')}</p>{/if}
+  {#if egressOff.length}<p class="external" data-egress-off>{t('steward.connEgressOff').replace('{tools}', egressOff.join(', '))}</p>{/if}
   {#if source.owner_message}
     <blockquote class="plain" data-source={source.kind}>
       {#if source.letter}

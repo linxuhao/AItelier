@@ -473,7 +473,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
           return refuseRead('page_out_of_range', { page_count: answer.sheet_count, reason: `这个表格只有 ${answer.sheet_count} 张表：pages 要在 1–${answer.sheet_count} 之内` });
         const read = sheetText({ ref, answer, first: sheetFirst, charsCall: limits.pdf_chars_call, cellChars: limits.office_read_cell_chars,
           cols: limits.office_cols, readRows: limits.office_read_rows });
-        catalog.markExternal();
+        catalog.markExternal('read_document');
         return { ref, kind: 'xlsx', sheet_count: answer.sheet_count, ...(read.shown ? { pages: spec(...read.shown) } : {}),
           ...(read.next ? { next_pages: read.next.pages, ...(read.next.rows ? { next_rows: read.next.rows } : {}) } : {}),
           images: 0, attachments: [], text: read.text };
@@ -530,7 +530,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
         const attachment = pages[0]?.attachment;
         refund(reserved - (attachment ? 1 : 0));
         if (!attachment) return refuseRead('broken');
-        catalog.markExternal();
+        catalog.markExternal('read_document');
         return { ref, kind: 'image', page_count: 1, images: 1, attachments: [attachment], text: `[图片 ${ref}，${row.mime}]` };
       }
       // Text only: stop at a whole page once the per-call characters are reached.
@@ -555,7 +555,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       // A file's text and page images are outside content, as a connection tool's result is (7.8.8,
       // review PRIV-1): the turn is marked before they are released, so an egress tool and the
       // steward's own writes are held to the same rule afterwards. A refusal read nothing: no mark.
-      catalog.markExternal();
+      catalog.markExternal('read_document');
       return { ref, kind: word ?? 'pdf', page_count: answer.page_count, ...(shown.length ? { pages: spec(shown[0].n, lastShown) } : {}),
         images: attachments.length, ...(next ? { next_pages: next.pages } : {}), attachments, text };
     },

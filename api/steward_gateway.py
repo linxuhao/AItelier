@@ -118,6 +118,14 @@ def _error(mid, code, text):
     return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": f"{code}: {text}", "data": {"code": code}}}
 
 
+# The steward's MCP client hands its host a JSON-RPC error and an upstream's isError result alike,
+# as one message: the error's `<code>: <text>`, or the result's text. An error the gateway writes
+# (`_error`) carries no upstream byte, so the steward's turn is not marked by it (design-steward
+# 7.8.8; integrations/dsh-director/lib/catalog.mjs `gatewayError` keys on those codes). So that no
+# upstream can pass for one, every upstream isError result is forwarded with this line first.
+UPSTREAM_ERROR_LINE = "The connection's tool answered with an error:"
+
+
 # ------------------------------------------------------------------ where it answers
 PORT_ENV = "AITELIER_STEWARD_GATEWAY_PORT"
 DEFAULT_PORT = 4445
@@ -834,6 +842,9 @@ class Gateway:
         try:
             result = await self.call(row, entry["raw_name"], arguments, retry=not entry["outward"])
             is_error = bool(result.get("isError"))
+            if is_error:
+                content = result.get("content") if isinstance(result.get("content"), list) else []
+                result = {**result, "content": [{"type": "text", "text": UPSTREAM_ERROR_LINE}, *content]}
             answer = {"jsonrpc": "2.0", "id": mid, "result": result}
         except asyncio.TimeoutError:
             rpc_error = "upstream_timeout"

@@ -13,7 +13,9 @@ approves the card, and the backend executes the FROZEN payload in one transactio
   `config_version`, each tool's `schema_sha256` - judges whether any field WIDENS a
   permission (`widens`: then only the dashboard card can approve it) and freezes a
   `snapshot` the card shows as plain text: every field's value before, each tool's
-  whole canonical definition, the source's own words read from the database.
+  whole canonical definition, the source's own words read from the database. A
+  payload taking egress off any tool also carries `egress_off` (those tools' names):
+  the dashboard card alone approves it.
 - `execute` (at approval, on the executor's write transaction) checks all of it again
   and writes exactly the payload; any mismatch fails the proposal and writes nothing.
   Its caller announces the tool-list change after the commit: no restart (7.8.8).
@@ -119,10 +121,6 @@ def validate(payload) -> dict:
                 if changes["blocked_args"] is None or any(not a or len(a) > 1000 for a in changes["blocked_args"]):
                     raise _invalid("tools: blocked_args is a list of argument paths")
                 changes["blocked_args"] = sorted(set(changes["blocked_args"]))
-            if changes.get("egress") is False:
-                # Every connection is a host other than the backend (7.8.4): only the owner's
-                # panel takes egress off.
-                raise StateGraphError("invalid_payload: egress_required")
             if tool.raw_name in seen:
                 raise _invalid(f"tools: {tool.raw_name} named twice")
             seen.add(tool.raw_name)
@@ -375,7 +373,12 @@ def prepare(conn, payload, home) -> dict:
     snapshot = {"connection": _connection_facts(row) if row is not None else None,
                 "tools": [_tool_facts(tools[t["raw_name"]]) for t in payload.get("tools", [])],
                 "source": source}
-    return {**payload, "widens": bool(marks), "widened": marks, "snapshot": snapshot}
+    # Every connection is a host other than the backend (7.8.4): a tool without egress may
+    # run after the steward read outside content. So a proposal saying egress: false for
+    # any tool (even one already off) is approved on the dashboard card only (`egress_off`).
+    egress_off = sorted(t["raw_name"] for t in payload.get("tools", []) if t.get("egress") is False)
+    return {**payload, "widens": bool(marks) or bool(egress_off), "widened": marks, "snapshot": snapshot,
+            **({"egress_off": egress_off} if egress_off else {})}
 
 
 # ---------------------------------------------------------------- execution

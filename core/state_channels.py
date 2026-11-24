@@ -1623,10 +1623,12 @@ class StateChannels:
                     impact = stop_impact(conn, json.loads(row["payload_json"])["project_id"])
                     if not impact_is_empty(impact):
                         return {**out, "outcome": "refused", "refusal": "needs_dashboard_confirmation"}
+                stored = json.loads(row["payload_json"]) if row["kind"] == CONNECTION_KIND else {}
                 if (row["kind"] == CONNECTION_KIND and row["status"] == "open" and row["version"] == version
-                        and json.loads(row["payload_json"]).get("widens") is not False):
-                    # A change that widens a permission is approved on the dashboard card only
-                    # (design-steward 7.8.10a): the phrase names an id, never what it approves.
+                        and (stored.get("widens") is not False or stored.get("egress_off"))):
+                    # A change that widens a permission, or takes egress off a tool, is approved on
+                    # the dashboard card only (design-steward 7.8.10a): the phrase names an id,
+                    # never what it approves.
                     return {**out, "outcome": "refused", "refusal": "needs_dashboard_approval"}
                 if (row["kind"] == CAPABILITY_KIND and row["status"] == "open" and row["version"] == version
                         and json.loads(row["payload_json"])["source"]["kind"] != "owner_message"):

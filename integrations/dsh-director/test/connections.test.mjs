@@ -77,6 +77,7 @@ test('connection_tools and connection_refresh mark the turn external before the 
     f.catalog.observe({ type: 'turn/start', seq: 2 });
     const refused = f.catalog.refusal({ name: 'propose_connection_change', agent: { session: { id: 'root' } } });
     assert.match(refused, /^external_content_seen: propose_connection_change needs a message from a person/);
+    assert.match(refused, new RegExp(`because this conversation read the result of ${name} at \\d\\d:\\d\\d:\\d\\d UTC since`), 'it names what marked the turn');
   }
 });
 
@@ -124,4 +125,12 @@ test('the channel lines for a connection change: decided, and a widening one poi
     'proposal p-1: not done - approve it on the dashboard card. 未执行：这条要在面板的卡片上批准。');
   assert.notEqual(channelReplies.approval({ proposal_id: 'p-1', action: 'approve', outcome: 'refused', refusal: 'needs_dashboard_approval' }),
     channelReplies.approval({ proposal_id: 'p-1', action: 'approve', outcome: 'refused', refusal: 'needs_dashboard_confirmation' }));
+});
+
+test('the proposal tool tells the steward it may take egress off an owner-local tool, approved on the dashboard', () => {
+  const { description } = fixture().tools.get('propose_connection_change');
+  assert.match(description, /egress: false/);
+  assert.match(description, /needs_dashboard_reason: "egress_off"/);
+  assert.match(description, /dashboard card/);
+  assert.doesNotMatch(description, /egress_required/);
 });

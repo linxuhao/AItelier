@@ -704,7 +704,9 @@ class StateSteward:
                 # No project: checked against the registry now, the card's snapshot frozen.
                 payload = ccp.prepare(conn, payload, steward_project())
                 return self._insert_proposal(conn, request_key, request_hash, kind, payload, reason, supersedes,
-                                             {"needs_dashboard": payload["widens"]})
+                                             {"needs_dashboard": payload["widens"],
+                                              **({"needs_dashboard_reason": "egress_off"}
+                                                 if payload.get("egress_off") else {})})
             if capability:
                 # Resolved in the effective set, checked, the row version and the card frozen. A
                 # route found by tool search (no owner's words) is approved on the card only.

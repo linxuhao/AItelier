@@ -1045,7 +1045,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       // Plugin step 14: the owner's memory requests from the dashboard run here, in code (and
-      // its 清空媒体 against this steward's own media library, design-steward 7.8.12).
+      // its 清空媒体 against this steward's own media library, design-steward 7.8.12: taken first and
+      // run beside the pass, so this pump never waits on the library's ingest lane).
       const ownerRequests = () => steward ? processMemoryRequests({ request, memory, media: library, log: line => ctx.logger.warn(line) })
         .catch(error => ctx.logger.warn('memory requests: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
       // Step 19: the owner's requests for a new WeChat login QR, also run in code; the QR

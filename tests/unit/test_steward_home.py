@@ -304,7 +304,7 @@ def test_an_older_memory_requests_table_is_migrated_for_media_clear(tmp_path):
         assert conn.execute("SELECT request_id,kind,payload_json FROM state_steward_memory_requests").fetchall() \
             == [("memreq-a", "forget", '{"ids": ["x"]}')]
         migrated = conn.execute("SELECT sql FROM sqlite_master WHERE name='state_steward_memory_requests'").fetchone()[0]
-        assert "'media_clear'" in migrated
+        assert "'media_clear'" in migrated and "taken_at" in migrated
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='state_steward_memory_requests_status'").fetchone()
         conn.execute("INSERT INTO state_steward_memory_requests(request_id,kind,payload_json,status,created_at,"
                      "created_by) VALUES('memreq-b','media_clear','{}','pending','t','owner:o')")
@@ -312,3 +312,55 @@ def test_an_older_memory_requests_table_is_migrated_for_media_clear(tmp_path):
     StateService(StateDatabase(path), actor="fixture", project_read_trusted=True)
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM state_steward_memory_requests").fetchone()[0] == 2
+
+
+def _age_requests(world, minutes=3):
+    old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_memory_requests SET created_at=?", (old,))
+        conn.commit()
+
+
+def take(world, request_id, key="take-1"):
+    return execute(world.steward, "take_steward_media_clear", {"request_key": key, "request_id": request_id},
+                   allow_write=True)
+
+
+def test_a_media_clear_the_host_took_never_lapses_under_it(world):
+    """Review clearmedia-1: the host takes the request (take_steward_media_clear) the moment it
+    starts the clear; a taken request is never answered expired, so a clear that waits on the
+    ingest lane past the two minutes is still the one the owner reads, and its write-back lands."""
+    request_id = world.owner.steward.request_media_clear("k1")["request_id"]
+    assert [r["request_id"] for r in execute(world.steward, "list_steward_memory_requests", {})["requests"]] \
+        == [request_id]
+    assert take(world, request_id) == {"request_id": request_id, "taken": True}
+    _age_requests(world)   # the clear waits behind a long ingest
+    assert world.owner.steward.read_memory_request(request_id) == {
+        "request_id": request_id, "kind": "media_clear", "status": "pending", "result": None}
+    execute(world.steward, "complete_steward_memory_request",
+            {"request_key": "m", "request_id": request_id, "result": {"cleared": True, "removed": 7}},
+            allow_write=True)
+    assert world.owner.steward.read_memory_request(request_id)["result"] == {"cleared": True, "removed": 7}
+
+
+def test_a_media_clear_is_taken_once_and_never_after_it_lapsed(world):
+    request_id = world.owner.steward.request_media_clear("k1")["request_id"]
+    assert take(world, request_id) == {"request_id": request_id, "taken": True}
+    assert take(world, request_id) == {"request_id": request_id, "taken": True}, "the same take is a replay"
+    # A second take (a host that restarted after its first) never clears again.
+    with pytest.raises(StateGraphError, match="media_clear_taken"):
+        take(world, request_id, key="take-2")
+    lapsed = world.owner.steward.request_media_clear("k2")["request_id"]
+    _age_requests(world)
+    with pytest.raises(StateGraphError, match="memory_request_not_pending"):
+        take(world, lapsed, key="take-3")
+    assert world.owner.steward.read_memory_request(lapsed)["result"] == {"refused": "expired"}
+    memory = world.owner.steward.create_memory_request("profile_read", {})["request_id"]
+    with pytest.raises(StateGraphError, match="not_media_clear"):
+        take(world, memory, key="take-4")
+    with pytest.raises(StateGraphError, match="unknown_memory_request"):
+        take(world, "memreq-none", key="take-5")
+    for service in (world.director, world.owner):
+        with pytest.raises(StateGraphError, match="steward_role_required"):
+            execute(service, "take_steward_media_clear", {"project_id": HOME, "request_key": "t",
+                    "request_id": request_id}, allow_write=True)

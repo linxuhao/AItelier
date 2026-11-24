@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS state_steward_memory_requests (
  kind TEXT NOT NULL CHECK(kind IN ('profile_read','profile_update','forgotten_list','forget','restore','purge','media_clear')),
  payload_json TEXT NOT NULL,
  status TEXT NOT NULL CHECK(status IN ('pending','done')),
- result_json TEXT, created_at TEXT NOT NULL, completed_at TEXT, created_by TEXT NOT NULL);
+ result_json TEXT, created_at TEXT NOT NULL, completed_at TEXT, created_by TEXT NOT NULL, taken_at TEXT);
 CREATE INDEX IF NOT EXISTS state_steward_memory_requests_status ON state_steward_memory_requests(status,created_at);
 CREATE TABLE IF NOT EXISTS state_steward_schedules (
  schedule_id TEXT PRIMARY KEY,
@@ -136,11 +136,13 @@ MEMORY_KINDS = ("profile_read", "profile_update", "forgotten_list", "forget", "r
 # The dashboard's 清空媒体 (design-steward 7.8.12 "保留 30 天"): one more owner request the steward's
 # host runs in code (it deletes the steward's media subdirectory, files and index rows). Its one
 # door is `request_media_clear` (State command steward_media_clear, POST /api/steward/media/clear),
-# never create_memory_request. A pending one older than MEDIA_CLEAR_PENDING_SECONDS is never
-# handed to the host: it is answered {"refused": "expired"} instead, so a host that comes back
-# later never deletes media that arrived after the owner's click.
+# never create_memory_request. The host TAKES one (take_media_clear) the moment it starts the
+# clear; one not taken within MEDIA_CLEAR_PENDING_SECONDS is answered {"refused": "expired"}
+# instead and can no longer be taken, so a host that comes back later never deletes media that
+# arrived after the owner's click. A taken one never lapses: its result is the host's.
 MEDIA_CLEAR_KIND = "media_clear"
 MEDIA_CLEAR_OP = "steward_media_clear"
+MEDIA_CLEAR_TAKE_OP = "take_steward_media_clear"
 MEDIA_CLEAR_PENDING_SECONDS = 120
 # The payload keys each memory request kind may carry (memory-requests.mjs).
 _MEMORY_KEYS = {"profile_read": set(), "profile_update": {"text", "expected_version", "reason"},
@@ -1080,14 +1082,15 @@ class StateSteward:
     # ---------------------------------------------------------------- memory requests
     @staticmethod
     def _expire(conn):
-        """Drop results the dashboard no longer needs (RESULT_TTL_SECONDS after completion)."""
+        """Drop results the dashboard no longer needs (RESULT_TTL_SECONDS after completion), and
+        answer a media_clear the host did not take in MEDIA_CLEAR_PENDING_SECONDS (never a taken one)."""
         moment = datetime.now(timezone.utc)
         cutoff = (moment - timedelta(seconds=RESULT_TTL_SECONDS)).isoformat()
         conn.execute("UPDATE state_steward_memory_requests SET result_json=? WHERE status='done' "
                      "AND completed_at<? AND result_json IS NOT ?", (canonical(EXPIRED), cutoff, canonical(EXPIRED)))
         stale = (moment - timedelta(seconds=MEDIA_CLEAR_PENDING_SECONDS)).isoformat()
         conn.execute("UPDATE state_steward_memory_requests SET status='done',result_json=?,payload_json='{}',"
-                     "completed_at=? WHERE kind=? AND status='pending' AND created_at<?",
+                     "completed_at=? WHERE kind=? AND status='pending' AND taken_at IS NULL AND created_at<?",
                      (canonical({"refused": "expired"}), moment.isoformat(), MEDIA_CLEAR_KIND, stale))
 
     def create_memory_request(self, kind, payload):
@@ -1120,8 +1123,8 @@ class StateSteward:
         request; the steward's host deletes its own media subdirectory (never a director's) and
         writes back {cleared, removed} - counts only. The owner session's alone (the steward's
         token has no such write: it is not in STEWARD_WRITE_ACTIONS). Read the result with
-        read_memory_request; one the host has not taken within MEDIA_CLEAR_PENDING_SECONDS is
-        answered {"refused": "expired"}."""
+        read_memory_request; one the host has not taken (take_media_clear) within
+        MEDIA_CLEAR_PENDING_SECONDS is answered {"refused": "expired"}."""
         self._owner()
         request_hash = _hash([MEDIA_CLEAR_KIND])
         with self.store.transaction(write=True) as conn:
@@ -1133,6 +1136,32 @@ class StateSteward:
                                    self._insert_request(conn, MEDIA_CLEAR_KIND, {}))
         self._notify()
         return created
+
+    def take_media_clear(self, project_id, request_key, request_id):
+        """The steward's host takes a pending media_clear the moment it starts the clear: within
+        MEDIA_CLEAR_PENDING_SECONDS of the click (a later one has lapsed: memory_request_not_pending)
+        and once (a second take - a host that restarted after the first - is media_clear_taken, so
+        no clear runs twice). A taken request never lapses; the host's write-back answers it."""
+        request_hash = _hash([request_id])
+        with self.store.transaction(write=True) as conn:
+            self._steward(conn, project_id)
+            replay = self._replay(conn, MEDIA_CLEAR_TAKE_OP, request_key, request_hash)
+            if replay is not None:
+                return replay
+            self._expire(conn)
+            row = conn.execute("SELECT kind,status,taken_at FROM state_steward_memory_requests WHERE request_id=?",
+                               (request_id,)).fetchone()
+            if row is None:
+                raise StateNotFound("unknown_memory_request")
+            if row["kind"] != MEDIA_CLEAR_KIND:
+                raise StateConflict("not_media_clear")
+            if row["status"] != "pending":
+                raise StateConflict("memory_request_not_pending")
+            if row["taken_at"] is not None:
+                raise StateConflict("media_clear_taken")
+            conn.execute("UPDATE state_steward_memory_requests SET taken_at=? WHERE request_id=?", (now(), request_id))
+            return self._record(conn, MEDIA_CLEAR_TAKE_OP, request_key, request_hash,
+                                {"request_id": request_id, "taken": True})
 
     def read_memory_request(self, request_id):
         """The owner reads one request. A done result is handed out once, then expires."""

@@ -1238,6 +1238,14 @@ class CompleteStewardMemoryRequest(Project):
     result: dict[str, Any]
 
 
+# The steward's HOST takes the owner's media_clear the moment it starts the clear (the
+# dashboard's 清空媒体, design-steward 7.8.12): within two minutes of the click, once
+# (core.state_steward.take_media_clear).
+class TakeStewardMediaClear(Project):
+    request_key: str = Field(min_length=1, max_length=320)
+    request_id: str = Field(min_length=1, max_length=200)
+
+
 # Step 16: the steward's scheduled reminders (core.state_steward, design-steward 7.4).
 _SCHEDULE = ("{kind: 'once', at: ISO time} or {kind: 'cron', expr: 5-field cron 'min hour day month weekday'}; "
              "runs at least 15 minutes apart")
@@ -1834,6 +1842,7 @@ WRITE_REQUESTS = {
     "create_steward_proposal": CreateStewardProposal,
     "withdraw_steward_proposal": WithdrawStewardProposal,
     "complete_steward_memory_request": CompleteStewardMemoryRequest,
+    "take_steward_media_clear": TakeStewardMediaClear,
     "create_steward_schedule": CreateStewardSchedule,
     "update_steward_schedule": UpdateStewardSchedule,
     "delete_steward_schedule": DeleteStewardSchedule,
@@ -2226,6 +2235,7 @@ def _handlers(service) -> dict:
         "list_steward_proposals": service.steward.list_proposals,
         "list_steward_memory_requests": service.steward.list_memory_requests,
         "complete_steward_memory_request": service.steward.complete_memory_request,
+        "take_steward_media_clear": service.steward.take_media_clear,
         "list_steward_schedules": service.steward.list_schedules,
         "create_steward_schedule": service.steward.create_schedule,
         "update_steward_schedule": service.steward.update_schedule,
@@ -2401,12 +2411,14 @@ def _driver_defaults(service, action, arguments):
 # deliberately absent - the basic-capabilities table is the owner's; the steward only proposes
 # a capability_route (create_steward_proposal), which the owner approves.
 # steward_media_clear (the dashboard's 清空媒体, design-steward 7.8.12) is deliberately absent too:
-# the steward's host only runs the owner's request and writes the result back
-# (complete_steward_memory_request).
+# the steward's host only runs the owner's request - take_steward_media_clear, in code, the
+# moment it starts the clear (within two minutes of the click, once) - and writes the result
+# back (complete_steward_memory_request).
 STEWARD_WRITE_ACTIONS = frozenset({
     "send_user_message", "withdraw_user_question", "send_director_message",
     "write_driver_note_entry", "supersede_driver_note_entry", "delist_driver_note_entry",
     "create_steward_proposal", "withdraw_steward_proposal", "complete_steward_memory_request",
+    "take_steward_media_clear",
     "acknowledge_director_message",
     # Owner 2026-11-17 ("state dag的inbox和导演的私人inbox都要能回复"): the steward may answer a
     # letter in its private inbox - only as a reply, to that letter's sender (below).

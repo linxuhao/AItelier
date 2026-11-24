@@ -9,7 +9,9 @@
  *  real image in calc.integration.mjs (only with AITELIER_CALC_IT_IMAGE). */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { spawn as spawnChild } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,7 +36,67 @@ const jpeg = (width = 10, height = 10) => Buffer.concat([Buffer.from('ffd8ffe000
   Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 0x03]), Buffer.alloc(64)]);
 const pdf = () => Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(100)]);
 
+/** A spawn stand-in for the wall-clock test. The fake docker is itself a node process: on a
+ *  loaded host its start-up eats the deliberately short test `wallMs`, so the self-check gets
+ *  killed before it can answer and the job's name never reaches the log. Answer the bootstrap
+ *  commands (ps / image inspect / rm / the self-check run) and the kill in-process, with the
+ *  same plan and the same log lines, and log every argv *at spawn time*. Job runs are still the
+ *  real fake-docker process; nothing here changes what the runner under test does. */
+function immediateDocker(files, realSpawn = spawnChild) {
+  const child = () => {
+    const c = new EventEmitter();
+    c.stdout = new EventEmitter(); c.stderr = new EventEmitter();
+    let settled = false, timer;
+    c.kill = () => { clearTimeout(timer); if (!settled) { settled = true; setImmediate(() => c.emit('close', null, 'SIGKILL')); } return true; };
+    c.answer = ({ code = 0, stdout = '', stderr = '' } = {}, delay = 0) => {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (stdout) c.stdout.emit('data', Buffer.from(stdout));
+        if (stderr) c.stderr.emit('data', Buffer.from(stderr));
+        c.emit('close', code, null);
+      }, delay);
+      return c;
+    };
+    return c;
+  };
+  return (command, args, options) => {
+    appendFileSync(files.log, JSON.stringify(args) + '\n');
+    const plan = JSON.parse(readFileSync(files.plan, 'utf8'));
+    if (args[0] === 'kill') {
+      const delay = plan.kill?.sleepMs ?? 0;
+      // Log the completion before closing the kill process, as the fake docker does.
+      setTimeout(() => appendFileSync(files.log, JSON.stringify(['kill-done', args[1]]) + '\n'), delay);
+      return child().answer({}, delay);
+    }
+    if (args[0] === 'ps') return child().answer({ stdout: plan.ps ?? '' });
+    if (args[0] === 'image') return child().answer(plan.inspect);
+    if (args[0] === 'rm') return child().answer();
+    if (args[0] === 'run') {
+      const mount = args.find((a, k) => args[k - 1] === '-v' && a.split(':')[1] === '/job/in');
+      const program = mount ? readFileSync(join(mount.split(':')[0], 'main.py'), 'utf8') : '';
+      if (program === SELFCHECK_CODE) {
+        const check = plan.selfcheck ?? {};
+        return child().answer({ code: check.code ?? 0, stdout: JSON.stringify({ v: 1, exit_code: 0, timed_out: false,
+          stdout: check.stdout ?? '1024\n', stdout_truncated: false, stderr_tail: check.stderr ?? '', skipped: 0, files: [] }) });
+      }
+      // The job itself still runs the real fake docker; it logs to a scratch file so the
+      // argv is recorded above, once, even if the wall kills it before it starts.
+      return realSpawn(command, args, { ...options, env: { ...options.env, FAKE_DOCKER_LOG: files.log + '.child' } });
+    }
+    return realSpawn(command, args, options);
+  };
+}
+
+/** Wait for the condition, not for a guess at how long a loaded host needs. */
+const until = async (what, predicate, idleMs = 10000) => {
+  const deadline = Date.now() + idleMs;
+  while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(predicate(), what);
+};
+
 function rig(plan = {}, options = {}) {
+  const { spawn: spawnFactory, ...runnerOptions } = options;
   const dir = mkdtempSync(join(tmpdir(), 'calc-'));
   const docker = join(dir, 'docker');
   copyFileSync(FAKE, docker);
@@ -48,7 +110,7 @@ function rig(plan = {}, options = {}) {
   const tmpRoot = join(dir, 'state', 'calc-tmp');
   const runner = createCalcRunner({ image: IMAGE, docker, tmpRoot, log: line => logs.push(line), now: () => clock,
     env: { PATH: process.env.PATH, FAKE_DOCKER_LOG: files.log, FAKE_DOCKER_PLAN: files.plan, FAKE_DOCKER_CAPTURE: files.capture },
-    ...options, limits: { ...(options.limits ?? {}) } });
+    ...runnerOptions, limits: { ...(options.limits ?? {}) }, ...(spawnFactory ? { spawn: spawnFactory(files) } : {}) });
   const calls = () => readFileSync(files.log, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   const runs = () => calls().filter(args => args[0] === 'run');
   const jobsLeft = () => (existsSync(tmpRoot) ? readdirSync(tmpRoot) : []);
@@ -177,7 +239,9 @@ test('the self-check\'s reasons (closed: selfcheck_failed, docker_unavailable), 
 });
 
 test('the wall clock: past it the container is killed by its name (awaited), timeout, the job directory removed', async () => {
-  const r = rig({ run: { sleepMs: 5000 }, kill: { sleepMs: 100 } }, { limits: { wallMs: 300 } });
+  // No node start-up is charged to the shortened wall: the bootstrap commands and the kill
+  // answer in-process, so `calls` is the evidence of the kill the answer really waited for.
+  const r = rig({ run: { sleepMs: 5000 }, kill: { sleepMs: 100 } }, { limits: { wallMs: 300 }, spawn: immediateDocker });
   await r.runner.start();
   const ran = await r.runner.run({ code: 'while True: pass' }, { priority: 'owner' });
   assert.deepEqual(ran, { refused: 'timeout' });
@@ -187,12 +251,14 @@ test('the wall clock: past it the container is killed by its name (awaited), tim
   assert.deepEqual(calls.filter(c => c[0] === 'kill'), [['kill', name]]);
   assert.deepEqual(calls.at(-1), ['kill-done', name], 'the answer waited for the kill');
   assert.deepEqual(r.jobsLeft(), []);
-  // A caller's abort is the same kill.
-  const s = rig({ run: { sleepMs: 5000 } });
+  // A caller's abort is the same kill: abort when the job is actually in flight, not on a timer.
+  const s = rig({ run: { sleepMs: 5000 } }, { spawn: immediateDocker });
   await s.runner.start();
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), 200);
-  assert.deepEqual(await s.runner.run({ code: 'x' }, { priority: 'owner' }, controller.signal), { refused: 'timeout' });
+  const running = s.runner.run({ code: 'x' }, { priority: 'owner' }, controller.signal);
+  await until('the aborted job never reached docker', () => s.runs().length === 2);
+  controller.abort();
+  assert.deepEqual(await running, { refused: 'timeout' });
   assert.equal(s.calls().filter(c => c[0] === 'kill').length, 1);
 });
 

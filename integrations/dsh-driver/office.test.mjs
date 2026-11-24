@@ -6,7 +6,9 @@
  *  the logs; and officeMediaOps (make and store, the read routes) over a real media library. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { spawn as spawnChild } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +23,92 @@ const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const LETTER = { format: 'pdf', title: '给物业的信-标题', blocks: [{ t: 'p', runs: [{ text: '楼道灯坏了-正文秘密' }] }] };
 
+/** A spawn stand-in for the wall-clock tests. The fake docker is itself a node process: on a
+ *  loaded host its start-up is charged to the deliberately short test `wallMs`, so font making,
+ *  the self-check or the kill answer can be lost. Answer the bootstrap commands (ps / image
+ *  inspect / rm), font making, the self-check run and the kill in-process, with the same plan
+ *  and the same log lines, and log every argv *at spawn time*. Job runs answer from the plan
+ *  with the fixture's own outputs; the runner under test is unchanged. */
+function immediateDocker(files, realSpawn = spawnChild) {
+  const child = () => {
+    const c = new EventEmitter();
+    c.stdout = new EventEmitter(); c.stderr = new EventEmitter();
+    let settled = false, timer;
+    c.kill = () => { clearTimeout(timer); if (!settled) { settled = true; setImmediate(() => c.emit('close', null, 'SIGKILL')); } return true; };
+    c.answer = ({ code = 0, stdout = '', stderr = '' } = {}, delay = 0) => {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (stdout) c.stdout.emit('data', Buffer.from(stdout));
+        if (stderr) c.stderr.emit('data', Buffer.from(stderr));
+        c.emit('close', code, null);
+      }, delay);
+      // A deliberately hanging kill may outlive the bounded wait for it; it must not keep
+      // the test process (or the next test) alive after the answer has been given.
+      if (delay > 1000) timer.unref?.();
+      return c;
+    };
+    return c;
+  };
+  return (command, args, options) => {
+    appendFileSync(files.log, JSON.stringify(args) + '\n');
+    const plan = JSON.parse(readFileSync(files.plan, 'utf8'));
+    if (args[0] === 'kill') {
+      const delay = plan.kill?.sleepMs ?? 0;
+      // The fake docker logs the completion before its process closes.
+      const completion = setTimeout(() => appendFileSync(files.log, JSON.stringify(['kill-done', args[1]]) + '\n'), delay);
+      if (delay > 1000) completion.unref?.();
+      return child().answer({}, delay);
+    }
+    if (args[0] === 'ps') return child().answer({ stdout: plan.ps ?? '' });
+    if (args[0] === 'image') return child().answer(plan.inspect);
+    if (args[0] === 'rm') return child().answer();
+    if (args[0] === 'run') {
+      const mount = target => {
+        const i = args.findIndex((a, k) => args[k - 1] === '-v' && a.split(':')[1] === target);
+        return i < 0 ? undefined : args[i].split(':')[0];
+      };
+      const out = mount('/job/out'), input = mount('/job/in');
+      const entry = args[args.indexOf('--entrypoint') + 1];
+      if (entry.endsWith('allfontsgen')) {
+        const step = plan.fonts ?? {};
+        if (step.partial) writeFileSync(join(out, 'AllFonts.js'), 'window["__fonts_fi');
+        else if (step.write !== false && !step.code) {
+          writeFileSync(join(out, 'AllFonts.js'), 'window["__fonts_files"] = [];');
+          writeFileSync(join(out, 'font_selection.bin'), Buffer.alloc(16));
+        }
+        return child().answer(step);
+      }
+      const task = readFileSync(join(input, args.at(-1).replace('/job/in/', '')), 'utf8');
+      const step = plan.run ?? {};
+      // Job runs answer in-process too: the plan a run uses is the one in force when it is
+      // spawned, not one a node process might read seconds later on a loaded host. Outputs
+      // are the fixture's, so the assertions about bytes and job directories stay real.
+      if (options.env.FAKE_DOCKER_CAPTURE && input) cpSync(input, options.env.FAKE_DOCKER_CAPTURE, { recursive: true });
+      const name = (/builder\.SaveFile\("\w+", "\/job\/out\/([\w.]+)"\)/.exec(task)
+        ?? /<m_sFileTo>\/job\/out\/([\w.]+)</.exec(task))?.[1];
+      const target = name ? join(out, name) : undefined;
+      if (target && step.write === 'pdf') writeFileSync(target, Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.from(task)]));
+      else if (target && step.write === 'copy') copyFileSync(step.from, target);
+      else if (target && step.write === 'symlink') symlinkSync('/etc/hostname', target);
+      else if (target && step.write === 'big') writeFileSync(target, Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(2 * 1024 * 1024)]));
+      else if (target && step.write === 'junk') writeFileSync(target, Buffer.alloc(100, 7));
+      if (step.extra) writeFileSync(join(out, 'extra.bin'), 'x');
+      return child().answer(step, step.sleepMs ?? 0);
+    }
+    return realSpawn(command, args, options);
+  };
+}
+
+/** Wait for the condition, not for a guess at how long a loaded host needs. */
+const until = async (what, predicate, idleMs = 10000) => {
+  const deadline = Date.now() + idleMs;
+  while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(predicate(), what);
+};
+
 function rig(plan = {}, options = {}) {
+  const { spawn: spawnFactory, ...runnerOptions } = options;
   const dir = mkdtempSync(join(tmpdir(), 'office-'));
   const docker = join(dir, 'docker');
   copyFileSync(FAKE, docker);
@@ -38,7 +125,7 @@ function rig(plan = {}, options = {}) {
   const runner = createOfficeRunner({ image: IMAGE, docker, tmpRoot: join(dir, 'state', 'office-tmp'), fontsRoot: join(dir, 'state', 'office-fonts'),
     verifyPdf: async path => readFileSync(path, 'utf8'), log: line => logs.push(line), now: () => clock, uid: 1234, gid: 5678,
     env: { PATH: process.env.PATH, FAKE_DOCKER_LOG: files.log, FAKE_DOCKER_PLAN: files.plan, FAKE_DOCKER_CAPTURE: files.capture },
-    ...options, limits: { ...(options.limits ?? {}) } });
+    ...runnerOptions, limits: { ...(options.limits ?? {}) }, ...(spawnFactory ? { spawn: spawnFactory(files) } : {}) });
   const calls = () => readFileSync(files.log, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
   const runs = () => calls().filter(args => args[0] === 'run');
   const jobsLeft = () => (existsSync(join(dir, 'state', 'office-tmp')) ? readdirSync(join(dir, 'state', 'office-tmp')) : []);
@@ -188,28 +275,35 @@ test('the exit mapping and the output checks; the job directory goes whatever ha
 });
 
 test('the wall clock: the host kills the container by its name and answers timeout; one slot, a waiter past queueWaitMs is busy', async () => {
-  const r = rig({}, { limits: { wallMs: 400, queueWaitMs: 150 } });
+  // The short wall must time the job, not the start-up of the fake-docker node processes.
+  const r = rig({}, { limits: { wallMs: 400, queueWaitMs: 150 }, spawn: immediateDocker });
   await r.runner.start();
   r.setPlan({ run: { sleepMs: 5000, write: 'pdf' } });
+  const before = r.runs().length;
   const started = Date.now();
-  const [slow, waiting] = await Promise.all([r.runner.generate(LETTER), new Promise(resolve => setTimeout(resolve, 50)).then(() => r.runner.generate(LETTER))]);
-  assert.deepEqual(slow, { refused: 'timeout' });
-  assert.deepEqual(waiting, { refused: 'busy' });
+  const slow = r.runner.generate(LETTER);
+  await until('the slow job never reached docker', () => r.runs().length > before);
+  const waiting = r.runner.generate(LETTER);
+  assert.deepEqual(await slow, { refused: 'timeout' });
+  assert.deepEqual(await waiting, { refused: 'busy' });
   assert.ok(Date.now() - started < 4000, 'the call did not wait for the container');
   const name = r.runs().at(-1)[r.runs().at(-1).indexOf('--name') + 1];
-  await new Promise(resolve => setTimeout(resolve, 300));
   assert.ok(r.calls().some(args => args[0] === 'kill' && args[1] === name), 'docker kill <name>');
   assert.deepEqual(r.jobsLeft(), []);
-  // An abort from the caller is the same kill.
+  // An abort from the caller is the same kill: abort when the job is actually in flight.
   r.setPlan({ run: { sleepMs: 5000, write: 'pdf' } });
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), 100);
-  assert.deepEqual(await r.runner.generate(LETTER, controller.signal), { refused: 'timeout' });
+  const run = before + 2;
+  const aborted = r.runner.generate(LETTER, controller.signal);
+  await until('the aborted job never reached docker', () => r.runs().length >= run);
+  controller.abort();
+  assert.deepEqual(await aborted, { refused: 'timeout' });
 });
 
 test('a kill is waited for before the slot is let go (bounded); a caller aborting while it waits gives up its place (review N2, N3)', async () => {
-  // wallMs leaves a quick fake run (a node start, slow on a loaded machine) time to finish.
-  const r = rig({}, { limits: { wallMs: 1500, queueWaitMs: 8000, killWaitMs: 5000 } });
+  // No fake-docker start-up is charged to wallMs or to the kill's sleep: the bootstrap, the
+  // self-check and the kill answer in-process, so the log is the evidence, not a stopwatch.
+  const r = rig({}, { limits: { wallMs: 1500, queueWaitMs: 8000, killWaitMs: 5000 }, spawn: immediateDocker });
   await r.runner.start();
   r.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 600 } });
   const answer = await r.runner.generate(LETTER);
@@ -218,16 +312,18 @@ test('a kill is waited for before the slot is let go (bounded); a caller abortin
   assert.ok(r.calls().some(args => args[0] === 'kill-done' && args[1] === name), 'answered only once docker kill returned');
   assert.deepEqual(r.jobsLeft(), []);
   // A kill that hangs is waited for killWaitMs only.
-  const hung = rig({}, { limits: { wallMs: 1500, killWaitMs: 300 } });
+  const hung = rig({}, { limits: { wallMs: 1500, killWaitMs: 300 }, spawn: immediateDocker });
   await hung.runner.start();
   hung.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 6000 } });
   let started = Date.now();
   assert.deepEqual(await hung.runner.generate(LETTER), { refused: 'timeout' });
   assert.ok(Date.now() - started < 4000, String(Date.now() - started));
-  // A second job waits behind the first until the first one's kill is done.
+  // A second job waits behind the first until the first one's kill is done. Start the second
+  // only when the first is provably in flight, not after a guess at a loaded host's delays.
   r.setPlan({ run: { sleepMs: 8000, write: 'pdf' }, kill: { sleepMs: 600 } });
+  let before = r.runs().length;
   const first = r.runner.generate(LETTER);
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await until('the first job never reached docker', () => r.runs().length > before);
   r.setPlan({ run: { write: 'pdf' }, kill: { sleepMs: 600 } });
   const second = await r.runner.generate(LETTER);
   assert.ok(second.bytes);
@@ -239,12 +335,15 @@ test('a kill is waited for before the slot is let go (bounded); a caller abortin
   assert.ok(killDone > firstAt && killDone < secondAt, 'the next container starts only after the kill');
   // Aborted while waiting for the slot: timeout at once, not after queueWaitMs; the queue goes on.
   r.setPlan({ run: { sleepMs: 3000, write: 'pdf' } });
+  before = r.runs().length;
   const holder = r.runner.generate(LETTER);
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await until('the holder never took the slot', () => r.runs().length > before);
   const controller = new AbortController();
   started = Date.now();
-  setTimeout(() => controller.abort(), 100);
-  assert.deepEqual(await r.runner.generate(LETTER, controller.signal), { refused: 'timeout' });
+  const waiting = r.runner.generate(LETTER, controller.signal);
+  await new Promise(resolve => setImmediate(resolve));   // it is queued before it is aborted
+  controller.abort();
+  assert.deepEqual(await waiting, { refused: 'timeout' });
   assert.ok(Date.now() - started < 1000, String(Date.now() - started));
   const runsBefore = r.runs().length;
   assert.deepEqual(await r.runner.generate(LETTER, AbortSignal.abort()), { refused: 'timeout' }, 'already aborted');

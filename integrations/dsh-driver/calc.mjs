@@ -37,11 +37,11 @@
  *  it again at most once per retryMs. Logs carry an elapsed time, an exit code, a refusal code,
  *  a count and a size of the output files, and the self-check state - never the code, stdout,
  *  stderr or a file name. */
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { spawn as spawnChild } from 'node:child_process';
 import { isAbsolute, join } from 'node:path';
-import { dockerEnv } from './office.mjs';
+import { createDockerRun, dockerEnv, dockerHostLabel } from './office.mjs';
 
 const MiB = 1024 * 1024;
 export const CALC_LIMITS = Object.freeze({
@@ -59,7 +59,7 @@ export const CALC_LIMITS = Object.freeze({
 export const CALC_USER = '65534:65534';
 export const CALC_LABEL = 'aitelier.calc=1';
 /** The label naming one host's jobs: its calc-tmp, hashed (startup removes only these). */
-export const calcHostLabel = tmpRoot => `aitelier.calc.host=${createHash('sha256').update(String(tmpRoot)).digest('hex').slice(0, 16)}`;
+export const calcHostLabel = tmpRoot => dockerHostLabel('calc', tmpRoot);
 export const CALC_NAME_PREFIX = 'aitelier-calc-';
 export const SELFCHECK_CODE = 'print(2**10)\n';
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
@@ -125,6 +125,7 @@ export function createCalcRunner({ image, docker = 'docker', tmpRoot, log = () =
   const rooted = typeof tmpRoot === 'string' && isAbsolute(tmpRoot);
   const pinned = typeof image === 'string' && IMAGE_ID.test(image);
   const hostLabel = calcHostLabel(tmpRoot);
+  const dockerRun = createDockerRun({ spawn, docker, env, limits, overflowBytes: limits.frameBytes });
   let status = { state: 'pending', checkedAt: -Infinity };
 
   // The one slot and its queue: owners' waiters first (in their order), then the groups'.
@@ -152,54 +153,6 @@ export function createCalcRunner({ image, docker = 'docker', tmpRoot, log = () =
       if (at < 0) waiting.push(entry); else waiting.splice(at, 0, entry);
       timer = setTimeout(() => leave('busy'), limits.queueWaitMs);
       signal?.addEventListener?.('abort', onAbort, { once: true });
-    });
-  }
-
-  /** One docker command: {code, signal, stdout, overflow, spawnError, killedByUs, stderrTail}. */
-  function dockerRun(args, { signal, wallMs, name, keepStdout = false } = {}) {
-    return new Promise(resolve => {
-      let child, done = false, killedByUs = false, overflow = false, outBytes = 0, killed;
-      const out = [];
-      let errTail = Buffer.alloc(0);
-      try { child = spawn(docker, args, { env, stdio: ['ignore', 'pipe', 'pipe'] }); }
-      catch { resolve({ spawnError: true }); return; }
-      const kill = () => {
-        if (killedByUs) return;
-        killedByUs = true;
-        // By its name: the client's own death would not stop the container. The answer waits for
-        // that kill (bounded), so the next job never overlaps this one.
-        if (name) {
-          killed = new Promise(settle => {
-            const bound = setTimeout(settle, limits.killWaitMs);
-            const end = () => { clearTimeout(bound); settle(); };
-            try { spawn(docker, ['kill', name], { env, stdio: 'ignore' }).on('error', end).on('close', end); } catch { end(); }
-          });
-        }
-        try { child.kill('SIGKILL'); } catch { /* gone */ }
-      };
-      const wall = wallMs ? setTimeout(kill, wallMs) : undefined;
-      signal?.addEventListener?.('abort', kill, { once: true });
-      const finish = fields => {
-        if (done) return;
-        done = true;
-        clearTimeout(wall);
-        signal?.removeEventListener?.('abort', kill);
-        const answer = { ...fields, killedByUs, overflow, stdout: Buffer.concat(out), stderrTail: errTail };
-        if (killed) killed.then(() => resolve(answer)); else resolve(answer);
-      };
-      child.on('error', () => finish({ spawnError: true }));
-      child.stdout.on('data', chunk => {
-        if (!keepStdout || overflow) return;
-        outBytes += chunk.length;
-        if (outBytes > limits.frameBytes) { overflow = true; out.length = 0; kill(); return; }
-        out.push(chunk);
-      });
-      child.stderr.on('data', chunk => {
-        const joined = Buffer.concat([errTail, chunk]);
-        errTail = Buffer.from(joined.subarray(Math.max(0, joined.length - limits.stderrBytes)));
-      });
-      child.on('close', (code, sig) => finish({ code, signal: sig }));
-      if (signal?.aborted) kill();
     });
   }
 

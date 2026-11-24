@@ -363,6 +363,27 @@ def test_each_status_code_and_the_dot(world):
     assert rows["music"]["status"] == {"dot": "grey", "reasons": ["not_set"]}
 
 
+def test_an_out_named_pin_is_tool_collision_and_not_available(world):
+    """Design "八": a pinned tool whose gateway name an earlier-seen tool of its connection
+    already holds is red `tool_collision`; the steward is given it as not available, no
+    pinned_name, and the stored route never moves."""
+    ready(world, names=("paint_v2", "generate_image"))
+    put(world, "draw", [conn("media", "paint_v2"), conn("media", "generate_image")])
+    route = stored(world)["draw"]
+    assert codes(world, "draw") == ["ok", "ok"]
+    with world.db.get_connection() as c:  # an earlier-seen tool with paint_v2's gateway name
+        c.execute("INSERT INTO state_steward_connection_tools(conn_id,raw_name,gw_name,definition_json,schema_sha256,"
+                  "allowed,allowed_sha256,outward,egress,blocked_args,first_seen_at,last_seen_at) "
+                  "SELECT conn_id,'paint.v2',gw_name,definition_json,schema_sha256,0,NULL,outward,egress,blocked_args,"
+                  "'2000-01-01',last_seen_at FROM state_steward_connection_tools WHERE conn_id='media' AND raw_name='paint_v2'")
+        c.commit()
+    assert table(world)["draw"]["status"] == {"dot": "yellow", "reasons": ["fallback_in_use", "tool_collision", "ok"]}
+    assert basics(world)["rows"] == [{"id": "draw", "route": [
+        {"kind": "conn", "visibility": "public", "pinned_name": None, "available": False},
+        {"kind": "conn", "visibility": "public", "pinned_name": "mcp__sw__media__generate_image", "available": True}]}]
+    assert stored(world)["draw"] == route
+
+
 def test_an_unticked_or_vanished_tool_is_reported_and_the_route_never_moves(world):
     """c4: unticked -> tool_not_allowed, the upstream no longer listing it -> tool_gone; the
     stored route is never edited by either."""

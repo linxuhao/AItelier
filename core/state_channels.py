@@ -96,7 +96,7 @@ from core.state_graph import StateConflict, StateGraphError, StateNotFound, cano
 from core.state_privacy import UntrustedDatabase, writer_only_read
 from core.state_schema_migration import add_column_if_missing
 from core.state_steward import (ARCHIVE_KINDS, CAPABILITY_KIND, CONNECTION_KIND, ProposalConflict, _hash, _proposal,
-                                default_tz, impact_is_empty, steward_project, stop_impact)
+                                _steward_proposal, default_tz, impact_is_empty, steward_project, stop_impact)
 
 log = logging.getLogger(__name__)
 
@@ -513,6 +513,21 @@ def _subject(proposal):
         from core.state_steward_capabilities import route_target
         return {"kind": proposal["kind"], "target": route_target(payload["cap_id"], payload["entries"])}
     return {"kind": proposal["kind"], "target": payload.get("project_id") or payload.get("conn_id")}
+
+
+def _decision_result(proposal):
+    """The executed answer's `result` is the deciding node's view of a proposal row,
+    not the row itself (iss-d5ed3cf073fe40e4). A capability_route's stored payload
+    holds the card shown on the owner's dashboard: third-party tool descriptions
+    and raw names. A channel answer carries the same card-free view a steward's
+    own proposal read gets, so give that projector the row shape it expects. Other
+    kinds keep all their decision facts, unchanged."""
+    if proposal["kind"] != CAPABILITY_KIND:
+        return proposal
+    row = {**proposal,
+           "payload_json": json.dumps(proposal["payload"]),
+           "result_json": json.dumps(proposal["result"]) if proposal["result"] is not None else None}
+    return _steward_proposal(row)
 
 
 def check_qr_svg(svg):
@@ -963,7 +978,7 @@ class StateChannels:
             return _RUNNING
         decided = _proposal(row)
         return {"proposal_id": pending["proposal_id"], "action": pending["action"], "outcome": "executed",
-                **_subject(decided), "result": decided}
+                **_subject(decided), "result": _decision_result(decided)}
 
     def _pepper_value(self):
         """The pepper that keys the binding codes, or None when it is missing or short."""
@@ -1594,7 +1609,7 @@ class StateChannels:
         try:
             if matched["action"] == "decline":
                 declined = steward.decide_decline(proposal_id, version, decided_by, record, carrier)
-                return {**out, "outcome": "executed", **_subject(declined), "result": declined}
+                return {**out, "outcome": "executed", **_subject(declined), "result": _decision_result(declined)}
             with self.store.transaction() as conn:
                 row = steward._get(conn, proposal_id)
                 impact = None
@@ -1638,4 +1653,4 @@ class StateChannels:
                 result = steward.fail(proposal_id, f"{type(exc).__name__}: {exc}")
             else:
                 result = steward.finish(proposal_id, "done", {"driver": driver})
-        return {**out, "outcome": "executed", **_subject(row), "result": result}
+        return {**out, "outcome": "executed", **_subject(row), "result": _decision_result(result)}

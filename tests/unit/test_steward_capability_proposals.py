@@ -428,6 +428,37 @@ def test_the_answer_and_the_wakes_carry_no_upstream_words(world):
     assert any('"entries":["conn"]' in b for b in bodies) and any('"error":"tool_gone"' in b for b in bodies)
 
 
+def test_the_channel_decision_answer_never_carries_the_upstream_card(world, monkeypatch):
+    """iss-d5ed3cf073fe40e4: both executed answers a relayed phrase returns to the
+    deciding node are projections of the decided row, not the row itself. The
+    owner's own read of either proposal still carries the frozen dashboard card."""
+    ready(world)
+    bind_slack(world, monkeypatch)
+    approved = propose(world, "draw", [PAINT])["proposal_id"]
+    declined = propose(world, "ocr", [PAINT])["proposal_id"]
+    for pid in (approved, declined):
+        assert UPSTREAM in json.dumps(proposal(world, pid)["payload"]["card"], ensure_ascii=False)
+
+    answer = relay(world, f"同意 proposal {approved}", key("a"))["approval"]
+    assert answer["outcome"] == "executed" and answer["result"]["status"] == "done"
+    assert answer["result"]["result"]["cap_id"] == "draw"
+    assert answer["result"]["payload"] == {"cap_id": "draw", "entries": ["conn"]}
+    text = json.dumps(answer, ensure_ascii=False)
+    for word in (UPSTREAM, DESCRIPTION, "payload_json", "card", "raw_name", "description"):
+        assert word not in text, (word, text)
+    assert proposal(world, approved)["status"] == "done"
+    assert UPSTREAM in json.dumps(proposal(world, approved)["payload"]["card"], ensure_ascii=False)
+
+    refusal = relay(world, f"拒绝 proposal {declined}", key("r"))["approval"]
+    assert refusal["outcome"] == "executed" and refusal["result"]["status"] == "declined"
+    assert refusal["result"]["payload"] == {"cap_id": "ocr", "entries": ["conn"]}
+    text = json.dumps(refusal, ensure_ascii=False)
+    for word in (UPSTREAM, DESCRIPTION, "payload_json", "card", "raw_name", "description"):
+        assert word not in text, (word, text)
+    assert proposal(world, declined)["status"] == "declined"
+    assert UPSTREAM in json.dumps(proposal(world, declined)["payload"]["card"], ensure_ascii=False)
+
+
 # --- the chat phrase -------------------------------------------------------------------------------
 
 def test_the_owners_phrase_approves_a_route_from_the_owners_words(world, monkeypatch):

@@ -378,8 +378,6 @@ def assert_repo_gate_calls(observations, counter: Path, *, tests: int, measured:
 # id so the homes stay distinct and of one fixed length. The root is removed
 # when the session ends.
 _HOMES_ROOT: Path | None = None
-# What `_run_repo_gate` appends to the home: `/r/` + 32 hex digits + `.s`.
-_RELAY_SOCKET_BYTES = len("/r/") + 32 + len(".s")
 # `_home_name` is always this long, so one probe measures every row's path.
 _HOME_NAME_CHARS = 10
 
@@ -398,23 +396,26 @@ def _homes_root() -> Path:
     """
     global _HOMES_ROOT
     if _HOMES_ROOT is None:
-        measured = []
+        from aitelier.gate_admission import relay_socket_path
+        refused = []
         # The environment's temp dir first, then the short conventional ones.
         for candidate in dict.fromkeys((tempfile.gettempdir(), "/tmp", "/var/tmp")):
             if not os.path.isdir(candidate):
                 continue
             root = Path(tempfile.mkdtemp(prefix="rt-homes-", dir=candidate)).resolve()
-            probe = root / ("0" * _HOME_NAME_CHARS) / "r" / ("0" * 32 + ".s")
-            measured.append((len(os.fsencode(probe)), str(root)))
-            if len(os.fsencode(probe)) < 108:
-                _HOMES_ROOT = root
-                atexit.register(shutil.rmtree, root, ignore_errors=True)
-                return root
-            shutil.rmtree(root, ignore_errors=True)
+            try:
+                # The product's own path, so the probe follows its layout.
+                relay_socket_path(root / ("0" * _HOME_NAME_CHARS), "probe", "probe")
+            except ValueError as exc:
+                refused.append((str(root), str(exc)))
+                shutil.rmtree(root, ignore_errors=True)
+                continue
+            _HOMES_ROOT = root
+            atexit.register(shutil.rmtree, root, ignore_errors=True)
+            return root
         raise RuntimeError(
-            f"no temp root short enough for a gate home: its owned relay socket "
-            f"needs {_RELAY_SOCKET_BYTES} bytes under the home and Linux allows "
-            f"107; measured {measured}")
+            f"no temp root short enough for a gate home: the owned relay socket "
+            f"of a {_HOME_NAME_CHARS}-char home under each root was refused: {refused}")
     return _HOMES_ROOT
 
 

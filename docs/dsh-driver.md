@@ -194,7 +194,10 @@ version, not an older globally installed command.
 
 ## Standing director goal and connection recovery
 
-The director mandate is a text file. The runtime reads the deployment's own
+The director mandate is a text file, read only for backend-managed directors
+(the ones the backend starts through `integrations/dsh-driver`). A standalone
+director on the local host never reads it; its standing goal is the host's
+`objective` (see `integrations/dsh-director/README.md`). The runtime reads the deployment's own
 mandate, `director-goal.md` in the AItelier data root (`$AITELIER_HOME`, else
 `~/.AItelier/director-goal.md`), when that file exists, and otherwise the
 repository's neutral default, `integrations/dsh-driver/goal.md`. The default
@@ -202,8 +205,8 @@ grants no standing authority: it tells the director to ask the owner before
 anything that leaves the machine or cannot be undone (push, publish or release,
 deploy, shared or production systems, spending, contacting anyone).
 
-**The override is an authorization the operator grants.** Every director on the
-host runs with full access as the installing user and no approval prompts (see
+**The override is an authorization the operator grants.** Every backend-managed
+director on the host runs with full access as the installing user and no approval prompts (see
 below), so whatever `director-goal.md` says it may do, it will do without asking.
 Read it before the first driver start, and write in it only what the owner
 allows: the project's scope, which outward actions are allowed and within what
@@ -211,7 +214,8 @@ bounds (for example "may push to the project's own remote branches"), which
 models or providers to prefer, and what to clean up. Keep it owner-readable only
 (`chmod 600`). `{{project_id}}` is replaced by each project's id. A file that
 exists but cannot be read (or is empty, or a link to a missing file) stops every
-director at start with `director goal override <path> ...` in the host journal;
+backend-managed director at start with `director goal override <path> ...` in the host journal
+(standalone directors are unaffected);
 it is never replaced by the default silently. The steward has no mandate and is
 not affected.
 

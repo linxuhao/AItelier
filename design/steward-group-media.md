@@ -211,29 +211,33 @@ records the message.
    say), today's `servesGroup` check stays and no `kept` is set: an addressed medium
    (R5).
 3. **`handleGroup`** (`:858-909`): for `!mentioned` it calls `groups.relay({..., kept:
-   true})`. When the answer is a refusal (`media_keep_off`, `stale`, `undated`,
-   `group_not_bound`), every ref of this message that the library marks `kept` is taken
+   true})`. When the answer is a refusal (`media_keep_off`, `undated`,
+   `group_not_bound`; `stale` is not among them on this path - see item 4, and the plugin's
+   code is unchanged), every ref of this message that the library marks `kept` is taken
    back at once through `media.withdraw(ref)` (section 4), and the message ends
    `{accepted: false, reason}`. That answer is final for the plugin, because none of those
    reasons is in its `RETRY_REASONS`. A `duplicate` answer takes nothing back. An
    un-mentioned message that carries no file has nothing to keep and is not relayed at all
    (`{accepted: false, reason: 'nothing_kept'}`).
-4. **`relay_group_message`** (`core/state_groups.py:883-1050`) takes `kept` (request model
+4. **`relay_group_message`** (`core/state_groups.py:883-1056`) takes `kept` (request model
    `RelayGroupMessage`, `core/state_commands.py:1743`; the adapter's `relay` in
    `integrations/dsh-driver/steward-host.mjs:860-863` passes it through). With `kept=True`
    it requires nonempty `attachments` (else `invalid_request`). After the group and undated
    checks it asks for a duplicate first: a channel ref this group already recorded is a
    duplicate whatever its age (that row is never withdrawn), and only a message it has never
-   recorded meets the `fresh_minutes` stale gate. A duplicate whose kept files the library
-   re-stored with new refs follows them - same count, kind and mime, nonempty refs - on that
-   same row, keeping its `message_id`, `at` and `accepted`; identical refs and any other shape
-   write nothing. Then it reads `media_keep`; anything but `on` answers
+   recorded AND that is a mention (`kept` false) meets the `fresh_minutes` stale gate - a
+   kept relay is never so held, whatever its `channel_at`, because it opens no turn, wakes
+   nobody and spends no quota, so its age cannot withdraw the file a later `@` must still
+   read. A duplicate whose kept files the library re-stored with new refs follows them - same
+   count, kind and mime, nonempty refs - on that same row, keeping its `message_id`, `at` and
+   `accepted`; identical refs and any other shape write nothing. Then it reads `media_keep`;
+   anything but `on` answers
    `{refused: 'media_keep_off'}` and writes no row. With the switch on, it runs the account-code
    check as every relay does, makes the sender's member row (`_member`, `:418-443`, so the
    sender has a label for R3), and writes ONE row: `kind='kept_media'`, `accepted=0`, the
    placeholder body, `attachments_json`. A kept row is not a question:
    * it is counted by none of the 60/20/120 windows, because those count `accepted=1`
-     inbound rows and outbound rows (`:1010-1035`);
+     inbound rows and outbound rows (`:1016-1041`);
    * it never decides a confirmation;
    * it never yields a quota notice.
 

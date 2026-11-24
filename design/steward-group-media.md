@@ -218,7 +218,7 @@ records the message.
    reasons is in its `RETRY_REASONS`. A `duplicate` answer takes nothing back. An
    un-mentioned message that carries no file has nothing to keep and is not relayed at all
    (`{accepted: false, reason: 'nothing_kept'}`).
-4. **`relay_group_message`** (`core/state_groups.py:883-1049`) takes `kept` (request model
+4. **`relay_group_message`** (`core/state_groups.py:883-1050`) takes `kept` (request model
    `RelayGroupMessage`, `core/state_commands.py:1743`; the adapter's `relay` in
    `integrations/dsh-driver/steward-host.mjs:860-863` passes it through). With `kept=True`
    it requires nonempty `attachments` (else `invalid_request`). After the group and undated

@@ -426,8 +426,9 @@ def list_capabilities(service=Depends(get_service)):
 
     A native fact wins; otherwise an effective MCP tool; otherwise `missing` names
     nobody. The view renders these values; it does not decide them. Beside them: the
-    owner's `setting` (null: not set), the steward's open `proposal` for it (or null),
-    the route's `status` {dot, reasons} and the editor's `spec`.
+    owner's `setting` (null: not set), the row `version` a write expects, the steward's
+    open `proposal` for it (or null), the route's `status` {dot, reasons} and the editor's
+    `spec`.
     """
     _owner(service)
     listed = _listed_connections(service)

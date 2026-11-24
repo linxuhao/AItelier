@@ -282,7 +282,34 @@ def test_unset_and_clear_go_back_to_the_empty_table_byte_for_byte(world):
         c.commit()
     assert canonical(listed(world)) == empty and "translate" not in table(world)
     clear(world)
-    assert stored(world) == {}
+    # Unset and cleared rows stay, not set, at their next version (a job off the list goes).
+    assert stored(world) == {"draw": (None, 2, "dashboard"), "calendar": (None, 2, "dashboard")}
+    assert canonical(listed(world)) == empty
+    assert table(world)["draw"]["setting"] is None and table(world)["draw"]["version"] == 2
+    assert table(world)["draw"]["status"] == {"dot": "grey", "reasons": ["not_set"]}
+
+
+@pytest.mark.parametrize("how", ["unset", "clear"])
+def test_an_unset_or_clear_never_takes_the_version_back(world, how):
+    """ABA: a writer that read the row before an unset (or clear) and a new set is refused,
+    and so is a writer that read nothing; the row is the newer writer's."""
+    ready(world, names=("paint_v2", "generate_image"))
+    put(world, "draw", [conn("media", "paint_v2")])                     # both tabs read v1
+    unset(world, "draw", 1) if how == "unset" else clear(world)         # tab B
+    assert table(world)["draw"]["version"] == 2 and table(world)["draw"]["setting"] is None
+    for stale in (0, 1):
+        with pytest.raises(StateConflict, match="version_conflict"):
+            put(world, "draw", [conn("media", "generate_image")], expect=stale)
+    put(world, "draw", [conn("media", "generate_image")], expect=2)    # tab B, at what it read
+    for stale in (0, 1, 2):                                             # tab A, and older reads
+        with pytest.raises(StateConflict, match="version_conflict"):
+            put(world, "draw", [{"kind": "missing"}], expect=stale)
+        with pytest.raises(StateConflict, match="version_conflict"):
+            unset(world, "draw", stale)
+    assert stored(world)["draw"][:2] == ([{"kind": "conn", "conn_id": "media", "conn_uid": stored(world)[
+        "draw"][0][0]["conn_uid"], "raw_name": "generate_image"}], 3)
+    assert table(world)["draw"]["version"] == table(world)["draw"]["setting"]["version"] == 3
+    assert table(world)["pdf"]["version"] == 0
 
 
 def test_a_set_removes_a_job_no_longer_on_the_list(world):
@@ -475,6 +502,8 @@ def test_the_routes_answer_codes_and_keep_the_row(world, client):
     assert client.delete("/api/steward/capabilities/draw?expect_version=2", headers=client.owner).status_code == 409
     assert client.delete("/api/steward/capabilities/draw?expect_version=1", headers=client.owner).json() == \
         {"cap_id": "draw", "setting": None}
-    put_([{"kind": "missing"}])
+    # The unset row kept its version: a write expects it (0 is stale now).
+    assert put_([{"kind": "missing"}]).status_code == 409
+    assert put_([{"kind": "missing"}], expect=2).status_code == 200
     assert client.delete("/api/steward/capabilities", headers=client.owner).json() == {"cleared": 1}
-    assert stored(world) == {}
+    assert stored(world) == {"draw": (None, 4, "dashboard")}

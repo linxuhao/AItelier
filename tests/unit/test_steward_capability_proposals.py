@@ -248,6 +248,42 @@ def test_a_row_the_owner_changed_since_fails_route_changed(world):
     assert stored(world)["draw"][:3] == ([{"kind": "missing"}], 1, "dashboard")
 
 
+@pytest.mark.parametrize("how", ["unset", "clear"])
+def test_a_row_unset_and_set_again_since_still_fails_route_changed(world, how):
+    """ABA: the owner unsets (or clears) the row and sets it again after the proposal froze
+    its version; the version never went back, so approval refuses and the row stays the owner's."""
+    ready(world)
+    execute(world.owner, "steward_capability_set", {"request_key": key(), "cap_id": "draw", "expect_version": 0,
+                                                    "route": [{"kind": "missing"}]}, allow_write=True)
+    pid = propose(world, "draw", [PAINT])["proposal_id"]
+    assert proposal(world, pid)["payload"]["expect_version"] == 1
+    if how == "unset":
+        execute(world.owner, "steward_capability_set", {"request_key": key(), "cap_id": "draw", "expect_version": 1,
+                                                        "unset": True}, allow_write=True)
+    else:
+        execute(world.owner, "steward_capabilities_clear", {"request_key": key()}, allow_write=True)
+    execute(world.owner, "steward_capability_set", {"request_key": key(), "cap_id": "draw", "expect_version": 2,
+                                                    "route": [{"kind": "conn", "conn_id": "media",
+                                                               "raw_name": "generate_image"}]}, allow_write=True)
+    owner_row = stored(world)["draw"]
+    done = approve(world, pid)
+    assert done["status"] == "failed" and done["result"] == {"error": "route_changed"}
+    assert stored(world)["draw"] == owner_row and owner_row[1:3] == (3, "dashboard")
+
+
+def test_a_proposal_on_an_unset_row_freezes_its_version_and_writes_the_next(world):
+    ready(world)
+    execute(world.owner, "steward_capability_set", {"request_key": key(), "cap_id": "draw", "expect_version": 0,
+                                                    "route": [{"kind": "missing"}]}, allow_write=True)
+    execute(world.owner, "steward_capability_set", {"request_key": key(), "cap_id": "draw", "expect_version": 1,
+                                                    "unset": True}, allow_write=True)
+    pid = propose(world, "draw", [PAINT])["proposal_id"]
+    assert proposal(world, pid)["payload"]["expect_version"] == 2
+    done = approve(world, pid)
+    assert done["status"] == "done"
+    assert stored(world)["draw"][1:4] == (3, "proposal", pid)
+
+
 @pytest.mark.parametrize("how", ["unlisted", "deleted", "added_again"])
 def test_a_tool_gone_before_approval_fails_tool_gone_and_writes_nothing(world, how):
     ready(world)

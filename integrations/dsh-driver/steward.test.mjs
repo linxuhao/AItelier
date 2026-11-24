@@ -2032,10 +2032,13 @@ test('step 24.4 steward.md (7.8.24 "七" 3): the basic-capabilities paragraph re
   const flat = md.replace(/\s+/g, ' ');
   for (const gone of ['no other tool behind them', '(mail, media, web, documents)', 'Your tools are exactly the ones listed'])
     assert.ok(!flat.includes(gone), gone);
-  for (const words of ['Your tools are the ones listed plus your connection tools; the "basic capabilities" table below says exactly which jobs you can do and with which tool.',
+  // Two sentences differ from the design's literal text so that they stay true with an empty
+  // table (no basics section): the table "follows" only when one is set, and the calendar rule
+  // is not conditional on a calendar row (an unset table must leave calendars as they were).
+  for (const words of ['Your tools are the ones listed plus your connection tools; when a "basic capabilities" table follows, it says exactly which jobs you can do and with which tool.',
     'Basic capabilities:', 'search_tools("basics:<id>") gives you exactly the tools for that job, in order', 'DESCRIPTION, not its name',
     'Search at most 3 times, limit 10', 'a chat reply cannot approve it', '同意 proposal <id>', '生成 图片',
-    'never propose again a route your owner declined', 'when the table lists calendar with a tool'])
+    'never propose again a route your owner declined', 'Calendars: a connected calendar is read freely'])
     assert.ok(flat.includes(words), words);
   // The paragraph comes before the connection-tools paragraph (design "七" 3).
   assert.ok(flat.indexOf('Basic capabilities:') < flat.indexOf('Your tools: besides your own tools you have connections your owner added.'));

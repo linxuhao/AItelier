@@ -1217,9 +1217,9 @@ export function stewardConnectionTools(connId: string): Promise<StewardConnectio
 // deployment and the owner's stored connection ticks; the view only renders it.
 export type StewardCapabilityProvider = 'native' | 'mcp' | 'missing';
 /** One entry of a capability's ordered route (design 7.8.24 "三"); the first is the main one.
- *  What the dashboard sends names a connection tool by `conn_id` + `raw_name` only: the
- *  backend takes `conn_uid` at the write. A read may add `conn_uid`, the connection's
- *  `visibility` and the entry's status `reason` (design "八"). */
+ *  What the dashboard sends names a connection tool by `conn_id` + `raw_name`: the backend
+ *  takes `conn_uid` at the write (a pin read back keeps its own). A read may add `conn_uid`,
+ *  the connection's `visibility` and the entry's status `reason` (design "八"). */
 export type StewardRouteEntry =
   | {kind: 'native'; reason?: string} | {kind: 'missing'; reason?: string} | {kind: 'host'; tool: string; reason?: string}
   | {kind: 'conn'; conn_id: string; raw_name: string; conn_uid?: string; visibility?: StewardVisibility | null; reason?: string};
@@ -1240,18 +1240,23 @@ export interface StewardCapability {
   /** Step 24.4: the owner's route (null = not set = today), the steward's open proposal,
    *  the row's status and what the editor may offer. Absent from an older backend. */
   setting?: StewardCapabilitySetting | null; proposal?: StewardCapabilityProposal | null;
+  /** The row version a write expects: an unset row keeps its own (it never goes back), 0 = never written. */
+  version?: number;
   status?: StewardCapabilityStatus | null; spec?: StewardCapabilitySpec;
 }
 export interface StewardCapabilities { capabilities: StewardCapability[] }
 export function listStewardCapabilities(): Promise<StewardCapabilities> {
   return _get('/api/steward/capabilities');
 }
-/** The route as the dashboard sends it: a connection entry carries only conn_id + raw_name. */
+/** The route as the dashboard sends it: a connection entry carries conn_id + raw_name, and the
+ *  conn_uid of a pin read back from the setting, so a pin whose connection was added again
+ *  under the same conn_id is refused (unknown_connection), never moved to the new one. */
 function _routeBody(route: StewardRouteEntry[]): StewardRouteEntry[] {
-  return route.map(e => e.kind === 'conn' ? {kind: 'conn', conn_id: e.conn_id, raw_name: e.raw_name}
+  return route.map(e => e.kind === 'conn'
+    ? {kind: 'conn', conn_id: e.conn_id, raw_name: e.raw_name, ...(e.conn_uid ? {conn_uid: e.conn_uid} : {})}
     : e.kind === 'host' ? {kind: 'host', tool: e.tool} : {kind: e.kind});
 }
-/** Set one capability's ordered route. `expectVersion` is the row version the owner saw (0 = no row);
+/** Set one capability's ordered route. `expectVersion` is the row version the owner saw (0 = never written);
  *  a stale one is refused `version_conflict`. A repeated `requestKey` replays the first answer. */
 export function setStewardCapability(capId: string, expectVersion: number, route: StewardRouteEntry[],
   requestKey: string = crypto.randomUUID()): Promise<unknown> {

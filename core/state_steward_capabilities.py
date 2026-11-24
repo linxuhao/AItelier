@@ -3,8 +3,10 @@
 A FIXED list of jobs (`CAPABILITIES`, the owner's "fixed list"); for each the owner may
 store one ordered ROUTE on the dashboard: `native`, `missing`, or one to eight tools - a
 host tool of the steward's own or any tool of any registered connection - the first the
-main one. One row per job in `state_steward_capabilities`; no row = not set = today (the
-steward finds its tools with search_tools as before).
+main one. One row per job in `state_steward_capabilities`; no row, or a row whose route is
+`null` (unset or cleared), = not set = today (the steward finds its tools with search_tools
+as before). Unset and clear keep the row at the next version, so a row's version only ever
+rises and a write or proposal made at an older version is refused.
 
 Two readings never mix:
 - DETECTION (api/steward_routers.py: the native facts and the exact tool name `tool`) is
@@ -127,6 +129,8 @@ MAX_OPEN_PROPOSALS = 5
 DECLINED_QUIET = timedelta(days=30)
 KIND = "capability_route"
 OP_SET, OP_CLEAR = "steward_capability_set", "steward_capabilities_clear"
+# The route of a row unset or cleared: not set, its version kept (never back to 0).
+NOT_SET = "null"
 # A row's colour per entry code (design 7.8.24 "八").
 _COLOR = {"ok": "green", "connection_error": "yellow", "see_driver_status": "grey", "missing": "grey"}
 
@@ -158,7 +162,15 @@ def _stored(conn) -> dict:
     """{cap_id: row} of the rows set for a job still on the list (others are ignored)."""
     if not _has_table(conn):
         return {}
-    return {r["cap_id"]: r for r in conn.execute("SELECT * FROM state_steward_capabilities") if r["cap_id"] in BY_ID}
+    return {r["cap_id"]: r for r in conn.execute("SELECT * FROM state_steward_capabilities")
+            if r["cap_id"] in BY_ID and r["route_json"] != NOT_SET}
+
+
+def _versions(conn) -> dict:
+    """{cap_id: version} of every row, an unset one included: what a write must expect."""
+    if not _has_table(conn):
+        return {}
+    return {r["cap_id"]: r["version"] for r in conn.execute("SELECT cap_id,version FROM state_steward_capabilities")}
 
 
 # ---------------------------------------------------------------- the route
@@ -364,7 +376,8 @@ class StewardCapabilities:
 
     def set(self, request_key, cap_id, expect_version, route=None, unset=False):
         """Write one job's route (or remove it: `unset`) as of the row version the panel read
-        (0: no row); another version is `version_conflict`. A connection entry names
+        (0: no row); another version is `version_conflict`. Unset keeps the row, route
+        `null`, at the next version. A connection entry names
         conn_id and raw_name; its conn_uid is the connection's now. The same request_key
         answers the same result; with another content it is refused."""
         self._owner()
@@ -385,7 +398,9 @@ class StewardCapabilities:
             conn.execute(f"DELETE FROM state_steward_capabilities WHERE cap_id NOT IN "
                          f"({','.join('?' * len(BY_ID))})", tuple(BY_ID))
             if unset:
-                conn.execute("DELETE FROM state_steward_capabilities WHERE cap_id=?", (cap_id,))
+                conn.execute("UPDATE state_steward_capabilities SET route_json=?, version=version+1, "
+                             "set_via='dashboard', proposal_id=NULL, updated_at=? WHERE cap_id=?",
+                             (NOT_SET, now(), cap_id))
                 result = {"cap_id": cap_id, "setting": None}
             else:
                 entries = check_route(cap_id, route, conn, via="dashboard")
@@ -399,7 +414,8 @@ class StewardCapabilities:
             return self.steward._record(conn, OP_SET, request_key, request_hash, result)
 
     def clear(self, request_key):
-        """Remove every row: the table as never set (the stop switch, design "十七")."""
+        """Every job not set: the table as never set (the stop switch, design "十七"); each
+        set row is kept unset at its next version."""
         self._owner()
         from core.state_steward import _hash
         request_hash = _hash(["clear"])
@@ -407,17 +423,23 @@ class StewardCapabilities:
             replay = self.steward._replay(conn, OP_CLEAR, request_key, request_hash)
             if replay is not None:
                 return replay
-            cleared = conn.execute("DELETE FROM state_steward_capabilities").rowcount
+            conn.execute(f"DELETE FROM state_steward_capabilities WHERE cap_id NOT IN "
+                         f"({','.join('?' * len(BY_ID))})", tuple(BY_ID))
+            cleared = conn.execute("UPDATE state_steward_capabilities SET route_json=?, version=version+1, "
+                                   "set_via='dashboard', proposal_id=NULL, updated_at=? WHERE route_json!=?",
+                                   (NOT_SET, now(), NOT_SET)).rowcount
             return self.steward._record(conn, OP_CLEAR, request_key, request_hash, {"cleared": cleared})
 
     @writer_only_read("steward_capabilities")
     def rows(self) -> dict:
-        """{cap_id: {setting, proposal, status, spec}} for every job on the list (the GET
-        /api/steward/capabilities additions; detection is the route's own). Each entry of a
-        setting's route carries its status `reason`, a connection entry its `visibility`."""
+        """{cap_id: {setting, version, proposal, status, spec}} for every job on the list (the
+        GET /api/steward/capabilities additions; detection is the route's own). `version` is
+        the row version a write expects (0: never written; an unset row keeps its own). Each
+        entry of a setting's route carries its status `reason`, a connection entry its
+        `visibility`."""
         self._owner()
         with self.store.transaction() as conn:
-            stored, facts = _stored(conn), _Facts(conn)
+            stored, versions, facts = _stored(conn), _versions(conn), _Facts(conn)
             proposals = {}
             for row in conn.execute("SELECT * FROM state_steward_proposals WHERE kind=? AND status='open' "
                                     "ORDER BY created_at", (KIND,)):
@@ -434,6 +456,7 @@ class StewardCapabilities:
                          for e, code in zip(entries, codes)]
                 out[cap["id"]] = {
                     "setting": {"route": route, "version": row["version"], "set_via": row["set_via"]} if row else None,
+                    "version": versions.get(cap["id"], 0),
                     "proposal": proposals.get(cap["id"]),
                     "status": derive_status(codes if row else None),
                     "spec": {"allows": list(cap["allows"]), "host_tools": list(cap["host_tools"]),

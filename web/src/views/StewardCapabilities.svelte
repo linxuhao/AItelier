@@ -23,14 +23,16 @@
   } = $props();
   let rows = $state<StewardCapability[]>([]);
   let loaded = $state(false), error = $state('');
-  // Open editors (a row's unsaved route), per-row save errors, the add-entry picker.
-  let drafts = $state<Record<string, StewardRouteEntry[]>>({});
+  // Open editors (a row's unsaved route and the row version it started from: a save expects
+  // that version, so a write made meanwhile is a version_conflict), per-row save errors, the
+  // add-entry picker.
+  let drafts = $state<Record<string, {entries: StewardRouteEntry[]; base: number}>>({});
   let rowErrors = $state<Record<string, string>>({});
   let busy = $state('');
   let picker = $state<{cap: string; conn: string; tools: StewardConnectionTool[] | null; error: string} | null>(null);
   let connections = $state<StewardConnection[] | null>(null);
   let dragging: {cap: string; index: number} | null = null;
-  let clearAsk = $state(false);
+  let clearAsk = $state(false), clearError = $state('');
   let alive = true;
   async function load() {
     try {
@@ -96,16 +98,19 @@
   }
   /** The saved route as editor entries (a read entry carries its own status `reason`). */
   const saved = (row: StewardCapability) => (row.setting?.route ?? []).map(entry => ({...entry}));
-  const shown = (row: StewardCapability) => drafts[row.id] ?? (row.setting ? saved(row) : null);
+  const shown = (row: StewardCapability) => drafts[row.id]?.entries ?? (row.setting ? saved(row) : null);
+  /** The row version a write expects, as read (an unset row keeps its own; 0: never written). */
+  const readVersion = (row: StewardCapability) => row.version ?? row.setting?.version ?? 0;
+  const base = (row: StewardCapability) => drafts[row.id]?.base ?? readVersion(row);
   function edit(row: StewardCapability, entries: StewardRouteEntry[]) {
-    drafts = {...drafts, [row.id]: entries.map(entry => ({...entry}))};
+    drafts = {...drafts, [row.id]: {entries: entries.map(entry => ({...entry})), base: base(row)}};
     rowErrors = {...rowErrors, [row.id]: ''};
     void ensureConnections();
   }
   function change(row: StewardCapability, mutate: (list: StewardRouteEntry[]) => void) {
     const list = [...(shown(row) ?? [])];
     mutate(list);
-    drafts = {...drafts, [row.id]: list};
+    drafts = {...drafts, [row.id]: {entries: list, base: base(row)}};
   }
   function forget(capId: string) {
     const {[capId]: _dropped, ...rest} = drafts;
@@ -181,11 +186,11 @@
     rowErrors = {...rowErrors, [row.id]: text};
   }
   async function save(row: StewardCapability) {
-    const route = drafts[row.id];
-    if (!route || busy) return;
+    const draft = drafts[row.id];
+    if (!draft || busy) return;
     busy = row.id; rowErrors = {...rowErrors, [row.id]: ''};
     try {
-      await setStewardCapability(row.id, row.setting?.version ?? 0, route);
+      await setStewardCapability(row.id, draft.base, draft.entries);
       forget(row.id);
       await load();
     } catch (e) { await failed(row, e); }
@@ -222,8 +227,9 @@
     await load();
   }
   async function clearAll() {
+    clearError = '';
     try { await clearStewardCapabilities(); drafts = {}; picker = null; }
-    catch (e) { error = String(e instanceof Error ? e.message : e); return; }
+    catch (e) { clearError = refusal(codeOf(e)); return; }
     await load();
   }
   function dropOn(row: StewardCapability, index: number, event: DragEvent) {
@@ -347,6 +353,7 @@
   {#if rows.some(row => row.setting)}
     <button type="button" class="outline secondary clear" data-cap-clear onclick={() => { clearAsk = true; }}>{t('steward.capClearAll')}</button>
   {/if}
+  {#if clearError}<p class="error" role="alert" data-cap-clear-error>{clearError}</p>{/if}
 </section>
 <ConfirmDialog bind:show={clearAsk} variant="danger" title={t('steward.capClearAll')}
   message={t('steward.capClearAllConfirm')} confirmLabel={t('steward.capClearAll')} onConfirm={clearAll} />

@@ -520,12 +520,16 @@ describe('the write calls (step 24.4)', () => {
     }));
     const real = await vi.importActual<typeof import('../../lib/api')>('../../lib/api');
     await real.setStewardCapability('draw', 4, [{kind: 'conn', conn_id: 'pub', raw_name: 'paint_v2', visibility: 'public',
-      reason: 'ok', conn_uid: 'u1'}, {kind: 'missing'}], 'k1');
+      reason: 'ok', conn_uid: 'u1'}, {kind: 'conn', conn_id: 'pub', raw_name: 'generate_image', visibility: 'public'},
+      {kind: 'missing'}], 'k1');
     await real.unsetStewardCapability('pdf', 3, 'k2');
     await real.clearStewardCapabilities('k3');
     expect(calls).toEqual([
       {url: '/api/steward/capabilities/draw', method: 'PUT', body: {request_key: 'k1', expect_version: 4,
-        route: [{kind: 'conn', conn_id: 'pub', raw_name: 'paint_v2'}, {kind: 'missing'}]}},
+        // A pin read back keeps its conn_uid (a gone pin is refused, never moved to a connection
+        // added again under that conn_id); a newly picked one has none.
+        route: [{kind: 'conn', conn_id: 'pub', raw_name: 'paint_v2', conn_uid: 'u1'},
+          {kind: 'conn', conn_id: 'pub', raw_name: 'generate_image'}, {kind: 'missing'}]}},
       {url: '/api/steward/capabilities/pdf?request_key=k2&expect_version=3', method: 'DELETE', body: null},
       {url: '/api/steward/capabilities?request_key=k3', method: 'DELETE', body: null},
     ]);
@@ -585,5 +589,53 @@ describe('the connections tab names a private-only pin', () => {
     await fireEvent.submit(view.container.querySelector('[data-conn-form]') as HTMLFormElement);
     await waitFor(() => expect(view.container.querySelector('[role="alert"]')?.textContent).toContain('private_only:'));
     expect(view.container.querySelector('[data-conn-pinned-private-only]')).toBeNull();
+  });
+});
+
+describe('the row version a write expects (step 24.4)', () => {
+  beforeEach(() => {
+    api.listStewardConnections.mockResolvedValue(conns());
+    api.setStewardCapability.mockResolvedValue({});
+  });
+
+  it('a draft saves at the version it started from, not at a later reload\'s (the other writer is not overwritten)', async () => {
+    api.listStewardCapabilities.mockResolvedValueOnce(routed({pdf: pdfSet}));
+    const view = render(StewardCapabilitiesView);
+    await waitFor(() => expect(chips(view.container, 'pdf')).toEqual(['Native', 'pub / ocr_pdf Not allowed yet']));
+    const items = row(view.container, 'pdf')!.querySelectorAll('[data-entry]');
+    await fireEvent.dragStart(items[1]); await fireEvent.dragOver(items[0]); await fireEvent.drop(items[0]);
+    // Meanwhile another writer moved pdf to v4; saving another row re-reads the table.
+    api.listStewardCapabilities.mockResolvedValue(routed({pdf: {...pdfSet, version: 4, setting: {
+      route: [{kind: 'native', reason: 'see_driver_status'}], version: 4, set_via: 'proposal'}}}));
+    await fireEvent.click(row(view.container, 'transcribe')!.querySelector('[data-cap-adopt]')!);
+    await fireEvent.click(row(view.container, 'transcribe')!.querySelector('[data-cap-save]')!);
+    await waitFor(() => expect(api.listStewardCapabilities).toHaveBeenCalledTimes(2));
+    await fireEvent.click(row(view.container, 'pdf')!.querySelector('[data-cap-save]')!);
+    await waitFor(() => expect(api.setStewardCapability).toHaveBeenCalledTimes(2));
+    expect(api.setStewardCapability.mock.calls[1].slice(0, 2)).toEqual(['pdf', 3]);
+  });
+
+  it('an unset row saves at the version it kept (never back to 0)', async () => {
+    api.listStewardCapabilities.mockResolvedValue(routed({transcribe: {version: 5}}));
+    const view = render(StewardCapabilitiesView);
+    await waitFor(() => expect(row(view.container, 'transcribe')?.querySelector('[data-cap-adopt]')).toBeTruthy());
+    await fireEvent.click(row(view.container, 'transcribe')!.querySelector('[data-cap-adopt]')!);
+    await fireEvent.click(row(view.container, 'transcribe')!.querySelector('[data-cap-save]')!);
+    await waitFor(() => expect(api.setStewardCapability).toHaveBeenCalledTimes(1));
+    expect(api.setStewardCapability.mock.calls[0].slice(0, 2)).toEqual(['transcribe', 5]);
+  });
+
+  it('a refused clear all says the clear failed, not that the table could not be read', async () => {
+    api.listStewardCapabilities.mockResolvedValue(routed({pdf: pdfSet}));
+    api.clearStewardCapabilities.mockRejectedValue(new ApiError(403, 'owner_session_required', null, 'owner_session_required'));
+    const view = render(StewardCapabilitiesView);
+    await waitFor(() => expect(view.container.querySelector('[data-cap-clear]')).not.toBeNull());
+    await fireEvent.click(view.container.querySelector('[data-cap-clear]')!);
+    await new Promise(done => requestAnimationFrame(() => done(null)));
+    await fireEvent.click(view.container.querySelector('#confirm-yes')!);
+    await waitFor(() => expect(view.container.querySelector('[data-cap-clear-error]')?.textContent)
+      .toBe(t('steward.capSaveFailed').replace('{code}', 'owner_session_required')));
+    expect(view.container.textContent).not.toContain(t('steward.capLoadFailed').replace('{code}', ''));
+    expect(chips(view.container, 'pdf')).toHaveLength(2);
   });
 });

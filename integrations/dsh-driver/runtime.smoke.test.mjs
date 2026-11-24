@@ -257,11 +257,11 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(activity.some(a => a.subagents.length > 0), 'native child activity missing\n' + output + JSON.stringify({contextReads,activity,requests:requests.map(r=>({summary:r.summary,child:r.child})),events:events.map(e=>e.type),directory}));
     assert.ok(events.some(e => e.type === 'compaction/end' && !e.data.error), 'automatic compaction missing\n' + output + JSON.stringify({requests:requests.map(r=>({summary:r.summary,child:r.child,size:JSON.stringify(r.options).length})),events:events.map(e=>({type:e.type,data:e.type==='compaction/end'?e.data:undefined}))}));
     assert.ok(contextReads >= 2, 'context was not refreshed\n' + output);
-    assert.ok(requests.some(r => !r.summary && !r.child && JSON.stringify(r.options).includes('你是 alpha 项目 State DAG 的常驻导演')), 'project director goal missing at startup');
+    assert.ok(requests.some(r => !r.summary && !r.child && JSON.stringify(r.options).includes('You are the standing director of the alpha project')), 'project director goal missing at startup');
     const after = requests.filter(r => !r.summary && !r.child).slice(2);
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('fresh private rule')), 'fresh private note missing\n' + output);
     assert.ok(after.some(r => JSON.stringify(r.options.messages).includes('VERIFIED')), 'fresh node status missing');
-    assert.ok(after.some(r => JSON.stringify(r.options).includes('你是 alpha 项目 State DAG 的常驻导演')), 'standing director goal missing after compact');
+    assert.ok(after.some(r => JSON.stringify(r.options).includes('You are the standing director of the alpha project')), 'standing director goal missing after compact');
     assert.equal(await readFile(join(childDirectory, 'worker-proof.txt'), 'utf8'), 'WORKER_SHELL_OK', 'native child could not write in its owned checkout under the parent workspace');
     assert.match(await readFile(join(childDirectory, 'commit-proof.txt'), 'utf8'), /^[0-9a-f]{40}\n$/, 'native child could not commit using its own git metadata');
     await assert.rejects(readFile(join(outsideDirectory, 'outside-probe.txt')), {code:'ENOENT'},
@@ -275,7 +275,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     assert.ok(events.some(e => e.type === 'user/message' && e.data.source?.kind === stateInjectionSource && JSON.stringify(e.data).includes('overflow fresh private rule')), 'overflow retry did not get fresh State');
     const created = events.filter(e => e.type === 'goal/change' && e.data.operation === 'create');
     assert.equal(created.length, 1, 'bootstrap must create exactly one native goal');
-    assert.match(created[0].data.goal.objective, /常驻导演/);
+    assert.match(created[0].data.goal.objective, /standing director/);
     assert.equal(events.filter(e => e.type === 'user/message' && e.data.source?.kind === 'goal').length, 1,
       'idle director immediately spun another native goal round');
     assert.ok(!events.some(e=>e.type==='user/message'&&e.data.source?.kind==='user'), 'bootstrap manufactured a human input');
@@ -379,7 +379,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
     const resumed = requests.slice(before).find(r => r.host && !r.summary && r.options.tools?.some(t => t.name === 'state_read'));
     assert.ok(resumed, 'persisted driver did not resume\n' + output);
     assert.match(JSON.stringify(resumed.options.messages), /earlier details can be searched/);
-    assert.match(JSON.stringify(resumed.options), /你是 alpha 项目 State DAG 的常驻导演/);
+    assert.match(JSON.stringify(resumed.options), /You are the standing director of the alpha project/);
     assert.equal(events.filter(e=>e.type==='goal/change'&&e.data.operation==='create').length,1,'restart replaced the persisted goal');
     const rearmed=events.find(e=>e.type==='goal/change'&&e.data.operation==='resume');
     assert.equal(rearmed?.data.goal.id,created[0].data.goal.id,'active goal was not rearmed after restart');

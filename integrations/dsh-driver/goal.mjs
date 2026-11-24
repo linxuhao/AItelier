@@ -1,9 +1,45 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, basename, join } from 'node:path';
-import { appendFile } from 'node:fs/promises';
+import { appendFile, lstat, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 
 const git = promisify(execFile);
+
+/** The deployment's own director mandate: `director-goal.md` in the AItelier data
+ *  root ($AITELIER_HOME, else ~/.AItelier - the rule of core/datadir.py), outside the
+ *  repository. It is an authorization the operator grants; the repository's goal.md
+ *  is only the neutral default. */
+export const GOAL_OVERRIDE_NAME = 'director-goal.md';
+
+export function goalOverrideFile(env = process.env) {
+  return join(env.AITELIER_HOME || join(homedir(), '.AItelier'), GOAL_OVERRIDE_NAME);
+}
+
+/** The mandate template this process runs with: the deployment's override when it
+ *  exists, else `defaultFile` (the repository's goal.md).
+ *
+ *  Returns { file, override, text } or, for an override that exists but cannot be
+ *  used (unreadable, a dangling link, empty), { file, override: true, error }: never
+ *  the default in its place, because the default would then be re-seeded into every
+ *  active director as if the owner had changed the mandate. Only a missing default
+ *  (a broken checkout) throws, as it always did. */
+export async function loadGoalTemplate(defaultFile, env = process.env) {
+  const file = goalOverrideFile(env);
+  const refuse = why => ({ file, override: true,
+    error: new Error(`director goal override ${file} ${why}; refusing to fall back to the repository default`) });
+  let text;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') return refuse(`cannot be read (${error?.code ?? error})`);
+    // ENOENT is also what a link to a missing file answers: that override is present.
+    try { await lstat(file); return refuse('is a link to a missing file'); } catch { /* absent */ }
+    return { file: defaultFile, override: false, text: await readFile(defaultFile, 'utf8') };
+  }
+  if (!text.trim()) return refuse('is empty');
+  return { file, override: true, text };
+}
 
 /** Git commit of the goal.md the runtime loaded, or 'unknown' (never throws).
  *  Tries the repository holding the loaded file, then AITELIER_TODO_CWD. */

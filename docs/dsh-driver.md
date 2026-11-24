@@ -194,9 +194,30 @@ version, not an older globally installed command.
 
 ## Standing director goal and connection recovery
 
-`integrations/dsh-driver/goal.md` seeds each project's standing director mandate
+The director mandate is a text file. The runtime reads the deployment's own
+mandate, `director-goal.md` in the AItelier data root (`$AITELIER_HOME`, else
+`~/.AItelier/director-goal.md`), when that file exists, and otherwise the
+repository's neutral default, `integrations/dsh-driver/goal.md`. The default
+grants no standing authority: it tells the director to ask the owner before
+anything that leaves the machine or cannot be undone (push, publish or release,
+deploy, shared or production systems, spending, contacting anyone).
+
+**The override is an authorization the operator grants.** Every director on the
+host runs with full access as the installing user and no approval prompts (see
+below), so whatever `director-goal.md` says it may do, it will do without asking.
+Read it before the first driver start, and write in it only what the owner
+allows: the project's scope, which outward actions are allowed and within what
+bounds (for example "may push to the project's own remote branches"), which
+models or providers to prefer, and what to clean up. Keep it owner-readable only
+(`chmod 600`). `{{project_id}}` is replaced by each project's id. A file that
+exists but cannot be read (or is empty, or a link to a missing file) stops every
+director at start with `director goal override <path> ...` in the host journal;
+it is never replaced by the default silently. The steward has no mandate and is
+not affected.
+
+The chosen text seeds each project's standing director mandate
 as a native DSH goal when its session has no current goal, and re-seeds an ACTIVE
-goal's objective from it on every start (see "Deploying a changed `goal.md`"). The native goal starts
+goal's objective from it on every start (see "Deploying a changed mandate"). The native goal starts
 the first director round. When that round ends, the runtime disarms immediate
 native continuation without changing the durable active phase, objective or
 round counters. Automatic notifications and idle reviews resume work instead of
@@ -209,14 +230,15 @@ Retained project-inbox messages are delivered after the first native goal round
 is admitted, so bootstrap messages cannot displace that round.
 
 Session resume preserves goal identity, counters and the existing project
-snapshot; an active goal's objective follows `goal.md`. The enabled resident host explicitly re-arms an active goal
+snapshot; an active goal's objective follows the mandate file. The enabled resident host explicitly re-arms an active goal
 after restart, while paused, blocked, completed and explicitly cleared goals remain unchanged.
 Native round limits remain in force; restart does not reset them or bypass a
 blocker. No additional goal store or scheduler is introduced. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the
-frontier, prioritizes critical defects, and aims for four independent native
-subagents when actionable work exists. The owner's push/publish scope,
-model preferences and cleanup policy are part of that mandate. At each scheduling
+frontier, prioritizes critical defects, and runs independent native subagents
+in parallel when actionable work exists. The owner's push/publish scope,
+model preferences and cleanup policy belong in the deployment's override, not in
+the repository default. At each scheduling
 round, new task or worker completion, the director checks ready work and free
 workers, dispatches bounded implementation/investigation/verification by default,
 and focuses on prioritization, acceptance and integration. An assignment is a
@@ -556,7 +578,8 @@ Director flow:
 6. When the plan is complete, call `todo_finish`, then `report_external_attempt` with its report.
 7. Review the delivery and `record_evidence` a separate report.
 
-Deploying a changed `goal.md`. The mandate's source of truth is
+Deploying a changed mandate. The mandate's source of truth is the deployment's
+`director-goal.md` (see "Standing director goal"), else
 `integrations/dsh-driver/goal.md` in the repository. Edit it and restart the host
 service (`aitelier-dsh-host.service`): on every start `bindDriverGoal` renders the
 file (`{{project_id}}` replaced) and, for each director whose native goal is
@@ -566,14 +589,18 @@ not touched, and the usual re-arm follows. Paused, blocked, completed and
 explicitly cleared goals are preserved (a cleared goal is deliberately not
 recreated); an objective that already matches is not edited again.
 
-`goal.md` is therefore a non-human authorization channel: whoever changes it
-rewrites every active director's mandate at the next restart. Every applied edit
+The mandate file is therefore a non-human authorization channel: whoever changes it
+rewrites every active director's mandate at the next restart. Adding, removing or
+changing `director-goal.md`, or updating a checkout whose default `goal.md`
+changed while no override exists, is such a change. Every applied edit
 appends one line to the append-only `goal-seed.jsonl` in the driver state
 directory (`AITELIER_DSH_STATE_DIR`; the headless host shows no logger output, so
 this file is the log): `at`, `goal_id`, `old_revision`, `new_revision`,
-`old_objective_sha256`, `new_objective_sha256`, `goal_md_sha256` and
-`goal_md_commit` (the last commit touching `goal.md` in the repository the runtime
-loaded it from, else in `AITELIER_TODO_CWD`, else `unknown`). It answers "what was
+`old_objective_sha256`, `new_objective_sha256`, `goal_md_file` (the file loaded),
+`goal_md_override` (true for the deployment's file), `goal_md_sha256` (of that
+file's bytes) and `goal_md_commit` (the last commit touching the loaded file in
+its own repository; for the default also in `AITELIER_TODO_CWD`; else `unknown`).
+It answers "what was
 this director told at the time": hash the objective text and match it against
 `new_objective_sha256` of the latest record at or before that time (objectives are
 hashed as DSH stores them, trimmed); the previous record's new digest equals the
@@ -584,8 +611,8 @@ This has to be the runtime, not a message: the model-facing `update_goal` only
 accepts a direct human turn, and an owner message delivered through the driver
 inbox does not count. The converse also holds: an objective changed by hand with
 `update_goal` or `/goal edit` on an active goal is overwritten at the next start if
-it differs from `goal.md`. To make a lasting change, edit `goal.md`; to keep a
-manual objective, pause the goal first.
+it differs from the mandate file. To make a lasting change, edit the mandate
+file; to keep a manual objective, pause the goal first.
 
 ## Checks
 

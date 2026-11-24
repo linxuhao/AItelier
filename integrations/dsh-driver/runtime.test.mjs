@@ -117,10 +117,9 @@ test('fresh context replaces names/statuses and both note indexes after compact'
   assert.equal(rendered.project_note.index[0].index_line, 'project rule');
   // The snapshot has no node_counts / nodes_omitted here, so render() adds neither.
   assert.deepEqual(Object.keys(rendered).sort(), ['driver_id','nodes','private_note','project_id','project_note']);
-  assert.match(driverGoal('alpha'), /你是 alpha 项目 State DAG 的常驻导演/);
-  assert.match(driverGoal('alpha'), /critical issues/);
-  assert.match(driverGoal('alpha'), /Claude Sonnet 5\.5 和 GPT-6\.1 Sol/);
-  assert.match(driverGoal('alpha'), /Claude Opus 5\.5/);
+  // The mandate's content (default or a deployment's override) is runtime.goalseed.test.mjs's;
+  // here only its rendering for this project.
+  assert.match(driverGoal('alpha'), /\balpha\b/);
   assert.doesNotMatch(driverGoal('alpha'), /\{\{project_id\}\}/);
 }));
 test('render carries the count map and omission statement when the payload has them', async () => fixture(async directory => {

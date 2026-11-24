@@ -708,7 +708,9 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       AITELIER_DRIVER_ID: 'drv-gcf', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 'gcf-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } });
+      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory'),
+      // A 'zh' owner: steward.md's own language, so the prompt pin below is the a1416299ee file whole.
+      AITELIER_OWNER_LANGUAGE: 'zh' } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);
     const commands = name => seen.state.filter(s => s.path === '/api/state/commands/' + name);

@@ -89,7 +89,10 @@ RUN chmod -R a-w,a+rX node_modules/wechaty-puppet-neo/dist \
 RUN ldd --version | head -n 1 \
     && ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node \
     && ! ldd node_modules/wechaty-puppet-neo/native/linux-x64/neo.node | grep -q 'not found'
-COPY --chmod=0444 bridge.mjs main.mjs qr-svg.mjs ./
+COPY --chmod=0444 bridge.mjs main.mjs qr-svg.mjs prepare-image.mjs ./
+# The JPEG codec is pure JS, vendored from the bridge image's own pinned npm tree so the
+# offline node suite needs no npm install. Its LICENSE stays with it.
+COPY --chmod=0444 vendor ./vendor
 # The bridge's own node suite runs HERE and nowhere else: the repository's node gate runs only the
 # projects the repo-root node_projects.json names (web, integrations/dsh, integrations/dsh-driver),
 # and the bridge is not among them, so a bridge change would otherwise reach an image untested. The

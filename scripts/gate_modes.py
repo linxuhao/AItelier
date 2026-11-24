@@ -232,22 +232,27 @@ def build_plan(
             "python-tree",
             list(PYTEST_PLAIN),
             "Plain `pytest tests`: exactly the repository gate's selection; "
-            "pytest.ini addopts and every marker selection are untouched.",
+            "pytest.ini addopts and every marker selection are untouched. "
+            "It also selects the two JS wrapper rows that driver-node-suite and "
+            "web-vitest-suite run on their own, so merge and full pay them twice; "
+            "this job's own wall time is not measured here.",
         )
     )
     plan["jobs"].append(
         job(
             "driver-node-suite",
             PYTEST + [DRIVER_NODE_SUITE],
-            "Driver+director node suite is its own job (measured 370-895 s), "
-            "not nested in the serial Python suite.",
+            "Driver+director node suite is its own job, so it is not nested in the "
+            "serial Python suite; its wall seconds are in the tests/README.md "
+            "gate-mode table, labelled with the tree they were taken on.",
         )
     )
     plan["jobs"].append(
         job(
             "web-vitest-suite",
             PYTEST + [WEB_VITEST_SUITE],
-            "SPA vitest suite is its own job (measured 106-118 s).",
+            "SPA vitest suite is its own job; its wall seconds are in the "
+            "tests/README.md gate-mode table, labelled with the tree.",
         )
     )
     return plan

@@ -80,6 +80,11 @@ SPA job also needs `web/node_modules` linked to the same directory.
 `scripts/gate_modes.py` prints the mode plan as JSON and executes nothing by
 default; `--run` executes its jobs in order, fail-fast. A refusal is a JSON
 plan with `allowed: false`, `offending_path` and `prescribed_mode`.
+Ask it for the plan you are about to pay for (add `--run` only when you mean it):
+
+```bash
+python scripts/gate_modes.py --mode targeted --changed tests/unit/test_gate_modes_plan.py
+```
 
 | Mode | Jobs (in order) | Measured wall seconds |
 |---|---|---|
@@ -101,15 +106,17 @@ python -m pytest -q -p no:cacheprovider tests/integration/test_web_suite_runs.py
 python -m pytest tests
 ```
 
-The container argv used for the measurements (each tree mounted at the same
-`/app` path; the two GitHub-object-reading jobs also mount the shared `.git`
-read-only at its host path) is:
+The container argv used for the measurements, byte for byte as retained next to each
+log (`argv_*_job.txt` in the report directory of the run). The mounts differ per job
+on purpose: the two jobs that read GitHub objects mount the shared `.git` read-only,
+and the guard job mounts the tree read-only. `/home/linxuhao/...` is the measurement
+checkout on this host.
 
 ```bash
 docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_documented_gate_paths_exist.py tests/unit/test_gate_modes_plan.py
-docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_truncation_is_not_a_formatting_mistake.py tests/unit/test_prose_corruption_catalog.py
-docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py
-docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/integration/test_web_suite_runs.py
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app:ro -v /home/linxuhao/AItelier/.git:/home/linxuhao/AItelier/.git:ro -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/unit/test_truncation_is_not_a_formatting_mistake.py tests/unit/test_prose_corruption_catalog.py
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/integration/test_driver_node_suite_runs.py
+docker run --rm --network none --cpus 2 --memory 2g --init -u 1000:1000 -v /home/linxuhao/.AItelier/director/work/gate-modes-1124:/app -w /app aitelier:latest python -m pytest -q -p no:cacheprovider tests/integration/test_web_suite_runs.py
 ```
 
 Wall seconds are whole-container wall time measured on the delivered
@@ -118,7 +125,11 @@ difference between that measured tree and the final commit is these four table
 values. The retained logs live under
 `/home/linxuhao/.AItelier/director/reports/gate-modes-1124/logs/`. `python-tree`
 was not run here: the whole suite takes hours; no estimate is presented as a
-measurement.
+measurement. Note that `python-tree` is `pytest tests` and therefore also selects
+the two JS wrapper rows that `driver-node-suite` and `web-vitest-suite` run on
+their own: in `merge`/`full` those two suites are paid twice, once nested and
+once as their own jobs, which is the point of splitting them out of the serial
+Python run rather than a saving in the mode.
 
 Targeted rule: a diff may take the `targeted` path only when every changed path
 is under `tests/`, `docs/` or `design/`, is a `.md` file anywhere, or is a

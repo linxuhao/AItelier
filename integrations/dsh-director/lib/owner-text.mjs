@@ -6,7 +6,7 @@
  *  The language is HostConfig.ownerLanguage, given by the host from the one setting its own
  *  fixed text follows: 'en' or 'zh' by its primary subtag; absent or anything else, 'en'. index.mjs
  *  hands the table to the channel layer (createOwnerChannels' replies and limits) and the
- *  steward's prompt (stewardPrompt).
+ *  steward's prompt (stewardPromptInLanguage, through lib/steward-prompt.mjs stewardPromptFor).
  *
  *  The 'zh' entries are what this plugin sent before the table existed, byte for byte (the
  *  bilingual lines included; test/owner-text.test.mjs holds the copies), and steward.md is
@@ -162,6 +162,6 @@ export const OWNER_TEXTS = Object.freeze({
 export const ownerTexts = language => OWNER_TEXTS[ownerLanguage(language)];
 
 /** `prompt` with the language's passages replaced ('zh': unchanged, byte for byte). */
-export function stewardPrompt(prompt, language) {
+export function stewardPromptInLanguage(prompt, language) {
   return ownerTexts(language).stewardPrompt.reduce((out, [from, to]) => out.split(from).join(to), prompt);
 }

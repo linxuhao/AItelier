@@ -200,9 +200,11 @@ def test_conn_id_accepts_the_rule(world):
         assert add(world, conn_id=conn_id, label="L" + conn_id)["conn_id"] == conn_id
 
 
+# dev_mcp itself (written `dev_mcp`, private, on the dashboard) is step 24.4c's narrow opening:
+# tests/unit/test_steward_dev_mcp.py; its address under any other name stays refused here.
 @pytest.mark.parametrize("url", [
     "https://127.0.0.1/mcp", "https://0.0.0.0:9/mcp", "https://[::1]:7676/mcp", "http://aitelier:4444/mcp",
-    "http://dev_mcp:7676/mcp", "http://zvec-grep:7998/mcp", "http://aitelier-zg:7998/mcp",
+    "http://zvec-grep:7998/mcp", "http://aitelier-zg:7998/mcp",
     "https://172.30.0.2/mcp", "https://172.30.0.9:7676/", "http://alias-of-backend:4444/mcp",
     "http://localhost:8931/mcp", "https://192.168.1.119:8931/mcp", "https://100.106.5.46:7999/mcp",
     "https://172.24.0.1:1/mcp", "https://lanhost:8999/mcp"])

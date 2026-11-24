@@ -364,11 +364,13 @@ class StateStewardConfirmations:
     def create(self, name, arguments, requester_message_id, audience="owner", question_ids=None):
         """The host's request for one confirmation: {code, text, channel, reply_to_message_id,
         expires_at} (a group's also group_ref). Refused: no_requester, ambiguous_requester,
-        not an allowed outward tool of a connection this turn may use, too many pending, too
-        long to confirm, invalid arguments, a group's send budget or account cap; a group's
-        text the exit check holds back answers {refused: withheld} (nothing created to confirm,
-        nothing to send). `question_ids` (a group turn): every question the turn took - the
-        audience record names only its first step's senders."""
+        not an allowed outward tool of a connection this turn may use, a dev-mcp tool the job
+        `code` does not pin, too many pending, too long to confirm, invalid arguments, a
+        group's send budget or account cap; a group's text the exit check holds back answers
+        {refused: withheld} (nothing created to confirm, nothing to send). `question_ids` (a
+        group turn): every question the turn took - the audience record names only its first
+        step's senders."""
+        from core import state_steward_capabilities as caps
         from core import state_steward_connections as sc
         from core.state_steward import steward_project
         if audience not in ("owner", "group"):
@@ -403,6 +405,12 @@ class StateStewardConfirmations:
                 raise StateGraphError("not_outward: this tool is not outward; call it directly")
             if entry["visibility"] == "private" and audience != "owner":
                 raise StateGraphError("not_visible_in_this_turn")
+            # The gateway's dev-mcp condition (step 24.4c): only a tool the owner pinned on
+            # `code` - never ask the owner to confirm a call the gateway refuses.
+            if sc.is_dev_mcp(connection) and (
+                    connection["visibility"] != "private" or entry["raw_name"].startswith(sc.DEV_MCP_SUBAGENT)
+                    or not caps.code_pin(conn, connection["conn_uid"], entry["raw_name"])):
+                raise StateGraphError("tool_not_allowed: this dev-mcp tool is not pinned on the job code")
             # The gateway's own argument checks (at any depth; on a public connection no
             # url-named key unless unblocked): never ask a person to confirm a refused call.
             if sc.blocked_present(arguments, entry["blocked_args"]) or (

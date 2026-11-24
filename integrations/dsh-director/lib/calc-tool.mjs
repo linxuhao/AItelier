@@ -102,7 +102,7 @@ export function registerCalcTool(scope, { defineTool, jsonOutput, media, catalog
         return refuse(refused, refused === 'calc_unavailable' && CALC_UNAVAILABLE_DETAILS.has(answer?.detail) ? { detail: answer.detail } : {});
       }
       // What the program printed may carry the input files' content: outside content.
-      if (refs.length) catalog.markExternal();
+      if (refs.length) catalog.markExternal('calculate');
       const files = answer.files.filter(file => file && REF_PATTERN.test(file.ref ?? ''))
         .map(file => ({ ref: file.ref, mime: String(file.mime), bytes: Number(file.bytes) }));
       return { exit_code: answer.exit_code, timed_out: answer.timed_out === true, stdout: String(answer.stdout ?? ''),

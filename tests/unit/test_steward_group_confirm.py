@@ -18,6 +18,7 @@ from datetime import timedelta
 
 import pytest
 
+from api import steward_gateway as gw
 from core import state_channels, state_groups, state_steward_confirmations as sconf
 from core.state_commands import execute
 from core.state_graph import StateGraphError
@@ -524,7 +525,7 @@ def test_an_owner_turn_that_runs_a_groups_confirmation_is_told_whose_it_was_and_
     upstream.call_answer = {"result": {"content": [{"type": "text", "text": "calendar full"}], "isError": True}}
     answer = call("calfam__create_event", event)
     assert answer["result"]["isError"] is True
-    assert [c["text"] for c in answer["result"]["content"]] == [line, "calendar full"]
+    assert [c["text"] for c in answer["result"]["content"]] == [line, gw.UPSTREAM_ERROR_LINE, "calendar full"]
     assert status_of(world, asked) == "failed"
     # An upstream JSON-RPC error: the line is in the error message.
     asked = group_confirmed("3")

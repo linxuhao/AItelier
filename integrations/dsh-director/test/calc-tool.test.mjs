@@ -134,6 +134,8 @@ test('a run with input files marks the turn as having read outside content; one 
   assert.equal(refused.catalog.externalSeen, false);
   await w.run({ code: 'x', files: [OWNER_CSV] });
   assert.equal(w.catalog.externalSeen, true);
+  assert.match(w.catalog.refusal({ name: 'memory_note', agent: { session: { id: w.catalog.rootSession } } }),
+    /read the result of calculate at \d\d:\d\d:\d\d UTC/, 'it names what marked the turn');
 });
 
 test('a group\'s budget: at most 3 a turn and 30 an hour per group, group_calc_budget past either; an owner turn is never counted', async () => {

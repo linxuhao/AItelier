@@ -196,11 +196,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const directorMedia = rootRole === 'director' && host.capabilities.includes('media') ? host.media : undefined;
   if (stewardCatalog) {
     // External content (7.8.8): the guard reads only the cache and the turn record; a
-    // connection tool's result marks the turn before the result is released.
+    // connection tool's result marks the turn before the result is released (an error the
+    // gateway itself wrote does not: lib/catalog.mjs gatewayError).
     ctx.tools.guard(exec => stewardCatalog.refusal(exec));
     ctx.on('tools/post-execute', async (exec, result, next) => {
       if (exec.agent?.session?.id === config.sessionId && stewardCatalog.isConnectionTool(exec.name)) {
-        stewardCatalog.markExternal();
+        stewardCatalog.connectionResult(exec, result);
         urlLedger?.record(exec.name, result);
       }
       return next();

@@ -426,6 +426,7 @@ test('PRIV-1: a PDF or image read marks the turn external before its result is r
   assert.equal(value.kind, 'pdf', JSON.stringify(value));
   assert.equal(w.catalog.externalSeen, true);
   assert.match(w.catalog.refusal(exec(WEB_FETCH)), /^external_content_seen: mcp__sw__web__web_fetch sends/);
+  assert.match(w.catalog.refusal(exec(WEB_FETCH)), /read the result of read_document at \d\d:\d\d:\d\d UTC/, 'it names what marked the turn');
   assert.match(w.catalog.refusal(exec('memory_note')), /^external_content_seen: memory_note needs a message from a person/);
   const text = withEgressTool(world());
   assert.equal((await text.run({ ref: OWNER_PDF, images: false })).kind, 'pdf');

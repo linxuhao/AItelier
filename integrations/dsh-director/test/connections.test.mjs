@@ -74,6 +74,7 @@ test('connection_tools and connection_refresh mark the turn external before the 
     f.catalog.observe({ type: 'turn/start', seq: 2 });
     const refused = f.catalog.refusal({ name: 'propose_connection_change', agent: { session: { id: 'root' } } });
     assert.match(refused, /^external_content_seen: propose_connection_change needs a message from a person/);
+    assert.match(refused, new RegExp(`because this conversation read the result of ${name} at \\d\\d:\\d\\d:\\d\\d UTC since`), 'it names what marked the turn');
   }
 });
 

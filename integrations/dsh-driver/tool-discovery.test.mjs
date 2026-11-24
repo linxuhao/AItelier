@@ -449,8 +449,8 @@ if (libraries.status === 'unmeasured') {
       registerWorld(ctx, world);
       // index.mjs: the catalog's guard, and a connection tool's result marks the turn first.
       ctx.tools.guard(exec => catalog.refusal(exec));
-      ctx.on('tools/post-execute', async (exec, _result, next) => {
-        if (exec.agent?.session?.id === 'root' && catalog.isConnectionTool(exec.name)) catalog.markExternal();
+      ctx.on('tools/post-execute', async (exec, result, next) => {
+        if (exec.agent?.session?.id === 'root' && catalog.isConnectionTool(exec.name)) catalog.connectionResult(exec, result);
         return next();
       });
       const groups = { listShow: async () => ({ lists: [] }), listAdd: async args => { added.push(args.items); return { added: args.items }; },
@@ -483,6 +483,42 @@ if (libraries.status === 'unmeasured') {
       person('OWNER: add eggs');
       assert.equal((await call('list_add', { list: 'shopping', items: ['eggs'] }, root)).isError, false);
       assert.deepEqual(added.at(-1), ['eggs']);
+    }, effective, 'steward', world.options);
+  });
+
+  test('7.8.8: a connection tool\'s error the gateway wrote marks nothing in the real harness, directly or through call_tool; an upstream\'s error marks', async () => {
+    const world = await stewardWorld(false);
+    const catalog = new StewardCatalog({ host: { connections: async () => ({ effective_hash: 'h', effective_tools: SW, connections: [
+      { conn_id: 'media', visibility: 'public', usable: true, tools: [{ name: SW[2], egress: true }] }] }), resyncDue: async () => {},
+    humanInput: text => text.startsWith('OWNER:') }, stateDir: mkdtempSync(join(tmpdir(), 'gateway-error-catalog-')), rootSession: 'root',
+    registryNames: () => SW, audience: () => world.turns.audience() });
+    await catalog.preStep();
+    // What the steward's MCP client throws: a JSON-RPC error as its message (the SDK's
+    // ProtocolError keeps code and data, which the harness drops), an isError result as its text.
+    let answer;
+    const protocolError = message => Object.assign(new Error(message), { name: 'ProtocolError', code: -32000, data: { code: message.split(':')[0] } });
+    await fixture(async ({ ctx, agent, call }) => {
+      const root = agent('root');
+      ctx.tools.register(defineTool({ name: SW[2], description: 'web search', parameters: {}, output, async execute() { throw answer; } }));
+      ctx.tools.guard(exec => catalog.refusal(exec));
+      ctx.on('tools/post-execute', async (exec, result, next) => {
+        if (exec.agent?.session?.id === 'root' && catalog.isConnectionTool(exec.name)) catalog.connectionResult(exec, result);
+        return next();
+      });
+      world.turn('owner');
+      catalog.observe({ type: 'turn/start', seq: 1 });
+      catalog.observe({ type: 'user/message', data: { message: { content: [{ type: 'text', text: 'OWNER: draw three cats' }] } } });
+      answer = protocolError('upstream_timeout: the connection did not answer this call');
+      for (const result of [await call(SW[2], {}, root), await call('call_tool', { name: SW[2], arguments: {} }, root)]) {
+        assert.equal(result.isError, true);
+        assert.match(JSON.stringify(result.content), /upstream_timeout: the connection did not answer this call/);
+        assert.doesNotMatch(JSON.stringify(result.content), /external_content_seen/, 'the retry is not refused');
+      }
+      assert.equal(catalog.externalSeen, false, 'the gateway\'s own error: no mark');
+      answer = new Error("The connection's tool answered with an error:\nupstream_timeout: the connection did not answer this call");
+      assert.equal((await call('call_tool', { name: SW[2], arguments: {} }, root)).isError, true);
+      assert.equal(catalog.externalSeen, true, 'an upstream\'s error text marks, whatever it says');
+      assert.match(JSON.stringify((await call(SW[2], {}, root)).content), new RegExp(`external_content_seen: ${SW[2]} sends what you write to the outside, and this conversation read the result of ${SW[2]} at \\d\\d:\\d\\d:\\d\\d UTC`));
     }, effective, 'steward', world.options);
   });
 

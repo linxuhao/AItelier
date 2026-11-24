@@ -56,7 +56,7 @@ export function registerConnectionTools(scope, { defineTool, jsonOutput, manage,
       const refused = refusal(exec);
       if (refused) return refused;
       // The server's own words reach the conversation: marked before they are released.
-      catalog.markExternal();
+      catalog.markExternal('connection_tools');
       return manage.tools(String(args.conn_id ?? ''), exec.signal);
     },
   }));
@@ -67,7 +67,7 @@ export function registerConnectionTools(scope, { defineTool, jsonOutput, manage,
     async execute(args, exec) {
       const refused = refusal(exec);
       if (refused) return refused;
-      catalog.markExternal();
+      catalog.markExternal('connection_refresh');
       return manage.refresh(String(args.conn_id ?? ''), exec.signal);
     },
   }));

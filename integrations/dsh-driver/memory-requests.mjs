@@ -5,14 +5,27 @@
  *  sees these requests and has no tool that reaches them.
  *
  *  Kinds: profile_read, profile_update {text, expected_version, reason}, forgotten_list,
- *  forget {ids, reason}, restore {id}, purge {ids}. */
+ *  forget {ids, reason}, restore {id}, purge {ids}; and media_clear (no payload: the dashboard's
+ *  清空媒体, design-steward 7.8.12 "保留 30 天"), run against the steward's media library - its
+ *  own subdirectory, never a director's d-<driver_id>/ - and answered with counts only. */
+import { basename } from 'node:path';
 
-export const MEMORY_REQUEST_KINDS = ['profile_read', 'profile_update', 'forgotten_list', 'forget', 'restore', 'purge'];
+export const MEMORY_REQUEST_KINDS = ['profile_read', 'profile_update', 'forgotten_list', 'forget', 'restore', 'purge', 'media_clear'];
 /** The State events these requests raise: handled here, never a model turn. */
 export const MEMORY_REQUEST_EVENTS = new Set(['steward_memory_request_created', 'steward_memory_request_completed']);
 
-/** One request against the store, as the owner. Never throws: a failure is the result. */
-export async function runOwnerMemoryRequest(memory, { kind, payload = {} }) {
+/** The owner's 清空媒体: the steward's whole media subdirectory, files and index rows. A
+ *  failure answers its code alone (an fs error's message names a path, and so a file). */
+async function clearMedia(media) {
+  if (!media || /^d-/.test(basename(media.home))) return { refused: 'media_unavailable' };
+  try { return { cleared: true, removed: (await media.clear()).removed }; }
+  catch (error) { return { error: String(error?.code ?? 'clear_failed').slice(0, 40) }; }
+}
+
+/** One request against the store (media_clear: against the media library), as the owner.
+ *  Never throws: a failure is the result. */
+export async function runOwnerMemoryRequest(memory, { kind, payload = {} }, { media } = {}) {
+  if (kind === 'media_clear') return clearMedia(media);
   if (!memory) return { refused: 'memory_unavailable' };
   try {
     switch (kind) {
@@ -32,13 +45,14 @@ export async function runOwnerMemoryRequest(memory, { kind, payload = {} }) {
 /** Run every pending request, oldest first, and write each result back. A result that could
  *  not be written stays pending and runs again next time: each kind is safe to repeat (a
  *  read reads again, forget/restore/purge report what was already done, a profile update
- *  repeated with the same version is refused naming the current text). */
-export async function processMemoryRequests({ request, memory, signal, log = () => {} }) {
+ *  repeated with the same version is refused naming the current text, a media_clear clears
+ *  again - the backend stops listing one two minutes after the owner's click). */
+export async function processMemoryRequests({ request, memory, media, signal, log = () => {} }) {
   const listed = await request('/api/state/query/list_steward_memory_requests', { status: 'pending', limit: 50 }, signal);
   const pending = (listed.result ?? listed).requests ?? [];
   let done = 0;
   for (const row of pending) {
-    const result = await runOwnerMemoryRequest(memory, row);
+    const result = await runOwnerMemoryRequest(memory, row, { media });
     try {
       await request('/api/state/commands/complete_steward_memory_request',
         { request_key: `memory-request:${row.request_id}`, request_id: row.request_id, result }, signal);

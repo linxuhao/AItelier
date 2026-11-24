@@ -701,8 +701,21 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
     purgeKept,
     /** The audiences that hold kept rows now (the purge sweep's list). */
     keptAudiences() { return [...new Set(rows.filter(row => row.kept === true).map(row => row.audience))]; },
-    /** Every file and row of this writer (the dashboard's 清空媒体). */
-    clear() { const n = rows.length; rows = []; refusals = []; rmSync(home, { recursive: true, force: true }); return { removed: n }; },
+    /** Every file and row of this writer - its whole subdirectory, kept media and recorded
+     *  refusals included (the dashboard's 清空媒体, design-steward 7.8.12 "保留 30 天"), under
+     *  the ingest lane so no ingest is half done. Resolves {removed: <rows>}; logs a count only. */
+    clear() {
+      const run = lane.then(() => {
+        const n = rows.length;
+        try { rmSync(home, { recursive: true, force: true }); }
+        catch (error) { log('media_clear_failed', { error: String(error?.code ?? 'error').slice(0, 40) }); throw error; }
+        rows = []; refusals = [];
+        log('media_cleared', { rows: n });
+        return { removed: n };
+      });
+      lane = run.catch(() => {});
+      return run;
+    },
     start(intervalMs = HOUR_MS) {
       if (timer) return;
       try { cleanup(); } catch (error) { log('media_cleanup_failed', { error: String(error?.code ?? 'error').slice(0, 40) }); }

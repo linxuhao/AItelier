@@ -600,3 +600,33 @@ test('design/steward-group-media.md: the adapter\'s kept media - purgeKept and k
   const again = await ops.ingest({ ...meta, messageRef: 'k2' }, async () => PNG);
   assert.deepEqual(ops.withdraw(again.ref), { removed: 1 });
 });
+
+test('清空媒体 (design-steward 7.8.12): the owner\'s media_clear runs against the steward\'s own library, with counts only', async () => {
+  const { runOwnerMemoryRequest, processMemoryRequests } = await import('./memory-requests.mjs');
+  const root = mkdtempSync(join(tmpdir(), 'steward-clear-'));
+  const library = createMediaLibrary({ root, userId: 'owner' });
+  const director = createMediaLibrary({ root, userId: 'd-drv1' });
+  const stored = await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'm1', index: 0 }, async () => PNG);
+  const theirs = await director.ingest({ channel: 'dashboard', audience: 'project:p1', source: 'in' }, async () => PNG);
+  assert.ok(stored.ref && theirs.ref);
+  // No memory store is no reason to refuse it: it never touches the memory.
+  assert.deepEqual(await runOwnerMemoryRequest(undefined, { kind: 'media_clear', payload: {} }, { media: library }), { cleared: true, removed: 1 });
+  assert.ok(!existsSync(library.home));
+  assert.ok(director.lookup(theirs.ref), 'a director\'s subdirectory stays');
+  assert.deepEqual(await runOwnerMemoryRequest(undefined, { kind: 'media_clear' }), { refused: 'media_unavailable' });
+  assert.deepEqual(await runOwnerMemoryRequest(undefined, { kind: 'media_clear' }, { media: director }), { refused: 'media_unavailable' },
+    'never a director\'s d-<driver_id>/');
+  assert.ok(director.lookup(theirs.ref));
+  // A failure answers its code, never the fs message (it names a path).
+  const failing = { home: join(root, 'owner'), clear: async () => { throw Object.assign(new Error(`EACCES: ${root}/owner/2026-11/abc.png`), { code: 'EACCES' }); } };
+  assert.deepEqual(await runOwnerMemoryRequest(undefined, { kind: 'media_clear' }, { media: failing }), { error: 'EACCES' });
+  // The loop hands the library through and writes the counts back.
+  const written = [];
+  const request = async (path, body) => {
+    if (path.endsWith('list_steward_memory_requests')) return { result: { requests: [{ request_id: 'r1', kind: 'media_clear', payload: {} }] } };
+    written.push(body); return { result: {} };
+  };
+  await library.ingest({ channel: 'wechat', audience: 'owner', source: 'in', messageRef: 'm2', index: 0 }, async () => PNG);
+  assert.deepEqual(await processMemoryRequests({ request, media: library }), { pending: 1, done: 1 });
+  assert.deepEqual(written, [{ request_key: 'memory-request:r1', request_id: 'r1', result: { cleared: true, removed: 1 } }]);
+});

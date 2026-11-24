@@ -18,6 +18,7 @@ import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
 import { render, cleanup, waitFor, fireEvent, within } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
+import { t } from '../../lib/i18n.svelte';
 
 const api = vi.hoisted(() => ({
   stateProjects: vi.fn(), driverStatus: vi.fn(),
@@ -26,7 +27,7 @@ const api = vi.hoisted(() => ({
   markDriverConversationRead: vi.fn(), messageDshDriver: vi.fn(),
   startDshDriver: vi.fn(), stopDshDriver: vi.fn(),
   listStewardProposals: vi.fn(), approveStewardProposal: vi.fn(), declineStewardProposal: vi.fn(),
-  stewardProposalImpact: vi.fn(), createStewardMemoryRequest: vi.fn(), stewardMemoryRequest: vi.fn(),
+  stewardProposalImpact: vi.fn(), createStewardMemoryRequest: vi.fn(), stewardMemoryRequest: vi.fn(), clearStewardMedia: vi.fn(),
   listStewardSchedules: vi.fn(), createStewardSchedule: vi.fn(), updateStewardSchedule: vi.fn(),
   deleteStewardSchedule: vi.fn(), previewStewardSchedule: vi.fn(), stewardMessageSources: vi.fn(),
   listOwnerGroups: vi.fn(),
@@ -633,6 +634,72 @@ describe('the profile page', () => {
     await waitFor(() => expect(api.createStewardMemoryRequest).toHaveBeenCalledWith('purge', {ids: ['e1']}));
     await view.findByText('Purged.');
     expect(view.container.querySelector('[data-forgotten="e1"]')).toBeNull();
+  });
+
+  it('清空媒体 (design 7.8.12): asks first, then the steward\'s host clears its media and the count is shown', async () => {
+    memory((kind) => kind === 'profile_read' ? {text: '', version: 'v1', limit: 4000} : {forgotten: []});
+    api.clearStewardMedia.mockResolvedValue({request_id: 'memreq-m', status: 'pending'});
+    api.stewardMemoryRequest.mockResolvedValue({request_id: 'memreq-m', kind: 'media_clear', status: 'done',
+      result: {cleared: true, removed: 4}});
+    const view = render(StewardProfile);
+    const button = await waitFor(() => {
+      const found = view.getByRole('button', {name: 'Clear media'}) as HTMLButtonElement;
+      expect(found.disabled).toBe(false);
+      return found;
+    });
+    expect(view.getByText(/Directors’ media are not touched/)).toBeTruthy();
+    await fireEvent.click(button);
+    await frame();
+    const dialog = view.container.ownerDocument.querySelector('dialog[open]') as HTMLElement;
+    expect(dialog.textContent).toContain('This cannot be undone');
+    await fireEvent.click(within(dialog).getByRole('button', {name: 'No'}));
+    expect(api.clearStewardMedia).not.toHaveBeenCalled();
+    await fireEvent.click(button);
+    await frame();
+    const again = view.container.ownerDocument.querySelector('dialog[open]') as HTMLElement;
+    await fireEvent.click(within(again).getByRole('button', {name: 'Clear media'}));
+    await waitFor(() => expect(api.clearStewardMedia).toHaveBeenCalledTimes(1), {timeout: 3000});
+    await view.findByText('Media cleared (4 entries).', undefined, {timeout: 3000});
+    expect(api.stewardMemoryRequest).toHaveBeenCalledWith('memreq-m');
+  });
+
+  it('清空媒体: a steward without a library, and one that did not answer, are said so', async () => {
+    memory((kind) => kind === 'profile_read' ? {text: '', version: 'v1', limit: 4000} : {forgotten: []});
+    api.clearStewardMedia.mockResolvedValue({request_id: 'memreq-m', status: 'done', result: {refused: 'media_unavailable'}});
+    const view = render(StewardProfile);
+    const confirm = async () => {
+      await fireEvent.click(await waitFor(() => {
+        const found = view.getByRole('button', {name: 'Clear media'}) as HTMLButtonElement;
+        expect(found.disabled).toBe(false);
+        return found;
+      }));
+      await frame();
+      const dialog = view.container.ownerDocument.querySelector('dialog[open]') as HTMLElement;
+      await fireEvent.click(within(dialog).getByRole('button', {name: 'Clear media'}));
+    };
+    await confirm();
+    await view.findByText('This steward has no media library.');
+    api.clearStewardMedia.mockResolvedValue({request_id: 'memreq-n', status: 'done', result: {refused: 'expired'}});
+    await confirm();
+    await view.findByText(/did not answer in time/);
+  });
+
+  it('清空媒体: every key exists in all 8 languages, translated rather than copied', () => {
+    const keys = ['media', 'mediaNote', 'mediaClear', 'mediaClearConfirmTitle', 'mediaClearConfirm', 'mediaCleared',
+      'mediaUnavailable', 'mediaClearOffline'].map(key => 'steward.' + key);
+    langStore.set('en');
+    const english = Object.fromEntries(keys.map(key => [key, t(key)]));
+    for (const key of keys) expect(english[key], key).not.toBe(key);
+    const copied: string[] = [];
+    for (const lang of ['zh-CN', 'zh-TW', 'ja', 'ko', 'fr', 'de', 'es']) {
+      langStore.set(lang);
+      for (const key of keys) if (t(key) === english[key]) copied.push(`${lang} ${key}`);
+      expect(t('steward.mediaCleared'), lang).toContain('{n}');
+    }
+    langStore.set('en');
+    expect(copied).toEqual([]);
+    langStore.set('zh-CN'); expect(t('steward.mediaClear')).toBe('清空媒体');
+    langStore.set('en');
   });
 });
 

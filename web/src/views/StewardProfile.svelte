@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { runMemoryRequest } from '../lib/steward';
+  import { runMediaClear, runMemoryRequest } from '../lib/steward';
   import type { StewardMemoryKind } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   // The owner's profile and forgotten entries (design 3.4 / 3.6). The memory
   // lives in the steward's host, out of the backend's reach, so every operation
   // here is a request the steward's host code runs and answers; when it does not
-  // answer in time the steward is offline and the page says so.
+  // answer in time the steward is offline and the page says so. The media library
+  // (design 7.8.12 "保留 30 天": 清空媒体) is cleared the same way.
   let profile = $state<{text: string; version: string; limit: number} | null>(null);
   let editing = $state(false), draft = $state(''), reason = $state(''), baseVersion = $state('');
   let conflict = $state<{text: string; version: string} | null>(null);
@@ -88,6 +89,15 @@
       forgotten = (forgotten ?? []).filter(entry => entry.id !== id);
     } else error = t('steward.purgeFailed') + ' ' + String(result.reason ?? result.refused ?? result.error ?? '');
   });
+  let mediaAsk = $state(false);
+  const clearMedia = () => run(async () => {
+    let result: Record<string, any> | null;
+    try { result = await runMediaClear(); } catch (e) { error = String(e instanceof Error ? e.message : e); return; }
+    if (result === null || result.refused === 'expired') error = t('steward.mediaClearOffline');
+    else if (result.cleared) notice = t('steward.mediaCleared').replace('{n}', String(result.removed ?? 0));
+    else if (result.refused === 'media_unavailable') error = t('steward.mediaUnavailable');
+    else error = refusal(result);
+  });
   onMount(() => { void loadProfile().then(loadForgotten); });
 </script>
 <section class="steward-profile" aria-label={t('steward.tabProfile')}>
@@ -139,7 +149,13 @@
     <label>{t('steward.forgetReason')}<input type="text" bind:value={forgetReason} /></label>
     <button type="submit" class="outline" disabled={busy || !forgetIds.trim() || !forgetReason.trim()}>{t('steward.forget')}</button>
   </form>
+  <h3>{t('steward.media')}</h3>
+  <p class="muted">{t('steward.mediaNote')}</p>
+  <div class="actions"><button type="button" class="outline danger" disabled={busy} data-media-clear onclick={() => { mediaAsk = true; }}>{t('steward.mediaClear')}</button></div>
 </section>
+<ConfirmDialog bind:show={mediaAsk} variant="danger" title={t('steward.mediaClearConfirmTitle')}
+  message={t('steward.mediaClearConfirm')} confirmLabel={t('steward.mediaClear')}
+  onConfirm={clearMedia} />
 <ConfirmDialog bind:show={purgeAsk} variant="danger" title={t('steward.purgeConfirmTitle')}
   message={t('steward.purgeConfirm') + ' (' + purgeId + ')'} confirmLabel={t('steward.purge')}
   onConfirm={purge} />
@@ -154,6 +170,6 @@
   .conflict{padding:8px;border:1px solid var(--pico-del-color);border-radius:6px;margin:0 0 8px;}
   .actions{display:flex;gap:8px;flex-wrap:wrap;}.actions button,.forgotten button,.forget button{width:auto;margin:0;padding:4px 10px;font-size:12px;}
   .forgotten{padding-left:0;margin:0 0 10px;}.forgotten li{list-style:none;display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 6px;}
-  .forgotten .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}
+  .forgotten .danger,.actions .danger{color:var(--pico-del-color);border-color:var(--pico-del-color);}
   .forget{display:grid;gap:4px;margin-top:8px;}.forget label{margin:0;}
 </style>

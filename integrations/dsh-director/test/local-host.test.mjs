@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
 import { localHost, LOCAL_OWNER, LOCAL_SESSION_ENV, HOST_NOTE, TESTED_DSH_VERSION, prerequisiteProblems, dshVersion,
   apply as applyLocal } from '../hosts/local.mjs';
-import { TodoCli } from '../lib/core.mjs';
+import { TodoCli, DEFAULT_SESSION_ENV, processSession, backgroundProcesses } from '../lib/core.mjs';
 import { startupFailure } from '../lib/exit-cause.mjs';
 import { PURGE_WORD, PURGE_CONFIRM_MS, registerOwnerCommands } from '../hosts/local-commands.mjs';
 import { validateHost } from '../lib/host.mjs';
@@ -833,6 +833,20 @@ test('local host session tag: one variable per director root, so two directors o
   for (const name of [a, b]) assert.match(name, /^DIRECTOR_LOCAL_SESSION_[0-9a-f]{12}$/);
   assert.equal(env({ root: '/tmp/director-a/../director-a/' }), a, 'the same root, written another way, is the same director');
   assert.equal(env({ root: '/tmp/director-a', sessionEnv: 'MY_TAG' }), 'MY_TAG', 'a configured variable wins');
+});
+
+test('core default session tag (a host that names no sessionEnv) is not a DSH_ name', async () => {
+  // Union review 2026-11-24 (standalone f2): DSH 0.2.1-rc.5 drops DSH_* from every model shell, so
+  // with the old default DSH_DIRECTOR_SESSION the director's own job carried no tag:
+  // watch_process refused it (not_this_driver) and its end event never arrived.
+  assert.ok(!DEFAULT_SESSION_ENV.startsWith('DSH_'), DEFAULT_SESSION_ENV);
+  const proc = await mkdtemp(join(tmpdir(), 'proc-'));
+  roots.push(proc);
+  await mkdir(join(proc, '4242'));
+  await writeFile(join(proc, '4242', 'environ'), `PATH=/bin\0${DEFAULT_SESSION_ENV}=dir-1\0`);
+  await writeFile(join(proc, '4242', 'stat'), '4242 (sh) S 1');
+  assert.equal(processSession(4242, proc), 'dir-1', 'the default is what processSession reads');
+  assert.deepEqual(backgroundProcesses('dir-1', 1, proc), [4242], 'and what idle_dormant counts');
 });
 
 test('local host dshEntry: the running entry with its symlinks resolved (a global dsh is a link)', async () => {

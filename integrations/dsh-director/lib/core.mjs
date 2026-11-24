@@ -249,8 +249,9 @@ export class Continuation {
 }
 
 /** The environment variable a host sets on its driver process (and so on every job
- *  the driver's shell starts) to the driver's session id, when it names none. */
-export const DEFAULT_SESSION_ENV = 'DSH_DIRECTOR_SESSION';
+ *  the driver's shell starts) to the driver's session id, when it names none. Never a
+ *  DSH_ name: DSH drops DSH_* from every model shell, so a job would carry no tag. */
+export const DEFAULT_SESSION_ENV = 'DIRECTOR_SESSION';
 /** The environment marker a runtime puts on a child it spawns for its OWN machinery (the
  *  memory store's resident grep helper), with value {@link INTERNAL_VALUE}.
  *

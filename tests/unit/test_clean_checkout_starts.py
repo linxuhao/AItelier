@@ -343,3 +343,62 @@ def test_container_side_secrets_dir_is_scrubbed_from_the_environment(
     import os as _os
     assert "AITELIER_SECRETS_DIR" not in _os.environ
     assert "CONTAINER-side" in capsys.readouterr().out
+
+
+# ── The search sidecar is optional (overfit review 2026-11-24, 阻-1) ────────
+
+def test_a_default_up_does_not_need_the_pinned_search_image():
+    """zvec-grep's image is a local digest with `pull_policy: never` and no
+    build stanza (test_compose_semantic_worker_pin.py); it exists only where it
+    was built. A default `docker compose up -d` must therefore not include it:
+    the service sits behind a profile, and the backend's dependency on it is not
+    required, so a clean checkout starts the backend without it."""
+    c = _compose("docker-compose.yml")
+    assert "zvec-grep" in (c["services"]["zvec-grep"].get("profiles") or []), (
+        "zvec-grep must be opt-in (profile `zvec-grep`)")
+    dep = c["services"]["aitelier"]["depends_on"]["zvec-grep"]
+    assert dep.get("condition") == "service_healthy"
+    assert dep.get("required") is False, (
+        "a required dependency on a profiled service makes compose refuse the "
+        "project: service \"aitelier\" depends on undefined service \"zvec-grep\"")
+
+
+def test_the_index_lifecycle_is_off_unless_the_sidecar_is_opted_in():
+    """With the lifecycle on and no sidecar, a run's first semantic_search waits
+    the whole preparation budget for an index nobody builds."""
+    env = _compose("docker-compose.yml")["services"]["aitelier"]["environment"]
+    assert env["AITELIER_ZVEC_LIFECYCLE"] == "${AITELIER_ZVEC_LIFECYCLE:-0}"
+
+
+def test_the_sidecar_files_carry_no_built_in_home():
+    """The sidecar's home comes from the invoking user's HOME (compose) or a
+    build argument, never from a home path written into the repository."""
+    for rel in ("docker/zvec-grep.Dockerfile", "docker/zvec-grep-sdk.Dockerfile",
+                "docker/zvec-grep-entrypoint.sh"):
+        assert "/home/" not in (ROOT / rel).read_text(encoding="utf-8"), rel
+    env = _compose("docker-compose.yml")["services"]["zvec-grep"]["environment"]
+    assert env["HOME"] == env["ZVEC_GREP_HOME"] == "${HOME}/.AItelier/zvec-grep-home"
+
+
+def test_the_published_backend_port_follows_the_cli_port_variable():
+    """The CLI connects to AITELIER_PORT; the published host port is the same
+    variable, so setting it moves both."""
+    ports = _compose("docker-compose.yml")["services"]["aitelier"]["ports"]
+    assert "127.0.0.1:${AITELIER_PORT:-4444}:4444" in ports, ports
+
+
+def test_the_steward_secrets_bind_source_is_provisioned(tmp_path, monkeypatch):
+    """docker-compose.yml bind-mounts the steward's connection secrets dir (rw,
+    default under ~/.local/share/aitelier). Left to Docker it is created as
+    root and the backend cannot store a connection's secret."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("AITELIER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("AITELIER_STEWARD_SECRETS_HOST_DIR", raising=False)
+    srv._ensure_host_dirs()
+    default = tmp_path / "home" / ".local/share/aitelier/steward-mcp-secrets"
+    assert default.is_dir()
+    moved = tmp_path / "elsewhere" / "steward"
+    monkeypatch.setenv("AITELIER_STEWARD_SECRETS_HOST_DIR", str(moved))
+    srv._ensure_host_dirs()
+    assert moved.is_dir()

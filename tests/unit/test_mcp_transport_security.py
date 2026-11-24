@@ -10,7 +10,8 @@ from mcp.server.transport_security import TransportSecurityMiddleware, Transport
 from api import mcp_router
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_PUBLIC = "aitelier.linxuhao.app,aitelier.linxuhao.app:*"
+# A public hostname an operator would put in .env; the compose default is empty.
+OPERATOR_PUBLIC = "operator.example,operator.example:*"
 
 # Compose's variable syntax, restricted to the forms docker-compose.yml uses:
 #   ${NAME}  ${NAME:-default}  ${NAME-default}
@@ -76,9 +77,11 @@ def _compose_environment(env_value: str = "") -> dict:
     return {key: _interpolate(str(value), variables) for key, value in environment.items()}
 
 
-def test_compose_default_uses_public_host_and_wildcard_port():
+def test_compose_default_names_no_public_host():
+    """No deployment's domain is a default: unset, /mcp answers only loopback
+    and the docker network names (api/mcp_router._DEFAULT_ALLOWED_HOSTS)."""
     environment = _compose_environment()
-    assert environment["AITELIER_MCP_ALLOWED_HOSTS"] == DEFAULT_PUBLIC
+    assert environment["AITELIER_MCP_ALLOWED_HOSTS"] == ""
 
 
 def test_compose_env_file_overrides_the_public_host_allowlist():
@@ -90,7 +93,7 @@ def test_compose_env_file_overrides_the_public_host_allowlist():
 
 @pytest.mark.asyncio
 async def test_fastmcp_host_matching_accepts_ports_and_rejects_host_spoofing(monkeypatch):
-    monkeypatch.setenv("AITELIER_MCP_ALLOWED_HOSTS", DEFAULT_PUBLIC)
+    monkeypatch.setenv("AITELIER_MCP_ALLOWED_HOSTS", OPERATOR_PUBLIC)
     hosts = mcp_router._allowed_hosts()
     security = TransportSecurityMiddleware(
         TransportSecuritySettings(
@@ -101,9 +104,9 @@ async def test_fastmcp_host_matching_accepts_ports_and_rejects_host_spoofing(mon
     )
 
     for host in (
-        "aitelier.linxuhao.app",
-        "aitelier.linxuhao.app:443",
-        "aitelier.linxuhao.app:8443",
+        "operator.example",
+        "operator.example:443",
+        "operator.example:8443",
         "aitelier:4444",
         "localhost:4444",
         "127.0.0.1:4444",
@@ -112,8 +115,8 @@ async def test_fastmcp_host_matching_accepts_ports_and_rejects_host_spoofing(mon
         assert await security.validate_request(_Request(host), is_post=True) is None
 
     for host in (
-        "aitelier.linxuhao.app.evil:443",
-        "aitelier.linxuhao.app@evil.example:443",
+        "operator.example.evil:443",
+        "operator.example@evil.example:443",
         "evil.example",
     ):
         rejected = await security.validate_request(_Request(host), is_post=True)
@@ -164,10 +167,10 @@ def test_supported_env_input_preserves_unset_and_empty_default_semantics(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("text, accepted_host, rejected_host", [
-    ("# comment\n\n", "aitelier.linxuhao.app:443", "operator.example:443"),
-    ("AITELIER_MCP_ALLOWED_HOSTS=", "aitelier.linxuhao.app:443", "operator.example:443"),
+    ("# comment\n\n", "localhost:4444", "operator.example:443"),
+    ("AITELIER_MCP_ALLOWED_HOSTS=", "localhost:4444", "operator.example:443"),
     ("# comment\n AITELIER_MCP_ALLOWED_HOSTS = operator.example,operator.example:* \n",
-     "operator.example:443", "aitelier.linxuhao.app:443"),
+     "operator.example:443", "other.example:443"),
 ])
 async def test_supported_raw_env_input_reaches_actual_host_security(
     monkeypatch, text, accepted_host, rejected_host,

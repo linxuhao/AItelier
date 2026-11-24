@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -86,7 +87,26 @@ def prepare(repo, home, secrets_dir):
             found = True
     if not found:
         lines.append('AITELIER_DRIVER_IDENTITY=on')
+    # docker-compose.yml runs every container as AITELIER_UID:AITELIER_GID, default
+    # 1000:1000. The `aitelier` CLI fills both in from the login; a bare `docker
+    # compose` does not, and any other uid then cannot write ~/.AItelier. A value
+    # already in .env is kept (main() warns when it is not this user's).
+    present = {match[1] for match in (re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
+                                      for line in lines) if match}
+    for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
+        if name not in present:
+            lines.append(f'{name}={value}')
     changed = atomic_text(env, '\n'.join(lines) + '\n')
+    # What docker-compose.yml bind-mounts from HOME, created as this user: Docker
+    # creates a missing bind source as root, and the backend (this uid) then
+    # cannot write it (sqlite crash loop, 503 on uploads, no connection secrets).
+    # Existing directories are left exactly as they are.
+    steward_secrets = Path(os.path.expandvars(setting(
+        repo, 'AITELIER_STEWARD_SECRETS_HOST_DIR',
+        str(home / '.local/share/aitelier/steward-mcp-secrets')))).expanduser()
+    for directory in (state / 'godot-control', home / '.local/share/dsh-director/media',
+                      home / '.local/share/aitelier/media-staging', steward_secrets):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     values = json.loads(config.read_text()) if config.exists() else {}
     values['mode'] = 'host'
     atomic_text(config, json.dumps(values) + '\n')
@@ -192,6 +212,8 @@ def main():
             raise ValueError('This Python has no ensurepip. Install its venv package (Ubuntu/Debian: sudo apt install python3.12-venv), then rerun; an incomplete .venv will be repaired.')
         run(sys.executable, '-m', 'venv', repo / '.venv')
     run(python, '-m', 'pip', 'install', '-e', repo)
+    # The steward reads PDFs with pypdfium2 in THIS venv (the backend image has its own copy).
+    run(python, '-m', 'pip', 'install', '-r', repo / 'requirements-pdf.txt')
     runtime = install_runtime(repo, (args.runtime_dir or home / '.local/share/aitelier-dsh').expanduser().resolve())
     unit = Path(os.environ.get('XDG_CONFIG_HOME', str(home / '.config'))) / 'systemd/user' / args.service_name
     unit_changed = atomic_text(unit, render_unit(repo, home, runtime, secrets_dir, args.api_url), mode=0o644)
@@ -207,6 +229,11 @@ def main():
     print('Service: ' + str(unit))
     if changed:
         print('Driver identity enabled in .env. Start/recreate the backend with this configuration before starting project drivers.')
+    for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
+        if setting(repo, name, str(value)) != str(value):
+            print(f'Note: .env sets {name}={setting(repo, name, "")}, but this user is {value}; the containers run as the .env value.')
+    if shutil.which('ffprobe') is None:
+        print('ffprobe not found: the steward refuses voice and video messages until it is installed (Debian/Ubuntu: sudo apt install ffmpeg).')
     print('Backend lifecycle remains separate; this installer does not restart Docker services.')
     print('For boot startup without login: loginctl enable-linger "$USER"')
     if args.no_start:

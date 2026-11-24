@@ -90,3 +90,30 @@ def test_rendered_service_uses_actual_paths_and_host_credentials(paths, monkeypa
     assert shlex.split(env['GIT_CONFIG_VALUE_0']) == [str(repo / 'docker/git-credential-helper.sh')]
     assert env['AITELIER_DSH_API_URL'] == 'http://127.0.0.1:5444'
     assert 'KillMode=control-group' in unit
+
+
+def test_install_creates_the_bind_sources_and_names_the_container_user(paths, monkeypatch):
+    """Overfit review 2026-11-24 (重-13, 重-14): every directory docker-compose.yml
+    bind-mounts from HOME exists, as this user, before Docker can create it as
+    root; and .env names this user's uid/gid for a bare `docker compose`. A
+    second run changes nothing, and values already in .env are kept."""
+    import os
+    repo, home, secrets = paths
+    monkeypatch.delenv('AITELIER_STEWARD_SECRETS_HOST_DIR', raising=False)
+    installer.prepare(repo, home, secrets)
+    for rel in ('.AItelier/godot-control', '.local/share/dsh-director/media',
+                '.local/share/aitelier/media-staging', '.local/share/aitelier/steward-mcp-secrets'):
+        directory = home / rel
+        assert directory.is_dir(), rel
+        assert directory.stat().st_uid == os.getuid(), rel
+    env = (repo / '.env').read_text().splitlines()
+    assert f'AITELIER_UID={os.getuid()}' in env and f'AITELIER_GID={os.getgid()}' in env
+    before = (repo / '.env').read_bytes()
+    assert not installer.prepare(repo, home, secrets)
+    assert (repo / '.env').read_bytes() == before
+
+    (repo / '.env').write_text('AITELIER_UID=4242\nAITELIER_DRIVER_IDENTITY=on\n')
+    installer.prepare(repo, home, secrets)
+    env = (repo / '.env').read_text().splitlines()
+    assert 'AITELIER_UID=4242' in env and f'AITELIER_UID={os.getuid()}' not in env
+    assert f'AITELIER_GID={os.getgid()}' in env

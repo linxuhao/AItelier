@@ -14,7 +14,7 @@ test('an explicitly cleared native goal is not recreated on resident restart', (
   assert.equal(bindDriverGoal({get:()=>undefined},agent,'bootstrap template'),undefined);
 });
 
-// An ACTIVE goal no longer keeps a differing objective: it follows goal.md (runtime.goalseed.test.mjs).
+// An ACTIVE goal no longer keeps a differing objective: it follows the mandate template (runtime.goalseed.test.mjs).
 test('resident restart preserves stopped goals and their edited objectives', () => {
   for (const phase of ['paused', 'blocked', 'complete']) {
     const current = {id:'kept',revision:7,objective:'owner-edited objective',phase,activation:'armed'};

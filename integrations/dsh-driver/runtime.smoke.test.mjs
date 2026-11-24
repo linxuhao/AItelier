@@ -203,6 +203,9 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       // Step 24.2b: the DSH host gives every driver a media root; the director then has its own
       // library, media_call and send_user_message's attachments (presented by roles.json).
       AITELIER_MEDIA_ROOT: join(scratch, 'media'),
+      // The deployment's data root (goal.mjs goalOverrideFile): without it the director would
+      // read the invoking account's ~/.AItelier/director-goal.md, not the default this test pins.
+      AITELIER_HOME: join(directory, 'aitelier-home'),
     };
     const launch = () => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: environment });
@@ -483,7 +486,7 @@ test('real pinned DSH default host adapter calls the authenticated completion br
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'host-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'host-root',
       AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
-      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'), AITELIER_HOME: join(directory, 'aitelier-home'),
     } });
     proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
     // The watched signals, all of them the child's own: the activity phases it
@@ -655,7 +658,7 @@ async function readImageThroughRoutes(t, routes) {
       DSH_HOME: join(directory, 'home'), AITELIER_DSH_ENTRY: entry, AITELIER_DRIVER_TOKEN_FILE: token,
       AITELIER_DRIVER_ID: 'route-fixture', AITELIER_DSH_PROJECT: 'alpha', AITELIER_DSH_SESSION: 'route-root',
       AITELIER_DSH_PROVIDER: 'aitelier', AITELIER_DSH_MODEL: 'driver', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
-      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'),
+      AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'absent'), AITELIER_HOME: join(directory, 'aitelier-home'),
     } });
     proc.stdout.on('data', c => output += c); proc.stderr.on('data', c => output += c);
     const toolMessage = () => completions.map(c => c.messages.find(m => m.role === 'tool' && m.tool_call_id === 'img-call')).find(Boolean);

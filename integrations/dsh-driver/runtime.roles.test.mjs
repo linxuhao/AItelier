@@ -11,7 +11,9 @@
  *
  * Every boot also checks the role split itself: the director's requests carry
  * exactly its presented tools and driver.md, the child's exactly the worker's and
- * worker.md, and the child is refused `subagent` through call_tool and by name. */
+ * worker.md, and the child is refused `subagent` through call_tool and by name. Neither
+ * carries the steward's basic-capabilities section (step 24.4), though the backend here
+ * would answer a table: only a steward root with a host catalog reads it. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -25,6 +27,7 @@ import { parseRoles } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
 import { watchProgress } from './progress.mjs';
+import { BASICS_INTRO } from '../dsh-director/lib/basics.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const systemText = request => request.options.messages.filter(m => m.role === 'system')
@@ -52,7 +55,7 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
   const stateSkill = await readFile(join(plugin, 'state.md'), 'utf8');
   const workerSkill = await readFile(join(director, 'worker.md'), 'utf8');
   const workerStateSkill = await readFile(join(plugin, 'worker-state.md'), 'utf8');
-  const requests = [], activity = [], parked = new Set();
+  const requests = [], activity = [], parked = new Set(), connectionReads = [];
   let output = '', proc;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -80,6 +83,10 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
     if (req.url.endsWith('/heartbeat')) return send({ ok: true });
     if (req.url === '/api/state/query/wait_for_state_change') { parked.add(res); res.on('close', () => parked.delete(res)); return; }
     if (req.url === '/test/request') { requests.push(body); return send({ ok: true }); }
+    // Step 24.4: a set table, as the backend would answer the steward - never asked for here.
+    if (req.url === '/api/state/query/list_steward_connections') { connectionReads.push(body);
+      return send({ result: { effective_hash: 'h', effective_tools: [], connections: [],
+        basics: { rows: [{ id: 'calendar', route: [{ kind: 'missing', available: false }] }] } } }); }
     res.statusCode = 404; send({ error: req.url });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -154,6 +161,10 @@ test('real pinned DSH: the role split holds, and a roles.json change between boo
         assert.ok(!systemText(r).includes(driverSkill.split('\n')[0]), `boot ${boot}: child system prompt carries director.md`);
         assert.ok(!systemText(r).includes(stateSkill.split('\n')[0]), `boot ${boot}: child system prompt carries state.md`);
       }
+      // Step 24.4 (design-steward 7.8.24 "七" 1): no basics section for the director or a worker.
+      for (const [role, list] of [['director', roots()], ['worker', children()]])
+        for (const r of list) assert.ok(!systemText(r).includes(BASICS_INTRO), `boot ${boot}: ${role} system prompt carries the basics section`);
+      assert.deepEqual(connectionReads, [], `boot ${boot}: the director read the steward's connections`);
       // The guard, in the real loop: subagent through call_tool and by its direct name.
       for (const step of [0, 1]) assert.match(resultFor(children(), `roles-child-${boot}-${step}`), /subagent is the director's/,
         `boot ${boot}: the child was not refused subagent (step ${step})`);

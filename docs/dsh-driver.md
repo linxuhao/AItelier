@@ -94,7 +94,8 @@ The backend retains its Docker deployment.
 The host installation at `~/.local/share/aitelier-dsh/releases/<fingerprint>/`
 uses Node 24 and the pinned DSH dependencies from the same Dockerfile stage as
 the image. The service connects to the
-backend via `http://127.0.0.1:4444`, retains per-driver tokens, and uses the host's
+backend via `http://127.0.0.1:$AITELIER_PORT` (4444 unless `.env` sets it; `--api-url`
+overrides), retains per-driver tokens, and uses the host's
 existing GitHub secret-file credential helper. Provider API keys remain in the
 backend model gateway. No Docker socket is mounted into the backend.
 
@@ -363,7 +364,12 @@ Environment=AITELIER_DSH_MCP_PWMCP=http://127.0.0.1:8931/mcp
 ```
 
 Then `systemctl --user daemon-reload` and restart the host supervisor, with
-native workers settled. `AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS` rewrites the
+native workers settled. Upgrading an install that relied on the former built-in
+ports (the four values above): create this drop-in and `daemon-reload` BEFORE the
+checkout is updated. The unit runs the checkout with `Restart=always`, so any
+restart after the update but before the drop-in is loaded provisions directors
+without these services; the old code reads the same values, so placing it first
+changes nothing. `AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS` rewrites the
 browser URL's port per driver and needs `AITELIER_DSH_MCP_PWMCP` set. The
 steward is given none of the four. The driver never starts these external
 services itself.

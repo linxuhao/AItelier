@@ -31,9 +31,11 @@
  *      limits.voice_ms (no ffprobe, or one that cannot read it: `unsupported` - fail
  *      closed). A `generated` file (send_media's) is held to limits.outbound_bytes and has
  *      no length bound (design 7.8.12 "上限": the per-kind limits are inbound ones).
- *  Refusals of the closed set: too_large, type, unsupported, gone; a failure to read the
- *  source or to write, or a deadline, is `unavailable` (transient: the caller may ask
- *  again, and it is never recorded).
+ *  Refusals of the closed set: too_large, type, unsupported, gone. The first three describe the
+ *  bytes and answer for good; `gone` is a claim about a remote at a moment, so its row answers
+ *  only for one window and an older key is fetched again (a fresh refusal restarts that window).
+ *  A failure to read the source or to write, or a deadline, is `unavailable` (transient: the
+ *  caller may ask again, and it is never recorded).
  *
  *  Refs are `m_` + 16 random hex characters, never a hash (they say nothing about whether
  *  two files are the same). Each row carries its AUDIENCE: `owner`, `group:<channel>:
@@ -106,6 +108,10 @@ const DISK_FULL = new Set(['ENOSPC', 'EDQUOT', 'EFBIG', 'EROFS', 'EIO']);
 const SNIFF_BYTES = 64;
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+/** A `gone` refusal is a claim about a remote at one moment: a CDN timeout clears and the bytes
+ *  come back, so its key is fetched again after this window (a fresh `gone` then starts a new
+ *  window). `type`, `too_large` and `unsupported` are properties of the bytes and never lapse. */
+export const GONE_WINDOW_MS = 60 * 60 * 1000;
 
 const signatureMatches = (buffer, signature) => signature.every(({ offset, hex }) => {
   const want = Buffer.from(hex, 'hex');
@@ -347,8 +353,15 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
   const expired = row => row.kept === true && now() - Date.parse(row.at) >= limits.kept_hours * HOUR_MS;
   const find = (channel, messageRef, index) => rows.find(row => row.channel === channel && row.messageRef === messageRef
     && row.index === index && !expired(row) && existsSync(absolute(row)));
-  const findRefusal = (channel, messageRef, index) => refusals.find(row => row.channel === channel
-    && row.messageRef === messageRef && row.index === index);
+  /** The newest recorded refusal for this key, or undefined when none answers now. Refusals are
+   *  append-only, so the last matching row is the newest: a re-learn after a lapsed `gone` writes
+   *  another row and restarts its window. Only `gone` ages out; the other three are byte facts. */
+  const findRefusal = (channel, messageRef, index) => {
+    let newest;
+    for (const row of refusals) if (row.channel === channel && row.messageRef === messageRef && row.index === index) newest = row;
+    if (!newest || (newest.refused === 'gone' && now() - Date.parse(newest.at) >= GONE_WINDOW_MS)) return undefined;
+    return newest;
+  };
   const MAX_REFUSALS = 10000;
   const recordRefusal = (meta, refused) => {
     const row = { refused, channel: meta.channel, messageRef: meta.messageRef, index: meta.index,
@@ -535,8 +548,9 @@ export function createMediaLibrary({ root, userId = 'owner', ffprobe = 'ffprobe'
         if (refusedBefore && conflicts(refusedBefore)) { log('media_refused', { reason: 'idempotency_conflict' }); return { refused: 'idempotency_conflict' }; }
         if (refusedBefore) return { refused: refusedBefore.refused, duplicate: true };
       }
-      // A refusal of the closed set is the attachment's answer for good (recorded by its key);
-      // `unavailable` is transient and never recorded.
+      // A keyed refusal of the closed set is recorded; `too_large`, `type` and `unsupported`
+      // answer for good, while `gone` answers only inside its window (findRefusal has already
+      // let an older one through to be fetched again). `unavailable` is transient, never recorded.
       const refuse = code => {
         if (keyed && MEDIA_REFUSALS.includes(code)) {
           try { recordRefusal(meta, code); }

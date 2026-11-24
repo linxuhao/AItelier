@@ -2605,6 +2605,17 @@ index 0b4ffcd..ceb9c17 100644
      async heartbeat() {
        beats++
        if (beats > 1 && script.laterHeartbeat) throw script.laterHeartbeat
+@@ -109,6 +109,10 @@ function scriptedSession(trace: unknown[], script: Script = {}): Session {
+       trace.push(['encode-wav', wav])
+       return { silkBase64: 'c2lsaw==', durationMs: 1200 }
+     },
++    async lookupContacts(usernames) {
++      // The fork resolves a group sender's name through this call; these fixtures know none.
++      return usernames.map(id => ({ id, nickname: null, alias: null, avatar: null }))
++    },
+     async lookupSelf() {
+       // Recorded one turn later, so the trace shows whether login waited for it.
+       await nextTurn()
 @@ -136,8 +148,9 @@ function waitFor<T>(subscribe: (done: (value: T) => void) => void, label: string
    })
  }

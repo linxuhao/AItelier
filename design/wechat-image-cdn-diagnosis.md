@@ -80,10 +80,19 @@ file). Host, port, path, headers, every other field, and the retry loop are shar
 ```
 
 Spacings: 9.44 s, 14.11 s, 24.59 s, 45.13 s; the five span 93.26 s (22:47:51.671749310Z to
-22:49:24.935768712Z). The words are the bridge's
-own (`bridge.mjs:727`): a failed fetch answers a transient `unavailable`, and once a medium's
-attempt budget is spent the entry is marked `gone` and later asks get `410`. So the ladder is
-one medium being asked five times, each time refused by the CDN, and then no longer offered.
+22:49:24.935768712Z). Both words are the bridge's own (`bridge.mjs`): a failed fetch answers a
+transient `unavailable`, and on the tree this window was measured on a medium's attempt budget
+counted five failures — the fifth marked the entry `gone` and later asks got `410`. So the
+ladder is one medium being asked five times, each time refused by the CDN, and then no longer
+offered.
+
+**Later change (2026-11-23, commit `7cad25a3af`):** that escalation was a defect and is gone
+(issue `iss-5fcf9785f9d14940`). The count is a log fact now (`held after 5 failures`), never a
+verdict: a failure that is not a refusal the bridge recognises answers `503 unavailable` however
+often it repeats, so the media stays retryable and a later reader's ask fetches it. A media still
+ends permanently for a refusal `isGone` recognises, for another login generation, for `too_large`,
+and when the event itself leaves its ring (`404`). The five lines above are the record of the older
+tree.
 
 ## 4. The delay between arrival and the first attempt
 
@@ -184,8 +193,9 @@ The instrument and the retry ladder are built into the fork patch in this tree (
 message through a recreated bridge (§9) showed the ladder working: the first profile was refused
 and the second served the picture on the id the message carried. The 400 is still not explained
 field by field (§5, §6.2), but no arriving image is lost to it any more. What the rebuild now
-needs is one image message after the new image is running: that needs the owner's QR window, so
-this document stops at the diagnosis.
+needs is one image message after the new image is running; recreating the bridge does not need a
+QR window (the saved login resumes itself — measured 2026-11-23T23:11Z), so this document stops at
+the diagnosis.
 
 ## 8. Measurements versus inferences in this document
 

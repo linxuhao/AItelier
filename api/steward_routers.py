@@ -330,7 +330,6 @@ CAPABILITIES = (
     {"id": "cloud_files", "label": "网盘", "tool": None, "native_fact": None},
     {"id": "memory", "label": "记忆与历史对话", "tool": None, "native_fact": None},
     {"id": "code", "label": "计算/跑代码", "tool": None, "native_fact": None},
-    {"id": "translate", "label": "翻译", "tool": None, "native_fact": None},
 )
 
 

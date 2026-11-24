@@ -39,7 +39,8 @@ export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfol
   // Step 24.2 (7.8.8, 7.8.12): media_call (its own nested call is the catalog's, judged by name and
   // not counted again) and send_media (only into this group, one of its group_send_budget sends).
   'media_call', 'send_media',
-  // Step 24.2c (7.8.12b "五"): read_document - only this group's own refs (covers), never a kept one.
+  // Step 24.2c (7.8.12b "五"): read_document - the refs this turn covers (covers): this group's own,
+  // and a kept one (a file sent without a mention) in that same group's later turns.
   'read_document',
   // Step 24.2d (7.8.12c "四", "九"): make_document - the file is this group's, its text exit-checked first.
   'make_document']));

@@ -342,6 +342,32 @@ def test_recover_runs_an_executing_route_again(world):
 
 # --- nothing upstream goes back to the steward -------------------------------------------------------
 
+def test_a_steward_proposal_read_never_carries_the_upstream_card(world):
+    """iss-0778ec1dbe744a1b: the plugin strips the card from its own snapshot, but the
+    steward can call `list_steward_proposals` itself. Its credential must get the route's
+    kinds and codes only; the owner's same read keeps the frozen dashboard card."""
+    ready(world)
+    pid = propose(world, "draw", [PAINT])["proposal_id"]
+    stored_payload = proposal(world, pid)["payload"]
+    assert stored_payload["card"] == [{"conn_id": "media", "raw_name": "paint_v2",
+                                       "description": DESCRIPTION[:500]}]
+
+    steward_rows = execute(world.steward, "list_steward_proposals", {"status": "all"})["proposals"]
+    assert len(steward_rows) == 1
+    assert steward_rows[0]["proposal_id"] == pid and steward_rows[0]["kind"] == "capability_route"
+    assert steward_rows[0]["payload"] == {"cap_id": "draw", "entries": ["conn"]}
+    text = json.dumps(steward_rows, ensure_ascii=False)
+    for word in (DESCRIPTION, UPSTREAM, LABEL, "根据文字描述", "paint_v2", "card", "raw_name",
+                 "conn_id", "source", "expect_version", "description"):
+        assert word not in text, (word, text)
+
+    owner_rows = execute(world.owner, "list_steward_proposals", {"status": "all"})["proposals"]
+    assert len(owner_rows) == 1
+    assert owner_rows[0]["payload"] == stored_payload
+    owner_text = json.dumps(owner_rows, ensure_ascii=False)
+    assert DESCRIPTION in owner_text and "paint_v2" in owner_text
+
+
 def test_the_answer_and_the_wakes_carry_no_upstream_words(world):
     """c5: the card keeps the description for the owner; the propose answer and the wake
     bodies (done and failed) carry kinds and codes only."""

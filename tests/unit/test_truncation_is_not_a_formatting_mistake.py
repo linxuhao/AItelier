@@ -24,6 +24,7 @@ import ast
 import json
 import re
 import string
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1349,12 +1350,52 @@ def test_every_prose_constant_in_core_is_accounted_for():
         "multi-line prose constants in core/ that are neither in the corpus "
         f"nor exempted with a reason: {', '.join(missing)}")
 
+# ── HEAD bytes: one bulk extraction, then memoized single-file reads ────────
+#
+# The prose corpus is read from HEAD for every parametrized corruption row and
+# every self-proof fixture. A `git show HEAD:<path>` per read cost thousands of
+# subprocesses on a two-file run (measured 3,853 on a5020e76f7). HEAD's prose
+# trees are extracted once per module instance into a process-lifetime
+# directory; this file is loaded twice in a process (pytest collects it
+# directly and the catalog test loads it through importlib), so there are at
+# most two extractions. Other revisions stay reachable through the per-
+# (rev, path) memo, so fixtures quoting older shas keep working.
+_HEAD_TREES = None
+_GIT_FILE_CACHE = {}
+
+
+def _head_tree():
+    """The extracted `core/` + `templates/` tree of HEAD, built once."""
+    global _HEAD_TREES
+    if _HEAD_TREES is None:
+        import io
+        import tarfile
+        import tempfile
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", "HEAD", "core", "templates"],
+            cwd=REPO_ROOT, capture_output=True)
+        assert archive.returncode == 0, archive.stderr.decode("utf-8", "replace")
+        root = Path(tempfile.mkdtemp(prefix="prose-head-"))
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            tar.extractall(root, filter="data")
+        _HEAD_TREES = root
+    return _HEAD_TREES
+
+
 def _git_file(rev, rel):
-    import subprocess
-    out = subprocess.run(["git", "show", f"{rev}:{rel}"], cwd=REPO_ROOT,
-                         capture_output=True, text=True)
-    assert out.returncode == 0, out.stderr
-    return out.stdout
+    """`rel` at `rev`: one `git show` per (rev, path), never one per test.
+
+    Git objects are immutable, so a cached read is the same bytes every time;
+    the older revisions quoted by the catalog stay reachable exactly as
+    before, and are no longer re-read for every parametrized row.
+    """
+    key = (rev, rel)
+    if key not in _GIT_FILE_CACHE:
+        out = subprocess.run(["git", "show", f"{rev}:{rel}"], cwd=REPO_ROOT,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        _GIT_FILE_CACHE[key] = out.stdout
+    return _GIT_FILE_CACHE[key]
 
 
 def _head_read(rel):
@@ -1366,8 +1407,35 @@ def _head_read(rel):
     one-shot container: the fixtures stay green while the live tree is
     damaged, and only the live-tree scan goes red. Tests that must see the
     live tree read it through `_read`, which the tripwire below redirects.
+    Paths under `core/` and `templates/` come from the one bulk extraction;
+    every other path falls back to the memoized `git show` per (rev, path).
     """
+    root = _head_tree()
+    if rel.startswith(("core/", "templates/")):
+        cached = root / rel
+        if cached.is_file():
+            return cached.read_text(encoding="utf-8")
     return _git_file("HEAD", rel)
+
+
+def test_head_read_serves_committed_bytes_from_the_bulk_extraction():
+    """The cache is the committed image, checked against the object store.
+
+    `git cat-file blob` is an independent oracle: it bypasses the extraction
+    and the memo entirely, so an extraction that silently served stale,
+    truncated or otherwise wrong bytes cannot pass this test.
+    """
+    root = _head_tree()
+    samples = ("core/__init__.py", "core/dpe_pipeline.py",
+               "core/output_migration.py", "core/meta_conversation.py",
+               "templates/fix_tests.md")
+    for rel in samples:
+        committed = subprocess.run(
+            ["git", "cat-file", "blob", f"HEAD:{rel}"],
+            cwd=REPO_ROOT, capture_output=True)
+        assert committed.returncode == 0, committed.stderr
+        assert (root / rel).read_bytes() == committed.stdout, rel
+        assert _head_read(rel).encode("utf-8") == committed.stdout, rel
 
 
 def _git_guidance(rev, block):

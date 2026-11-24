@@ -1027,7 +1027,7 @@ test('D4, D5: a group code in a public channel, a Slack Connect channel, a DM or
   assert.deepEqual([...web.infoCalls].sort(), ['C2', 'C3', 'C4', 'D5', 'G6', 'G7']);
   assert.deepEqual(web.posted, [], 'a refused code is answered with nothing');
   const reasons = Object.fromEntries(warnings.map(line => /group code in (\w+) not taken: (\w+)/.exec(line)?.slice(1) ?? [line, line]));
-  assert.deepEqual(reasons, { C2: 'not_private', C3: 'shared', C4: 'shared', D5: 'not_a_channel', G6: 'not_a_channel', G7: 'unreadable',
+  assert.deepEqual(reasons, { C2: 'not_private', C3: 'shared', C4: 'shared', D5: 'not_a_channel', G6: 'not_a_channel', G7: 'missing_scope',
     C10: 'shared' });
   assert.ok(warnings.every(line => !line.includes(code)));
   assert.equal(groupRefusal({ ...PRIVATE_CHANNEL }), undefined);
@@ -1248,5 +1248,62 @@ test('D8: the bind notice goes into the thread the owner posted the code in (its
   await until(() => ownerChannels.calls.length === 1);
   await channel.sendGroup('C9', 'NOTICE', { replyToRef: 'C9:1763481700.000100' });
   assert.equal(web.posted[0].thread_ts, '1763481500.000100');
+  await channel.stop();
+});
+
+// ---- step 23 review round 2 (sg-f): Slack's refusals named, the pause shown while down, a bounded wait for the list ----
+
+test('sg-f1: a conversations.info refusal is named by its code, and a missing scope is told apart from a group to unbind', async () => {
+  const warnings = [];
+  const { channel, web } = await started(registry(), { log: { info() {}, warn: line => warnings.push(line) } });
+  const rooms = ['C1', 'C2', 'C3', 'C4'];
+  await channel.setRooms({ ownerRef: 'U1', rooms: rooms.map(room => ({ room_ref: room, prefix: `<@${BOT}>`, label: room })) });
+  const refused = (code, data = {}) => { const error = platformError(code); Object.assign(error.data, data); return error; };
+  const shipped = JSON.parse(readFileSync(new URL('../slack-app-manifest.json', import.meta.url), 'utf8')).oauth_config.scopes.bot;
+  web.infos = {
+    // The shipped app (groups:read, no channels:read): what Slack answers for a channel made public.
+    C1: refused('missing_scope', { needed: 'channels:read', provided: shipped.join(',') }),
+    // An app installed before groups:read was in the manifest.
+    C2: refused('missing_scope', { needed: 'groups:read', provided: shipped.filter(scope => scope !== 'groups:read').join(',') }),
+    C3: refused('not_allowed_token_type'),
+    C4: refused('channel_not_found'),
+  };
+  for (const room of rooms) await assert.rejects(channel.sendGroup(room, 'x'), { code: 'room_paused', status: 409 });
+  assert.deepEqual(web.posted, []);
+  const detail = channel.status().detail;
+  assert.equal(detail, '4 groups paused: 「C1」 not_private, 「C4」 channel_not_found - unbind on the dashboard; '
+    + '「C2」 missing_scope - reinstall the Slack app from its manifest, then restart the steward; '
+    + '「C3」 not_allowed_token_type - save the bot (xoxb-) token again, then restart the steward');
+  assert.ok(detail.length <= 300, 'fits the status detail the backend keeps');
+  assert.ok(warnings.some(line => /group C2 paused: missing_scope .*reinstall the Slack app/.test(line)));
+  assert.ok(warnings.every(line => !/C2 paused.*unbind/.test(line)));
+  await channel.stop();
+});
+
+test('sg-f2: a paused group stays named in the status while the socket is down, after why it is down', async () => {
+  const { channel, socket } = await grouped();
+  await deliver(socket, groupEnvelope(mention(), { is_ext_shared_channel: true }));
+  await settle();
+  socket.emit('disconnected');
+  assert.deepEqual(channel.status(), { connected: false,
+    detail: 'disconnected; 1 group paused: 「C1」 shared - unbind on the dashboard' });
+  await channel.stop();
+});
+
+test('sg-f3: a host that never lists its groups does not hold a room\'s mentions forever: the wait is bounded and said once', async () => {
+  const warnings = [];
+  const { channel, ownerChannels, web } = await started(registry(), { roomsWaitMs: 50, log: { info() {}, warn: line => warnings.push(line) } });
+  const first = channel.onEnvelope(groupEnvelope(mention()));
+  const second = channel.onEnvelope(groupEnvelope(mention({ ts: '1763481601.000100' })));
+  const outcome = await Promise.race([Promise.all([first, second]).then(() => 'settled'), tick(2000).then(() => 'hung')]);
+  assert.equal(outcome, 'settled');
+  assert.deepEqual(ownerChannels.calls, [], 'with no group listed nothing is taken');
+  assert.deepEqual(web.infoCalls, []);
+  assert.equal(warnings.filter(line => /no group list from the host/.test(line)).length, 1, 'said once');
+  // The host's list, when it comes, counts as before.
+  await channel.setRooms(ROOMS);
+  await channel.onEnvelope(groupEnvelope(mention({ ts: '1763481602.000100' })));
+  assert.equal(ownerChannels.calls.length, 1);
+  assert.equal(ownerChannels.calls[0].conversationRef, 'C1');
   await channel.stop();
 });

@@ -93,11 +93,20 @@ only this platform layer changed).
   must say `is_private`, not `is_im`/`is_mpim`, and not `is_ext_shared`/`is_pending_ext_shared`
   (D4 (a), D5 (a)); the envelope's own `is_ext_shared_channel` is checked first. A code posted
   in a public channel, a Slack Connect channel, a DM or a group DM binds nothing (logged
-  `a group code in <channel> not taken: <why>`). A bound channel found shared or public is
-  **paused**: its events are dropped and nothing is sent into it (`room_paused`) for the rest
-  of the process, and the channel's status names it: `n group(s) paused - unbind on the
-  dashboard: 「<name>」 <why>` (the group's name on the dashboard, else its ref's last six);
-  unbinding it lifts the pause. A restart judges it again on its next message or send.
+  `a group code in <channel> not taken: <why>`). The app has `groups:read` only, so Slack
+  answers `missing_scope` for a public channel, a DM or a group DM: with `groups:read` among
+  the token's scopes that is `not_private`; without it the app itself lacks the scope
+  (`missing_scope`). Slack's other refusals are named by their code (`not_allowed_token_type`,
+  `channel_not_found`, `not_in_channel`, `method_not_supported_for_channel_type`). A bound
+  channel found otherwise than private and unshared, or refused, is **paused**: its events are
+  dropped and nothing is sent into it (`room_paused`) for the rest of the process, and the
+  channel's status (after why it is disconnected, when it is) names it with what to do:
+  `n group(s) paused: 「<name>」 <why> - unbind on the dashboard` (the group's name on the
+  dashboard, else its ref's last six), or for `missing_scope` `reinstall the Slack app from its
+  manifest, then restart the steward` and for `not_allowed_token_type` `save the bot (xoxb-)
+  token again, then restart the steward`. Unbinding lifts the pause; a restart judges it again
+  on its next message or send. Mentions wait for the host's first group list at most 5
+  minutes (logged once); past that they are judged with no group bound.
 - A group code message passed on as a bind is never taken again: a Socket Mode redelivery
   of it (an ack Slack did not see) is dropped, not asked as a question of the new group.
 - `sendGroup(channel, text, {replyToRef?})` → posts into a bound group: under the thread of

@@ -23,8 +23,10 @@ moment of that capture. These tests execute the property rather than describe it
 * editing a covered module's file on disk leaves the REPORTED digest untouched
   while a digest freshly computed from the changed bytes differs
   (``test_editing_the_imported_module_on_disk_does_not_move_the_reported_digest``)
-  - that is the whole point, and it is why the assertion is a real byte change
-  restored in a ``finally``, not a mocked hash;
+  - that is the whole point, and it is why the assertion is a real byte change,
+  not a mocked hash. The edit is made in a copy of the covered files under
+  ``tmp_path`` whose capture the process reports, never in the checkout itself,
+  so the row also runs on a read-only checkout and beside parallel rows;
 * two consecutive calls report an identical identity, from the route and from a
   direct ``health_check()`` call, and the route still runs the payload on its own
   probe pool (``test_two_calls_report_one_identity``,
@@ -137,49 +139,73 @@ def test_the_reported_digest_recomputes_from_the_imported_tree():
     assert _digest_from_tree(root, identity["files"]) == identity["digest"]
 
 
-def test_editing_the_imported_module_on_disk_does_not_move_the_reported_digest(client):
-    """The witness: the reported digest is the loaded bytes, not the disk's bytes."""
-    identity = main.health_check()["source_identity"]       # captured at import
-    root = Path(identity["root"])
-    assert MUTATED_FILE in identity["files"]
-    path = root / MUTATED_FILE
+def test_editing_the_imported_module_on_disk_does_not_move_the_reported_digest(
+        client, tmp_path, monkeypatch):
+    """The witness: the reported digest is the loaded bytes, not the disk's bytes.
+
+    The checkout may be mounted read-only and other rows read it concurrently, so
+    the byte change is made in a copy of the covered files, and the process is
+    made to report that copy's capture - the same one-time reading
+    ``api.main`` makes at import, taken from a tree this row may write.
+    """
+    imported = main.health_check()["source_identity"]      # captured at import
+    imported_root = Path(imported["root"])
+    files = imported["files"]
+    assert MUTATED_FILE in files
+    assert _module_name(MUTATED_FILE) in sys.modules
+
+    tree = tmp_path / "tree"
+    for rel in files:
+        target = tree / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((imported_root / rel).read_bytes())
+    # The copy holds the imported bytes: the same digest by the same rule.
+    assert source_identity.compute_digest(tree, files) == imported["digest"]
+
+    monkeypatch.setattr(main, "_SOURCE_IDENTITY", source_identity.capture(tree))
+    identity = main.health_check()["source_identity"]
+    assert identity["root"] == str(tree)
+    assert identity["reason"] is None
+    assert identity["digest"] == imported["digest"]
+
+    path = tree / MUTATED_FILE
     original = path.read_bytes()
     # A real content change - not a different file, not a mock: the same length
     # class of edit a merge would make.
     changed = original + b"\n# a merge landed this line after the process started\n"
     assert changed != original
+    path.write_bytes(changed)
+    assert path.read_bytes() == changed
 
-    try:
-        path.write_bytes(changed)
-        assert path.read_bytes() == changed
+    # The witness: the process keeps reporting the bytes it captured, through
+    # both entry points, capture moment included.
+    assert main.health_check()["source_identity"] == identity
+    assert client.get("/health").json()["source_identity"] == _as_json(identity)
 
-        reported_while_changed = main.health_check()["source_identity"]
-        over_http_while_changed = client.get("/health").json()["source_identity"]
-        # What the bytes on disk hash to NOW, computed independently of the
-        # capture - both by reading the tree and by substituting the bytes.
-        fresh = _digest_from_tree(root, identity["files"])
-        expected = _digest_from_tree(root, identity["files"],
-                                     replaced={MUTATED_FILE: changed})
-    finally:
-        path.write_bytes(original)
-
-    # Nothing left behind.
-    assert path.read_bytes() == original
-
-    # The used-to-be-wrong answer is gone: a digest of the disk HAS moved, and it
-    # moved exactly because of the edited file's bytes.
-    assert fresh == expected
+    # A digest of the disk HAS moved, and it moved exactly because of the edited
+    # file's bytes - computed independently of the capture, both by reading the
+    # tree and by substituting the bytes.
+    fresh = source_identity.compute_digest(tree, files)
+    assert fresh == _digest_from_tree(tree, files, replaced={MUTATED_FILE: changed})
     assert fresh != identity["digest"]
-    assert hashlib.sha256(changed).hexdigest() != hashlib.sha256(original).hexdigest()
-
-    # The witness: the process keeps reporting the bytes it loaded, through both
-    # entry points, capture moment included.
-    assert reported_while_changed == identity
-    assert over_http_while_changed == _as_json(identity)
 
     # And with the edit gone, the tree and the reported digest agree again - the
     # reported value was a digest of exactly these files all along.
-    assert _digest_from_tree(root, identity["files"]) == identity["digest"]
+    path.write_bytes(original)
+    assert source_identity.compute_digest(tree, files) == identity["digest"]
+    assert main.health_check()["source_identity"] == identity
+
+    # The other direction: a capture taken while the copy held DIFFERENT bytes.
+    # Now the copy and the imported checkout both hash to the imported digest,
+    # so a reported digest re-read from either root - the captured one or this
+    # module's own checkout - would move away from the capture.
+    path.write_bytes(changed)
+    edited = source_identity.capture(tree)
+    path.write_bytes(original)
+    assert edited["digest"] != imported["digest"]
+    monkeypatch.setattr(main, "_SOURCE_IDENTITY", edited)
+    assert main.health_check()["source_identity"] == {**edited, "files": list(edited["files"])}
+    assert client.get("/health").json()["source_identity"] == _as_json(edited)
 
 
 def test_two_calls_report_one_identity(client):

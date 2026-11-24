@@ -38,7 +38,8 @@ from aitelier import gate_admission
 from aitelier.gate_evidence import release_disposition, report_state
 from aitelier.tools.run_tests import impl as rt
 from tests.gate_fixture import (GATE_PY, HOLDER, HarnessRig, embed_env,
-                                install_entry_executor, red_report, write_gate)
+                                install_entry_executor, red_report,
+                                short_gate_home, write_gate)
 
 
 
@@ -450,7 +451,8 @@ def _contended_red_run(tmp_path, monkeypatch, *, gate_program=None):
             GATE_PY, FIXTURE_GATE_POST_DELAY_SEC=str(SLOW_POST_DELAY_SEC))
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    home = short_gate_home(str(tmp_path))
+    monkeypatch.setenv("AITELIER_HOME", str(home))
     rig.script_report = red_report()
     install_entry_executor(monkeypatch)
     repo = _repo(tmp_path)
@@ -593,7 +595,7 @@ def test_a_real_uncontended_gate_run_records_no_contention(tmp_path, monkeypatch
     """
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     install_entry_executor(monkeypatch)
     try:
         repo = _repo(tmp_path)
@@ -758,7 +760,7 @@ def test_a_gate_refused_before_it_ran_is_not_a_measured_clean_queue(
     command is injected, through the same `install_entry_executor(refuse=...)`
     seam the outcome table uses.
     """
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     install_entry_executor(monkeypatch,
                            refuse=lambda args: "run_tests.sh" in " ".join(args)
                            or list(args)[:1] == ["bash"])
@@ -817,7 +819,7 @@ def test_a_gate_that_executed_and_never_touched_the_queue_stays_a_clean_none(
     contacts the engine. Nothing is refused and nothing times out, so
     `runner_error` and `timed_out` are both unset.
     """
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     install_entry_executor(monkeypatch)
     repo = _repo(tmp_path)
     (repo / "gate.py").write_text(_EXECUTED_RED_GATE, encoding="utf-8")

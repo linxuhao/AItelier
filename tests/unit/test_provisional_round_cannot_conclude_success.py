@@ -94,7 +94,7 @@ from aitelier.gate_coverage import (
     PRODUCER_RUN_TESTS, PROVISIONAL_PRODUCER, PROVISIONAL_PURPOSE,
     full_coverage)
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import embed_env, install_entry_executor
+from tests.gate_fixture import embed_env, install_entry_executor, short_gate_home
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "configs" / "coding_impl.yaml"
@@ -172,7 +172,7 @@ def _run_tests(tmp_path, monkeypatch, repo, *, measured_pass=False):
     `_retained_coverage` refuses to reach through a repository gate (it answers
     it `unmeasured`, an absence). See the module header.
     """
-    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("AITELIER_HOME", str(short_gate_home(str(tmp_path))))
     install_entry_executor(monkeypatch)
     out = tmp_path / "graph" / "test"
     with monkeypatch.context() as served:

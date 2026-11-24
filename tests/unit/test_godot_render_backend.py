@@ -32,6 +32,7 @@ they pin:
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -179,8 +180,12 @@ def rig(tmp_path, monkeypatch):
     dri = tmp_path / "dri"
     dri.mkdir()
     (dri / "renderD128").write_text("")
-    scratch = tmp_path / "tmp"
-    scratch.mkdir()
+    # Kept outside pytest's tmp tree on purpose: weston binds
+    # <runtime dir>/<socket>, and an AF_UNIX path stops at 107 bytes, which a
+    # tmp_path nested under xdist's popen-gwN/ (or a long basetemp) exceeds.
+    # mkdtemp still honours TMPDIR, so a TMPDIR longer than ~60 bytes would
+    # overrun it again. Made before tempfile.tempdir is pointed at it below.
+    scratch = Path(tempfile.mkdtemp(prefix="gwl-"))
     r = type("Rig", (), {})()
     r.weston_log = tmp_path / "weston.jsonl"
     r.xwayland_log = tmp_path / "xwayland.jsonl"
@@ -209,7 +214,8 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(gh, "_WESTON_START", None)
     # Every per-invocation runtime dir is made under this one, so a leak shows.
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
-    return r
+    yield r
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _leftover_runtime_dirs(r) -> list:

@@ -15,9 +15,14 @@ under $GATE_REPORT_DIR.
 """
 from __future__ import annotations
 
+import atexit
+import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
+import tempfile
 import threading
 
 import time
@@ -389,3 +394,67 @@ def assert_repo_gate_calls(observations, counter: Path, *, tests: int, measured:
         assert gate["attempts"] == 1, gate
         assert gate["measured"] == measured, gate
     assert int(counter.read_text()) == observations[-1]["after"]
+
+
+# A row that runs the REAL repository gate binds the gate's admission relay at
+# `<AITELIER_HOME>/r/<32 hex>.s` (aitelier/gate_admission.py:relay_socket_path),
+# and Linux allows such a socket path 107 bytes. A home inside pytest's tmp tree
+# repeats the row id, plus `popen-gwN/` under xdist and whatever the basetemp
+# is, so the longest ids overran the budget before the gate ever launched: the
+# product refused correctly ("owned relay path exceeds Linux AF_UNIX's 107-byte
+# filesystem budget") and the row read "gate not started" instead of the
+# verdict it pins.
+#
+# That is the FIXTURE's environment, not the product's: the deployed home is
+# short (`~/.AItelier`). Each row gets a home of its own under one short root
+# outside the pytest tmp tree (`short_gate_home`), named by a digest of its row
+# id so the homes stay distinct and of one fixed length. The root is removed
+# when the session ends.
+_HOMES_ROOT: Path | None = None
+# `_home_name` is always this long, so one probe measures every row's path.
+_HOME_NAME_CHARS = 10
+
+
+def _home_name(row_id: str) -> str:
+    """A short, stable directory name for one row's home (10 hex chars)."""
+    return hashlib.blake2s(row_id.encode("utf-8"), digest_size=5).hexdigest()
+
+
+def _homes_root() -> Path:
+    """The one short root the rows' homes live under; removed at session end.
+
+    Chosen by MEASURING the socket path a row's home will actually get, so a
+    too-long temp root fails here -- naming the budget and the measured bytes --
+    instead of quietly turning every gate into "not started" again.
+    """
+    global _HOMES_ROOT
+    if _HOMES_ROOT is None:
+        from aitelier.gate_admission import relay_socket_path
+        refused = []
+        # The environment's temp dir first, then the short conventional ones.
+        for candidate in dict.fromkeys((tempfile.gettempdir(), "/tmp", "/var/tmp")):
+            if not os.path.isdir(candidate):
+                continue
+            root = Path(tempfile.mkdtemp(prefix="rt-homes-", dir=candidate)).resolve()
+            try:
+                # The product's own path, so the probe follows its layout.
+                relay_socket_path(root / ("0" * _HOME_NAME_CHARS), "probe", "probe")
+            except ValueError as exc:
+                refused.append((str(root), str(exc)))
+                shutil.rmtree(root, ignore_errors=True)
+                continue
+            _HOMES_ROOT = root
+            atexit.register(shutil.rmtree, root, ignore_errors=True)
+            return root
+        raise RuntimeError(
+            f"no temp root short enough for a gate home: the owned relay socket "
+            f"of a {_HOME_NAME_CHARS}-char home under each root was refused: {refused}")
+    return _HOMES_ROOT
+
+
+def short_gate_home(row_id: str) -> Path:
+    """One row's own `AITELIER_HOME`, below the AF_UNIX socket path budget.
+
+    `row_id` only has to be unique per row (a node id, or the row's `tmp_path`).
+    """
+    return _homes_root() / _home_name(row_id)

@@ -195,6 +195,18 @@ def test_editing_the_imported_module_on_disk_does_not_move_the_reported_digest(
     assert source_identity.compute_digest(tree, files) == identity["digest"]
     assert main.health_check()["source_identity"] == identity
 
+    # The other direction: a capture taken while the copy held DIFFERENT bytes.
+    # Now the copy and the imported checkout both hash to the imported digest,
+    # so a reported digest re-read from either root - the captured one or this
+    # module's own checkout - would move away from the capture.
+    path.write_bytes(changed)
+    edited = source_identity.capture(tree)
+    path.write_bytes(original)
+    assert edited["digest"] != imported["digest"]
+    monkeypatch.setattr(main, "_SOURCE_IDENTITY", edited)
+    assert main.health_check()["source_identity"] == {**edited, "files": list(edited["files"])}
+    assert client.get("/health").json()["source_identity"] == _as_json(edited)
+
 
 def test_two_calls_report_one_identity(client):
     first = client.get("/health").json()["source_identity"]

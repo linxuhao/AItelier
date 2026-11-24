@@ -21,6 +21,7 @@ from core import state_channels, state_groups, state_steward
 from core.state_commands import ProjectPrivate, execute
 from core.state_graph import StateConflict, StateGraphError
 from core.state_service import StateService
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import OWNER_HEADERS, client, refused, world  # noqa: F401
 from tests.unit.test_steward_groups import (MEMBER, MEMBER2, OWNER_WX, ROOM, ROOM2, ask, audience, bound_group,
                                             family_view, public_view, reply, rows)

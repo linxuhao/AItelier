@@ -941,6 +941,9 @@ class TestTheStewardReadersRefuseTheAnonymous:
             ("POST", "/api/state/commands/steward_capability_set",
              {"request_key": "c", "cap_id": "draw", "expect_version": 1, "unset": True}),
             ("POST", "/api/state/commands/steward_capabilities_clear", {"request_key": "c2"}),
+            # The owner's 清空媒体 (design-steward 7.8.12): a memory request, owner session only.
+            ("POST", "/api/steward/media/clear", None),
+            ("POST", "/api/state/commands/steward_media_clear", {"request_key": "c3"}),
         ]
         results = {}
         try:

@@ -33,6 +33,7 @@ import { StewardCatalog } from '../dsh-director/lib/catalog.mjs';
 import { GroupTurns, GROUP_SOURCE } from '../dsh-director/lib/group-turns.mjs';
 import { GROUP_LIMITS } from '../dsh-director/lib/channels.mjs';
 import { basicsSection, renderBasics } from '../dsh-director/lib/basics.mjs';
+import { registerGroupTools } from '../dsh-director/lib/group-tools.mjs';
 import { loadRoles } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { discoveryTexts } from './aitelier-texts.mjs';
@@ -431,6 +432,58 @@ if (libraries.status === 'unmeasured') {
     assert.equal(digest(seen['true:owner'].basics), digest(renderBasics(BASICS_TABLE, seen['true:owner'].registered)));
     assert.match(seen['true:group'].basics, /email \(email, mail, inbox\): 1\) connection tool - search_tools\("basics:email"\) \(owner turns only\); 2\) connection tool - search_tools\("basics:email"\) \(owner and group turns\)\./);
     for (const word of ['mailme', 'mailpub', 'search_messages', 'mcp__sw__']) assert.ok(!seen['true:group'].basics.includes(word), word);
+  });
+
+  test('step 25 C4 (7.9.5, 7.8.8 (2)): after a connection tool result a family-list change is refused like the steward\'s other writes, until a person writes again', async () => {
+    const world = await stewardWorld(false);
+    // A catalog that knows a person's message (stewardWorld's knows none), on the same turns.
+    const catalog = new StewardCatalog({ host: { connections: async () => ({ effective_hash: 'h', effective_tools: SW, connections: [
+      { conn_id: 'media', visibility: 'public', usable: true, tools: [{ name: SW[2] }] }] }), resyncDue: async () => {},
+    humanInput: text => text.startsWith('OWNER:') }, stateDir: mkdtempSync(join(tmpdir(), 'lists-catalog-')), rootSession: 'root',
+    registryNames: () => SW, audience: () => world.turns.audience() });
+    await catalog.preStep();
+    const person = text => catalog.observe({ type: 'user/message', data: { message: { content: [{ type: 'text', text }] } } });
+    const added = [];
+    await fixture(async ({ ctx, agent, call }) => {
+      const root = agent('root');
+      registerWorld(ctx, world);
+      // index.mjs: the catalog's guard, and a connection tool's result marks the turn first.
+      ctx.tools.guard(exec => catalog.refusal(exec));
+      ctx.on('tools/post-execute', async (exec, _result, next) => {
+        if (exec.agent?.session?.id === 'root' && catalog.isConnectionTool(exec.name)) catalog.markExternal();
+        return next();
+      });
+      const groups = { listShow: async () => ({ lists: [] }), listAdd: async args => { added.push(args.items); return { added: args.items }; },
+        listCheck: async () => ({ checked: [] }), listRemove: async () => ({ removed: [] }) };
+      registerGroupTools(root.ctx, { defineTool, jsonOutput: output, groups, turns: world.turns });
+      world.turn('owner');
+      catalog.observe({ type: 'turn/start', seq: 1 });
+      person('OWNER: look up the price of milk');
+      assert.equal((await call('list_add', { list: 'shopping', items: ['milk'] }, root)).isError, false, 'nothing read yet');
+      assert.equal((await call('call_tool', { name: SW[2], arguments: {} }, root)).value, 'ran ' + SW[2]);
+      assert.equal(catalog.externalSeen, true, 'the connection tool\'s result marked the turn');
+      // The next turn opens without a person (a reminder, a letter): the web page's 「add X」 cannot reach the list.
+      world.turn('owner');
+      catalog.observe({ type: 'turn/start', seq: 2 });
+      const before = added.length;
+      for (const [name, args] of [['list_add', { list: 'shopping', items: ['injected'] }], ['list_check', { item_ids: ['i1'] }],
+        ['list_remove', { item_ids: ['i1'] }]]) {
+        const refused = await call(name, args, root);
+        assert.equal(refused.isError, true, name);
+        assert.match(JSON.stringify(refused.content), new RegExp(`external_content_seen: ${name} needs a message from a person in this turn`), name);
+      }
+      const memory = catalog.refusal({ name: 'memory_note', agent: { session: { id: 'root' } } });
+      assert.equal(catalog.refusal({ name: 'list_add', agent: { session: { id: 'root' } } }), memory.replace('memory_note', 'list_add'),
+        'the same refusal as the other writes');
+      assert.equal(added.length, before, 'nothing reached the host');
+      assert.equal((await call('list_show', {}, root)).isError, false, 'a read is not held');
+      // A person writes again: allowed.
+      world.turn('owner');
+      catalog.observe({ type: 'turn/start', seq: 3 });
+      person('OWNER: add eggs');
+      assert.equal((await call('list_add', { list: 'shopping', items: ['eggs'] }, root)).isError, false);
+      assert.deepEqual(added.at(-1), ['eggs']);
+    }, effective, 'steward', world.options);
   });
 
   test('step 24.1a: a steward without a host catalog finds nothing and is shown no discovery tool', () => fixture(async ({ ctx, agent, call }) => {

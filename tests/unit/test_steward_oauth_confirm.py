@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from api import steward_gateway as gw
-from core import drivers, state_channels, state_steward_confirmations as sconf, state_steward_connections as sc
+from core import drivers, owner_text, state_channels, state_steward_confirmations as sconf, state_steward_connections as sc
 from core import steward_oauth
 from core.state_commands import STEWARD_WRITE_ACTIONS, execute
 from core.state_graph import StateGraphError, StateNotFound
@@ -33,6 +33,15 @@ MAIL = "https://mail.example/mcp"
 ISSUER = "https://auth.example"
 BASE = "https://aitelier.example"
 OTHER_OWNER = "owner:someone-else@example.com"
+
+
+@pytest.fixture(autouse=True)
+def _zh_owner():
+    """These tests pin the lines a 'zh' owner reads (core.owner_text; this deployment's owner).
+    test_owner_text covers the table and the English default."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(owner_text.SETTING, "zh")
+        yield
 
 
 # --- a fake authorization server --------------------------------------------------------------
@@ -578,6 +587,58 @@ def test_a_channel_confirmation_is_the_exact_reply_of_the_same_sender_on_the_sam
     monkeypatch.setattr(sconf, "_utcnow", lambda: late)
     assert relay(world, f"确认 {third}", "late", at=late.isoformat())["confirmation"]["outcome"] == "expired"
     assert status_of(world, third) == "expired"
+
+
+def test_the_english_alias_confirms_and_cancels_as_exactly_as_the_chinese_words(world, monkeypatch):
+    """Overfit review 重-17: `confirm <code>` / `cancel <code>`, whole message, ends stripped,
+    lower case only, the code as issued - for the same requester on the same channel."""
+    mail_ready(world)
+    bind_slack(world, monkeypatch)
+    bind_slack(world, monkeypatch, sender="wx-owner", channel="wechat")
+    code = ask(world, relay(world, "send it", "m1")["message_id"])["code"]
+    for n, body in enumerate(("confirm" + code, f"Confirm {code}", f"CONFIRM {code}", f"confirm {code.lower()}",
+                              f"confirm  {code}", f"confirm {code}.", f"please confirm {code}", f"confirm {code} please",
+                              f"confirm\u3000{code}", f"confirmed {code}", f"yes {code}", f"ok {code}", f"confirm: {code}",
+                              f"ｃｏｎｆｉｒｍ {code}", f"confirm {code}\nconfirm {code}", f"Cancel {code}", f"cancel{code}")):
+        assert "confirmation" not in relay(world, body, f"x{n}"), body
+    assert "confirmation" not in relay(world, f"confirm {code}", "w1", channel="wechat", sender="wx-owner")
+    assert "confirmation" not in dashboard(world, f"confirm {code}", "o-9")
+    assert status_of(world, code) == "pending"
+    assert relay(world, f"  confirm {code}\n", "ok1")["confirmation"] == {"code": code, "action": "confirm",
+                                                                         "outcome": "confirmed"}
+    assert "confirmation" not in relay(world, f"确认 {code}", "ok2"), "decided once, in either language"
+    second = ask(world, relay(world, "another", "m2")["message_id"])["code"]
+    assert relay(world, f"cancel {second}", "c1")["confirmation"]["outcome"] == "cancelled"
+    assert "confirmation" not in relay(world, f"confirm {second}", "c2")
+    assert status_of(world, second) == "cancelled"
+    third = ask(world, dashboard(world, "third", "o-3")["message_id"])["code"]
+    assert dashboard(world, f"confirm {third}", "o-4")["confirmation"]["outcome"] == "confirmed"
+
+
+def test_an_alias_reply_decides_exactly_what_its_chinese_words_decide(world, monkeypatch):
+    """The matcher over every shape, each probe rolled back: an English reply decides iff the
+    same reply with the Chinese words does, the same code, action and outcome."""
+    mail_ready(world)
+    bind_slack(world, monkeypatch)
+    code = ask(world, relay(world, "send it", "m1")["message_id"])["code"]
+    now = datetime.now(timezone.utc)
+    tails = [code, code.lower(), " " + code, code + " ", code + "。", code + ".", "K0000", "", code + "\n" + code,
+             code[:-1], code + "A"]
+    wraps = [("", ""), ("  ", "\n"), ("\u3000", ""), ("x ", ""), ("", " ok")]
+    senders = [("slack", "U0OWNER", now), ("slack", "U0OTHER", now), ("wechat", "U0OWNER", now), ("slack", "U0OWNER", None),
+               ("slack", "U0OWNER", now + timedelta(minutes=30))]
+    with world.db.get_connection() as conn:
+        for zh, en in ((sconf.CONFIRM, sconf.CONFIRM_EN), (sconf.CANCEL, sconf.CANCEL_EN)):
+            for tail in tails:
+                for before, after in wraps:
+                    for channel, sender, at in senders:
+                        outs = []
+                        for prefix in (zh, en):
+                            outs.append(sconf.match_reply(conn, before + prefix + tail + after, channel=channel,
+                                                          sender_ref=sender, written_at=at, message_id="probe"))
+                            conn.rollback()
+                        assert outs[0] == outs[1], (en, tail, before, after, channel, sender, at)
+    assert status_of(world, code) == "pending", "every probe was rolled back"
 
 
 def test_at_most_three_wait_for_one_person_and_records_go_after_30_days(world):

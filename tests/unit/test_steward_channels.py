@@ -1372,7 +1372,14 @@ def test_the_status_is_bounded_and_its_contents_are_never_logged(world, caplog):
 
 @pytest.mark.parametrize("body", [
     "同意 proposal p-1。", "同意proposal p-1", "同意　proposal p-1", " ok", "同意 proposal P-1",
-    "同意  proposal p-1", "请 同意 proposal p-1", "同意 proposal p-1 谢谢", "approve proposal p-1"])
+    "同意  proposal p-1", "请 同意 proposal p-1", "同意 proposal p-1 谢谢",
+    # The English alias (overfit review 重-17) is as exact: lower case only, one U+0020 space,
+    # the whole message, no synonym, no full-width letters.
+    "Approve proposal p-1", "APPROVE PROPOSAL p-1", "approve Proposal p-1", "approve proposal p-1.", "approveproposal p-1",
+    "approve  proposal p-1", "approve\u3000proposal p-1", "approve proposal P-1", "please approve proposal p-1",
+    "approve proposal p-1 thanks", "approve p-1", "approved proposal p-1", "accept proposal p-1", "yes proposal p-1",
+    "ａｐｐｒｏｖｅ proposal p-1", "approve proposal p-1\napprove proposal p-1", "Decline proposal p-1",
+    "reject proposal p-1", "deny proposal p-1", "同意 proposal p-1 approve proposal p-1"])
 def test_anything_but_the_exact_phrase_is_an_ordinary_message(world, body):
     bind(world)
     plant_proposal(world)
@@ -1794,6 +1801,56 @@ def test_the_decline_phrase_declines_as_the_bound_account(world):
     row = proposal(world)
     assert row["status"] == "declined" and row["decided_by"] == "owner:wechat:wxid_owner"
     assert row["result"]["phrase"] == "拒绝 proposal p-1"
+
+
+def test_the_english_alias_approves_and_declines_exactly_as_the_chinese_phrase(world):
+    """Overfit review 重-17: `approve proposal <id>` / `decline proposal <id>`, whole message,
+    ends stripped, decide through the same path as 同意/拒绝 - the record keeps what was sent."""
+    bind(world)
+    plant_proposal(world)
+    out = relay(world, "  approve proposal p-1\n", "ts-en")
+    assert out["approval"]["action"] == "approve" and out["approval"]["outcome"] == "executed", out
+    row = proposal(world)
+    assert row["status"] == "done" and row["decided_by"] == f"owner:slack:{SLACK_USER}"
+    assert row["result"]["phrase"] == "approve proposal p-1"
+    plant_proposal(world, "p-2", payload={**CREATE, "project_id": "delta"})
+    out = relay(world, "decline proposal p-2", "ts-en-2")
+    assert out["approval"]["action"] == "decline" and out["approval"]["outcome"] == "executed"
+    assert proposal(world, "p-2")["status"] == "declined"
+    # Decided once: the alias of a decided proposal is that proposal's refusal, as its Chinese phrase is.
+    again = relay(world, "approve proposal p-1", "ts-en-3")["approval"]
+    zh = relay(world, "同意 proposal p-1", "ts-zh-3")["approval"]
+    assert again == zh and again["outcome"] != "executed"
+
+
+def test_an_alias_matches_exactly_what_its_chinese_phrase_matches_and_nothing_else(world):
+    """The matcher, over every shape: an English body decides iff the same body with the
+    Chinese words does, the same proposal, action and version; a body with no Chinese twin
+    (any other case or word) decides nothing."""
+    plant_proposal(world)
+    plant_proposal(world, "P-2", payload={**CREATE, "project_id": "delta"})
+    ids = ["p-1", "P-1", "P-2", "p-2", "", " p-1", "p-1 ", "p-1\n", "p-1。", "p-1 p-1", "p-9", "p-1\u200b"]
+    wraps = [("", ""), ("  ", "\n"), ("\u3000", "\u3000"), ("x ", ""), ("", " ."), ("\n\n", "")]
+    with world.db.get_connection() as conn:
+        for zh, en in ((state_channels.APPROVE, state_channels.APPROVE_EN), (state_channels.DECLINE, state_channels.DECLINE_EN)):
+            for pid in ids:
+                for before, after in wraps:
+                    chinese = state_channels.match_phrase(conn, before + zh + pid + after)
+                    english = state_channels.match_phrase(conn, before + en + pid + after)
+                    strip = (lambda m: None if m is None else {k: v for k, v in m.items() if k != "phrase"})
+                    assert strip(english) == strip(chinese), (en, pid, before, after)
+        for body in ("Approve proposal p-1", "APPROVE PROPOSAL p-1", "Decline proposal p-1", "approve  proposal p-1",
+                     "approve proposal\u00a0p-1", "approve\tproposal p-1", "approve-proposal p-1", "approval proposal p-1",
+                     "approve proposal", "approve proposal ", "decline proposal"):
+            assert state_channels.match_phrase(conn, body) is None, body
+
+
+def test_a_dashboard_alias_decides_as_the_owner_session(world):
+    plant_proposal(world)
+    out = execute(world.owner, "send_user_conversation_message",
+                  {"request_key": "d-en", "project_id": HOME, "body": "approve proposal p-1"}, allow_write=True)
+    assert out["approval"]["outcome"] == "executed"
+    assert proposal(world)["result"]["phrase"] == "approve proposal p-1"
 
 
 def test_an_executed_decision_names_the_stored_proposals_kind_and_target(world):

@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -86,11 +87,48 @@ def prepare(repo, home, secrets_dir):
             found = True
     if not found:
         lines.append('AITELIER_DRIVER_IDENTITY=on')
-    changed = atomic_text(env, '\n'.join(lines) + '\n')
+    # What the caller reports as "identity enabled": the identity line only. The
+    # uid/gid lines below have their own note (container_user_note).
+    identity_changed = not env.exists() or lines != original.splitlines()
+    # docker-compose.yml runs every container as AITELIER_UID:AITELIER_GID, default
+    # 1000:1000. The `aitelier` CLI fills both in from the login; a bare `docker
+    # compose` does not, and any other uid then cannot write ~/.AItelier. A value
+    # already in .env is kept (main() warns when it is not this user's).
+    present = {match[1] for match in (re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
+                                      for line in lines) if match}
+    for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
+        if name not in present:
+            lines.append(f'{name}={value}')
+    changed = atomic_text(env, '\n'.join(lines) + '\n') and identity_changed
+    # What docker-compose.yml bind-mounts from HOME, created as this user: Docker
+    # creates a missing bind source as root, and the backend (this uid) then
+    # cannot write it (sqlite crash loop, 503 on uploads, no connection secrets).
+    # Existing directories are left exactly as they are.
+    steward_secrets = Path(os.path.expandvars(setting(
+        repo, 'AITELIER_STEWARD_SECRETS_HOST_DIR',
+        str(home / '.local/share/aitelier/steward-mcp-secrets')))).expanduser()
+    for directory in (state / 'godot-control', home / '.local/share/dsh-director/media',
+                      home / '.local/share/aitelier/media-staging', steward_secrets):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     values = json.loads(config.read_text()) if config.exists() else {}
     values['mode'] = 'host'
     atomic_text(config, json.dumps(values) + '\n')
     return changed
+
+
+def container_user_note(repo):
+    """docker-compose.yml interpolates `user: ${AITELIER_UID:-1000}:${AITELIER_GID:-1000}`
+    only when it creates a container, so a backend created without these values
+    keeps running as 1000:1000 and cannot write this user's ~/.AItelier."""
+    # Compose's ${VAR:-1000} treats an empty value exactly like an absent one.
+    uid = setting(repo, 'AITELIER_UID', '1000') or '1000'
+    gid = setting(repo, 'AITELIER_GID', '1000') or '1000'
+    user = uid + ':' + gid
+    if user == '1000:1000':
+        return None
+    return (f'Containers run as {user} (AITELIER_UID:AITELIER_GID), not the compose default 1000:1000. '
+            'Compose applies this only when it creates a container: if the backend was created '
+            'without it, recreate it (docker compose up -d aitelier) before starting project drivers.')
 
 
 def install_runtime(repo, destination):
@@ -139,6 +177,24 @@ def unit_quote(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
 
 
+def default_api_url(repo):
+    """The backend as docker-compose.yml publishes it: loopback, host port AITELIER_PORT."""
+    return 'http://127.0.0.1:' + setting(repo, 'AITELIER_PORT', '4444')
+
+
+def install_pdf_reader(python, repo):
+    """The steward reads PDFs with pypdfium2 in the host venv (the backend image has its
+    own copy). requirements-pdf.txt pins one wheel's hash (x86_64 manylinux), so on other
+    platforms pip refuses it: say so and go on, like a missing ffprobe."""
+    try:
+        run(python, '-m', 'pip', 'install', '-r', repo / 'requirements-pdf.txt')
+    except subprocess.CalledProcessError:
+        print('pypdfium2 could not be installed from requirements-pdf.txt (its hash pins the x86_64 '
+              'manylinux wheel): the steward cannot read PDF attachments until pypdfium2 is installed in .venv.')
+        return False
+    return True
+
+
 def render_unit(repo, home, runtime, secrets_dir, api_url):
     values = {
         'REPO': repo, 'PYTHON': repo / '.venv/bin/python', 'HOME_ENV': 'HOME=' + str(home),
@@ -166,7 +222,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--runtime-dir', type=Path, help='Default: ~/.local/share/aitelier-dsh')
-    parser.add_argument('--api-url', default='http://127.0.0.1:4444')
+    parser.add_argument('--api-url', help='Default: http://127.0.0.1:$AITELIER_PORT (4444 when unset)')
     parser.add_argument('--service-name', default='aitelier-dsh-host.service')
     parser.add_argument('--no-start', action='store_true', help='Prepare files without enabling/starting the service (initial install before backend startup)')
     args = parser.parse_args()
@@ -192,9 +248,10 @@ def main():
             raise ValueError('This Python has no ensurepip. Install its venv package (Ubuntu/Debian: sudo apt install python3.12-venv), then rerun; an incomplete .venv will be repaired.')
         run(sys.executable, '-m', 'venv', repo / '.venv')
     run(python, '-m', 'pip', 'install', '-e', repo)
+    install_pdf_reader(python, repo)
     runtime = install_runtime(repo, (args.runtime_dir or home / '.local/share/aitelier-dsh').expanduser().resolve())
     unit = Path(os.environ.get('XDG_CONFIG_HOME', str(home / '.config'))) / 'systemd/user' / args.service_name
-    unit_changed = atomic_text(unit, render_unit(repo, home, runtime, secrets_dir, args.api_url), mode=0o644)
+    unit_changed = atomic_text(unit, render_unit(repo, home, runtime, secrets_dir, args.api_url or default_api_url(repo)), mode=0o644)
     if not args.no_start:
         was_running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', args.service_name]).returncode == 0
         run('systemctl', '--user', 'daemon-reload')
@@ -207,6 +264,14 @@ def main():
     print('Service: ' + str(unit))
     if changed:
         print('Driver identity enabled in .env. Start/recreate the backend with this configuration before starting project drivers.')
+    note = container_user_note(repo)
+    if note:
+        print(note)
+    for name, value in (('AITELIER_UID', os.getuid()), ('AITELIER_GID', os.getgid())):
+        if setting(repo, name, str(value)) != str(value):
+            print(f'Note: .env sets {name}={setting(repo, name, "")}, but this user is {value}; the containers run as the .env value.')
+    if shutil.which('ffprobe') is None:
+        print('ffprobe not found: the steward refuses voice and video messages until it is installed (Debian/Ubuntu: sudo apt install ffmpeg).')
     print('Backend lifecycle remains separate; this installer does not restart Docker services.')
     print('For boot startup without login: loginctl enable-linger "$USER"')
     if args.no_start:

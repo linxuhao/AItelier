@@ -135,7 +135,7 @@ test('guard (step 24, 7.8.8): a group turn calls its PUBLIC connection tools - d
 });
 
 test('guard (step 25 C4, 7.7.16 table + 7.9.5): list_show, list_add, list_check in a group turn; list_remove only in an owner turn, and not paused', () => {
-  assert.deepEqual([...GROUP_TOOLS].sort(), ['call_tool', 'family_memory_note', 'family_memory_show', 'group_reminder_set', 'list_add',
+  assert.deepEqual([...GROUP_TOOLS].sort(), ['calculate', 'call_tool', 'family_memory_note', 'family_memory_show', 'group_reminder_set', 'list_add',
     'list_check', 'list_show', 'make_document', 'media_call', 'portfolio_project', 'portfolio_projects', 'read_document', 'request_confirmation', 'run_confirmed',
     'search_tools', 'send_media']);
   for (const name of ['list_show', 'list_add', 'list_check']) {
@@ -892,4 +892,106 @@ test('group wake (director 602 defect 3): a group the host does not name wakes n
   assert.equal(groupWakeName({ channel: 'wechat', group_ref: 'r1', label: '老家群' }), '老家群');
   for (const group of [undefined, null, {}, { label: null }, { label: '' }, { label: '  ' }, { label: 7 }])
     assert.throws(() => groupWakeName(group), /^Error: group_wake_unnamed/, JSON.stringify(group));
+});
+
+// --- step 23, Slack private channels (design-steward 7.7.19): only the platform layer changes ----
+
+test('audience (7.7.19): a Slack group\'s turns follow the WeChat group\'s rules - audience, merge, put-back, guard, pause', () => {
+  const tagged = channel => (text, ref = 'r1', qid = 'q' + ids) => message(text, { kind: GROUP_SOURCE, channel, group_ref: ref,
+    group_label: '家庭群', question_ids: [qid], sender_refs: ['m1'] });
+  const run = channel => {
+    const ask = tagged(channel), g = turns(), seen = [];
+    const owner = message('owner wrote');
+    const first = g.split([ask('q1'), owner, ask('x', 'r2'), ...Array.from({ length: 6 }, (_, i) => ask('m' + i))], 1);
+    seen.push([first.keep.length, first.back.length, g.audience()]);
+    seen.push(['portfolio_projects', 'family_memory_note', 'request_confirmation', 'shell', 'memory_write', 'connections_list']
+      .map(name => g.guard(name)));
+    seen.push(g.split([owner], 1).keep.length, g.audience());
+    seen.push(g.guard('family_memory_note'));
+    return JSON.parse(JSON.stringify(seen).replaceAll(`"${channel}"`, '"CHANNEL"'));
+  };
+  const wechat = run('wechat'), slack = run('slack');
+  assert.deepEqual(slack, wechat);
+  assert.deepEqual(wechat[0][2], { kind: 'group', channel: 'CHANNEL', group_ref: 'r1', label: '家庭群' });
+});
+
+function slackGroupWorld(answers = {}) {
+  const calls = [], sent = [], rooms = [];
+  const host = { relay: async m => { calls.push(['owner-relay', m]); return { message_id: 'x' }; }, bind: async m => { calls.push(['owner-bind', m]); return { bound: true }; },
+    sourceOf: async () => null, recordDelivery: async () => ({}), list: async () => ({ channels: [] }) };
+  const groups = { list: async () => ({ owner_refs: { slack: 'U1' }, groups: [{ channel: 'slack', group_ref: 'C1', mention_prefix: '<@UBOT>' }] }),
+    relay: async m => { calls.push(['relay', m]); return answers.relay ?? { message_id: 'g1', sender_role: 'member', sender_label: '成员甲' }; },
+    bind: async m => { calls.push(['bind', m]); return answers.bind ?? { bound: true, notice: 'NOTICE' }; } };
+  const dir = mkdtempSync(join(tmpdir(), 'slack-group-channels-'));
+  const channels = createOwnerChannels({ host, groups, owedFile: join(dir, 'owed.json') });
+  channels.service.register({ name: 'slack', send: async (text, o) => { sent.push(['1:1', text, o]); return {}; }, status: () => ({ connected: true }),
+    sendGroup: async (room, text, options) => { sent.push(['group', room, text, options]); return {}; }, setRooms: async r => { rooms.push(r); } });
+  const woken = [];
+  channels.setGroupWake(async q => { woken.push(q); });
+  channels.ready();
+  return { channels, calls, sent, rooms, woken, owed: join(dir, 'owed.json') };
+}
+const slackInbound = (w, extra) => w.channels.service.inbound({ channel: 'slack', senderRef: 'U2', messageRef: 'C1:1763481600.0003',
+  text: '123456', at: new Date().toISOString(), conversationRef: 'C1', asked: true, ...extra });
+
+test('channels (7.7.19): a Slack channel\'s question takes the group path - relayed, woken, never the owner\'s lane or a binding', async () => {
+  const w = slackGroupWorld();
+  assert.deepEqual(await slackInbound(w), { accepted: true });
+  assert.deepEqual(w.calls.map(c => c[0]), ['relay']);
+  assert.deepEqual({ ...w.calls[0][1], at: undefined }, { channel: 'slack', groupRef: 'C1', senderRef: 'U2', messageRef: 'C1:1763481600.0003',
+    text: '123456', at: undefined });
+  assert.ok(!existsSync(w.owed) || !readFileSync(w.owed, 'utf8').includes('123456'));
+  assert.equal(w.woken.length, 1);
+  assert.equal(w.woken[0].channel, 'slack');
+  assert.deepEqual(w.rooms.at(-1), { ownerRef: 'U1', rooms: [{ room_ref: 'C1', prefix: '<@UBOT>' }] });
+  assert.deepEqual(w.sent, [], 'nothing is said for an accepted question until the turn ends');
+});
+
+test('channels (D8): the lines that answer one Slack message - a quota notice, a confirmation line, the bind notice - go into its thread', async () => {
+  const over = slackGroupWorld({ relay: { refused: 'member_quota', notice: '问得太多了' } });
+  assert.deepEqual(await slackInbound(over, { text: 'hi' }), { accepted: false, reason: 'member_quota' });
+  assert.deepEqual(over.sent, [['group', 'C1', '问得太多了', { replyToRef: 'C1:1763481600.0003' }]]);
+  const line = '已确认 K7Q2A，正在执行。';
+  const confirmed = slackGroupWorld({ relay: { message_id: 'g2', confirmation: { code: 'K7Q2A', outcome: 'confirmed' }, confirmation_line: line } });
+  await slackInbound(confirmed, { text: '确认 K7Q2A' });
+  assert.deepEqual(confirmed.sent, [['group', 'C1', line, { replyToRef: 'C1:1763481600.0003' }]]);
+  const bound = slackGroupWorld();
+  assert.deepEqual(await slackInbound(bound, { text: 'G-7K2M-Q9XD', conversationRef: 'C9', messageRef: 'C9:1.2', asked: undefined,
+    senderRef: 'U1', groupBind: { prefix: '<@UBOT>', code: 'G-7K2M-Q9XD' } }), { accepted: true });
+  assert.deepEqual(bound.calls.at(-1), ['bind', { channel: 'slack', groupRef: 'C9', senderRef: 'U1', messageRef: 'C9:1.2', prefix: '<@UBOT>',
+    code: 'G-7K2M-Q9XD' }]);
+  assert.deepEqual(bound.sent.at(-1), ['group', 'C9', 'NOTICE', { replyToRef: 'C9:1.2' }]);
+});
+
+test('group reply (D8): the question\'s channel ref the backend answers goes to the send, so Slack threads the reply', async () => {
+  const g = turns(), sent = [];
+  const ask = (text, qid) => message(text, { kind: GROUP_SOURCE, channel: 'slack', group_ref: 'C1', group_label: '家庭群',
+    question_ids: [qid], sender_refs: ['U2'] });
+  g.split([ask('Q1', 'gq1')], 1, 7);
+  const watch = groupReplies({ turns: g, warn: () => {},
+    reply: async args => ({ channel: 'slack', group_ref: 'C1', text: args.body, reply_to_ref: 'C1:1763481600.0003' }),
+    sendGroup: async (...args) => { sent.push(args); } });
+  watch({ type: 'turn/start', data: { turn: 7 } });
+  watch({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '周六去公园。' }] } } });
+  await watch({ type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } });
+  assert.deepEqual(sent, [['slack', 'C1', '周六去公园。', { replyToRef: 'C1:1763481600.0003' }]]);
+  // A backend answer without the ref (a reply recorded before it carried one) sends as before.
+  const r = groupReply('答。');
+  await r.done;
+  assert.deepEqual(r.sent, [['wechat', 'r1', '「Q2」\n答。']]);
+});
+
+test('channels (D5 a): the whitelist carries each group\'s dashboard name, so a channel can name a paused group', async () => {
+  const rooms = [];
+  const groups = { list: async () => ({ owner_refs: { slack: 'U1' }, groups: [
+    { channel: 'slack', group_ref: 'C1', mention_prefix: '<@UBOT>', label: '家人' },
+    { channel: 'slack', group_ref: 'C2', mention_prefix: '<@UBOT>', label: null }] }) };
+  const host = { sourceOf: async () => null, recordDelivery: async () => ({}), list: async () => ({ channels: [] }) };
+  const channels = createOwnerChannels({ host, groups, owedFile: join(mkdtempSync(join(tmpdir(), 'rooms-label-')), 'owed.json') });
+  channels.service.register({ name: 'slack', send: async () => ({}), status: () => ({ connected: true }),
+    sendGroup: async () => ({}), setRooms: async r => { rooms.push(r); } });
+  channels.ready();
+  await channels.refreshRooms();
+  assert.deepEqual(rooms.at(-1), { ownerRef: 'U1', rooms: [{ room_ref: 'C1', prefix: '<@UBOT>', label: '家人' },
+    { room_ref: 'C2', prefix: '<@UBOT>' }] });
 });

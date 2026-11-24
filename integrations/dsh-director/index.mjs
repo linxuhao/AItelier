@@ -20,6 +20,7 @@ import { StewardCatalog } from './lib/catalog.mjs';
 import { basicsSection } from './lib/basics.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
 import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
+import { registerCalcTool } from './lib/calc-tool.mjs';
 import { attachmentLine } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
@@ -35,14 +36,19 @@ import { capacityLimits, describeDispatch, isDshLimitRefusal, RefusedDispatches 
 import { lastTurn, resumeCandidates, refusal, recoveryNote, ResumeRecords } from './lib/resume.mjs';
 import { createHash } from 'node:crypto';
 import { openMemory, profileSection, registerMemoryTools } from './lib/memory/tools.mjs';
+import { turnRecorderFor } from './lib/memory/turns.mjs';
+import { stewardPromptFor, stewardPromptFeatures } from './lib/steward-prompt.mjs';
 import { registerPortfolioTools } from './lib/portfolio.mjs';
 import { registerProposalTools } from './lib/proposals.mjs';
-import { createOwnerChannels, GROUP_LIMITS, GROUP_WAKE_IMAGE_LIMIT, trimRecent } from './lib/channels.mjs';
+import { CHANNEL_LIMITS, createOwnerChannels, GROUP_LIMITS, GROUP_WAKE_IMAGE_LIMIT, trimRecent } from './lib/channels.mjs';
+import { ownerTexts } from './lib/owner-text.mjs';
 import { GroupTurns, GROUP_SOURCE, createGroupSetup, groupReplies, filterCompactionRequest, withoutGroupTurns, groupWakeName } from './lib/group-turns.mjs';
 import { registerChannelTools } from './lib/channel-tools.mjs';
 import { registerGroupTools } from './lib/group-tools.mjs';
 
 export const name = 'dsh-director';
+/** The context hash a plan binds when its host has none (config.planKeysOptional). */
+export const PLAN_KEYS_UNSET = 'unset';
 /** Step 24.2b (design-steward 7.8.12a "导演与管家的不同"): the tools a director's media_call runs on
  *  its files - its own media connection's, each taking its file as `*_base64`. */
 export const DIRECTOR_MEDIA_TOOLS = Object.freeze(['mcp__agentmcp__ocr_image', 'mcp__agentmcp__vision_critique',
@@ -75,7 +81,11 @@ export function ownerChannelsFor(ctx, host) {
   // The owed store lives in the director's own state dir: a message that still owes a line
   // outlives the process, and it does so in the one directory this session already owns.
   const stateDir = host.config?.stateDir;
+  // The owner's language (HostConfig.ownerLanguage; overfit review 重-18): the lines the
+  // channel layer sends and how long a mirrored message may be.
+  const owner = ownerTexts(host.config?.ownerLanguage);
   return createOwnerChannels({ host: host.channels, ...(host.groups ? { groups: host.groups } : {}),
+    replies: owner.replies, limits: { ...CHANNEL_LIMITS, mirrorChars: owner.mirrorChars },
     // Step 24.2 (7.8.12): storeMedia stores into the host's media library, when it has one.
     ...(host.capabilities.includes('media') && host.media ? { media: host.media } : {}),
     ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
@@ -151,8 +161,17 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const sessionEnv = config.sessionEnv;
   await ctx.get('loader')?.await();
   const require = createRequire(config.dshEntry);
-  const { defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
-  const llm = await import(require.resolve('@deepseek-ai/dsh-llm'));
+  // DSH's own libraries are found from its entry; a wrong entry is named as such (no `code`
+  // and no `cause`: it is a configuration error, not a connection-level one).
+  const dshLibrary = name => {
+    try { return require.resolve(name); }
+    catch (error) {
+      throw new Error(`cannot find ${name} from config.dshEntry ${config.dshEntry} (${String(error?.message ?? error).split('\n')[0]});`
+        + ' set dshEntry to the lib/bin.js of the DSH that runs this plugin');
+    }
+  };
+  const { defineTool } = await import(dshLibrary('@deepseek-ai/dsh-tools'));
+  const llm = await import(dshLibrary('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
   // roles() is synchronous and must return a valid table (the loaded one, extended):
   // a Promise or a broken table is refused here, naming it, not met later as a crash.
@@ -166,7 +185,12 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const rootOnly = rootRole === 'director' ? 'Director only. ' : '';
   if (!roles[rootRole]) throw new Error(`directorHost refused: config.rootRole is ${rootRole} but the role table has no ${rootRole}`);
   const promptDir = dirname(config.rolesFile);
-  const runtimeSkill = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
+  // Overfit review 2026-11-24: the steward is told only about what its host can do (重-11), and
+  // the reply phrases and the brief's fixed lines are in the owner's language (重-18); both in
+  // lib/steward-prompt.mjs stewardPromptFor. A 'zh' host with every feature gets its prompt file unchanged.
+  const rolePrompt = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
+  const runtimeSkill = rootRole === 'steward' ? stewardPromptFor(rolePrompt, {
+    features: stewardPromptFeatures(host.capabilities, { memory: config.memory }), language: config.ownerLanguage }) : rolePrompt;
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
   // Step 24.1a (design-steward 7.8.7): a role with `catalog: "host"` (the steward) finds and
   // calls its further tools only in the catalog its host gives for the turn; without such a
@@ -310,6 +334,10 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // that cannot start is {error}: its tools answer that, everything else runs.
   const memory = config.memory ? await openMemory(config.memory, { sessionId: config.sessionId,
     logger: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) }) : undefined;
+  // Overfit review 2026-11-24 (重-10): a host without `memory` has no conversation source of its
+  // own (it records no turn), so the root session's own turns go into memory from here.
+  const turnRecorder = turnRecorderFor({ capabilities: host.capabilities, store: memory?.store, log: line => ctx.logger.warn(line) });
+  if (turnRecorder) ctx.on('session/event', (session, event) => { if (session?.id === config.sessionId) turnRecorder.observe(event); });
   // The plans, and what the host says about the work item each one is named after.
   // The two are read together because every view of "unfinished work" needs both: a
   // plan whose work has settled is not work, and one whose work the host could not
@@ -469,7 +497,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     /** Step 25 C11: one line into a bound group (a group reminder the host posted), through the
      *  same channel send and bridge queue as a group reply: true when the channel took it. */
-    groupSend: (channel, groupRef, text) => channels ? channels.sendGroup(channel, groupRef, text) : Promise.resolve(false),
+    groupSend: (channel, groupRef, text, options) => channels ? channels.sendGroup(channel, groupRef, text, options) : Promise.resolve(false),
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
@@ -617,28 +645,37 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       },
     }));
     const planArgs = new Set(['template', 'params', 'goal', 'attempt_id', 'node_key', 'context_hash', 'base_sha', 'workspace']);
+    // A host whose work items carry no node key or context hash (config.planKeysOptional, the
+    // local host) makes both optional: the plan then binds node_key = attempt_id and the
+    // context hash PLAN_KEYS_UNSET. Any other host keeps both required, as they always were.
+    const keysOptional = config.planKeysOptional === true;
+    const planKeys = args => ['--node-key=' + (keysOptional ? args.node_key || args.attempt_id : args.node_key),
+      '--context-hash=' + (keysOptional ? args.context_hash || PLAN_KEYS_UNSET : args.context_hash)];
+    // DSH's defineTool takes `required: true` or no `required` at all.
+    const planKey = () => keysOptional ? { type: 'string' } : { type: 'string', required: true };
+    const planParameters = () => ({ template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
+      goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: planKey(),
+      context_hash: planKey(), base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } });
     scope.tools.register(defineTool({ name: 'todo_plan',
-      description: texts.tools.todo_plan ?? 'Director only. Freeze the todo plan of a work item before dispatching its native child, by expanding a repository template (see todo_templates) with params bound to that template\'s declared params. context_hash is the one your host returned when the work item started. A wrongly typed, missing or unknown param refuses the plan. Items cannot be supplied: when no template fits, add one under todo_templates/ through a reviewed code change.',
-      parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
-        goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
-        context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
+      description: texts.tools.todo_plan ?? 'Director only. Freeze the todo plan of a work item before dispatching its native child, by expanding a repository template (see todo_templates) with params bound to that template\'s declared params. '
+        + (keysOptional ? 'node_key and context_hash are optional on this host (node_key defaults to attempt_id).' : 'context_hash is the one your host returned when the work item started.')
+        + ' A wrongly typed, missing or unknown param refuses the plan. Items cannot be supplied: when no template fits, add one under todo_templates/ through a reviewed code change.',
+      parameters: planParameters(),
       output: jsonOutput,
       execute: (args, exec) => Object.keys(args).some(key => !planArgs.has(key))
         ? { refused: 'unknown_arguments', reason: `todo_plan takes only ${[...planArgs].join(', ')}; items come from the template`, brief: null }
         : todo.call(args.attempt_id, ['create', '--template=' + args.template, '--params=' + JSON.stringify(args.params),
-        '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
+        '--attempt=' + args.attempt_id, ...planKeys(args),
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
     scope.tools.register(defineTool({ name: 'todo_batch_plan',
       description: texts.tools.todo_batch_plan ?? 'Director only. Freeze a todo BATCH for a work item from a kind: batch template (todo_templates lists find_verify): one find sub-plan per dimension now, one verify sub-plan per finding once every finder passed. Same arguments as todo_plan. dispatch holds the finder prompts, cut to the batch\'s max_parallel (concurrent finders; the rest are pending), each with its prompt_sha256: give each one verbatim to its own new native subagent, followed by a last line "prompt_sha256: <that sha>". A batch template refuses todo_plan, an ordinary template refuses this tool.',
-      parameters: { template: { type: 'string', required: true }, params: { type: 'object', additionalProperties: true, required: true },
-        goal: { type: 'string', required: true }, attempt_id: { type: 'string', required: true }, node_key: { type: 'string', required: true },
-        context_hash: { type: 'string', required: true }, base_sha: { type: 'string', required: true }, workspace: { type: 'string', required: true } },
+      parameters: planParameters(),
       output: jsonOutput,
       execute: (args, exec) => Object.keys(args).some(key => !planArgs.has(key))
         ? { refused: 'unknown_arguments', reason: `todo_batch_plan takes only ${[...planArgs].join(', ')}; sub-plans come from the template`, brief: null }
         : todo.call(args.attempt_id, ['batch-create', '--template=' + args.template, '--params=' + JSON.stringify(args.params),
-        '--attempt=' + args.attempt_id, '--node-key=' + args.node_key, '--context-hash=' + args.context_hash,
+        '--attempt=' + args.attempt_id, ...planKeys(args),
         '--base-sha=' + args.base_sha, '--workspace=' + args.workspace, '--goal=' + args.goal], exec.signal),
     }));
     scope.tools.register(defineTool({ name: 'todo_batch_status',
@@ -817,6 +854,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // Step 24.2 (design-steward 7.8.12): media_call and send_media, when the host has a media library.
     if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
       media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
+    // Step 24.4b (design-steward 7.8.24 "十"): calculate, the host's sandbox (absent: calc_unavailable at call time).
+    if (mediaHost && groupTurns) registerCalcTool(scope, { defineTool, jsonOutput, media: mediaHost, catalog: stewardCatalog, turns: groupTurns });
     if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
       media: directorMedia, rootSession: config.sessionId, projectId: config.projectId, names: DIRECTOR_MEDIA_TOOLS });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
@@ -979,7 +1018,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // groupReplies). An owner turn's words never go to a group.
   if (groupTurns && channels && host.groups) {
     const watch = groupReplies({ turns: groupTurns, reply: args => host.groups.reply(args),
-      sendGroup: (channel, groupRef, text) => channels.sendGroup(channel, groupRef, text), warn: line => ctx.logger.warn(line),
+      sendGroup: (channel, groupRef, text, options) => channels.sendGroup(channel, groupRef, text, options), warn: line => ctx.logger.warn(line),
       mirror: (messageId, text) => channels.ownerMessageSent(messageId, text) });
     ctx.on('session/event', (session, event) => { if (session === agent.session) void watch(event); });
     setTimeout(redeliver, 1000).unref?.();
@@ -1002,6 +1041,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     await handle.dispose();
     await ctx.sessionPersistence.flush();
     await activity.catch(() => {});
+    await turnRecorder?.settled();
     await memory?.store?.close().catch(() => {});
   };
   ctx.on('dispose', close);
@@ -1037,6 +1077,8 @@ export function apply(ctx) {
   // Awaiting loader settlement inside apply would deadlock its own startup. A boot
   // that failed has no event stream to serve, so this process ends - and the record
   // it leaves names the failure class, not only the exit code (iss-6df19ff31a3b449b).
-  void boot(ctx, { channels }).catch(error => startupFailure(ctx, error));
+  // A host that prints no reason of its own (config.startupErrorDetail, the local host) gets the
+  // first line of the error's message printed as well.
+  void boot(ctx, { channels }).catch(error => startupFailure(ctx, error, { detail: ctx.directorHost?.config?.startupErrorDetail === true }));
 }
 

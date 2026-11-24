@@ -519,26 +519,121 @@ def check_url(url: str) -> tuple[str, str, int]:
 # It is judged by the written name; check_url refuses numeric aliases of an address. The
 # browser itself is on its own docker network (steward-browser) with the backend alone, so
 # no other container reaches it around this gateway (deploy/pwmcp/run-pwmcp.sh).
-PRIVATE_ONLY_HOSTS = ("steward-pwmcp",)
+# Step 24.4c (7.8.24 "九" 5): dev-mcp, registered on the dashboard under the written name
+# `dev_mcp`, is private too.
+PRIVATE_ONLY_HOSTS = ("steward-pwmcp", "dev_mcp")
+
+
+def written_host(url) -> str:
+    """The host a connection's address names, as written (lower-cased), or ''."""
+    try:
+        return urlsplit(url).hostname or ""
+    except (TypeError, ValueError):
+        return ""
 
 
 def private_only(url) -> bool:
-    try:
-        return (urlsplit(url).hostname or "") in PRIVATE_ONLY_HOSTS
-    except (TypeError, ValueError):
-        return False
+    return written_host(url) in PRIVATE_ONLY_HOSTS
 
 
 def check_visibility(url, visibility) -> None:
     if visibility == "public" and private_only(url):
-        raise StateGraphError("private_only: the steward's own browser is never public")
+        raise StateGraphError("private_only: this connection is never public")
 
 
-def reserved_addresses(resolver=None) -> set[str]:
+# ---------------------------------------------------------------- dev-mcp (step 24.4c)
+# The one narrow opening for a reserved service (design-steward 7.8.24 "九" 5, risk (y)):
+# a connection is THE dev-mcp connection exactly when its written host is `dev_mcp`
+# (`is_dev_mcp`). Only the owner's dashboard registration of a PRIVATE one, and the
+# gateway opening a session or fetching a file for such a row, may reach dev_mcp's
+# address (`checked_address(..., dev_mcp_ok=True)`); a proposal and OAuth never pass it,
+# so an alias, a numeric address, a tunnel name or an OAuth endpoint stays refused. Its
+# write tools are always outward and egress (an owner confirmation for every call), its
+# subagent_* tools are never allowed or served, and the gateway forwards a call only for
+# a tool pinned on the basic capability `code` (core.state_steward_capabilities.code_pin).
+DEV_MCP_HOST = "dev_mcp"
+# What dev-mcp's own `initialize` reports (its FastMCP server name).
+DEV_MCP_SERVER_NAME = "dev-tools-mcp"
+# The read-only dev-mcp tools. Everything else that `DEV_MCP_PINNABLE` may name is a write
+# tool for the lock: `dev_mcp_writes` derives the locked set from the pin's own list, so a
+# tool added there is outward and egress without a second edit here (a hardcoded name pair
+# that a widened `DEV_MCP_PINNABLE` does not follow leaves the new tool served and pinned
+# unlocked).
+DEV_MCP_READ = ("list_dir", "read_file", "search")
+DEV_MCP_SUBAGENT = "subagent_"
+DEV_MCP_LOCKED = "locked: dev_mcp"
+
+
+def dev_mcp_writes() -> tuple[str, ...]:
+    """The pinnable dev-mcp tools that write: what the pin's list names, minus the read-only
+    ones. Read at call time, so the lock and the pin cannot drift apart."""
+    from core.state_steward_capabilities import DEV_MCP_PINNABLE
+    return tuple(name for name in DEV_MCP_PINNABLE if name not in DEV_MCP_READ)
+
+
+# The value the dev-mcp lock REFUSES for each flag it locks: a save that sends one of these
+# is rejected, so `allowed` may never be true here and outward/egress may never be false. The
+# locked NAMES come from dev_mcp_locked_flags() - the same predicate the owner's projection
+# reports - so a widened pin cannot leave an editable tick in the panel.
+DEV_MCP_LOCKED_VALUES = {"allowed": True, "outward": False, "egress": False}
+
+
+def dev_mcp_locked_flags(raw_name: str) -> tuple[str, ...]:
+    """The ticks the dev-mcp lock holds for one tool: a write tool's outward/egress, a
+    subagent_* tool's `allowed`; no flags for anything else (an ordinary connection calls
+    this only after checking `is_dev_mcp`). Derived from the pin's own write list, so a
+    tool added to `DEV_MCP_PINNABLE` is shown locked by the very rule that locks it."""
+    if raw_name in dev_mcp_writes():
+        return ("outward", "egress")
+    if raw_name.startswith(DEV_MCP_SUBAGENT):
+        return ("allowed",)
+    return ()
+
+
+def dev_mcp_hosts() -> set[str]:
+    """Other names that reach dev-mcp (its tunnel hostnames), set at deploy time in
+    AITELIER_DEV_MCP_HOSTS (comma-separated): a connection written with one is always
+    `reserved_endpoint`."""
+    raw = os.environ.get("AITELIER_DEV_MCP_HOSTS", "")
+    return {name.strip().lower().rstrip(".") for name in raw.split(",") if name.strip()}
+
+
+def is_dev_mcp(row) -> bool:
+    """Whether a connection (a row, or anything with its `url`) is the dev-mcp connection."""
+    return written_host(row["url"]) == DEV_MCP_HOST
+
+
+def dev_mcp_private(row) -> bool:
+    """The one shape dev-mcp may have: written `dev_mcp` and private."""
+    return is_dev_mcp(row) and row["visibility"] == "private"
+
+
+def dev_mcp_server_ok(row, server_name) -> bool:
+    """The upstream's own name (`initialize`'s serverInfo.name) fits the row: the private
+    `dev_mcp` row must be dev-mcp itself, and any other row must not be dev-mcp (a tunnel
+    or an alias the address check could not see)."""
+    name = server_name if isinstance(server_name, str) else ""
+    if dev_mcp_private(row):
+        return name == DEV_MCP_SERVER_NAME
+    return name.strip().casefold() != DEV_MCP_SERVER_NAME
+
+
+def _lock_dev_mcp(conn, conn_id) -> None:
+    """The flags no path may loosen on the dev-mcp connection: its write tools outward
+    and egress, its subagent_* tools not allowed."""
+    writes = dev_mcp_writes()
+    conn.execute(f"UPDATE state_steward_connection_tools SET outward=1, egress=1 WHERE conn_id=? AND raw_name IN "
+                 f"({','.join('?' * len(writes))})", (conn_id, *writes))
+    conn.execute("UPDATE state_steward_connection_tools SET allowed=0 WHERE conn_id=? AND substr(raw_name,1,?)=?",
+                 (conn_id, len(DEV_MCP_SUBAGENT), DEV_MCP_SUBAGENT))
+
+
+def reserved_addresses(resolver=None, *, skip=()) -> set[str]:
     resolver = resolver or RESOLVER
     reserved = set(HOST_LITERALS) | set(host_addresses()) | route_gateways()
     for name in RESERVED_SERVICES + HOST_NAMES:
-        reserved |= _resolve(name, resolver)
+        if name not in skip:
+            reserved |= _resolve(name, resolver)
     return reserved
 
 
@@ -567,20 +662,26 @@ def address_refused(address: str, reserved, *, private_ok: bool) -> bool:
                or (not private_ok and not one.is_global) for one in judged)
 
 
-def checked_address(url: str, resolver=None, *, require=True) -> str | None:
+def checked_address(url: str, resolver=None, *, require=True, dev_mcp_ok=False) -> str | None:
     """Resolve the connection's host and refuse it (`reserved_endpoint`) when any of its
     addresses is the backend, dev_mcp, zvec-grep or the host itself - on any port, by
     the resolved address, never by the written name. Returns the address to connect to
     (the one judged: no second lookup, 7.8.10a), or None when the host does not resolve
-    and `require` is false (a registration may name a server that is not up yet)."""
+    and `require` is false (a registration may name a server that is not up yet).
+    Step 24.4c: with `dev_mcp_ok` (the dashboard's private registration, the gateway for
+    the private `dev_mcp` row) a host written exactly `dev_mcp` may resolve to dev_mcp's
+    own addresses - and only to them; a name in AITELIER_DEV_MCP_HOSTS is always refused."""
     resolver = resolver or RESOLVER
     _scheme, host, _port = check_url(url)
+    if host.rstrip(".") in dev_mcp_hosts():
+        raise StateGraphError("reserved_endpoint")
     found = _resolve(host, resolver)
     if not found:
         if require:
             raise ProbeFailed("unresolvable_host")
         return None
-    reserved = reserved_addresses(resolver)
+    own = dev_mcp_ok is True and host == DEV_MCP_HOST
+    reserved = reserved_addresses(resolver, skip=(DEV_MCP_HOST,) if own else ())
     # The owner names the connection: a container or LAN service is private by nature.
     if any(address_refused(address, reserved, private_ok=True) for address in found):
         raise StateGraphError("reserved_endpoint")
@@ -629,6 +730,14 @@ def effective(conn) -> list[dict]:
         if (c is None or not connection_usable(c) or not row["allowed"] or row["allowed_sha256"] != row["schema_sha256"]
                 or (row["conn_id"], row["raw_name"]) in lost):
             continue
+        locked = is_dev_mcp(c)
+        if locked:
+            # Step 24.4c: only a private dev-mcp's pinnable tools are ever served (never a
+            # subagent_* one), and its write tools always as outward and egress.
+            from core.state_steward_capabilities import DEV_MCP_PINNABLE
+            if c["visibility"] != "private" or row["raw_name"] not in DEV_MCP_PINNABLE:
+                continue
+        write = locked and row["raw_name"] in dev_mcp_writes()
         definition = json.loads(row["definition_json"])
         tool = {"name": f"{row['conn_id']}__{row['gw_name']}", "description": definition.get("description", ""),
                 "inputSchema": definition.get("inputSchema", {"type": "object"})}
@@ -636,7 +745,8 @@ def effective(conn) -> list[dict]:
             if key in definition:
                 tool[key] = definition[key]
         out.append({"tool": tool, "conn_id": row["conn_id"], "raw_name": row["raw_name"], "gw_name": row["gw_name"],
-                    "visibility": c["visibility"], "egress": bool(row["egress"]), "outward": bool(row["outward"]),
+                    "visibility": c["visibility"], "egress": bool(row["egress"]) or write,
+                    "outward": bool(row["outward"]) or write,
                     "blocked_args": json.loads(row["blocked_args"]), "daily_cap": row["daily_cap"]})
     return sorted(out, key=lambda e: e["tool"]["name"])
 
@@ -803,8 +913,10 @@ class StateStewardConnections:
                 raise StateGraphError("invalid_header_name")
         else:
             header_name = None
-        checked_address(url, require=False)
+        # The visibility first: a public dev_mcp is `private_only`, not a reserved address.
         check_visibility(url, visibility)
+        # Step 24.4c: the owner's dashboard is the one place a private dev_mcp is registered.
+        checked_address(url, require=False, dev_mcp_ok=visibility == "private")
         moment = _iso(_utcnow())
         dropped = None
         with self.store.transaction(write=True) as conn:
@@ -847,6 +959,8 @@ class StateStewardConnections:
                     conn.execute("UPDATE state_steward_connection_tools SET egress=1 WHERE conn_id=?", (conn_id,))
                 if reconfirm:
                     conn.execute("UPDATE state_steward_connections SET identity_confirmed=0 WHERE conn_id=?", (conn_id,))
+                if is_dev_mcp({"url": url}):  # an existing connection moved onto dev_mcp keeps no loosened flag
+                    _lock_dev_mcp(conn, conn_id)
                 if moved and old["auth_kind"] == "oauth":
                     # The tokens were issued for the old address: never sent to a new one.
                     conn.execute("UPDATE state_steward_connections SET auth_identity=NULL, identity_confirmed=0 "
@@ -1011,11 +1125,17 @@ class StateStewardConnections:
         if not isinstance(tools, list) or not tools or len(tools) > 500:
             raise StateGraphError("invalid_tools")
         with self.store.transaction(write=True) as conn:
-            self._row(conn, conn_id)
+            locked = is_dev_mcp(self._row(conn, conn_id))
             for item in tools:
                 if not isinstance(item, dict) or not isinstance(item.get("raw_name"), str) or set(item) - {
                         "raw_name", "allowed", "outward", "egress", "blocked_args", "daily_cap", "schema_sha256"}:
                     raise StateGraphError("invalid_tools")
+                # Step 24.4c (7.8.24 "九" 5): dev-mcp's write tools stay outward and egress (every
+                # call confirmed by the owner); its subagent_* tools are never allowed. The
+                # flags come from the same predicate the owner's panel renders as locked.
+                locked_flags = dev_mcp_locked_flags(item["raw_name"]) if locked else ()
+                if any(item.get(flag) is DEV_MCP_LOCKED_VALUES[flag] for flag in locked_flags):
+                    raise StateGraphError(DEV_MCP_LOCKED)
                 row = conn.execute("SELECT * FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?",
                                    (conn_id, item["raw_name"])).fetchone()
                 if row is None:
@@ -1210,18 +1330,23 @@ class StateStewardConnections:
                             (conn_id,)).fetchall()
         lost = _collisions(rows)
         tools = []
+        dev_locked = is_dev_mcp(row)
         for t in rows:
             definition = json.loads(t["definition_json"])
             state = ("collision" if (t["conn_id"], t["raw_name"]) in lost
                      else "changed" if t["allowed_sha256"] and t["allowed_sha256"] != t["schema_sha256"]
                      else "allowed" if t["allowed"] else "new" if not t["allowed_sha256"] else "off")
+            # The panel must not offer a tick the write guard would refuse. Same predicate as
+            # `tools_set`, so showing a flag as locked and enforcing that lock cannot drift.
+            held = dev_mcp_locked_flags(t["raw_name"]) if dev_locked else ()
             tools.append({"raw_name": t["raw_name"], "gw_name": t["gw_name"],
                           "name": public_name(conn_id, t["gw_name"]),
                           "description": definition.get("description", ""), "input_schema": definition.get("inputSchema"),
                           "annotations": definition.get("annotations"), "schema_sha256": t["schema_sha256"],
                           "allowed": bool(t["allowed"]), "outward": bool(t["outward"]), "egress": bool(t["egress"]),
                           "blocked_args": json.loads(t["blocked_args"]), "daily_cap": t["daily_cap"],
-                          "first_seen_at": t["first_seen_at"], "last_seen_at": t["last_seen_at"], "state": state})
+                          "first_seen_at": t["first_seen_at"], "last_seen_at": t["last_seen_at"], "state": state,
+                          "locked": list(held), "locked_reason": "dev_mcp" if held else None})
         answer = {"conn_id": conn_id, "instructions": row["instructions"], "last_probe_at": row["last_probe_at"],
                   "last_error": row["last_error"], "tools": tools}
         if not instructions:
@@ -1264,13 +1389,21 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
         if row is None:
             return {"conn_id": conn_id, "gone": True}
         before = current_hash(conn)
+        locked = is_dev_mcp(row)
         for raw, (text, definition) in parsed.items():
+            if locked and "annotations" in definition:
+                # Step 24.4c: dev-mcp's own hints are not read, so they are not stored either -
+                # neither the steward's `tools/list` nor the owner's panel shows dev-mcp's claim
+                # about itself (its `bash` claims `readOnlyHint: true`).
+                definition = {k: v for k, v in definition.items() if k != "annotations"}
+                text = definition_json(definition)
             digest = sha256_text(text)
             old = conn.execute("SELECT definition_json,blocked_args FROM state_steward_connection_tools "
                                "WHERE conn_id=? AND raw_name=?", (conn_id, raw)).fetchone()
             if old is None:
                 annotations = definition.get("annotations") or {}
-                outward = 0 if annotations.get("readOnlyHint") is True else 1
+                # Step 24.4c: dev-mcp's own hints are not read; every new tool starts outward.
+                outward = 0 if annotations.get("readOnlyHint") is True and not locked else 1
                 blocked = _url_params(definition["inputSchema"]) if row["visibility"] == "public" else []
                 conn.execute("INSERT INTO state_steward_connection_tools(conn_id,raw_name,gw_name,definition_json,"
                              "schema_sha256,allowed,allowed_sha256,outward,egress,blocked_args,daily_cap,first_seen_at,"
@@ -1289,6 +1422,8 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
                                    (conn_id,)).fetchall():
             if raw not in parsed:
                 conn.execute("DELETE FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?", (conn_id, raw))
+        if is_dev_mcp(row):
+            _lock_dev_mcp(conn, conn_id)
         conn.execute("UPDATE state_steward_connections SET last_probe_at=?, last_error=NULL, instructions=? "
                      "WHERE conn_id=?", (moment, (instructions or None) and str(instructions)[:8192], conn_id))
         changed = current_hash(conn) != before

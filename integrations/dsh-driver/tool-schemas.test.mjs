@@ -32,6 +32,7 @@ import { registerProposalTools } from '../dsh-director/lib/proposals.mjs';
 import { registerPortfolioTools } from '../dsh-director/lib/portfolio.mjs';
 import { installToolDiscovery } from '../dsh-director/lib/tool-discovery.mjs';
 import { registerDirectorMediaCall, registerMediaTools } from '../dsh-director/lib/media-tools.mjs';
+import { registerCalcTool } from '../dsh-director/lib/calc-tool.mjs';
 import { DIRECTOR_MEDIA_TOOLS } from '../dsh-director/index.mjs';
 
 const jsonOutput = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] };
@@ -72,6 +73,8 @@ test('every tool registrar of the steward and the director is accepted by the pi
       roles: { director: role, steward: { ...role, catalog: 'host' }, worker: role }, catalog: () => new Set() });
   registerMediaTools(scopeOf('media'), { ctx, defineTool: checked('media'), jsonOutput, HarnessError: Error,
     media: {}, catalog, turns, channels: undefined, ledger: {} });
+  // Step 24.4b: calculate (files: an array of refs).
+  registerCalcTool(scopeOf('calc'), { defineTool: checked('calc'), jsonOutput, media: {}, catalog, turns });
   // Step 24.2b: a director's media_call (no catalog, its own few tools).
   registerDirectorMediaCall(scopeOf('director-media'), { ctx, defineTool: checked('director-media'), jsonOutput, HarnessError: Error,
     media: {}, rootSession: 's', projectId: 'p', names: DIRECTOR_MEDIA_TOOLS });
@@ -90,5 +93,6 @@ test('every tool registrar of the steward and the director is accepted by the pi
   // Step 24.2c: read_document is registered whatever the host has (media: {} here), so its schema is checked too.
   // Step 24.2d: make_document too (its rows: arrays of string-or-number cells).
   assert.deepEqual(by('media'), ['make_document', 'media_call', 'read_document', 'send_media']);
+  assert.deepEqual(by('calc'), ['calculate']);
   assert.deepEqual(by('director-media'), ['media_call']);
 });

@@ -85,6 +85,7 @@ from starlette.websockets import WebSocketClose
 
 from api import authz
 from core import media_types
+from core import state_steward_capabilities as caps
 from core import state_steward_confirmations as sconf
 from core import state_steward_connections as sc
 from core import steward_oauth
@@ -350,7 +351,9 @@ class Upstream:
         self.task: asyncio.Task | None = None
 
     async def open(self):
-        address = await asyncio.to_thread(sc.checked_address, self.row["url"])
+        # Step 24.4c: dev_mcp's address only for the private `dev_mcp` row (7.8.24 "九" 5).
+        address = await asyncio.to_thread(lambda: sc.checked_address(
+            self.row["url"], dev_mcp_ok=sc.dev_mcp_private(self.row)))
         headers, auth = {}, None
         if self.row["auth_kind"] == "header":
             secret = await asyncio.to_thread(sc.read_secret, self.conn_id) or {}
@@ -376,6 +379,14 @@ class Upstream:
                 async with streamable_http_client(self.row["url"], http_client=client) as (read, write, _sid):
                     async with ClientSession(read, write, message_handler=self._message) as session:
                         result = await session.initialize()
+                        # Step 24.4c: the server's own name must fit the row - dev-mcp only behind
+                        # the private `dev_mcp` row, nothing else there (a tunnel, an alias).
+                        server = getattr(getattr(result, "serverInfo", None), "name", None)
+                        if not sc.dev_mcp_server_ok(self.row, server):
+                            self.error = "reserved_endpoint"
+                            logger.info("steward gateway: %s refused: its server name does not fit (dev-mcp)",
+                                        self.conn_id)
+                            return
                         self.instructions = getattr(result, "instructions", None)
                         self.session = session
                         self.ready.set()
@@ -772,6 +783,15 @@ class Gateway:
                     return "tool_not_allowed", None, None, None, None, None
                 if row["visibility"] == "private" and sc.audience_of(conn) != "owner":
                     return "not_visible_in_this_turn", None, None, None, None, None
+                if sc.is_dev_mcp(row):
+                    # Step 24.4c (7.8.24 "九" 5): private only, never a subagent_* tool, only a
+                    # tool the owner pinned on `code`, and a write tool always outward (the
+                    # owner confirms every call) whatever its stored flag says.
+                    if (row["visibility"] != "private" or entry["raw_name"].startswith(sc.DEV_MCP_SUBAGENT)
+                            or not caps.code_pin(conn, row["conn_uid"], entry["raw_name"])):
+                        return "tool_not_allowed", None, None, None, None, None
+                    if entry["raw_name"] in sc.dev_mcp_writes():
+                        entry = {**entry, "outward": True, "egress": True}
                 if sc.blocked_present(arguments, entry["blocked_args"]) or (
                         row["visibility"] == "public"
                         and sc.url_argument_present(arguments, sc.unblocked_url_paths(entry))):
@@ -1051,7 +1071,7 @@ async def fetch(conn_id: str, request: Request, url: str = ""):
     try:
         # The url's origin is the connection's own (checked above), so the address is the one the
         # connection's own host resolves to - judged the same way as its upstream session's.
-        address = await asyncio.to_thread(sc.checked_address, row["url"])
+        address = await asyncio.to_thread(lambda: sc.checked_address(row["url"], dev_mcp_ok=sc.dev_mcp_private(row)))
     except (StateGraphError, sc.ProbeFailed) as exc:
         return _fetch_refused(403, getattr(exc, "code", None) or str(exc).split(":")[0])
     # No upstream credential: no header, no oauth token, no cookie - a bare client.

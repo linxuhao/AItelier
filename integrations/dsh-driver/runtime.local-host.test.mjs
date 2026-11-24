@@ -96,10 +96,13 @@ test('real pinned DSH: dsh-director with its built-in local host, no AItelier: h
       "export const name = 'probe-host'; export const inject = [];",
       'export function apply(ctx, { probeFile, ...config }) {',
       '  const host = localHost(config);',
-      "  host.capabilities = [...host.capabilities, 'install'];",
+      // The local host has an install() of its own (its startup checks): the probe runs first, then it.
+      "  const own = host.install;",
+      "  host.capabilities = [...new Set([...host.capabilities, 'install'])];",
       '  host.install = async api => {',
       "    let refusal = ''; try { await api.notify('too early'); } catch (error) { refusal = String(error.message); }",
       '    writeFileSync(probeFile, JSON.stringify({ keys: Object.keys(api), refusal, agentUndefined: api.agent === undefined }));',
+      '    await own?.(api);',
       '  };',
       "  ctx.provide('directorHost', host);",
       '}'].join('\n'));

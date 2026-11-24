@@ -177,6 +177,11 @@ def _ensure_host_dirs() -> None:
         for rel in (".local/share/dsh-director/media",
                     ".local/share/aitelier/media-staging"):
             (Path.home() / rel).mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Step 24.1a: the steward's connection secrets (rw), at the path compose
+        # mounts them from.
+        Path(os.environ.get("AITELIER_STEWARD_SECRETS_HOST_DIR")
+             or (Path.home() / ".local/share/aitelier/steward-mcp-secrets")).expanduser().mkdir(
+                 mode=0o700, parents=True, exist_ok=True)
     except OSError:
         pass          # let Docker report it in its own terms
     try:

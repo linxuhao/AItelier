@@ -24,6 +24,8 @@ import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/por
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { CHANNEL_LIMITS } from '../dsh-director/lib/channels.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
+// The zone the runtime falls back to when the unit names none (overfit review 次-1).
+const HOST_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const text = readFileSync(new URL('../dsh-director/roles.json', import.meta.url), 'utf8');
 const table = loadRoles();
@@ -288,10 +290,27 @@ const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_D
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });
 
+test('a host zone Intl cannot use is no memory zone: the plugin keeps its UTC instead of refusing the memory (overfit fix round)', async () => {
+  // TZ= (empty) makes Node resolve 'Etc/Unknown', which memory.timeZone refuses; the zone is
+  // read once at import, so each case is its own process.
+  const { spawnSync } = await import('node:child_process');
+  const script = `import { aitelierHost } from ${JSON.stringify(new URL('./runtime.mjs', import.meta.url).href)};
+    process.stdout.write(JSON.stringify(aitelierHost(${JSON.stringify(env({ AITELIER_DSH_ROLE: 'steward' }))}).config.memory));`;
+  const memoryUnder = (TZ) => {
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, TZ }, encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  };
+  assert.deepEqual(memoryUnder(''), { userId: 'owner' }, 'TZ= : no zone, the plugin uses UTC');
+  assert.deepEqual(memoryUnder('Europe/Paris'), { userId: 'owner', timeZone: 'Europe/Paris' }, 'a real host zone is kept');
+});
+
 test('the AItelier host started as the steward: steward root, memory, portfolio and handoff, no full access; a director host is unchanged', () => {
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }));
   assert.equal(steward.config.rootRole, 'steward');
-  assert.deepEqual(steward.config.memory, { userId: 'owner' });
+  // No AITELIER_DSH_MEMORY_TZ: the host's own zone, not the plugin's UTC (overfit review 次-1).
+  assert.deepEqual(steward.config.memory, { userId: 'owner', timeZone: HOST_TIME_ZONE });
+  assert.ok(HOST_TIME_ZONE, 'the test host names a time zone');
   // Step 21: the owner's time zone reaches memory.timeZone from AITELIER_DSH_MEMORY_TZ.
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_TZ: 'Europe/Paris' })).config.memory,
     { userId: 'owner', timeZone: 'Europe/Paris' });
@@ -299,9 +318,9 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   // Step 21: the local vector channel from AITELIER_DSH_MEMORY_VECTOR_URL / _MODEL, only with a url.
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_URL: 'http://127.0.0.1:18751',
     AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
-    { userId: 'owner', vector: { url: 'http://127.0.0.1:18751', model: 'bge-m3-q8_0' } });
+    { userId: 'owner', timeZone: HOST_TIME_ZONE, vector: { url: 'http://127.0.0.1:18751', model: 'bge-m3-q8_0' } });
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
-    { userId: 'owner' }, 'no url, no vector channel');
+    { userId: 'owner', timeZone: HOST_TIME_ZONE }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-7), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']);
   // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience
@@ -1315,6 +1334,9 @@ test('step 24 (7.8.9): a group requester\'s confirmation goes only into that gro
     requester_message_id: 'gq2', audience: 'group', question_ids: ['gq1', 'gq2'] }]]);
   assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }), { group_ref: 'r1', sent: true });
   assert.deepEqual(groupSent, [['wechat', 'r1', 'T']]);
+  // Step 23 Slack (D8): the asker's question's channel ref goes with it, so a channel that threads answers under it.
+  await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'slack', groupRef: 'C1', replyToRef: 'C1:1763481600.000300' });
+  assert.deepEqual(groupSent.at(-1), ['slack', 'C1', 'T', { replyToRef: 'C1:1763481600.000300' }]);
   assert.equal(calls.length, 1, 'nothing written into the owner\'s conversation');
   took = false;
   assert.deepEqual(await confirm.deliver({ code: 'K7Q2A', text: 'T', replyTo: 'gq2', channel: 'wechat', groupRef: 'r1' }),
@@ -2056,4 +2078,27 @@ test('24.2b: the steward\'s send_user_message has no attachments parameter and n
   assert.doesNotMatch(steward.description, /attachment|30 days|WeChat or Slack/);
   assert.equal(steward.attachments, false);
   assert.equal(sendUserMessageTool({ steward: false, library }).attachments, true, 'a director with the same library has them');
+});
+
+test('overfit review 2026-11-24 (重-10, 重-11): on the AItelier host the steward\'s prompt is steward.md as at a1416299ee, byte for byte, and the plugin records no turn of its own', async () => {
+  const { createHash } = await import('node:crypto');
+  const { stewardPromptFor, stewardPromptFeatures } = await import('../dsh-director/lib/steward-prompt.mjs');
+  const { turnRecorderFor } = await import('../dsh-director/lib/memory/turns.mjs');
+  const sha = text => createHash('sha256').update(text, 'utf8').digest('hex');
+  // What index.mjs assembled at a1416299ee: steward.md read whole (the fixture is that file, `git show`n).
+  const base = readFileSync(new URL('./test-fixtures/steward.md.a1416299ee', import.meta.url), 'utf8');
+  assert.equal(sha(base), '9439656623c12e3f383adb7fac6f3762f49aa6d2319dda7aa2b411ada4385ab3', 'the fixture is the base\'s steward.md');
+  const now = readFileSync(new URL('../dsh-director/steward.md', import.meta.url), 'utf8');
+  // With and without the media library (the only part of the steward's capability list an environment changes).
+  // A 'zh' owner (AITELIER_OWNER_LANGUAGE=zh, the language steward.md is written for); the test names it, never reading a .env.
+  for (const extra of [{}, { AITELIER_MEDIA_ROOT: mkdtempSync(join(tmpdir(), 'steward-media-')) }]) {
+    const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_OWNER_LANGUAGE: 'zh', ...extra }));
+    assert.equal(host.config.ownerLanguage, 'zh');
+    // What index.mjs assembles now: the same call, on this host's capabilities, memory config and owner's language.
+    const assembled = stewardPromptFor(now, { features: stewardPromptFeatures(host.capabilities, { memory: host.config.memory }),
+      language: host.config.ownerLanguage });
+    assert.equal(sha(assembled), sha(base), JSON.stringify(host.capabilities));
+    // The host records its owner's turns (syncConversation): the plugin adds no second writer.
+    assert.equal(turnRecorderFor({ capabilities: host.capabilities, store: { recordTurn: async () => ({}) } }), undefined);
+  }
 });

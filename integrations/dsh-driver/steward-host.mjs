@@ -2,12 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { withoutLeadingClockLines, DORMANT_MIN_MINUTES, DORMANT_MAX_MINUTES } from '../dsh-director/lib/core.mjs';
 import { attachmentLine, MEDIA_LIMITS, sniff } from '../dsh-director/lib/media.mjs';
 import { chmod, lstat, mkdir, mkdtemp, open as openFile, readFile, rm, stat } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, readFileSync } from 'node:fs';
 import { spawn as spawnChild } from 'node:child_process';
 import { basename, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { wakeTakesImages } from './model.mjs';
 import { officeMediaOps } from './office.mjs';
+import { calcMediaOps } from './calc.mjs';
 import { HOST_TOOLS } from '../dsh-director/lib/basics.mjs';
 
 /** The AItelier side of the steward (plugin step 12, design-steward 4): its owner's
@@ -253,10 +254,12 @@ export async function openProposals(request, signal) {
 /** Step 24.4 (design-steward 7.8.24 "八"): the host's basic-capabilities self-checks for the
  *  driver status line, from closed codes only ('' when all are fine): the PDF reader's self-check
  *  failed, the office converter's did (an office converter with no image configured is off, not
- *  failed), the owner's memory did not open. A check still pending says nothing yet. */
-export function basicsFlag({ pdf, office, memoryError } = {}) {
+ *  failed), the owner's memory did not open, and (step 24.4b) calculate's sandbox failed its
+ *  self-check (likewise off without an image). A check still pending says nothing yet. */
+export function basicsFlag({ pdf, office, calc, memoryError } = {}) {
   const codes = [...(pdf?.state === 'unavailable' ? ['pdf_reader_unavailable'] : []),
     ...(office?.state === 'unavailable' && office.reason !== 'no_image_configured' ? ['office_unavailable'] : []),
+    ...(calc?.state === 'unavailable' && calc.reason !== 'no_image_configured' ? ['calc_unavailable'] : []),
     ...(memoryError ? ['memory_unavailable'] : [])];
   return codes.length ? 'basics: ' + codes.join('; ') : '';
 }
@@ -993,7 +996,7 @@ const OWNER_MEDIA_SUBJECTS = { image: 'Image', voice: 'Voice message', file: 'Fi
  *  readDocument(ref, {pages, images, maxPages}, signal); `routeInput` (the adapter's
  *  route-input cache) gives takesImages(signal) - whether read_document renders page images,
  *  the same judgement as a wake's native images (the plugin has no route input of its own). */
-export function mediaOps({ request, library, gatewayFetch, owner, reader, routeInput, office }) {
+export function mediaOps({ request, library, gatewayFetch, owner, reader, routeInput, office, calc }) {
   // Step 24.2d (design-steward 7.8.12c): with the office converter, readDocument also reads a docx,
   // pptx or xlsx, and makeDocument makes one (office.mjs officeMediaOps).
   const documents = reader || office ? officeMediaOps({ library, reader, office }) : undefined;
@@ -1001,6 +1004,8 @@ export function mediaOps({ request, library, gatewayFetch, owner, reader, routeI
     ...(owner ? { sendToOwner: (file, signal) => sendMediaToOwner({ ...owner, library }, file, signal) } : {}),
     ...(documents ? { readDocument: documents.readDocument } : {}),
     ...(office ? { makeDocument: documents.makeDocument } : {}),
+    // Step 24.4b (design-steward 7.8.24 "十"): calculate's sandbox (calc.mjs calcMediaOps).
+    ...(calc ? calcMediaOps({ library, calc }) : {}),
     ...(routeInput ? { takesImages: async signal => wakeTakesImages(await routeInput(signal)) } : {}),
     ingest: (meta, open, options) => library.ingest(meta, open, options),
     resolve: async ref => library.lookup(ref),
@@ -1630,17 +1635,22 @@ export function stateRefusal(error) {
  *  chat channel's requester the channel took it (the mirror is awaited, not fired). A
  *  family-group requester's text (`groupRef`; the backend already stored it as the group's
  *  outbound row, request key confirm:<code>) goes only into that group through `groupSend`
- *  (the plugin's group send, the bridge's queue), never into the owner's conversation. */
+ *  (the plugin's group send, the bridge's queue), never into the owner's conversation - with the
+ *  asker's question's channel ref (`replyToRef`, step 23 Slack D8) so a channel that threads
+ *  answers under it. */
 export function confirmOps(request, { project, mirror = () => {}, groupSend }) {
   return {
     create: ({ name, arguments: args, requesterMessageId, audience, questionIds }, signal) =>
       request('/api/state/commands/create_steward_confirmation', { name, arguments: args,
         requester_message_id: requesterMessageId, audience, ...(questionIds ? { question_ids: questionIds } : {}) }, signal)
         .then(r => r?.result ?? r, stateRefusal),
-    async deliver({ code, text, replyTo, channel, groupRef }, signal) {
+    async deliver({ code, text, replyTo, channel, groupRef, replyToRef }, signal) {
       if (groupRef) {
         let ok = false;
-        try { ok = typeof groupSend === 'function' && await groupSend(channel, groupRef, text) === true; } catch { ok = false; }
+        try {
+          ok = typeof groupSend === 'function'
+            && await groupSend(channel, groupRef, text, ...(typeof replyToRef === 'string' && replyToRef ? [{ replyToRef }] : [])) === true;
+        } catch { ok = false; }
         return ok ? { group_ref: groupRef, sent: true } : { refused: 'not_delivered', reason: 'group_send_failed' };
       }
       let sent;
@@ -1877,4 +1887,27 @@ export function stewardOps({ request, rawRequest = request, project, me, stateDi
       return { handed_off: true, project_id: projectId, cites_user_message_id: citesUserMessageId, ...sent };
     },
   };
+}
+
+/** The owner's language (core/owner_text.py, AITELIER_OWNER_LANGUAGE): the environment's -
+ *  core/dsh_driver.py passes it resolved - else the line of the .env file `dotenv` names, read
+ *  with core/dotenv_boot.py's grammar (first assignment wins; `export ` and surrounding quotes
+ *  dropped), so a driver a host supervisor older than that pass starts still follows the one
+ *  setting. Only the entry (runtime.mjs apply) names a file - this checkout's .env - so no
+ *  test reads it (core/dotenv_boot.py: configuration belongs to the process you started).
+ *  Undefined (unset, empty, no file named or readable): the plugin's default, English. */
+export function ownerLanguageSetting(env, dotenv) {
+  if (typeof env.AITELIER_OWNER_LANGUAGE === 'string') return env.AITELIER_OWNER_LANGUAGE || undefined;
+  if (dotenv === undefined) return undefined;
+  let text;
+  try { text = readFileSync(dotenv, 'utf8'); } catch { return undefined; }
+  for (const raw of text.split('\n')) {
+    const line = (raw.endsWith('\r') ? raw.slice(0, -1) : raw).trim();
+    const at = line.indexOf('=');
+    if (!line || line.startsWith('#') || at < 0) continue;
+    let key = line.slice(0, at).trim();
+    if (key.startsWith('export ')) key = key.slice('export '.length);
+    if (key === 'AITELIER_OWNER_LANGUAGE') return line.slice(at + 1).trim().replace(/^["']+|["']+$/g, '') || undefined;
+  }
+  return undefined;
 }

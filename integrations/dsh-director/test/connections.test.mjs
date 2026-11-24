@@ -10,7 +10,10 @@ import { join } from 'node:path';
 import { StewardCatalog } from '../lib/catalog.mjs';
 import { registerConnectionTools } from '../lib/connections.mjs';
 import { PROPOSAL_KINDS, registerProposalTools } from '../lib/proposals.mjs';
-import { channelReplies } from '../lib/channels.mjs';
+import { OWNER_TEXTS } from '../lib/owner-text.mjs';
+
+// The lines a 'zh' owner gets (lib/owner-text.mjs).
+const channelReplies = OWNER_TEXTS.zh.replies;
 
 const CACHE = {
   connections: [{ conn_id: 'media', conn_uid: 'u'.repeat(32), config_version: 3, label: 'Media', url: 'http://mcp_server:9003/mcp',

@@ -47,9 +47,13 @@ services:
       core: 0
     # Run as the host user → files written into ~/.AItelier keep host ownership.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
+    # zvec-grep is OPTIONAL (profile `zvec-grep`, see that service): a clean
+    # checkout has no image for it, so the backend must start without it.
+    # With the profile active this waits for it exactly as before.
     depends_on:
       zvec-grep:
         condition: service_healthy
+        required: false
     environment:
       # Path.home() resolves from HOME on POSIX → keep it == the host home dir.
       HOME: ${HOME}
@@ -61,6 +65,9 @@ services:
       # docker gateways are reserved without them) no steward connection may resolve
       # to. Set in .env; see .env.example.
       AITELIER_STEWARD_HOST_ADDRESSES: "${AITELIER_STEWARD_HOST_ADDRESSES:-}"
+      # Step 24.4c (design-steward 7.8.24): dev-mcp's tunnel hostnames; a steward connection
+      # written with one is always refused (reserved_endpoint). Set in .env; see .env.example.
+      AITELIER_DEV_MCP_HOSTS: "${AITELIER_DEV_MCP_HOSTS:-}"
       # Step 24.1a (design-steward 7.8.5, director 487): the steward's MCP gateway
       # (/api/steward/mcp) is served ONLY on this second listener, which the backend
       # opens in its own process; 4444 answers 404 for it. Published below on the
@@ -72,7 +79,9 @@ services:
       AITELIER_PUBLIC_BASE_URL: "${AITELIER_PUBLIC_BASE_URL:-}"
       # MCP Host allowlist is operator-configurable; `:*` is FastMCP's official
       # wildcard-port form, so the public bare host and explicit ports pass.
-      AITELIER_MCP_ALLOWED_HOSTS: "${AITELIER_MCP_ALLOWED_HOSTS:-aitelier.linxuhao.app,aitelier.linxuhao.app:*}"
+      # Empty (the default) answers only loopback and the docker network names;
+      # set your public hostname in .env (see .env.example).
+      AITELIER_MCP_ALLOWED_HOSTS: "${AITELIER_MCP_ALLOWED_HOSTS:-}"
       # How many DIFFERENT projects the poller may advance per tick. The poll
       # takes this many active candidates, skips the ones whose per-project tick
       # lock is held, and asyncio.gathers the rest — so this is the real
@@ -102,7 +111,11 @@ services:
       # (Python/web) projects never call it.
       GODOT_BUILDER_URL: "http://godot-builder:8080"
       AITELIER_HOME: "${HOME}/.AItelier"
-      AITELIER_ZVEC_LIFECYCLE: "1"
+      # Run-index lifecycle for the zvec-grep sidecar. Off unless the sidecar
+      # runs: with nothing serving it, every first semantic_search of a run
+      # would wait the whole budget below for an index nobody builds. Set
+      # AITELIER_ZVEC_LIFECYCLE=1 in .env together with COMPOSE_PROFILES=zvec-grep.
+      AITELIER_ZVEC_LIFECYCLE: "${AITELIER_ZVEC_LIFECYCLE:-0}"
       # A run's first semantic_search waits this long for its index build
       # (measured ready 14-37s after run start when the 10s default failed).
       AITELIER_ZVEC_PREPARE_WAIT_SECONDS: "60"
@@ -191,7 +204,8 @@ services:
       # Loopback-only: the host CLI uses localhost:4444; the public path is via
       # cloudflared over the 'edge' network (aitelier:4444). Binding to 0.0.0.0
       # would let any LAN client reach the backend directly, bypassing Cloudflare.
-      - "127.0.0.1:4444:4444"
+      # The host side follows AITELIER_PORT, the variable the CLI connects to.
+      - "127.0.0.1:${AITELIER_PORT:-4444}:4444"
       # The steward's gateway (AITELIER_STEWARD_GATEWAY_PORT above): loopback ONLY,
       # never a LAN or tailnet address - no container and no other machine reaches
       # it through the host.
@@ -252,7 +266,18 @@ services:
   # It never scans historical run worktrees. Existing project/root indexes are
   # retained; the host reconciles only recorded active runs and owned releases.
   # See docs/semantic-index-activation.md for the guarded migration.
+  #
+  # OPTIONAL, behind the compose profile `zvec-grep`: the pinned image below
+  # exists only where it was built (it is not published, and a fresh
+  # docker/zvec-grep.Dockerfile build fails since 2026-11-20, see that file), so
+  # a default `docker compose up -d` neither needs nor starts it. A deployment
+  # that has the image opts in with two lines in .env:
+  #   COMPOSE_PROFILES=zvec-grep
+  #   AITELIER_ZVEC_LIFECYCLE=1
+  # Without them semantic_search answers that semantic search is unavailable
+  # and every other tool works.
   zvec-grep:
+    profiles: ["zvec-grep"]
     # The accepted semantic worker image (fbe0 worker over upstream @zvec/zvec-grep
     # 0.2.2), built offline. Pinned by digest and deliberately WITHOUT a build
     # stanza: `up --build` (the CLI uses it when dependencies change) cannot swap
@@ -275,6 +300,10 @@ services:
     container_name: aitelier-zg
     environment:
       AITELIER_HOME: "${HOME}/.AItelier"
+      # The sidecar's own home, from the invoking user's HOME (the image's baked
+      # value is only the fallback for an image-only run).
+      HOME: "${HOME}/.AItelier/zvec-grep-home"
+      ZVEC_GREP_HOME: "${HOME}/.AItelier/zvec-grep-home"
       AITELIER_PROJECTS_DIR: "${HOME}/.AItelier/projects"
       AITELIER_WORKTREES_DIR: "${HOME}/.AItelier/worktrees"
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"

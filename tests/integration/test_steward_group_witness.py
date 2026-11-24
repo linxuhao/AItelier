@@ -55,7 +55,9 @@ from api.dependencies import get_db_manager
 from api.main import app
 from core import cf_access, drivers
 from core.state_service import StateService
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import OWNER, world  # noqa: F401
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_groups import MEMBER, OWNER_WX, ROOM, bound_group
 
 HEADER = {"X-AItelier-Read-As": "public"}

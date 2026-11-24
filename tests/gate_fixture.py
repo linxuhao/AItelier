@@ -36,11 +36,12 @@ HARNESS = Path(__file__).resolve().parents[1] / "docker" / "godot" / "godot_harn
 HOLDER = "op-holder"
 
 GATE_PY = r'''
-import json, os, sys, tempfile, urllib.error, urllib.request
+import json, os, sys, tempfile, time, urllib.error, urllib.request
 
 builder = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 client_timeout = float(os.environ.get("FIXTURE_GATE_CLIENT_TIMEOUT", "60"))
 noise = int(os.environ.get("FIXTURE_GATE_NOISE", "0"))
+post_delay = float(os.environ.get("FIXTURE_GATE_POST_DELAY_SEC", "0"))
 op = os.environ.get("FIXTURE_GATE_OP") or os.path.basename(os.getcwd())
 
 parent = os.environ.get("GATE_REPORT_DIR") or tempfile.gettempdir()
@@ -70,6 +71,12 @@ req = urllib.request.Request(builder.rstrip("/") + "/script",
                              data=json.dumps(payload).encode(),
                              headers={"Content-Type": "application/json"},
                              method="POST")
+# The directory above is only a PRE-POST marker. A slow-POST arm holds the
+# request back for longer than a test's fixed hold window: a witness that
+# sleeps from the marker releases the render owner before this request can
+# queue, while a witness that watches the harness queue still sees it arrive.
+if post_delay > 0:
+    time.sleep(post_delay)
 try:
     with urllib.request.urlopen(req, timeout=client_timeout) as r:
         report = json.loads(r.read())
@@ -141,6 +148,22 @@ class HarnessRig:
         self.rendered: list = []
         self.script_report = green_report()
         self._lock = threading.Lock()
+        # The harness's own view of ARRIVAL: a non-holder request finds the
+        # live render owner in the way and is queued behind it. The fixture
+        # observes that failure instead of guessing from a pre-POST marker or
+        # from a fixed sleep.
+        self.queued = threading.Event()
+        real_acquire = gh.acquire_render_owner
+
+        def observed_acquire(project_id, run_id, operation_id, **kwargs):
+            try:
+                return real_acquire(project_id, run_id, operation_id, **kwargs)
+            except gh.RenderOwnerConflict:
+                if operation_id != HOLDER:
+                    self.queued.set()
+                raise
+
+        monkeypatch.setattr(gh, "acquire_render_owner", observed_acquire)
 
         def run_script(_proj, _scripts, timeout=600):
             active = [r for r in gh.render_owner_snapshot() if r["status"] == "active"]
@@ -164,6 +187,16 @@ class HarnessRig:
     def entered_event(self, op: str) -> threading.Event:
         with self._lock:
             return self.entered.setdefault(op, threading.Event())
+
+    def await_queued_request(self, timeout: float) -> bool:
+        """Wait for a request to REACH the harness queue behind the holder.
+
+        `timeout` is a ceiling, never the verdict: the caller still asserts a
+        fact about the harness (the request queued, so the wait it measures is
+        the product's). A witness that waited on a multiple of the render
+        poll would only be measuring the host's scheduler.
+        """
+        return self.queued.wait(timeout)
 
     def hold(self) -> None:
         """Put a live render in flight under another owner, and wait for it."""

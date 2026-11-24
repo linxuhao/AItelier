@@ -37,7 +37,10 @@ import '../dsh-director/test/memory-vector.test.mjs';
 import '../dsh-director/test/memory-perf.test.mjs';
 import '../dsh-director/test/memory-grep-helper.test.mjs';
 import '../dsh-director/test/steward-tools.test.mjs';
+import '../dsh-director/test/steward-prompt.test.mjs';
+import '../dsh-director/test/memory-turns.test.mjs';
 import '../dsh-director/test/channels.test.mjs';
+import '../dsh-director/test/owner-text.test.mjs';
 import '../dsh-director/test/clock.test.mjs';
 import '../dsh-director/test/group-turns.test.mjs';
 import '../dsh-director/test/catalog.test.mjs';
@@ -50,6 +53,7 @@ import '../dsh-director/test/read-document.test.mjs';
 import '../dsh-director/test/group-wake-images.test.mjs';
 import '../dsh-director/test/office.test.mjs';
 import '../dsh-director/test/make-document.test.mjs';
+import '../dsh-director/test/calc-tool.test.mjs';
 import { walk } from '../dsh-director/test/boundary.test.mjs';
 import { adapterVocabulary, adapterPattern } from './plugin-vocabulary.mjs';
 

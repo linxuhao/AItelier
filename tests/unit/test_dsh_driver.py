@@ -626,7 +626,33 @@ def test_native_spawn_and_fork_use_worker_without_changing_the_director(runtime)
     assert runtime.get("alpha")["model"] == "driver"
 
 
-def test_local_mcp_servers_are_registered_by_default(runtime):
+# The four optional local services, as an operator's host service names them
+# (none has a built-in URL: overfit review 2026-11-24, 次-3).
+LOCAL_MCP = {"devmcp": "http://127.0.0.1:7676/mcp", "zvec": "http://127.0.0.1:7999/mcp",
+             "agentmcp": "http://127.0.0.1:9003/mcp", "pwmcp": "http://127.0.0.1:8931/mcp"}
+
+
+@pytest.fixture
+def local_mcp(monkeypatch):
+    for server, url in LOCAL_MCP.items():
+        monkeypatch.setenv("AITELIER_DSH_MCP_" + server.upper(), url)
+    return LOCAL_MCP
+
+
+def test_no_local_mcp_server_is_registered_unless_its_url_is_configured(runtime, monkeypatch):
+    """No built-in port: an install that names none of the four gets none, and a
+    per-driver browser port mapping alone does not register the browser."""
+    for server in LOCAL_MCP:
+        monkeypatch.delenv("AITELIER_DSH_MCP_" + server.upper(), raising=False)
+    row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
+    monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS", f"{row['driver_id']}=18932")
+    runtime._environment(row)
+    ids = {e["id"] for e in next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)}
+    assert "mcp-aitelier" in ids
+    assert not ids & {"mcp-" + server for server in LOCAL_MCP}, sorted(ids)
+
+
+def test_local_mcp_servers_are_registered_when_configured(runtime, local_mcp):
     import yaml
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     runtime._environment(row)
@@ -678,7 +704,7 @@ def test_worker_capacity_is_one_number_for_dsh_and_for_the_director(runtime):
     assert env["AITELIER_DSH_MAX_ACTIVE_SUBAGENTS"] == str(MAX_ACTIVE_SUBAGENTS)
 
 
-def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch):
+def test_the_browser_mcp_is_a_capability_not_a_prerequisite(runtime, monkeypatch, local_mcp):
     """The autoshot browser server is registered, redirectable and withdrawable.
 
     Registering it is what makes a UI claim checkable at all: measured
@@ -719,7 +745,7 @@ def _mcp_entries(runtime, row):
     return {e["id"]: e for e in next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)}
 
 
-def test_mapped_drivers_get_distinct_browser_urls(runtime, monkeypatch):
+def test_mapped_drivers_get_distinct_browser_urls(runtime, monkeypatch, local_mcp):
     alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
     assert alpha["driver_id"] != beta["driver_id"]
@@ -755,11 +781,10 @@ def test_a_driver_absent_from_the_mapping_keeps_the_default(runtime, monkeypatch
     assert _mcp_entries(runtime, beta)["mcp-pwmcp"]["config"]["url"] == shared
 
 
-def test_without_a_mapping_every_driver_keeps_the_default(runtime, monkeypatch):
+def test_without_a_mapping_every_driver_keeps_the_default(runtime, monkeypatch, local_mcp):
     alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
     monkeypatch.delenv(PWMCP_PORTS_ENV, raising=False)
-    monkeypatch.delenv("AITELIER_DSH_MCP_PWMCP", raising=False)
     for row in (alpha, beta):
         assert _mcp_entries(runtime, row)["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:8931/mcp"
     # An empty value is the same statement as an unset one: no mapping.
@@ -768,7 +793,7 @@ def test_without_a_mapping_every_driver_keeps_the_default(runtime, monkeypatch):
         assert _mcp_entries(runtime, row)["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:8931/mcp"
 
 
-def test_a_blank_base_url_withdraws_the_service_even_when_the_driver_is_mapped(runtime, monkeypatch):
+def test_a_blank_base_url_withdraws_the_service_even_when_the_driver_is_mapped(runtime, monkeypatch, local_mcp):
     alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     beta = runtime._provision("beta", "fixture-provider", "fixture-model", "fixture")
     monkeypatch.setenv("AITELIER_DSH_MCP_PWMCP", "")
@@ -806,7 +831,7 @@ def test_a_malformed_mapping_is_refused_even_when_the_service_is_withdrawn(runti
     assert "grok=not-a-port" in str(refused.value)
 
 
-def test_agentmcp_can_be_redirected_or_disabled(runtime, monkeypatch):
+def test_agentmcp_can_be_redirected_or_disabled(runtime, monkeypatch, local_mcp):
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     monkeypatch.setenv("AITELIER_DSH_MCP_AGENTMCP", "http://127.0.0.1:19003/mcp")
     runtime._environment(row)
@@ -824,7 +849,7 @@ def test_agentmcp_can_be_redirected_or_disabled(runtime, monkeypatch):
     assert {"mcp-aitelier", "mcp-devmcp", "mcp-zvec"} <= ids
 
 
-def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch):
+def test_blanking_one_local_mcp_url_removes_only_that_entry(runtime, monkeypatch, local_mcp):
     monkeypatch.setenv("AITELIER_DSH_MCP_DEVMCP", "")
     row = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     runtime._environment(row)
@@ -862,9 +887,8 @@ def _inserted(runtime, row):
     return next(p["insert"] for p in _patch_document(runtime, row) if "insert" in p)
 
 
-def test_a_steward_start_writes_no_extra_mcp_entry(runtime, monkeypatch):
-    for server in EXTRA_MCP_IDS:
-        monkeypatch.delenv("AITELIER_DSH_MCP_" + server[4:].upper(), raising=False)
+def test_a_steward_start_writes_no_extra_mcp_entry(runtime, monkeypatch, local_mcp):
+    # All four configured for the host: the steward still gets none of them.
     steward = _steward_row(runtime)
     runtime._environment(steward)
     entries = _inserted(runtime, steward)
@@ -897,9 +921,8 @@ def test_the_steward_gateway_url_is_its_own_setting(tmp_path, monkeypatch):
     assert entry["config"]["url"] == "http://127.0.0.1:6445/api/steward/mcp"
 
 
-def test_a_director_keeps_all_four_services_and_its_mapped_browser_port(runtime, monkeypatch):
+def test_a_director_keeps_all_four_services_and_its_mapped_browser_port(runtime, monkeypatch, local_mcp):
     alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
-    monkeypatch.delenv("AITELIER_DSH_MCP_PWMCP", raising=False)
     monkeypatch.setenv(PWMCP_PORTS_ENV, f" {alpha['driver_id']}=18932 ")
     entries = _mcp_entries(runtime, alpha)
     assert set(EXTRA_MCP_IDS) <= set(entries), sorted(entries)
@@ -908,11 +931,9 @@ def test_a_director_keeps_all_four_services_and_its_mapped_browser_port(runtime,
     assert entries["mcp-pwmcp"]["config"]["url"] != "http://127.0.0.1:8931/mcp"
 
 
-def test_a_director_without_a_mapping_keeps_the_shared_browser_url(runtime, monkeypatch):
+def test_a_director_without_a_mapping_keeps_the_shared_browser_url(runtime, monkeypatch, local_mcp):
     alpha = runtime._provision("alpha", "fixture-provider", "fixture-model", "fixture")
     monkeypatch.delenv(PWMCP_PORTS_ENV, raising=False)
-    for server in EXTRA_MCP_IDS:
-        monkeypatch.delenv("AITELIER_DSH_MCP_" + server[4:].upper(), raising=False)
     entries = _mcp_entries(runtime, alpha)
     assert set(EXTRA_MCP_IDS) <= set(entries), sorted(entries)
     assert entries["mcp-pwmcp"]["config"]["url"] == "http://127.0.0.1:8931/mcp"

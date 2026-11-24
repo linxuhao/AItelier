@@ -1,0 +1,20 @@
+name: docs_change
+version: 1
+description: Write or revise documentation files under a declared scope and deliver them as a commit.
+params:
+  paths:
+    type: list[str]
+    required: true
+    description: Files this change must modify.
+  scope:
+    type: list[str]
+    required: true
+    description: Globs the whole change may touch; anything outside fails delivery.
+items:
+  - id: write
+    title: "Write ${paths}"
+    predicates:
+      - predicate: files_changed
+        args: {paths: $paths}
+      - predicate: changes_within
+        args: {scope: $scope}

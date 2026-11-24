@@ -141,10 +141,12 @@ test('the turns brackets: a native or host entry says group turns exactly when t
       assert.equal(text.includes('(owner and group turns)'), spec.native.tools.every(tool => g.guard(tool) === undefined), spec.id);
     }
   }
-  // calculate (24.4b) is not in GROUP_TOOLS yet: owner turns only until it is.
-  assert.ok(!GROUP_TOOLS.has('calculate'));
+  // calculate (24.4b) is in GROUP_TOOLS: once registered, the code row says group turns too.
+  assert.ok(GROUP_TOOLS.has('calculate'));
   assert.match(renderBasics({ rows: [{ id: 'code', route: [{ kind: 'host', tool: 'calculate', available: true }] }] }, ['calculate']),
-    /1\) calculate \(owner turns only\)/);
+    /1\) calculate \(owner and group turns\)/);
+  assert.match(renderBasics({ rows: [{ id: 'code', route: [{ kind: 'host', tool: 'calculate', available: true }] }] }, []),
+    /1\) calculate \(unavailable right now\)/, 'not registered on this host: unavailable');
 });
 
 test('basicsSection: registered only while the table has a row, removed when it is cleared; its text read at each assembly', () => {

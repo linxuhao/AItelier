@@ -18,12 +18,22 @@ from datetime import timedelta
 
 import pytest
 
-from core import state_channels, state_groups, state_steward_confirmations as sconf
+from core import owner_text, state_channels, state_groups, state_steward_confirmations as sconf
 from core.state_commands import execute
 from core.state_graph import StateGraphError
 from tests.unit.test_steward_connections import (ADDRESSES, FakeUpstream, add, allow, body_of, discover, rpc,  # noqa: F401
                                                  server, world)
 from tests.unit.test_steward_oauth_confirm import SEND, bind_slack, dashboard, mail_ready, relay, status_of
+
+
+@pytest.fixture(autouse=True)
+def _zh_owner():
+    """These tests pin the lines a 'zh' owner reads (core.owner_text; this deployment's owner).
+    test_owner_text covers the table and the English default."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(owner_text.SETTING, "zh")
+        yield
+
 
 OWNER_WX, MEMBER, MEMBER2, ROOM = "wxid_owner", "wxid_m1", "wxid_m2", "r1@chatroom"
 
@@ -83,6 +93,8 @@ def test_the_requester_of_a_group_turn_is_its_one_asker_and_the_conversation_is_
     row = record(world, asked["code"])
     assert (row["requester_kind"], row["channel"], row["conversation_ref"], row["sender_ref"], row["audience"],
             row["status"]) == ("member", "wechat", ROOM, MEMBER, "group", "pending")
+    # Step 23 Slack (D8): it names the question's channel ref, so a channel that threads answers under it.
+    assert asked["reply_to_ref"] == "q1"
     # The owner asking in the group is the owner, in the group.
     owner_q = gask(world, "q2", sender=OWNER_WX)["message_id"]
     group_turn(world, senders=(OWNER_WX,), turn="gt2")

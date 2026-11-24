@@ -50,7 +50,11 @@ def manager(request: Request) -> DshDrivers:
 class Start(BaseModel):
     model_config = ConfigDict(extra="forbid")
     provider: str = Field(default="aitelier", min_length=1, max_length=100)
-    model: str = Field(default="driver", min_length=1, max_length=200)
+    # Absent is NOT "driver": the dashboard posts `{}`, and `DshDrivers.start`
+    # substitutes the project's role route only when the model is falsy. Defaulting
+    # to `driver` would name the director's route explicitly and start the reserved
+    # steward project (aitelier-home) with model=driver. A named model still wins.
+    model: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class HistoryEntry(BaseModel):

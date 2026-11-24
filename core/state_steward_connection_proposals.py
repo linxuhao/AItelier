@@ -219,6 +219,10 @@ def _current(conn, payload):
     definition exactly as proposed. Any mismatch raises its code."""
     conn_id, op = payload["conn_id"], payload["op"]
     row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+    # Step 24.4c (7.8.24 "九" 5): no proposal ever touches the dev-mcp connection - add, update,
+    # remove or reenable, at creation and again at execution: the owner does it on the dashboard.
+    if sc.is_dev_mcp(payload if op == "add" else row or {"url": ""}):
+        raise StateGraphError("needs_dashboard: dev_mcp")
     if op == "add":
         if row is not None:
             raise StateGraphError(f"connection_exists: {conn_id}")

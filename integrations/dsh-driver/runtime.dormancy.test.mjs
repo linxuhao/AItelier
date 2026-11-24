@@ -195,9 +195,20 @@ async function scenario(t, floor, { minuteMs } = {}) {
   const result = id => events.find(e => e.type === 'tool/result' && e.data.message.toolCallId === id);
   const json = event => JSON.parse(event.data.message.content.map(b => b.text ?? '').join(''));
   const reviews = () => events.filter(e => e.type === 'user/message' && e.data.content?.[0]?.text?.startsWith('AItelier director review due:'));
-  const until = async (what, predicate, ms = 20000) => {
-    const deadline = Date.now() + ms;
-    while (Date.now() < deadline && proc.exitCode === null && !predicate()) await new Promise(resolve => setTimeout(resolve, 50));
+  // A real pinned DSH is a separate process: on a loaded host one fixture turn can take far
+  // longer than a fixed wall budget while the scenario is making progress. Wait for the
+  // condition, with a watchdog on *quiet* rather than on total time: every new request, event,
+  // phase or line of output buys another idle window. The cap only catches a wedged driver.
+  const progress = () => `${requests.length}/${events.length}/${phases.length}/${claimQueries.length}/${output.length}`;
+  const until = async (what, predicate, quietMs = 45000) => {
+    const cap = Date.now() + 180000;
+    let mark = progress(), quietSince = Date.now();
+    while (Date.now() < cap && proc.exitCode === null && !predicate()) {
+      await sleep(50);
+      const seen = progress();
+      if (seen !== mark) { mark = seen; quietSince = Date.now(); }
+      if (Date.now() - quietSince > quietMs) break;
+    }
     assert.equal(proc.exitCode, null, output);
     assert.ok(predicate(), `${what}\nREQ ${JSON.stringify(requests.map(r => [r.session === session ? 'root' : r.session.slice(0, 8), r.purpose]))}\n${output}\n${JSON.stringify(events.map(e => [e.seq, e.type, e.data?.message?.toolCallId ?? e.data?.source?.kind ?? '']))}`);
   };
@@ -264,7 +275,7 @@ async function scenario(t, floor, { minuteMs } = {}) {
     if (minuteMs) {
       // No input at all: the chosen sleep runs out and the parked review runs once, saying why.
       const timedOut = () => reviews().filter(e => e.data.content[0].text.includes('"reason":"dormancy_timeout"'));
-      await until('the dormancy timeout never ran the review', () => timedOut().length === 1, 15 * minuteMs + 15000);
+      await until('the dormancy timeout never ran the review', () => timedOut().length === 1, Math.max(15 * minuteMs + 15000, 45000));
       assert.ok(Date.now() - enteredAt >= 15 * minuteMs - 1000, 'the review ran before the chosen sleep ran out');
       const review = JSON.parse(timedOut()[0].data.content[0].text.split('\n').slice(1).join('\n'));
       assert.equal(review.dormant_reason, 'nothing authorized is available');
@@ -300,7 +311,7 @@ async function scenario(t, floor, { minuteMs } = {}) {
   }
 }
 
-test('real pinned DSH: dormancy is refused while work is live, parks reviews, compacts a large context once, and a State event wakes it', { timeout: 60000 }, async (t) => {
+test('real pinned DSH: dormancy is refused while work is live, parks reviews, compacts a large context once, and a State event wakes it', { timeout: 240000 }, async (t) => {
   const run = await scenario(t, 1000);
   if (!run) return;
   const { compactions, summaryRequests } = run;
@@ -308,11 +319,11 @@ test('real pinned DSH: dormancy is refused while work is live, parks reviews, co
   assert.equal(summaryRequests, 1);
 });
 
-test('real pinned DSH: with no input the chosen sleep runs out, the phase leaves dormant and the review runs', { timeout: 60000 }, async (t) => {
+test('real pinned DSH: with no input the chosen sleep runs out, the phase leaves dormant and the review runs', { timeout: 240000 }, async (t) => {
   await scenario(t, 10_000_000, { minuteMs: 100 });
 });
 
-test('real pinned DSH: below the token floor dormancy does not compact', { timeout: 60000 }, async (t) => {
+test('real pinned DSH: below the token floor dormancy does not compact', { timeout: 240000 }, async (t) => {
   const run = await scenario(t, 10_000_000);
   if (!run) return;
   const { compactions, summaryRequests } = run;

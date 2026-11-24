@@ -43,13 +43,16 @@ export const GROUP_TOOLS = Object.freeze(new Set(['portfolio_projects', 'portfol
   // and a kept one (a file sent without a mention) in that same group's later turns.
   'read_document',
   // Step 24.2d (7.8.12c "四", "九"): make_document - the file is this group's, its text exit-checked first.
-  'make_document']));
+  'make_document',
+  // Step 24.4b (7.8.24 "十" 4): calculate - no network, this group's refs only, its files this group's;
+  // at most 3 a turn and 30 an hour per group (lib/calc-tool.mjs).
+  'calculate']));
 /** Refused in an owner turn after a group turn until the owner writes again (7.7.5): the
  *  plugin's own writes here; a host adds its own (GroupTurns `pausedTools`, host.groups.pausedTools). */
 export const PAUSED_TOOLS = Object.freeze(new Set(['memory_note', 'memory_profile_update', 'propose',
   // 7.8.8: a connection change waits for the owner too.
   'propose_connection_change']));
-export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check, group_reminder_set, read_document, make_document and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
+export const groupTurnRefusal = 'group turn: only portfolio_projects, portfolio_project, the family memory tools, list_show, list_add, list_check, group_reminder_set, read_document, make_document, calculate and your public connection tools (search_tools, call_tool, request_confirmation, run_confirmed, media_call, send_media); your last words are your reply to the group';
 /** The tools only a group turn may call (7.7.5): the family memory (7.7.8a) and, step 23.1, a
  *  family member's reminder to their own group (7.9.4). */
 export const FAMILY_TOOLS = Object.freeze(new Set(['family_memory_note', 'family_memory_show', 'group_reminder_set']));
@@ -488,7 +491,10 @@ export function groupReplies({ turns, reply, sendGroup, warn, mirror }) {
       return reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body, turn: String(event.data?.turn ?? turn.turn) })
         .then(sent => {
           if (sent?.owner_notice?.message_id && mirror) void mirror(sent.owner_notice.message_id, sent.owner_notice.body);
-          return sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused));
+          // The question's own channel ref (step 23 Slack, D8): a channel that threads answers under it.
+          return sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text,
+            ...(typeof sent.reply_to_ref === 'string' && sent.reply_to_ref ? [{ replyToRef: sent.reply_to_ref }] : []))
+            : warn('group reply refused: ' + String(sent?.refused));
         })
         .catch(error => warn('group reply: ' + short(error)));
     }

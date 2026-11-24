@@ -556,6 +556,76 @@ def test_a_recorded_message_replayed_hours_later_is_a_duplicate_not_stale(world)
     assert rows(world, sql, ("k-replay",)) == before  # one row, same id and same attachment refs
 
 
+KEPT_ROW = ("SELECT message_id, at, accepted, attachments_json FROM state_group_messages "
+            "WHERE direction='in' AND channel_message_ref=?")
+
+
+def replay_kept(world, ref, files, at=NOW):
+    """The bridge re-delivers a message this group kept, with whatever attachments its media
+    library now holds for it (a new relay call, its own request key)."""
+    if at is NOW:
+        at = state_channels._now().isoformat()
+    return execute(world.steward, "relay_group_message",
+                   {"request_key": f"replay-{ref}-{files[0].get('ref') or files[0].get('refused')}",
+                    "channel": "wechat", "group_ref": ROOM, "sender_ref": MEMBER,
+                    "channel_message_ref": ref, "body": "[图片]", "channel_at": at, "kept": True,
+                    "attachments": files}, allow_write=True)
+
+
+def test_a_replayed_kept_message_follows_the_refs_the_media_library_re_minted(world):
+    """The library lost the bytes (the withdraw before iss-00f3ae7d59664341 was fixed) and the
+    replay re-stored the file under a NEW ref: the recorded row must move with the library, or
+    the medium it recovered is unreachable by the ref the row still names."""
+    bound_group(world)
+    turn_on(world)
+    first = kept_media(world, "k-refdrift", media="m_0123456789abcdef")
+    before = rows(world, KEPT_ROW, ("k-refdrift",))
+    assert len(before) == 1
+    again = replay_kept(world, "k-refdrift", [{"kind": "image", "ref": "m_feedfacefeedface",
+                                               "mime": "image/png", "size": 33}])
+    assert again == {"duplicate": True, "message_id": first["message_id"], "accepted": False}
+    after = rows(world, KEPT_ROW, ("k-refdrift",))
+    assert len(after) == 1, "still the one row"
+    assert after[0][:3] == before[0][:3], "message_id, at and accepted never move"
+    assert json.loads(after[0][3]) == [{"kind": "image", "ref": "m_feedfacefeedface",
+                                       "mime": "image/png", "size": 33}]
+
+
+def test_a_replay_with_the_same_refs_writes_nothing(world):
+    """A replay that carries the refs the row already names is the same message: no write, so
+    the stored attachments_json stays identical byte for byte."""
+    bound_group(world)
+    turn_on(world)
+    ref = "m_0123456789abcdef"
+    first = kept_media(world, "k-same", media=ref)
+    before = rows(world, KEPT_ROW, ("k-same",))
+    old = (state_channels._now() - timedelta(hours=5)).isoformat()
+    again = replay_kept(world, "k-same", [{"kind": "image", "ref": ref, "mime": "image/png", "size": 33}],
+                        at=old)
+    assert again == {"duplicate": True, "message_id": first["message_id"], "accepted": False}
+    assert rows(world, KEPT_ROW, ("k-same",)) == before
+    assert rows(world, "SELECT attachments_json FROM state_group_messages WHERE channel_message_ref=?",
+                ("k-same",))[0][0] == json.dumps([{"kind": "image", "ref": ref, "mime": "image/png",
+                                                   "size": 33}])
+
+
+def test_a_replay_of_another_shape_leaves_the_kept_row_untouched(world):
+    """Only a same-shape replay may move the refs: another count, another kind or mime, or an
+    entry with no ref at all writes nothing - not half a row, and never a 500."""
+    bound_group(world)
+    turn_on(world)
+    first = kept_media(world, "k-shape", media="m_0123456789abcdef")
+    before = rows(world, KEPT_ROW, ("k-shape",))
+    for files in ([{"kind": "image", "ref": "m_0000000000000001", "mime": "image/png", "size": 33},
+                   {"kind": "image", "ref": "m_0000000000000002", "mime": "image/png", "size": 33}],
+                  [{"kind": "file", "ref": "m_0000000000000003", "mime": "image/png", "size": 33}],
+                  [{"kind": "image", "ref": "m_0000000000000004", "mime": "image/jpeg", "size": 33}],
+                  [{"kind": "image", "refused": "gone"}]):
+        assert replay_kept(world, "k-shape", files) == {
+            "duplicate": True, "message_id": first["message_id"], "accepted": False}
+        assert rows(world, KEPT_ROW, ("k-shape",)) == before, "a different shape leaves the whole row alone"
+
+
 def test_a_never_recorded_message_five_hours_old_is_still_stale(world):
     """The stale freshness gate still refuses a message the group has never recorded."""
     bound_group(world)

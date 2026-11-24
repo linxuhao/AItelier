@@ -218,17 +218,22 @@ records the message.
    reasons is in its `RETRY_REASONS`. A `duplicate` answer takes nothing back. An
    un-mentioned message that carries no file has nothing to keep and is not relayed at all
    (`{accepted: false, reason: 'nothing_kept'}`).
-4. **`relay_group_message`** (`core/state_groups.py:708-815`) takes `kept` (request model
+4. **`relay_group_message`** (`core/state_groups.py:883-1049`) takes `kept` (request model
    `RelayGroupMessage`, `core/state_commands.py:1743`; the adapter's `relay` in
    `integrations/dsh-driver/steward-host.mjs:860-863` passes it through). With `kept=True`
-   it requires nonempty `attachments` (else `invalid_request`). After the group, undated,
-   stale and duplicate checks it reads `media_keep`; anything but `on` answers
+   it requires nonempty `attachments` (else `invalid_request`). After the group and undated
+   checks it asks for a duplicate first: a channel ref this group already recorded is a
+   duplicate whatever its age (that row is never withdrawn), and only a message it has never
+   recorded meets the `fresh_minutes` stale gate. A duplicate whose kept files the library
+   re-stored with new refs follows them - same count, kind and mime, nonempty refs - on that
+   same row, keeping its `message_id`, `at` and `accepted`; identical refs and any other shape
+   write nothing. Then it reads `media_keep`; anything but `on` answers
    `{refused: 'media_keep_off'}` and writes no row. With the switch on, it runs the account-code
-   check as every relay does, makes the sender's member row (`_member`, `:360-373`, so the
+   check as every relay does, makes the sender's member row (`_member`, `:418-443`, so the
    sender has a label for R3), and writes ONE row: `kind='kept_media'`, `accepted=0`, the
    placeholder body, `attachments_json`. A kept row is not a question:
    * it is counted by none of the 60/20/120 windows, because those count `accepted=1`
-     inbound rows and outbound rows (`:776-803`);
+     inbound rows and outbound rows (`:1010-1035`);
    * it never decides a confirmation;
    * it never yields a quota notice.
 

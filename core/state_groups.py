@@ -882,9 +882,11 @@ class StateGroups:
 
     def relay_group_message(self, project_id, request_key, channel, group_ref, sender_ref, channel_message_ref, body,
                             channel_at=None, attachments=None, kept=False, sender_name=None):
-        """One @-message from the bound group: dated by the channel within the last
-        fresh_minutes, deduplicated by its channel ref, stamped owner/member by code, held to
-        the group's, the member's and the account's hourly bounds, stored. Answers
+        """One @-message from the bound group: refused undated without a channel time, then
+        deduplicated by its channel ref - a message this group already recorded is a duplicate
+        whatever its age; only a never-recorded message is held to the last fresh_minutes (else
+        stale) - then stamped owner/member by code, held to the group's, the member's and the
+        account's hourly bounds, stored. Answers
         {message_id, sender_role, sender_label, duplicate} - or a refusal: group_not_bound,
         undated, stale, code_in_group (a live ACCOUNT code it carries is retired, nothing of
         the body is kept, nothing is answered), group_quota / member_quota (with notice and
@@ -893,7 +895,9 @@ class StateGroups:
         7.8.9) is decided before the quotas: the answer then carries `confirmation` and, when
         the group's send budget allows, `confirmation_line` (and its message id) for the host
         to send. `attachments` (step 24.2, 7.8.12) is the metadata of the message's files, kept
-        in the row's attachments_json (core.media_types); never a byte or a name.
+        in the row's attachments_json (core.media_types); never a byte or a name. A duplicate
+        whose kept files the library re-stored with new refs moves that row's attachments_json
+        with them - same shape only - and never its message_id, at or accepted.
 
         `kept` (design/steward-group-media.md section 3, owner 2026-11-23): the message did NOT
         call the steward and carries files. It is recorded only while the group's media switch
@@ -937,10 +941,30 @@ class StateGroups:
                 # A replay of a message this group already recorded is a duplicate whatever its
                 # age: deciding staleness first would withdraw media kept for a recorded message
                 # that the bridge re-delivers after a restart.
-                seen = conn.execute("SELECT message_id,accepted,sender_role FROM state_group_messages "
+                seen = conn.execute("SELECT message_id,accepted,sender_role,attachments_json "
+                                    "FROM state_group_messages "
                                     "WHERE direction='in' AND channel=? AND group_ref=? AND channel_message_ref=?",
                                     (channel, group_ref, channel_message_ref)).fetchone()
                 if seen is not None:
+                    # The media library, not this row, owns a kept file's bytes. After it loses
+                    # them (the withdraw before iss-00f3ae7d59664341) a replay re-stores the file
+                    # and mints a NEW ref, so the row follows it: same shape only (as many
+                    # entries, the same kind and mime each, every one a nonempty ref), and then
+                    # the new attachments_json on this same row. Identical refs write nothing; a
+                    # different shape writes nothing at all rather than half a row. The row's
+                    # message_id, at and accepted never change.
+                    stored = json.loads(seen["attachments_json"] or "null")
+                    follow = None
+                    if kept and files and isinstance(stored, list) and len(stored) == len(files) and all(
+                            isinstance(old, dict) and isinstance(old.get("ref"), str) and old["ref"]
+                            and isinstance(new.get("ref"), str) and new["ref"]
+                            and old.get("kind") == new["kind"] and old.get("mime") == new.get("mime")
+                            for old, new in zip(stored, files)):
+                        if [old["ref"] for old in stored] != [new["ref"] for new in files]:
+                            follow = json.dumps(files)
+                    if follow is not None:
+                        conn.execute("UPDATE state_group_messages SET attachments_json=? WHERE message_id=?",
+                                     (follow, seen["message_id"]))
                     return {"duplicate": True, "message_id": seen["message_id"],
                             "accepted": bool(seen["accepted"])}
                 if moment - written > timedelta(minutes=GROUP_LIMITS["fresh_minutes"]):

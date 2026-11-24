@@ -1,5 +1,10 @@
-# The Python the plugin runs (todo.python, python3 by default) needs these:
-#   python3 -m pip install -r requirements.txt
+# The Python the plugin runs (todo.python, python3 by default) needs these.
+#   Debian/Ubuntu:  apt install python3-yaml   (their python3 has no pip, and pip refuses
+#                   the system Python there; any PyYAML that imports will do: the package
+#                   only calls yaml.safe_load)
+#   elsewhere:      python3 -m pip install -r requirements.txt
+#   or a venv:      python3 -m venv <dir> && <dir>/bin/pip install -r requirements.txt,
+#                   then set todo.python to <dir>/bin/python3
 # The todo package (todo/dsh_todo) reads its templates with PyYAML; nothing else in it
 # goes beyond the standard library.
 PyYAML>=6.0.3,<7

@@ -10,7 +10,7 @@
  *  has defaults: `rolesFile` the plugin's own roles.json (with director.md and worker.md
  *  next to it), `todo` the plugin's own todo package (python -m dsh_todo in todo/, state in
  *  DSH_TODO_STATE_DIR), `dshEntry` the real path of the running DSH entry (a global `dsh`
- *  symlink resolved), `sessionEnv` LOCAL_SESSION_ENV, which this plugin sets on its own
+ *  symlink resolved), `sessionEnv` localSessionEnv(root), which this plugin sets on its own
  *  process so every job a shell starts carries it (watch_process, idle_dormant); any of
  *  them can be overridden. At startup (install) the host checks what the plugin needs on
  *  this machine - not Windows, python3 with PyYAML for the todo package, git - and refuses
@@ -52,7 +52,7 @@
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat, rm } from 'node:fs/promises';
 import { readFileSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
@@ -69,10 +69,13 @@ async function writeJson(file, value) {
   await writeFile(file + '.tmp', JSON.stringify(value, null, 2) + '\n');
   await rename(file + '.tmp', file);
 }
-/** The variable that tags every process this DSH starts with the director's session id, when
- *  the config names none. Not DSH_-prefixed: DSH rebuilds the DSH_* namespace for every
- *  model shell call and drops ambient DSH_* values, so such a tag never reaches a job. */
+/** The prefix of the variable that tags every process this DSH starts with the director's
+ *  session id, when the config names none. Not DSH_-prefixed: DSH rebuilds the DSH_* namespace
+ *  for every model shell call and drops ambient DSH_* values, so such a tag never reaches a job. */
 export const LOCAL_SESSION_ENV = 'DIRECTOR_LOCAL_SESSION';
+/** The default tag variable of the director whose files are under `root`: one per root, so two
+ *  directors on one machine with the same sessionId do not count each other's jobs. */
+export const localSessionEnv = root => `${LOCAL_SESSION_ENV}_${createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12)}`;
 /** The DSH release this host is tested on (the repository's pin; README.md). Another one
  *  starts with a warning, not a refusal. */
 export const TESTED_DSH_VERSION = '0.2.1-rc.5';
@@ -434,7 +437,7 @@ export function localHost(options = {}) {
       stateDir: options.stateDir ?? join(root, 'state'),
       dshEntry: options.dshEntry ?? runningEntry(),
       rolesFile: options.rolesFile ?? fileURLToPath(new URL('../roles.json', import.meta.url)),
-      sessionEnv: options.sessionEnv ?? LOCAL_SESSION_ENV,
+      sessionEnv: options.sessionEnv ?? localSessionEnv(root),
       // This host prints nothing of its own when the director cannot start: the plugin prints
       // the first line of the reason. A plan here binds to a work item by its id alone.
       startupErrorDetail: true, planKeysOptional: true,
@@ -644,7 +647,9 @@ export async function prerequisiteProblems({ todo, director = true, memory = fal
     // The CLI lists a template it cannot load with that template's error, so a missing PyYAML
     // shows as an error on every template, not as a failed run.
     const noYaml = text => /No module named '?yaml/.test(text);
-    const yamlProblem = `PyYAML is missing for ${todo.python} (pip install -r ${REQUIREMENTS})`;
+    // Debian and Ubuntu's python3 has no pip, and pip refuses their system Python (PEP 668).
+    const yamlProblem = `PyYAML is missing for ${todo.python} (Debian/Ubuntu: apt install python3-yaml; `
+      + `otherwise ${todo.python} -m pip install -r ${REQUIREMENTS}, in a venv if pip refuses)`;
     try {
       const { code, result } = await todo.run(['templates'], undefined, 60000);
       if (code !== 0) problems.push(`the todo package refused to list its templates: ${JSON.stringify(result).slice(0, 300)}`);

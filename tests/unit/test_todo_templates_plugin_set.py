@@ -39,6 +39,10 @@ def test_the_plugin_find_verify_differs_from_the_repository_one_only_in_wording(
     assert shape(plugin) == shape(repo)
     text = (PLUGIN_TEMPLATES / "find_verify.yaml").read_text(encoding="utf-8")
     assert "aitelier" not in text.lower()
+    # Review r2: the local host has no evidence store, so the plugin's copy does not tell the
+    # director to record evidence; it names where a verdict's evidence is (each verify report).
+    assert "record evidence" not in plugin["description"]
+    assert "verify report" in plugin["description"]
 
 
 def test_the_package_alone_lists_every_template_director_md_names(tmp_path):

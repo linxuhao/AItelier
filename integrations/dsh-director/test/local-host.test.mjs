@@ -815,12 +815,24 @@ test('local host, review 467: steward.md tells a standalone steward to use its o
 test('local host config: provider and model are required, the rest has working defaults', () => {
   assert.throws(() => validateHost(localHost({ root: '/tmp/x' })), /missing config: provider; missing config: model/);
   const { config } = localHost({ root: '/tmp/x', provider: 'p', model: 'm', permissionPreset: 'danger-full-access' });
-  assert.equal(config.sessionEnv, LOCAL_SESSION_ENV);
+  assert.ok(config.sessionEnv.startsWith(LOCAL_SESSION_ENV + '_'), config.sessionEnv);
   assert.ok(!LOCAL_SESSION_ENV.startsWith('DSH_'), 'DSH drops ambient DSH_* variables from every model shell');
   assert.equal(config.permissionPreset, 'danger-full-access');
   assert.equal(config.startupErrorDetail, true);
   assert.equal(config.planKeysOptional, true);
   assert.equal(localHost({ root: '/tmp/x' }).config.permissionPreset, undefined, 'no preset unless asked for');
+});
+
+test('local host session tag: one variable per director root, so two directors on one machine do not see each other\'s jobs', () => {
+  // Review r2 (nit): with one fixed variable and the default sessionId every local director's
+  // jobs carried DIRECTOR_LOCAL_SESSION=director, so watch_process and idle_dormant of one
+  // director counted the other's jobs.
+  const env = options => localHost({ provider: 'p', model: 'm', ...options }).config.sessionEnv;
+  const a = env({ root: '/tmp/director-a' }), b = env({ root: '/tmp/director-b' });
+  assert.notEqual(a, b);
+  for (const name of [a, b]) assert.match(name, /^DIRECTOR_LOCAL_SESSION_[0-9a-f]{12}$/);
+  assert.equal(env({ root: '/tmp/director-a/../director-a/' }), a, 'the same root, written another way, is the same director');
+  assert.equal(env({ root: '/tmp/director-a', sessionEnv: 'MY_TAG' }), 'MY_TAG', 'a configured variable wins');
 });
 
 test('local host dshEntry: the running entry with its symlinks resolved (a global dsh is a link)', async () => {
@@ -880,7 +892,14 @@ test('local host prerequisites: each missing piece is named, and a working machi
   assert.match(problem, /^python not found: \/nonexistent\/python3/);
   // The CLI lists a template it cannot load with its error: with no PyYAML that is every template.
   const noYaml = { python: 'python3', run: async () => ({ code: 0, result: { templates: [{ name: 'a', error: "ModuleNotFoundError: No module named 'yaml'" }] } }) };
-  assert.deepEqual(await prerequisiteProblems({ todo: noYaml }), [`PyYAML is missing for python3 (pip install -r ${new URL('../requirements.txt', import.meta.url).pathname})`]);
+  // Review r2: Debian and Ubuntu's python3 has no pip, and pip refuses their system Python
+  // (PEP 668), so the distribution's package is named first.
+  assert.deepEqual(await prerequisiteProblems({ todo: noYaml }), ['PyYAML is missing for python3 (Debian/Ubuntu: apt install python3-yaml; '
+    + `otherwise python3 -m pip install -r ${new URL('../requirements.txt', import.meta.url).pathname}, in a venv if pip refuses)`]);
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  assert.ok(readme.includes('apt install python3-yaml'), 'README.md names the Debian/Ubuntu package');
+  const requirements = await readFile(new URL('../requirements.txt', import.meta.url), 'utf8');
+  assert.ok(requirements.includes('apt install python3-yaml'), 'requirements.txt names the Debian/Ubuntu package');
   const noGit = await prerequisiteProblems({ todo: real, git: '/nonexistent/git' });
   assert.deepEqual(noGit, ['git not found (no /nonexistent/git on PATH): install git']);
   assert.match((await prerequisiteProblems({ todo: real, platform: 'win32' }))[0], /^Windows is not supported/);
@@ -945,6 +964,23 @@ test('startupFailure: with detail the first line of the reason follows the exit 
   } finally { console.error = saved; }
   assert.deepEqual(printed, ['dsh exit cause: dsh-director startup: Error', 'dsh-director startup: directorHost refused: missing config: provider',
     'dsh exit cause: dsh-director startup: Error']);
+});
+
+test('startupFailure: an error with a code keeps its class on the exit line, and the reason still follows (README.md says so)', async () => {
+  const printed = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  try {
+    const slot = Symbol.for('dsh.exit-cause');
+    delete globalThis[slot];
+    const error = Object.assign(new Error("ENOENT: no such file or directory, open '/nonexistent/roles.json'"), { code: 'ENOENT' });
+    startupFailure({ logger: { error: () => {} }, get: () => undefined }, error, { detail: true });
+    delete globalThis[slot];
+  } finally { console.error = saved; }
+  assert.deepEqual(printed, ['dsh exit cause: dsh-director startup: connection-level ENOENT',
+    "dsh-director startup: ENOENT: no such file or directory, open '/nonexistent/roles.json'"]);
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  assert.ok(readme.includes('dsh exit cause: dsh-director startup: connection-level ENOENT'), 'README.md shows the coded exit line too');
 });
 
 test('the tested DSH release is the repository\'s pin, and README.md names it', async t => {

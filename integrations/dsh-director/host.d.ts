@@ -30,7 +30,7 @@ export interface HostConfig {
   todo: { python?: string; cwd?: string; module: string; stateDirEnv: string };
   /** Environment variable carrying the session id on the driver's processes (default DSH_DIRECTOR_SESSION).
    *  The host sets it on the DSH process. A DSH_-prefixed name never reaches a job a model shell
-   *  starts (DSH rebuilds that namespace per shell call); the local host uses DIRECTOR_LOCAL_SESSION. */
+   *  starts (DSH rebuilds that namespace per shell call); the local host uses DIRECTOR_LOCAL_SESSION_<hash of its root>. */
   sessionEnv?: string;
   /** When the director cannot start, print the first line of the reason after the exit line
    *  (default false: the host prints its own, redacted). The local host sets it. */

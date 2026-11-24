@@ -21,7 +21,11 @@ host they do not load), or several directors coordinating.
   work there, but `watch_process` cannot see jobs (it reads `/proc`).
 - **DSH `0.2.1-rc.5`** (the release this plugin is tested on) and the Node.js it needs (tested
   with Node 24). Another DSH release starts with a warning in the DSH log.
-- **python3 with PyYAML**, for the todo package: `python3 -m pip install -r requirements.txt`.
+- **python3 with PyYAML**, for the todo package. On Debian and Ubuntu: `sudo apt install python3-yaml`
+  (their python3 has no pip, and pip refuses to install into it). Elsewhere:
+  `python3 -m pip install -r requirements.txt`, or in a venv
+  (`python3 -m venv <dir> && <dir>/bin/pip install -r requirements.txt`, then set
+  `todo: { python: <dir>/bin/python3 }` in the config below).
 - **git**, for plans and their delivery.
 - **A model key.** DSH's built-in DeepSeek route, provider `deepseek-official`, reads
   `DEEPSEEK_API_KEY` (from the environment or DSH's credential store).
@@ -46,7 +50,7 @@ compaction service, in `headless` for the credentials service (the log says
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.5
 cd integrations/dsh-director            # in your checkout of this repository
-python3 -m pip install -r requirements.txt
+sudo apt install python3-yaml           # Debian/Ubuntu; elsewhere: python3 -m pip install -r requirements.txt
 ```
 
 ## 2. Write the profile
@@ -92,13 +96,13 @@ EOF
 
 | key | default | what it does |
 |---|---|---|
-| `sessionId` | `director` | the director's DSH session; a restart resumes it |
+| `sessionId` | `director` | the director's DSH session; a restart resumes it. Give each director on one machine its own |
 | `objective` | none | the director's standing goal (its DSH goal), set once on the first start |
 | `permissionPreset` | none | a DSH permission preset for the director and its workers (below) |
 | `dshEntry` | the running `dsh`, symlinks resolved | DSH's `lib/bin.js`; set it when DSH's libraries are not found from there |
 | `todo` | `{ python: 'python3' }` and the plugin's own todo package | `python` names another interpreter |
 | `pollMs` | `2000` | how often `inbox/` is read |
-| `sessionEnv` | `DIRECTOR_LOCAL_SESSION` | the variable that tags every process this DSH starts with the director's session; the plugin sets it itself |
+| `sessionEnv` | `DIRECTOR_LOCAL_SESSION_<hash of root>` | the variable that tags every process this DSH starts with the director's session; the plugin sets it itself. One per `root`, so two directors do not count each other's jobs |
 
 ## 3. Permissions
 
@@ -189,10 +193,20 @@ dsh exit cause: dsh-director startup: Error
 dsh-director startup: <the reason>
 ```
 
+A failure that carries a system error code names that code on the first line instead of
+`Error`, for example a `rolesFile` that does not exist:
+
+```
+dsh exit cause: dsh-director startup: connection-level ENOENT
+dsh-director startup: ENOENT: no such file or directory, open '/nonexistent/roles.json'
+```
+
+The second line is the one to read.
+
 | reason | fix |
 |---|---|
 | `missing config: provider` (or `model`, `root`) | add it to `director-local`'s `config` |
-| `python not found` / `PyYAML is missing` | install python3, then `python3 -m pip install -r requirements.txt`; or set `todo.python` |
+| `python not found` / `PyYAML is missing` | install python3 and PyYAML (Debian/Ubuntu: `sudo apt install python3-yaml`; elsewhere `python3 -m pip install -r requirements.txt`, or a venv); or set `todo.python` |
 | `git not found` | install git |
 | `cannot find @deepseek-ai/dsh-tools from config.dshEntry ...` | set `dshEntry` to the `lib/bin.js` of your DSH install |
 | `Windows is not supported` | run it on Linux |

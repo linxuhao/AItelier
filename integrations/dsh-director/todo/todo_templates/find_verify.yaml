@@ -6,7 +6,7 @@ description: >-
   dimension reports findings, the runtime deduplicates and caps them and expands one
   verifier per finding, bound to a session that found nothing in this batch, which tries
   to refute it against the reviewed commit; the runtime then writes a summary that is not
-  evidence (record evidence from each verify report). Use todo_batch_plan, not todo_plan.
+  evidence (a verdict rests on each verify report's evidence). Use todo_batch_plan, not todo_plan.
 params:
   target:
     type: str

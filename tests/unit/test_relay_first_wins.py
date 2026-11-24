@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 
 from core.state_graph import StateGraphError
+from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import (  # noqa: F401
     SLACK_USER, Stopped, bind, conversation, ledger, plant_proposal, proposal, refused, relay, world)
 from tests.unit.test_steward_connections import FakeUpstream  # noqa: F401

@@ -149,11 +149,6 @@ def _is_lock_error(error):
         text in str(error) for text in ("database is locked", "database table is locked"))
 
 
-# Local MCP endpoints the driver is given by default on this host. Ports match
-# the services that already run here: agentmcp (asr/ocr/pdf/web + media + video)
-# on 9003 and dev-tools-mcp (files, bash, subagent jobs) on 7676. Both are plain
-# streamable-HTTP and need no token from loopback - agentmcp's gate only demands
-# one beyond the Cloudflare edge.
 # DSH built-in tool plugins the driver profile switches off (see the patch list in
 # _provision): measured unused, or shadowing the runtime's own tools.
 UNUSED_BUILTIN_TOOL_PLUGINS = ("tool-subagent-fork", "tool-workflow", "plan-mode", "tool-todo")
@@ -173,25 +168,32 @@ SUBAGENT_PROVIDER = "aitelier"
 # user request can name one of these.
 RECOVERY_ACTORS = frozenset({"dsh-host-recovery", "dsh-runtime-recovery"})
 
-DSH_EXTRA_MCP_DEFAULTS = {
+# Optional local MCP services a director can be given. NONE is registered by
+# default: each is registered only when the host service's environment names
+# its URL in AITELIER_DSH_MCP_<NAME> (e.g. AITELIER_DSH_MCP_AGENTMCP). A built-in
+# port would aim every install at whatever else happens to listen there; the
+# ports one deployment uses are an operator's systemd drop-in (docs/dsh-driver.md).
+DSH_EXTRA_MCP_SERVERS = (
     # These four are the DIRECTOR's capabilities. The steward role gets none of
     # them (see `_environment`): its role presents no tool of any of these
     # services, so the entries bought it nothing - while the pwmcp one aimed a
     # steward start at the SHARED browser and evicted a director mid-playtest.
-    "devmcp": "http://127.0.0.1:7676/mcp",
-    "zvec": "http://127.0.0.1:7999/mcp",
-    # Media definitions stay behind caller-scoped search_tools/call_tool for
-    # the driver and native children. Blank the URL to disable this service.
-    "agentmcp": "http://127.0.0.1:9003/mcp",
+    # devmcp: files, bash, subagent jobs; zvec: semantic code search.
+    "devmcp",
+    "zvec",
+    # Media (asr/ocr/pdf/web + media + video). Definitions stay behind
+    # caller-scoped search_tools/call_tool for the driver and native children.
+    "agentmcp",
     # The persistent Playwright (autoshot) browser. Registering it is what makes
     # a UI claim checkable at all: without it every dashboard delivery can only
     # say "the strings are in the bundle and the component tests pass", which
     # cannot see a layout that renders nothing (measured 2026-11-13: the service
-    # answered initialize on this port while search_tools found 0 browser tools).
+    # answered initialize on its port while search_tools found 0 browser tools).
     # The proxy in front of the browser answers MCP itself, so the URL is the
-    # proxy, not the Playwright CLI's own port behind it.
-    "pwmcp": "http://127.0.0.1:8931/mcp",
-}
+    # proxy, not the Playwright CLI's own port behind it. The per-driver port
+    # mapping (below) rewrites this URL's port, so it needs a base URL too.
+    "pwmcp",
+)
 
 # One Playwright MCP instance holds ONE client session: two drivers pointed at
 # the same URL do not share a browser, the second `initialize` evicts the first,
@@ -700,7 +702,7 @@ class DshDrivers:
         director_source = Path(__file__).resolve().parents[1] / "integrations" / "dsh-director" / "index.mjs"
         # JSON is YAML too; the runtime installs its own native State/pipeline tools.
         # Local MCP services the driver may use, each switchable independently:
-        # the URL is the switch. A blank URL means "do not register it", so an
+        # the URL is the switch. An unset or blank URL means "do not register it", so an
         # operator can take one away without editing code, and a host that does
         # not run these services keeps exactly the tool set it had before.
         #
@@ -728,12 +730,11 @@ class DshDrivers:
         # and all.
         extra = []
         if role != "steward":
-            for server, default_url in DSH_EXTRA_MCP_DEFAULTS.items():
-                url = os.environ.get(
-                    "AITELIER_DSH_MCP_" + server.upper(), default_url).strip()
+            for server in DSH_EXTRA_MCP_SERVERS:
+                url = os.environ.get("AITELIER_DSH_MCP_" + server.upper(), "").strip()
                 if not url:
-                    # Blank withdraws the entry outright; the per-driver mapping
-                    # must not resurrect a service the operator took away.
+                    # Unset or blank: not registered; the per-driver mapping
+                    # must not resurrect a service the operator did not name.
                     continue
                 if server == "pwmcp":
                     port = driver_ports.get(row["driver_id"])

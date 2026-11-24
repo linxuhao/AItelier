@@ -35,12 +35,15 @@ names, and whether `git status --porcelain` in that same directory shows changes
 (tracked edits and untracked non-ignored files both count). Both are read at
 capture time only, alongside the digest, so a later merge leaves both reported
 facts alone. `vcs.commit` is a 40-character lowercase hex id or None, `vcs.dirty`
-is a bool or None, and `vcs.reason` is None on success or names what failed. A git
-executable missing from PATH, a directory that is not a repository, a non-zero
-exit and a timeout are declared there rather than raised: /health must still
-answer when the git metadata is unavailable, and the digest keeps its own reason
-for unreadable covered files. Every git call has a short timeout and a small,
-fixed environment, so no pager or interactive prompt can hold up an import.
+is a bool or None, and `vcs.reason` is None on success or names what failed.
+`is_commit_id` owns the shape of that id, and both `head_commit` and the reader
+in ``deploy/loaded_source`` apply it, so a verifier cannot accept a spelling the
+capture could never have produced. A git executable missing from PATH, a
+directory that is not a repository, a non-zero exit and a timeout are declared in
+`vcs.reason` rather than raised: /health must still answer when the git metadata
+is unavailable, and the digest keeps its own reason for unreadable covered files.
+Every git call has a short timeout and a small, fixed environment, so no pager or
+interactive prompt can hold up an import.
 
 A missing or unreadable file is DECLARED by ``capture`` (null digest plus a reason
 naming the path) and never raised: it runs at import, where raising would take the
@@ -62,6 +65,7 @@ __all__ = [
     "capture",
     "compute_digest",
     "head_commit",
+    "is_commit_id",
     "repository_root",
 ]
 
@@ -150,15 +154,24 @@ def _git_output(root, args) -> tuple[str, str | None]:
     return result.stdout.strip(), None
 
 
+def is_commit_id(value) -> bool:
+    """Whether ``value`` is a commit id in this contract: 40 lowercase hex digits.
+
+    This is the one shape check, shared by the capture-side git read and by the
+    reader of an answer; a short id, a tag and uppercase hex are all refused.
+    """
+    return isinstance(value, str) and _COMMIT_ID.fullmatch(value) is not None
+
+
 def head_commit(root) -> tuple[str | None, str | None]:
     """The checkout's HEAD commit, or ``(None, reason)`` when git cannot say.
 
     This is the same read ``capture`` makes at import and the one a verifier
-    makes against the tree it is checking, so both name a commit by the same
-    rule: 40 lowercase hex digits, no ambiguity about short ids or tags.
+    makes against the tree it is checking; `is_commit_id` is the one shape check
+    both apply before calling a string a commit.
     """
     commit, reason = _git_output(root, ("rev-parse", "HEAD"))
-    if reason is None and not _COMMIT_ID.fullmatch(commit):
+    if reason is None and not is_commit_id(commit):
         return None, (f"git -C {root} rev-parse HEAD did not report a "
                       "40-character lowercase hex commit")
     return (commit if reason is None else None), reason

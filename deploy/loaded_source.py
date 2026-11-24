@@ -18,9 +18,10 @@ checked tree for its own HEAD commit with the same git read the process used at
 import. The digest covers four files; the commit covers the whole tree, so a merge
 that leaves those four files byte-identical is still caught. Both reads call
 ``core.source_identity`` - the same implementations api/main.py captures with - so
-there is no second copy of either rule here to drift from it. api.main is
-deliberately NOT imported: a verifier that loaded the app would only prove
-something about itself.
+there is no second copy of either rule here to drift from it: the answer's commit
+is checked by ``is_commit_id``, the same shape check ``head_commit`` applies to
+the tree's own commit. api.main is deliberately NOT imported: a verifier that
+loaded the app would only prove something about itself.
 
 USAGE
 -----
@@ -63,12 +64,12 @@ EXIT CODES
 import argparse
 import json
 from pathlib import Path, PurePosixPath
-import re
 import sys
 import urllib.error
 import urllib.request
 
-from core.source_identity import SourceUnreadable, compute_digest, head_commit
+from core.source_identity import (SourceUnreadable, compute_digest, head_commit,
+                                  is_commit_id)
 
 EXIT_MATCH = 0
 EXIT_MISMATCH = 1
@@ -77,7 +78,6 @@ EXIT_UNVERIFIABLE = 2
 DEFAULT_TIMEOUT = 10.0
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
-_ANSWER_COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
 
 class Unverifiable(Exception):
@@ -186,8 +186,7 @@ def verify(url: str, tree, timeout: float = DEFAULT_TIMEOUT) -> dict:
     # match may be printed; a missing commit is declared, never treated as green.
     vcs = identity.get("vcs")
     reported_commit = vcs.get("commit") if isinstance(vcs, dict) else None
-    if (not isinstance(reported_commit, str)
-            or not _ANSWER_COMMIT.fullmatch(reported_commit)):
+    if not is_commit_id(reported_commit):
         detail = vcs.get("reason") if isinstance(vcs, dict) else None
         raise Unverifiable(
             "source_identity.vcs.commit does not name a commit"
@@ -279,8 +278,10 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "The covered file list comes from the answer itself; the digest is "
             "recomputed with core.source_identity.compute_digest and the checked "
-            "tree's commit with core.source_identity.head_commit. Both commits "
-            "are reported, with a commit_status of match, mismatch or uncheckable."
+            "tree's commit with core.source_identity.head_commit; the answer's "
+            "commit is checked with core.source_identity.is_commit_id. Both "
+            "commits are reported, with a commit_status of match, mismatch or "
+            "uncheckable."
         ),
     )
     parser.add_argument("--url", required=True,

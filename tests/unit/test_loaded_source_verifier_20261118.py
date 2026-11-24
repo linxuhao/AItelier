@@ -59,7 +59,7 @@ import pytest
 
 import deploy.loaded_source as verifier
 from core import source_identity
-from core.source_identity import compute_digest
+from core.source_identity import compute_digest, head_commit, is_commit_id
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -507,3 +507,31 @@ def test_whole_tree_without_a_checkable_tree_commit_is_unverifiable(tmp_path):
 
         with pytest.raises(verifier.Unverifiable, match="not a git repository"):
             verifier.verify(url, plain)
+
+
+def test_the_answer_commit_uses_the_capture_side_shape_check(tmp_path):
+    """One shape rule: head_commit's id is accepted; other spellings are refused."""
+    tree = _git_tree(tmp_path / "shape-check")
+    commit, reason = head_commit(tree)
+    assert reason is None
+    assert is_commit_id(commit) is True
+    identity = source_identity.capture(tree)
+    assert identity["vcs"]["commit"] == commit
+
+    with _health_server(identity) as url:
+        good = _run_verifier("--url", url, "--tree", str(tree), "--json")
+        assert good.returncode == 0, (good.stdout, good.stderr)
+        assert json.loads(good.stdout)["commit_status"] == "match"
+
+    bad_ids = [commit[:39], commit.upper(), f"refs/tags/v1:{commit}"]
+    assert bad_ids[1] != commit                 # the uppercase arm is distinct
+    for bad in bad_ids:
+        assert is_commit_id(bad) is False, bad
+        served = dict(identity, vcs={"commit": bad, "dirty": False, "reason": None})
+        with _health_server(served) as url:
+            run = _run_verifier("--url", url, "--tree", str(tree), "--json")
+            assert run.returncode == 2, (bad, run.stdout, run.stderr)
+            report = json.loads(run.stdout)
+            assert report["status"] == "unverifiable"
+            assert report["commit_status"] == "uncheckable"
+            assert "does not name a commit" in report["error"]

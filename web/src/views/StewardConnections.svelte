@@ -81,6 +81,17 @@
     } catch (e) { toolFailed(e); }
     finally { if (probe) busy = ''; }
   }
+  // A whole column at once (allowed / outward / egress): only the ticks the owner could click
+  // one by one - never a locked one, a name collision's allowed, or a changed tool's allowed
+  // (a changed description is re-ticked by hand). Nothing is saved until Save.
+  const BULK: [StewardToolLock, string][] = [['allowed', 'steward.connAllowed'], ['outward', 'steward.connOutward'],
+    ['egress', 'steward.connEgress']];
+  const bulkable = (flag: StewardToolLock) => tools.filter(r => drafts[r.raw_name] && !holds(r, flag)
+    && !(flag === 'allowed' && (r.state === 'collision' || r.state === 'changed')));
+  const bulkOn = (flag: StewardToolLock) => bulkable(flag).length > 0 && bulkable(flag).every(r => drafts[r.raw_name][flag]);
+  function setColumn(flag: StewardToolLock, value: boolean) {
+    for (const r of bulkable(flag)) drafts[r.raw_name][flag] = value;
+  }
   async function saveTools() {
     if (!open || busy) return;
     busy = 'tools'; toolsError = ''; notice = '';
@@ -211,6 +222,15 @@
           <div class="tools" data-conn-tools>
             {#if toolsError}<p class="error" role="alert">{toolsError}</p>{/if}
             {#if instructions}<details><summary>{t('steward.connInstructions')}</summary><pre class="plain">{instructions}</pre></details>{/if}
+            {#if tools.length}
+              <div class="ticks bulk" data-conn-bulk>
+                <span>{t('steward.connAllTools')}</span>
+                {#each BULK as [flag, label] (flag)}
+                  <label><input type="checkbox" data-bulk={flag} checked={bulkOn(flag)} disabled={!bulkable(flag).length}
+                    onchange={(event) => setColumn(flag, event.currentTarget.checked)} /> {t(label)}</label>
+                {/each}
+              </div>
+            {/if}
             {#each tools as tool (tool.raw_name)}
               {@const d = drafts[tool.raw_name]}
               <div class="tool" class:changed={tool.state === 'changed'} data-tool={tool.raw_name} data-state={tool.state}
@@ -308,6 +328,7 @@
   .plain{white-space:pre-wrap;overflow-wrap:anywhere;margin:2px 0;}
   .annotations{font-family:monospace;font-size:11px;color:var(--pico-muted-color);}
   .ticks{display:flex;gap:12px;flex-wrap:wrap;align-items:center;}.ticks label{margin:0;font-size:12px;}
+  .bulk{padding:6px 0;font-size:12px;color:var(--pico-muted-color);}
   .ticks input[type=text],.ticks input[type=number]{width:120px;margin:0;padding:2px 6px;font-size:12px;height:auto;}
   .edit{margin:12px 0 0;padding:12px 14px;border:1px solid var(--pico-muted-border-color);border-radius:8px;}
   .notice{color:var(--pico-primary);}.error{color:var(--pico-del-color);}

@@ -123,3 +123,11 @@ test('the channel lines for a connection change: decided, and a widening one poi
   assert.notEqual(channelReplies.approval({ proposal_id: 'p-1', action: 'approve', outcome: 'refused', refusal: 'needs_dashboard_approval' }),
     channelReplies.approval({ proposal_id: 'p-1', action: 'approve', outcome: 'refused', refusal: 'needs_dashboard_confirmation' }));
 });
+
+test('the proposal tool tells the steward it may take egress off an owner-local tool, approved on the dashboard', () => {
+  const { description } = fixture().tools.get('propose_connection_change');
+  assert.match(description, /egress: false/);
+  assert.match(description, /needs_dashboard_reason: "egress_off"/);
+  assert.match(description, /dashboard card/);
+  assert.doesNotMatch(description, /egress_required/);
+});

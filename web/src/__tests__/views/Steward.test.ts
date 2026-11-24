@@ -487,6 +487,25 @@ describe('a connection_change card (step 24.1c)', () => {
     expect(p.onconnect).toHaveBeenCalledWith('mailpub');
   });
 
+  it('an egress_off change names the tools that lose egress, says what it means, and keeps the external mark', () => {
+    const view = render(StewardProposalCard, props(update({visibility: undefined, external_content: true,
+      tools: [{raw_name: 'ocr_image', schema_sha256: 'a'.repeat(64), egress: false}],
+      widens: true, widened: ['tools.ocr_image.egress'], egress_off: ['ocr_image']})));
+    const note = view.container.querySelector('[data-egress-off]') as HTMLElement;
+    expect(note).toBeTruthy();
+    expect(t('steward.connEgressOff')).not.toBe('steward.connEgressOff');
+    expect(note.textContent).toBe(t('steward.connEgressOff').replace('{tools}', 'ocr_image'));
+    const tool = view.container.querySelector('[data-tool="ocr_image"]') as HTMLElement;
+    expect((tool.querySelector('[data-field="egress"]') as HTMLElement).dataset.widen).toBe('1');
+    expect(tool.querySelector('[data-field="egress"] [data-after]')?.textContent).toBe('false');
+    expect(view.container.querySelector('[data-external]')).toBeTruthy();
+  });
+
+  it('a change without egress_off shows no egress note', () => {
+    const view = render(StewardProposalCard, props(update()));
+    expect(view.container.querySelector('[data-egress-off]')).toBeNull();
+  });
+
   it('a narrowing change has no widening note; the card still approves on the version shown', async () => {
     const p = props(update({visibility: 'private', widens: false, widened: [],
       tools: [{raw_name: 'ocr_image', schema_sha256: 'a'.repeat(64), allowed: false}]}));

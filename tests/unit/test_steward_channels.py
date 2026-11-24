@@ -8,14 +8,19 @@ path. The HTTP tests run the real app with the write gate ON, like
 tests/unit/test_steward_proposals.py."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
+import shutil
 import sqlite3
 import sys
+from contextlib import contextmanager
+from copy import copy as shallow_copy
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,23 +45,102 @@ SLACK_USER = "U0OWNER"
 CREATE = {"project_id": "gamma", "title": "Gamma", "goal": "a new project", "seed_nodes": []}
 
 
-@pytest.fixture
-def world(tmp_path, monkeypatch, state_db_copy):
-    # The binding codes are keyed with the driver pepper secret file; here it is the
-    # registry's pepper, whatever the ambient container mounts.
+# One provisioned world per module: the State file, the seeded registry and both
+# DSH drivers (including their token files) are built here, once. Provisioning is
+# the expensive part - a test body is milliseconds next to it - and none of it
+# needs repeating for a test that only reads the baseline.
+@pytest.fixture(scope="module")
+def world_baseline(_state_templates, tmp_path_factory):
+    root = tmp_path_factory.mktemp("steward-world-baseline")
+    path = _state_templates.copy(state_template.state_registry_dsh, root / "baseline.sqlite")
+    db = StateDatabase(path)
+    # The binding codes are keyed with the registry's pepper, whatever the ambient
+    # container mounts. Patch it for provisioning, which predates a test's own
+    # monkeypatch of read_pepper.
+    with patch.object(drivers, "read_pepper", lambda: PEPPER):
+        registry = DriverRegistry(db, PEPPER)
+        registry.seed("steward-channel-owner-cli-token")
+        seeder = StateService(db, actor="fixture", project_read_trusted=True)
+        for project in ("alpha", HOME):
+            seeder.store.create_project(project, project.title())
+        runtime = DshDrivers(db, registry, root / "drivers",
+                             command=[sys.executable, "-c", "import time; time.sleep(90)"])
+        rows = {
+            "steward": runtime._provision(HOME, "aitelier", "driver", "fixture"),
+            "director": runtime._provision("alpha", "aitelier", "driver", "fixture"),
+        }
+        tokens = {name: (runtime.root / row["driver_id"] / "token").read_text().strip()
+                  for name, row in rows.items()}
+    # Put every provisioned row in the main file before handing out copies; a WAL
+    # sibling must not be needed to reconstruct the baseline.
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+    finally:
+        conn.close()
+    # No connection is open on the baseline from here on. A bare copy of the
+    # main file must not depend on the WAL siblings, so drop them after the
+    # checkpoint; each test's StateDatabase puts its own copy back into WAL mode.
+    for suffix in ("-wal", "-shm"):
+        Path(str(path) + suffix).unlink(missing_ok=True)
+    return type("Baseline", (), dict(db_path=Path(path), registry=registry, runtime=runtime,
+                                     driver_ids={name: row["driver_id"] for name, row in rows.items()},
+                                     tokens=tokens))
+
+
+class _TestStateDatabase(StateDatabase):
+    """A private throwaway file keeps WAL, but need not fsync every commit.
+
+    Durability across a power loss is not what these tests measure; isolation
+    is. `synchronous=OFF` removes that fsync from each connection without
+    sharing a file, a handle or a schema with any other test.
+    """
+
+    @contextmanager
+    def get_connection(self):
+        with super().get_connection() as conn:
+            conn.execute("PRAGMA synchronous=OFF")
+            yield conn
+
+
+def _build_world(dest, baseline, monkeypatch):
+    """A private world cloned from the provisioned baseline.
+
+    The provisioned identity rows and driver home directories are never shared
+    live: this test owns the copied State file and a copied token file per
+    driver, so its row and its credential are independently mutable. Services,
+    runtime and registry are per-world objects over that private file, so a
+    monkeypatch in one test cannot reach another's world.
+    """
     monkeypatch.setattr(drivers, "read_pepper", lambda: PEPPER)
-    db = StateDatabase(state_db_copy(state_template.state_registry_dsh, tmp_path / "state.sqlite"))
-    registry = DriverRegistry(db, PEPPER)
-    registry.seed("steward-channel-owner-cli-token")
-    seeder = StateService(db, actor="fixture", project_read_trusted=True)
-    for project in ("alpha", HOME):
-        seeder.store.create_project(project, project.title())
-    runtime = DshDrivers(db, registry, tmp_path / "drivers",
-                         command=[sys.executable, "-c", "import time; time.sleep(90)"])
-    steward = runtime._provision(HOME, "aitelier", "driver", "fixture")
-    director = runtime._provision("alpha", "aitelier", "driver", "fixture")
-    tokens = {name: (runtime.root / row["driver_id"] / "token").read_text().strip()
-              for name, row in (("steward", steward), ("director", director))}
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / "state.sqlite"
+    shutil.copyfile(baseline.db_path, path)
+    shutil.copymode(baseline.db_path, path)
+    db = _TestStateDatabase(str(path))
+    # The copy already has the baseline's provisioned schema. The conftest's
+    # per-test forget ran before this fixture, so mark THIS file (unique inode)
+    # as set up: no other test's handle or schema cache is touched.
+    from core import state_schema_setup
+    state_schema_setup.once(db, "graph", lambda _db: None, db)
+
+    registry = shallow_copy(baseline.registry)
+    registry.db = db
+    tokens = {}
+    for name, driver_id in baseline.driver_ids.items():
+        directory = dest / "drivers" / driver_id
+        directory.mkdir(parents=True, mode=0o700)
+        source = baseline.runtime.root / driver_id / "token"
+        shutil.copyfile(source, directory / "token")
+        shutil.copymode(source, directory / "token")
+        tokens[name] = (directory / "token").read_text().strip()
+
+    runtime = shallow_copy(baseline.runtime)
+    runtime.db, runtime.registry, runtime.root = db, registry, dest / "drivers"
+    runtime.processes, runtime.gateways, runtime.monitors = {}, {}, set()
+    runtime.lock, runtime.closing = asyncio.Lock(), False
+    rows = {name: runtime.get(project) for name, project in (("steward", HOME), ("director", "alpha"))}
 
     def as_driver(row):
         return StateService(db, actor="driver:" + row["driver_id"], driver_id=row["driver_id"],
@@ -64,8 +148,13 @@ def world(tmp_path, monkeypatch, state_db_copy):
 
     owner = StateService(db, actor="owner:" + OWNER, project_read_trusted=True)
     return type("World", (), dict(db=db, runtime=runtime, registry=registry, tokens=tokens, owner=owner,
-                                  steward_row=steward, steward=as_driver(steward),
-                                  director=as_driver(director)))
+                                   steward_row=rows["steward"], steward=as_driver(rows["steward"]),
+                                   director=as_driver(rows["director"])))
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch, world_baseline):
+    return _build_world(tmp_path, world_baseline, monkeypatch)
 
 
 def bind(world, channel="slack", sender=SLACK_USER, key="bind-1"):

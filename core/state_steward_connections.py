@@ -549,8 +549,9 @@ def check_visibility(url, visibility) -> None:
 # address (`checked_address(..., dev_mcp_ok=True)`); a proposal and OAuth never pass it,
 # so an alias, a numeric address, a tunnel name or an OAuth endpoint stays refused. Its
 # write tools are always outward and egress (an owner confirmation for every call), its
-# subagent_* tools are never allowed or served, and the gateway forwards a call only for
-# a tool pinned on the basic capability `code` (core.state_steward_capabilities.code_pin).
+# subagent_* tools are never allowed, stored as a tool or served (`dev_mcp_tool`), and the
+# gateway forwards a call only for a tool pinned on the basic capability `code`
+# (core.state_steward_capabilities.code_pin).
 DEV_MCP_HOST = "dev_mcp"
 # What dev-mcp's own `initialize` reports (its FastMCP server name).
 DEV_MCP_SERVER_NAME = "dev-tools-mcp"
@@ -588,6 +589,19 @@ def dev_mcp_locked_flags(raw_name: str) -> tuple[str, ...]:
     if raw_name.startswith(DEV_MCP_SUBAGENT):
         return ("allowed",)
     return ()
+
+
+def dev_mcp_tool(raw_name: str) -> bool:
+    """Whether a name in dev-mcp's own `tools/list` is one of its TOOLS at all.
+
+    Its subagent_* names are not. The lock never allows one (`dev_mcp_locked_flags` answers
+    `allowed` for it), and a tool that may never be allowed may never be served: not in the
+    effective set, not in the steward's catalog, and the gateway answers `tool_not_allowed`.
+    So discovery stores no row for it (`record_discovery`) - the panel, the probe answer and
+    the served catalog then name the same dev-mcp tools, instead of the answer showing the
+    owner tools that cannot exist for them (iss-01aa74d937994601). This only refuses to
+    STORE a name nothing could ever serve; the lock itself is unchanged."""
+    return not (isinstance(raw_name, str) and raw_name.startswith(DEV_MCP_SUBAGENT))
 
 
 def dev_mcp_hosts() -> set[str]:
@@ -1374,15 +1388,26 @@ def record_discovery(store, conn_id: str, listed: list, instructions=None) -> di
     A tool the server no longer lists (removed, or renamed: a rename is a removal and a
     new tool) is deleted with its owner fields, so it leaves the effective set; if it
     is listed again it is a NEW tool, off until the owner allows it again. The call
-    ledger keeps its past calls. `listed` must be the server's whole list."""
+    ledger keeps its past calls. `listed` must be the server's whole list. On the dev-mcp
+    connection a listed name that is not one of its tools (`dev_mcp_tool`: its subagent_*
+    names) is not stored at all, so it appears nowhere - no panel row, no probe answer
+    entry, no served catalog entry (iss-01aa74d937994601)."""
     moment = _iso(_utcnow())
+    with store.transaction() as conn:
+        known = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+    if known is None:
+        return {"conn_id": conn_id, "gone": True}
+    dev = is_dev_mcp(known)
     parsed = {}
     for tool in listed:
         try:
             text = definition_json(tool)
         except (ValueError, UnicodeEncodeError):
             continue
-        parsed.setdefault(definition_of(tool)["name"], (text, definition_of(tool)))
+        definition = definition_of(tool)
+        if dev and not dev_mcp_tool(definition["name"]):
+            continue
+        parsed.setdefault(definition["name"], (text, definition))
     changed = False
     with store.transaction(write=True) as conn:
         row = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()

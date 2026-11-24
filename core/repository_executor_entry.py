@@ -1,6 +1,5 @@
 """Container entry: capture actual command results, with no backend environment."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import importlib.util
 import errno
 import hashlib
 import stat
@@ -380,6 +379,28 @@ def _coding_shell(payload, env):
 GATE_IMPORT_ROOT = "/opt/aitelier-gate-imports"
 
 
+def _child_has_pytest_timeout(executable, repo, env, deadline):
+    """Whether the interpreter that will run pytest can load pytest-timeout.
+
+    Asked of the child (same executable, environment and cwd), not of this
+    process: `--timeout` is a child argument, and a plugin this process can
+    import but the child cannot would make the child refuse it ("unrecognized
+    arguments").
+    """
+    try:
+        # find_spec, not import: importing the plugin imports pytest, and this
+        # probe is paid out of the entry's own deadline. The answer is read
+        # from stdout, not the exit status: with SIGCHLD ignored the child is
+        # auto-reaped and subprocess reports returncode 0 whatever it was.
+        return subprocess.run([executable, "-c", "import importlib.util; "
+                               "print(importlib.util.find_spec('pytest_timeout') is not None)"],
+                              cwd=repo, env=env, capture_output=True, text=True,
+                              timeout=min(30, max(0.1, deadline - time.monotonic()))
+                              ).stdout.strip() == "True"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def run(payload):
     repo = payload["repo"]
     env = {"HOME": "/tmp", "PATH": "/usr/local/bin:/usr/bin:/bin",
@@ -499,7 +520,7 @@ def run(payload):
         threading.Thread(target=relay.serve_forever, daemon=True).start()
         env["GODOT_BUILDER_URL"] = f"http://127.0.0.1:{relay.server_port}"
     command = list(payload["args"])
-    if payload.get("pytest_timeout") and importlib.util.find_spec("pytest_timeout"):
+    if payload.get("pytest_timeout") and _child_has_pytest_timeout(command[0], repo, env, deadline):
         command += ["--timeout=120", "--timeout-method=thread"]
     execution_identity = None
     if payload.get("pytest_timeout") and not payload.get("profile"):

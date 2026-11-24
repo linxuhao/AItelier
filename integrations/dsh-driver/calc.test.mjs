@@ -321,6 +321,8 @@ test('calcMediaOps: the refs\' files go in; outputs are stored by magic as the t
   assert.deepEqual(group.files.map(f => f.mime), ['image/png'], 'a group keeps png only');
   assert.equal(group.files_skipped, 4);
   assert.equal(library.lookup(group.files[0].ref).audience, 'group:wechat:r1');
+  // The turn's audience is the queue priority (design 十四: an owner's call before the groups').
+  assert.deepEqual(r.logs.filter(line => line.startsWith('calc_job ')).map(line => JSON.parse(line.slice(9)).priority), ['owner', 'group']);
 
   // Bad magic, a docx where an xlsx would be, svg, csv text: never stored.
   r.setPlan({ run: { frame: { files: [{ name: 'a.png', text: '<svg/>' }, { name: 'b.csv', text: 'a,b\n1,2\n' }, { name: 'c.xlsx', data: ooxml('docx').toString('base64') },

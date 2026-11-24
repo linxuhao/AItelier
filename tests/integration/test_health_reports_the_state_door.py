@@ -202,8 +202,11 @@ def test_the_existing_health_keys_keep_their_name_and_meaning(client):
         assert body["engine"] == "DPE SOTA v3.0"
         assert set(body["gate_harness"]) == {"path", "sha256", "reason"}
         assert set(body["process"]) == {"started_at", "uptime_seconds", "reason"}
+        # `vcs` is the added whole-tree fact; the five older keys keep their
+        # names and meanings. This expectation was updated because the new
+        # field genuinely makes the old exact-key set false.
         assert set(body["source_identity"]) == {"root", "digest", "captured_at",
-                                                "files", "reason"}
+                                                "files", "reason", "vcs"}
         assert set(body["state_door"]) == {"verdict", "dispatch",
                                            "declaration_mismatch", "reason"}
 

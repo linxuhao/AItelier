@@ -1,8 +1,9 @@
 """/health's `source_identity` must have a consumer that really runs, and one rule.
 
 The backend reports which source bytes the answering process imported (root, a
-digest captured once at import, the capture moment). These tests execute the two
-halves of the contract the consumer exists for:
+digest captured once at import, the checkout's git commit captured alongside it,
+and the capture moment). These tests execute the two halves of the contract the
+consumer exists for:
 
 * a LIVE answer, produced by a real uvicorn process serving ``api.main:app`` on
   loopback inside this test, checked by ``python -m deploy.loaded_source`` against
@@ -16,6 +17,10 @@ halves of the contract the consumer exists for:
   tree, in this process, independently of the verifier subprocess, so the shared
   implementation is shown to be the one both sides use
   (``test_the_reported_digest_is_the_shared_implementations_value``);
+* the whole-tree commit from a real scratch git repository: a process captured
+  from that tree matches even when the digest alone cannot see a later merge, a
+  different HEAD is a mismatch naming both commits, and no commit on either side
+  is unverifiable, never green (the three `whole_tree` tests);
 * the rule's loop exists in exactly ONE place, and that place is
   ``core/source_identity.py``: ``api/main.py`` imports it instead of owning a
   copy, and no other non-test module the repository TRACKS carries the rule's
@@ -35,20 +40,26 @@ the mismatch arm runs against a copy made under the test's temp directory, so th
 live answer stays trustworthy for the whole module.
 """
 import ast
+from contextlib import contextmanager
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
 import pytest
 
-from core.source_identity import compute_digest
+import deploy.loaded_source as verifier
+from core import source_identity
+from core.source_identity import compute_digest, head_commit, is_commit_id
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -121,6 +132,13 @@ def _run_verifier(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _git(repo, *args):
+    """A real git command against a scratch repository the test created."""
+    done = subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True, check=True, timeout=30)
+    return done.stdout.strip()
+
+
 def test_the_verifier_agrees_with_the_live_process(live_backend):
     """Arm one: a live answer, the tree its process imported, exit 0."""
     url, identity = live_backend
@@ -166,6 +184,15 @@ def test_the_verifier_names_the_file_whose_bytes_differ(live_backend, tmp_path):
     changed = original + b"\n# a merge this serving process never imported\n"
     target.write_bytes(changed)
     assert hashlib.sha256(changed).hexdigest() != hashlib.sha256(original).hexdigest()
+
+    # The verifier now also compares whole-tree commits, so the candidate tree
+    # must really be a checkout for the digest arm to stay a mismatch verdict;
+    # its commit is necessarily different from the served process's.
+    _git(copy, "init", "-q")
+    _git(copy, "config", "user.email", "health@example.invalid")
+    _git(copy, "config", "user.name", "health test")
+    _git(copy, "add", "--", *identity["files"])
+    _git(copy, "commit", "-q", "-m", "candidate tree")
 
     run = _run_verifier("--url", url, "--tree", str(copy))
     assert run.returncode == 1, (run.returncode, run.stdout, run.stderr)
@@ -305,3 +332,206 @@ def test_the_scan_ignores_files_the_repository_does_not_track(tmp_path):
                           if _RULE_FINGERPRINT in path.read_text(encoding="utf-8"))
     assert walk_holders == [".cache/vendored/third_party.py",
                             "instrument/rule.py"], walk_holders
+
+
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}\Z")
+
+
+@contextmanager
+def _health_server(identity):
+    """A loopback /health serving exactly the identity the test hands it."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({"status": "ok",
+                               "source_identity": identity}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_port}/health"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+
+def _git_tree(path):
+    """A real, clean checkout in tmp_path, with the covered files committed."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "verifier@example.invalid")
+    _git(path, "config", "user.name", "verifier test")
+    for rel in source_identity.SOURCE_IDENTITY_MODULES:
+        target = path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {rel}\ncovered\n", encoding="utf-8")
+    _git(path, "add", "--", *source_identity.SOURCE_IDENTITY_MODULES)
+    _git(path, "commit", "-q", "-m", "first commit")
+    return path
+
+
+def _commit_file(repo, rel, text, message):
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    _git(repo, "add", "--", rel)
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_whole_tree_match_and_commit_only_mismatch(tmp_path):
+    """The report name both commits; a merge outside the digest still goes red."""
+    tree = _git_tree(tmp_path / "checkout")
+    first_commit = _git(tree, "rev-parse", "HEAD")
+    identity = source_identity.capture(tree)
+    files = list(identity["files"])
+    assert _COMMIT_ID.fullmatch(first_commit)
+    assert identity["vcs"]["commit"] == first_commit
+    assert compute_digest(tree, files) == identity["digest"]
+
+    with _health_server(identity) as url:
+        matched = _run_verifier("--url", url, "--tree", str(tree), "--json")
+        assert matched.returncode == 0, (matched.returncode, matched.stderr)
+        report = json.loads(matched.stdout)
+        assert report["status"] == "match"
+        assert report["commit_status"] == "match"
+        assert report["reported_commit"] == first_commit
+        assert report["tree_commit"] == first_commit
+        assert report["reported_digest"] == report["recomputed_digest"] == \
+            identity["digest"]
+
+        text = _run_verifier("--url", url, "--tree", str(tree))
+        assert text.returncode == 0, (text.returncode, text.stderr)
+        assert "MATCH" in text.stdout
+        assert f"reported commit  : {first_commit}" in text.stdout
+        assert f"tree commit      : {first_commit}" in text.stdout
+        assert "commit status    : match" in text.stdout
+
+        second_commit = _commit_file(tree, "core/state_channels.py",
+                                     "merged after import\n", "a later merge")
+        assert _COMMIT_ID.fullmatch(second_commit)
+        assert second_commit != first_commit
+        assert _git(tree, "rev-parse", "HEAD") == second_commit
+        assert compute_digest(tree, files) == identity["digest"], \
+            "the digest arm must stay green for this to be a commit-only test"
+
+        mismatched = _run_verifier("--url", url, "--tree", str(tree), "--json")
+        assert mismatched.returncode == 1, (mismatched.returncode, mismatched.stderr)
+        report = json.loads(mismatched.stdout)
+        assert report["status"] == "mismatch"
+        assert report["commit_status"] == "mismatch"
+        assert report["reported_commit"] == first_commit
+        assert report["tree_commit"] == second_commit
+        assert report["reported_digest"] == report["recomputed_digest"]
+        assert first_commit in report["differing_reason"]
+        assert second_commit in report["differing_reason"]
+
+        text = _run_verifier("--url", url, "--tree", str(tree))
+        assert text.returncode == 1, (text.returncode, text.stderr)
+        assert "MISMATCH" in text.stdout
+        assert f"reported commit  : {first_commit}" in text.stdout
+        assert f"tree commit      : {second_commit}" in text.stdout
+        assert "commit status    : mismatch" in text.stdout
+        assert first_commit in text.stdout and second_commit in text.stdout
+
+
+def test_whole_tree_without_an_answered_commit_is_unverifiable(tmp_path):
+    """A process that declared git absent can never be answered green."""
+    tree = _git_tree(tmp_path / "checkout")
+    identity = source_identity.capture(tree)
+    declared = dict(identity, vcs={"commit": None, "dirty": None,
+                                   "reason": "git not found on PATH"})
+    with _health_server(declared) as url:
+        run = _run_verifier("--url", url, "--tree", str(tree), "--json")
+        assert run.returncode == 2, (run.returncode, run.stdout, run.stderr)
+        report = json.loads(run.stdout)
+        assert report["status"] == "unverifiable"
+        assert report["commit_status"] == "uncheckable"
+        assert report["tree_commit"] is None
+        assert "git not found on PATH" in report["error"]
+
+        text = _run_verifier("--url", url, "--tree", str(tree))
+        assert text.returncode == 2, (text.returncode, text.stdout, text.stderr)
+        assert "git not found on PATH" in text.stderr
+        assert "MATCH" not in text.stdout + text.stderr
+
+        with pytest.raises(verifier.Unverifiable, match="cannot be made"):
+            verifier.verify(url, tree)
+
+    # A legacy answer with no vcs block at all is refused for the same reason.
+    old = {key: value for key, value in identity.items() if key != "vcs"}
+    with _health_server(old) as url:
+        run = _run_verifier("--url", url, "--tree", str(tree), "--json")
+        assert run.returncode == 2
+        assert "vcs.commit" in json.loads(run.stdout)["error"]
+
+
+def test_whole_tree_without_a_checkable_tree_commit_is_unverifiable(tmp_path):
+    """The digest is readable here, but the tree's own commit is not."""
+    tree = _git_tree(tmp_path / "checkout")
+    identity = source_identity.capture(tree)
+    commit = identity["vcs"]["commit"]
+    plain = tmp_path / "plain-tree"
+    plain.mkdir()
+    for rel in identity["files"]:
+        target = plain / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((tree / rel).read_bytes())
+    assert compute_digest(plain, identity["files"]) == identity["digest"]
+
+    with _health_server(identity) as url:
+        run = _run_verifier("--url", url, "--tree", str(plain), "--json")
+        assert run.returncode == 2, (run.returncode, run.stdout, run.stderr)
+        report = json.loads(run.stdout)
+        assert report["status"] == "unverifiable"
+        assert report["commit_status"] == "uncheckable"
+        assert report["reported_commit"] == commit
+        assert report["tree_commit"] is None
+        assert "not a git repository" in report["error"]
+        assert commit in report["error"]
+
+        text = _run_verifier("--url", url, "--tree", str(plain))
+        assert text.returncode == 2, (text.returncode, text.stdout, text.stderr)
+        assert "not a git repository" in text.stderr
+        assert "MATCH" not in text.stdout + text.stderr
+
+        with pytest.raises(verifier.Unverifiable, match="not a git repository"):
+            verifier.verify(url, plain)
+
+
+def test_the_answer_commit_uses_the_capture_side_shape_check(tmp_path):
+    """One shape rule: head_commit's id is accepted; other spellings are refused."""
+    tree = _git_tree(tmp_path / "shape-check")
+    commit, reason = head_commit(tree)
+    assert reason is None
+    assert is_commit_id(commit) is True
+    identity = source_identity.capture(tree)
+    assert identity["vcs"]["commit"] == commit
+
+    with _health_server(identity) as url:
+        good = _run_verifier("--url", url, "--tree", str(tree), "--json")
+        assert good.returncode == 0, (good.stdout, good.stderr)
+        assert json.loads(good.stdout)["commit_status"] == "match"
+
+    bad_ids = [commit[:39], commit.upper(), f"refs/tags/v1:{commit}"]
+    assert bad_ids[1] != commit                 # the uppercase arm is distinct
+    for bad in bad_ids:
+        assert is_commit_id(bad) is False, bad
+        served = dict(identity, vcs={"commit": bad, "dirty": False, "reason": None})
+        with _health_server(served) as url:
+            run = _run_verifier("--url", url, "--tree", str(tree), "--json")
+            assert run.returncode == 2, (bad, run.stdout, run.stderr)
+            report = json.loads(run.stdout)
+            assert report["status"] == "unverifiable"
+            assert report["commit_status"] == "uncheckable"
+            assert "does not name a commit" in report["error"]

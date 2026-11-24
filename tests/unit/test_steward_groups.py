@@ -634,6 +634,62 @@ def test_a_never_recorded_message_five_hours_old_is_still_stale(world):
     assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(0,)]
 
 
+# --- iss-f62cedf428384095: the stale gate is the mention's alone ----------------------------------
+
+def test_a_kept_relay_five_hours_old_is_recorded_and_a_later_replay_is_its_duplicate(world):
+    """An un-mentioned (`kept`) message carries no question: its channel time decides nothing, so
+    a file that reached the bridge hours ago is still kept as ONE `kept_media` row (accepted 0)
+    with the attachments it came with - the row and the bytes a later @ in that group must read.
+    A replay of the same channel ref is that row's duplicate at the same age, and writes nothing
+    (iss-f62cedf428384095: a refusal here makes the host withdraw the just-stored bytes)."""
+    bound_group(world)
+    turn_on(world)
+    old = (state_channels._now() - timedelta(hours=5)).isoformat()
+    first = kept_media(world, "k-late", at=old)
+    assert "refused" not in first, first
+    assert first["kept"] is True and first["duplicate"] is False
+    files = [{"kind": "image", "ref": "m_0123456789abcdef", "mime": "image/png", "size": 33}]
+    stored = rows(world, KEPT_ROW, ("k-late",))
+    assert len(stored) == 1
+    assert stored[0][0] == first["message_id"] and stored[0][2] == 0
+    assert rows(world, "SELECT kind, accepted FROM state_group_messages WHERE direction='in'") == [("kept_media", 0)]
+    assert json.loads(stored[0][3]) == files
+    again = replay_kept(world, "k-late", files, at=old)
+    assert again == {"duplicate": True, "message_id": first["message_id"], "accepted": False}
+    assert rows(world, KEPT_ROW, ("k-late",)) == stored, "no extra row, the same row untouched"
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(1,)]
+
+
+def test_a_kept_relay_without_a_channel_time_is_still_undated_and_writes_no_row(world):
+    """The exemption is the stale gate's alone: `undated` is decided before it and still refuses a
+    kept relay, so nothing is written for a message whose age cannot be judged at all."""
+    bound_group(world)
+    turn_on(world)
+    assert kept_media(world, "k-undated", at=None) == {"refused": "undated"}
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(0,)]
+    assert rows(world, "SELECT COUNT(*) FROM state_group_members") == [(0,)]
+
+
+def test_a_kept_relay_in_a_group_whose_switch_is_not_on_is_still_media_keep_off_with_no_row(world):
+    """`media_keep_off` is untouched: a group whose switch is not `on` stores nothing, and the
+    answer still names that reason (not `stale`) and writes no row and no member."""
+    bound_group(world)
+    assert switch(world)[0] != "on"
+    assert kept_media(world, "k-off") == {"refused": "media_keep_off"}
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(0,)]
+    assert rows(world, "SELECT COUNT(*) FROM state_group_members") == [(0,)]
+
+
+def test_a_mention_relay_five_hours_old_is_still_stale_and_writes_no_row(world):
+    """A MENTION relay (kept false) keeps today's gate exactly: the steward is being asked, so a
+    question that old is dropped."""
+    bound_group(world)
+    turn_on(world)
+    old = (state_channels._now() - timedelta(hours=5)).isoformat()
+    assert ask(world, "mention-late", at=old) == {"refused": "stale"}
+    assert rows(world, "SELECT COUNT(*) FROM state_group_messages WHERE direction='in'") == [(0,)]
+
+
 def test_a_live_account_code_in_a_group_message_is_retired_and_never_kept(world, monkeypatch):
     bound_group(world)
     monkeypatch.setattr(state_channels.secrets, "randbelow", lambda _n: 711833)

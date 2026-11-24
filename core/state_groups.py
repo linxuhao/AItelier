@@ -884,9 +884,11 @@ class StateGroups:
                             channel_at=None, attachments=None, kept=False, sender_name=None):
         """One @-message from the bound group: refused undated without a channel time, then
         deduplicated by its channel ref - a message this group already recorded is a duplicate
-        whatever its age; only a never-recorded message is held to the last fresh_minutes (else
-        stale) - then stamped owner/member by code, held to the group's, the member's and the
-        account's hourly bounds, stored. Answers
+        whatever its age; only a never-recorded MENTION is held to the last fresh_minutes (else
+        stale) - a kept relay is never so held, since it opens no turn, wakes nobody and spends
+        no quota, so its age cannot withdraw the file a later @ must still read (section 3 of
+        design/steward-group-media.md) - then stamped owner/member by code, held to the group's,
+        the member's and the account's hourly bounds, stored. Answers
         {message_id, sender_role, sender_label, duplicate} - or a refusal: group_not_bound,
         undated, stale, code_in_group (a live ACCOUNT code it carries is retired, nothing of
         the body is kept, nothing is answered), group_quota / member_quota (with notice and
@@ -904,7 +906,8 @@ class StateGroups:
         is on (else media_keep_off, and no row), as ONE row of kind 'kept_media' (accepted 0)
         with the sender's member row: not a question - none of the hourly windows counts it, it
         decides no confirmation and yields no quota notice; a mention turn's `recent` lists it
-        for one day.
+        for one day. Its `channel_at` may be any age: the fresh_minutes stale gate is the
+        mention's alone (the duplicate branch above already says why age cannot decide).
 
         `sender_name` (the owner's ruling of 2026-11-23, 「让微信桥带上发送者昵称/微信id」) is the
         name the channel carried for this sender - the bridge's `sender_name`, the member's
@@ -967,7 +970,10 @@ class StateGroups:
                                      (follow, seen["message_id"]))
                     return {"duplicate": True, "message_id": seen["message_id"],
                             "accepted": bool(seen["accepted"])}
-                if moment - written > timedelta(minutes=GROUP_LIMITS["fresh_minutes"]):
+                # The freshness gate is the mention's alone: a kept relay opens no turn, so the
+                # age of its channel_at must not refuse it - a refusal makes the host withdraw
+                # the bytes it just stored, and the later @ could never read the file.
+                if not kept and moment - written > timedelta(minutes=GROUP_LIMITS["fresh_minutes"]):
                     answer = {"refused": "stale"}
             if answer is not None:
                 self._log("message dropped " + answer["refused"], channel, group_ref, sender_ref, size)

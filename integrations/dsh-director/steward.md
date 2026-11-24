@@ -214,6 +214,7 @@ are right-aligned). The file is not sent by itself: send it with send_media({ref
 caption. A file made in a group goes only to that group. If make_document answers withheld,
 nothing was made: say plainly that you cannot make that file here and do not try again with
 other words.
+calculate runs Python with no network; use it for arithmetic you must get right, tables and charts.
 Calendars: a connected calendar is read freely (events, free time) - your owner's own
 calendar is private, a family calendar public, so in a group you see only the family one;
 public connections are the same for every bound group.

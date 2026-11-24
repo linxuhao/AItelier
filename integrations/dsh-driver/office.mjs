@@ -68,7 +68,8 @@ export const OFFICE_IMAGE_LAYOUT = Object.freeze({
 });
 export const OFFICE_LABEL = 'aitelier.office=1';
 /** The label naming one host's jobs: its state dir's office-tmp, hashed (startup removes only these). */
-export const officeHostLabel = tmpRoot => `aitelier.office.host=${createHash('sha256').update(String(tmpRoot)).digest('hex').slice(0, 16)}`;
+export const dockerHostLabel = (kind, tmpRoot) => `aitelier.${kind}.host=${createHash('sha256').update(String(tmpRoot)).digest('hex').slice(0, 16)}`;
+export const officeHostLabel = tmpRoot => dockerHostLabel('office', tmpRoot);
 export const OFFICE_NAME_PREFIX = 'aitelier-office-';
 const IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
 const TEMPLATES = Object.freeze({
@@ -120,40 +121,10 @@ export function dockerEnv(env = process.env) {
   return out;
 }
 
-/** @param image the pinned image id (`sha256:` + 64 hex) @param docker the docker command
- *  @param tmpRoot <state dir>/office-tmp @param fontsRoot <state dir>/office-fonts
- *  @param verifyPdf (path, signal) => the text of the PDF's first page, or undefined (the PDF
- *  reader: the self-check's read-back) @param log (line) => void. */
-export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoot, verifyPdf, log = () => {}, now = Date.now,
-  limits: overrides, spawn = spawnChild, env = dockerEnv(), uid = process.getuid?.(), gid = process.getgid?.(),
-  random = n => randomBytes(n) } = {}) {
-  const limits = { ...OFFICE_LIMITS, ...(overrides ?? {}) };
-  const rooted = typeof tmpRoot === 'string' && isAbsolute(tmpRoot) && typeof fontsRoot === 'string' && isAbsolute(fontsRoot);
-  const pinned = typeof image === 'string' && IMAGE_ID.test(image);
-  const fontsDir = pinned && rooted ? join(fontsRoot, image.slice(7, 19)) : undefined;
-  const hostLabel = officeHostLabel(tmpRoot);
-  let tail = Promise.resolve();
-  let status = { state: 'pending', checkedAt: -Infinity };
-
-  /** The one slot: {release}, or {refused} - busy past queueWaitMs, timeout when the caller
-   *  aborted while waiting (its place in the queue is given up either way). */
-  async function acquire(signal) {
-    const previous = tail;
-    let release, timer, onAbort;
-    const mine = new Promise(resolve => { release = resolve; });
-    tail = previous.then(() => mine);
-    const turn = await Promise.race([previous.then(() => 'turn'),
-      new Promise(resolve => { timer = setTimeout(() => resolve('busy'), limits.queueWaitMs); }),
-      new Promise(resolve => {
-        onAbort = () => resolve('timeout');
-        if (signal?.aborted) onAbort(); else signal?.addEventListener?.('abort', onAbort, { once: true });
-      })]);
-    clearTimeout(timer);
-    signal?.removeEventListener?.('abort', onAbort);
-    if (turn !== 'turn') { release(); return { refused: turn }; }
-    return { release };
-  }
-
+/** The one docker command runner both sandboxes share (office here, calc.mjs): `limits.killWaitMs` and
+ *  `limits.stderrBytes` bound the kill wait and the stderr tail; stdout past `overflowBytes` kills the
+ *  container and answers overflow (nothing kept). */
+export function createDockerRun({ spawn, docker, env, limits, overflowBytes }) {
   /** One docker command: {code, signal, stdout, overflow, spawnError, killedByUs, stderrTail}. */
   function dockerRun(args, { signal, wallMs, name, keepStdout = false } = {}) {
     return new Promise(resolve => {
@@ -190,7 +161,7 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
       child.stdout.on('data', chunk => {
         if (!keepStdout || overflow) return;
         outBytes += chunk.length;
-        if (outBytes > limits.stdoutBytes) { overflow = true; out.length = 0; kill(); return; }
+        if (outBytes > overflowBytes) { overflow = true; out.length = 0; kill(); return; }
         out.push(chunk);
       });
       child.stderr.on('data', chunk => {
@@ -200,6 +171,43 @@ export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoo
       child.on('close', (code, sig) => finish({ code, signal: sig }));
       if (signal?.aborted) kill();
     });
+  }
+  return dockerRun;
+}
+
+/** @param image the pinned image id (`sha256:` + 64 hex) @param docker the docker command
+ *  @param tmpRoot <state dir>/office-tmp @param fontsRoot <state dir>/office-fonts
+ *  @param verifyPdf (path, signal) => the text of the PDF's first page, or undefined (the PDF
+ *  reader: the self-check's read-back) @param log (line) => void. */
+export function createOfficeRunner({ image, docker = 'docker', tmpRoot, fontsRoot, verifyPdf, log = () => {}, now = Date.now,
+  limits: overrides, spawn = spawnChild, env = dockerEnv(), uid = process.getuid?.(), gid = process.getgid?.(),
+  random = n => randomBytes(n) } = {}) {
+  const limits = { ...OFFICE_LIMITS, ...(overrides ?? {}) };
+  const rooted = typeof tmpRoot === 'string' && isAbsolute(tmpRoot) && typeof fontsRoot === 'string' && isAbsolute(fontsRoot);
+  const pinned = typeof image === 'string' && IMAGE_ID.test(image);
+  const fontsDir = pinned && rooted ? join(fontsRoot, image.slice(7, 19)) : undefined;
+  const hostLabel = officeHostLabel(tmpRoot);
+  const dockerRun = createDockerRun({ spawn, docker, env, limits, overflowBytes: limits.stdoutBytes });
+  let tail = Promise.resolve();
+  let status = { state: 'pending', checkedAt: -Infinity };
+
+  /** The one slot: {release}, or {refused} - busy past queueWaitMs, timeout when the caller
+   *  aborted while waiting (its place in the queue is given up either way). */
+  async function acquire(signal) {
+    const previous = tail;
+    let release, timer, onAbort;
+    const mine = new Promise(resolve => { release = resolve; });
+    tail = previous.then(() => mine);
+    const turn = await Promise.race([previous.then(() => 'turn'),
+      new Promise(resolve => { timer = setTimeout(() => resolve('busy'), limits.queueWaitMs); }),
+      new Promise(resolve => {
+        onAbort = () => resolve('timeout');
+        if (signal?.aborted) onAbort(); else signal?.addEventListener?.('abort', onAbort, { once: true });
+      })]);
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', onAbort);
+    if (turn !== 'turn') { release(); return { refused: turn }; }
+    return { release };
   }
 
   /** The bytes of `<dir>/out/<file>` - a name the host chose - or undefined: opened with

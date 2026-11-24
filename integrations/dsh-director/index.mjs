@@ -20,6 +20,7 @@ import { StewardCatalog } from './lib/catalog.mjs';
 import { basicsSection } from './lib/basics.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
 import { registerDirectorMediaCall, registerMediaTools, UrlLedger } from './lib/media-tools.mjs';
+import { registerCalcTool } from './lib/calc-tool.mjs';
 import { attachmentLine } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
@@ -817,6 +818,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // Step 24.2 (design-steward 7.8.12): media_call and send_media, when the host has a media library.
     if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
       media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
+    // Step 24.4b (design-steward 7.8.24 "十"): calculate, the host's sandbox (absent: calc_unavailable at call time).
+    if (mediaHost && groupTurns) registerCalcTool(scope, { defineTool, jsonOutput, media: mediaHost, catalog: stewardCatalog, turns: groupTurns });
     if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
       media: directorMedia, rootSession: config.sessionId, projectId: config.projectId, names: DIRECTOR_MEDIA_TOOLS });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.

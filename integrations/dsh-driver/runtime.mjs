@@ -33,6 +33,7 @@ import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSourc
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
 import * as core from '../dsh-director/lib/core.mjs';
 import { exitCause, failureClass } from '../dsh-director/lib/exit-cause.mjs';
+import { memoryTimeZoneProblem } from '../dsh-director/lib/host.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, rename } from 'node:fs/promises';
@@ -292,6 +293,14 @@ export function projectInboxDigest(page, {
 // ---- The director's pieces, re-exported with this deployment's labels bound ----
 /** The environment variable core/dsh_driver.py sets on every driver process. */
 export const SESSION_ENV = 'AITELIER_DSH_SESSION';
+/** A zone Intl resolved for this host, kept only when memory.timeZone would accept it: an empty
+ *  TZ resolves to 'Etc/Unknown', which openMemory refuses, so that host keeps the plugin's UTC. */
+function hostTimeZone(zone) {
+  return zone && zone !== 'Etc/Unknown' && !memoryTimeZoneProblem(zone) ? zone : undefined;
+}
+/** This host's own IANA time zone (TZ, else /etc/localtime), the steward memory's zone when the
+ *  unit names none (AITELIER_DSH_MEMORY_TZ). Undefined where Intl cannot name a usable one. */
+const HOST_TIME_ZONE = hostTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
 export const { NOTHING_LEFT, MAX_AUTO_CONTINUE, processAlive, watchRefusal, DORMANT_MIN_MINUTES,
   DORMANT_MAX_MINUTES, wakeAfterRefusal, pruneDepartedChildren, LiveChildren, phaseReport, continuationWaitKey,
   DORMANT_COMPACT_MIN_TOKENS, IdleReview, awaitingFinish, batchesToRedispatch, batchRedispatchRows, todoSummary,
@@ -691,8 +700,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       ...(steward ? { rootRole: 'steward', memory: { userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
         ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}),
         // Step 21 (design-steward 3.8.1): the owner's time zone for search's dates and the
-        // index's date words; the host unit's drop-in sets it (Europe/Paris), default UTC.
-        ...(env.AITELIER_DSH_MEMORY_TZ ? { timeZone: env.AITELIER_DSH_MEMORY_TZ } : {}),
+        // index's date words: the host unit's drop-in (AITELIER_DSH_MEMORY_TZ), else this
+        // host's own zone; the plugin's UTC only when neither names one.
+        ...((env.AITELIER_DSH_MEMORY_TZ || HOST_TIME_ZONE) ? { timeZone: env.AITELIER_DSH_MEMORY_TZ || HOST_TIME_ZONE } : {}),
         // Step 21 (design-steward 3.8.2): the local embedding server, only when its url is set
         // (the drop-in 20-memory-vector.conf sets both); off otherwise.
         ...(env.AITELIER_DSH_MEMORY_VECTOR_URL ? { vector: { url: env.AITELIER_DSH_MEMORY_VECTOR_URL,

@@ -90,3 +90,60 @@ def test_rendered_service_uses_actual_paths_and_host_credentials(paths, monkeypa
     assert shlex.split(env['GIT_CONFIG_VALUE_0']) == [str(repo / 'docker/git-credential-helper.sh')]
     assert env['AITELIER_DSH_API_URL'] == 'http://127.0.0.1:5444'
     assert 'KillMode=control-group' in unit
+
+
+def test_install_creates_the_bind_sources_and_names_the_container_user(paths, monkeypatch):
+    """Overfit review 2026-11-24 (重-13, 重-14): every directory docker-compose.yml
+    bind-mounts from HOME exists, as this user, before Docker can create it as
+    root; and .env names this user's uid/gid for a bare `docker compose`. A
+    second run changes nothing, and values already in .env are kept."""
+    import os
+    repo, home, secrets = paths
+    monkeypatch.delenv('AITELIER_STEWARD_SECRETS_HOST_DIR', raising=False)
+    installer.prepare(repo, home, secrets)
+    for rel in ('.AItelier/godot-control', '.local/share/dsh-director/media',
+                '.local/share/aitelier/media-staging', '.local/share/aitelier/steward-mcp-secrets'):
+        directory = home / rel
+        assert directory.is_dir(), rel
+        assert directory.stat().st_uid == os.getuid(), rel
+    env = (repo / '.env').read_text().splitlines()
+    assert f'AITELIER_UID={os.getuid()}' in env and f'AITELIER_GID={os.getgid()}' in env
+    before = (repo / '.env').read_bytes()
+    assert not installer.prepare(repo, home, secrets)
+    assert (repo / '.env').read_bytes() == before
+
+    (repo / '.env').write_text('AITELIER_UID=4242\nAITELIER_DRIVER_IDENTITY=on\n')
+    # Only AITELIER_GID is appended: identity was already on, so prepare() does not
+    # report it (main() would otherwise tell the operator to recreate the backend).
+    assert not installer.prepare(repo, home, secrets)
+    env = (repo / '.env').read_text().splitlines()
+    assert 'AITELIER_UID=4242' in env and f'AITELIER_UID={os.getuid()}' not in env
+    assert f'AITELIER_GID={os.getgid()}' in env
+
+
+def test_a_pdf_reader_install_failure_is_a_note_not_an_aborted_install(paths, monkeypatch, capsys):
+    """Overfit fix round: requirements-pdf.txt pins the x86_64 wheel's hash only, so
+    pip fails on aarch64/musl. The installer goes on (unit, runtime) and says so,
+    as it does for a missing ffprobe."""
+    import subprocess
+    repo, _, _ = paths
+    calls = []
+    def failing_run(*args, **kwargs):
+        calls.append([str(a) for a in args])
+        raise subprocess.CalledProcessError(1, args)
+    monkeypatch.setattr(installer, 'run', failing_run)
+    assert installer.install_pdf_reader(repo / '.venv/bin/python', repo) is False
+    assert calls and calls[0][-2:] == ['-r', str(repo / 'requirements-pdf.txt')]
+    assert 'pypdfium2' in capsys.readouterr().out
+    monkeypatch.setattr(installer, 'run', lambda *a, **k: None)
+    assert installer.install_pdf_reader(repo / '.venv/bin/python', repo) is True
+
+
+def test_the_default_api_url_follows_aitelier_port(paths, monkeypatch):
+    """Overfit fix round (次-5): compose publishes the backend on AITELIER_PORT, so the
+    unit's AITELIER_DSH_API_URL defaults to the same port, 4444 when unset."""
+    repo, _, _ = paths
+    monkeypatch.delenv('AITELIER_PORT', raising=False)
+    assert installer.default_api_url(repo) == 'http://127.0.0.1:4444'
+    (repo / '.env').write_text('AITELIER_PORT=5555\n')
+    assert installer.default_api_url(repo) == 'http://127.0.0.1:5555'

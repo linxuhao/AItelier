@@ -113,8 +113,15 @@ save_token xapp- slack-app-token
 save_token xoxb- slack-bot-token
 ```
 
-Then **restart the steward** (see below), open the app in Slack (**Apps → AItelier
-Steward**, Messages tab) and write to it.
+Then:
+
+1. **Restart the steward** (see [the restart](#where-the-tokens-live-and-the-restart)
+   below). The dashboard's Steward card → **Channels** then shows Slack `connected`.
+2. **Bind your account.** The steward answers only the one Slack account bound to the
+   channel; until then a message to the bot gets no reply. On the **Channels** tab press
+   **Bind** on the Slack row, then open the app in Slack (**Apps → AItelier Steward**,
+   Messages tab) and send it the six-digit code before it expires. After that, write to
+   it.
 
 ### B. By hand
 
@@ -165,6 +172,17 @@ steward. Files sent before the reinstall are not fetched again.
   when the profile is written, at the steward's start: tokens added to a running steward
   load nothing. Until the restart the dashboard's Channels tab shows no status for Slack
   at all (or, if it ran before, its last report); after it, `connected` or why not.
+- The restart: the steward is the driver of the State project `aitelier-home` (no such
+  project yet? see "The steward" in `docs/dsh-driver.md`). Stop and start that driver
+  from the dashboard's driver controls, or through the backend's API (the header only
+  when your `.env` sets `AITELIER_ADMIN_TOKEN`):
+
+  ```bash
+  H="X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN"
+  curl -fsS -X POST -H "$H" http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/stop
+  curl -fsS -X POST -H "$H" -H 'Content-Type: application/json' -d '{}' \
+    http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/start
+  ```
 
 The Slack SDK (`@slack/socket-mode` 3.1.1, `@slack/web-api` 8.3.0, pinned exactly) is a
 dependency of the DSH runtime install (`integrations/dsh-driver/package.json`), and is

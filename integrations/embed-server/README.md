@@ -36,8 +36,9 @@ The expected checksums live here, one place each: `model.sha256` (read by `run.s
 and `llama.sha256` (read by the image build). Check by hand:
 
 ```sh
-(cd ~/.local/share/dsh-director/models/bge-m3 && sha256sum -c ~/AItelier/integrations/embed-server/model.sha256)
-(cd ~/.local/share/aitelier-embed/dl && sha256sum -c ~/AItelier/integrations/embed-server/llama.sha256)
+# from the repository root
+(repo=$PWD; cd ~/.local/share/dsh-director/models/bge-m3 && sha256sum -c "$repo/integrations/embed-server/model.sha256")
+(repo=$PWD; cd ~/.local/share/aitelier-embed/dl && sha256sum -c "$repo/integrations/embed-server/llama.sha256")
 ```
 
 ## Build
@@ -133,11 +134,13 @@ Environment=AITELIER_DSH_MEMORY_VECTOR_MODEL=bge-m3-q8_0
 ```
 
 `~/.config/systemd/user/aitelier-dsh-host.service.d/21-memory-tz.conf` (the owner's
-time zone for dated lines, day groups and date words, §3.8.1; independent of vectors):
+time zone for dated lines, day groups and date words, §3.8.1; independent of vectors).
+Unset, the steward uses the host's own time zone (`timedatectl`); set it when the
+owner lives in another one, with the owner's IANA zone name:
 
 ```ini
 [Service]
-Environment=AITELIER_DSH_MEMORY_TZ=Europe/Paris
+Environment=AITELIER_DSH_MEMORY_TZ=America/New_York
 ```
 
 Enabling = start the container (`run.sh`), copy the drop-ins, `systemctl --user

@@ -94,7 +94,8 @@ The backend retains its Docker deployment.
 The host installation at `~/.local/share/aitelier-dsh/releases/<fingerprint>/`
 uses Node 24 and the pinned DSH dependencies from the same Dockerfile stage as
 the image. The service connects to the
-backend via `http://127.0.0.1:4444`, retains per-driver tokens, and uses the host's
+backend via `http://127.0.0.1:$AITELIER_PORT` (4444 unless `.env` sets it; `--api-url`
+overrides), retains per-driver tokens, and uses the host's
 existing GitHub secret-file credential helper. Provider API keys remain in the
 backend model gateway. No Docker socket is mounted into the backend.
 
@@ -192,6 +193,53 @@ can select an installed DSH executable and `AITELIER_DSH_API_URL` overrides the
 default loopback backend URL. Use a complete `dsh` installation from this pinned
 version, not an older globally installed command.
 
+## The steward (project `aitelier-home`)
+
+The steward is not a separate service: it is the driver of the one State project
+whose id is exactly `aitelier-home` (`core/dsh_driver.py` `RESERVED_ROLES`). Any
+other project's driver is a director. A fresh backend has no such project, so
+there is no steward until you create it and start its driver, once:
+
+1. In the dashboard's project list, **New project**: id `aitelier-home` (exactly),
+   any title, and leave "start driver" **unticked**.
+2. Start its driver on the `steward` route (the dashboard's start button, on a
+   project that has no driver yet, picks the `driver` route instead):
+
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/start \
+     -H 'Content-Type: application/json' -H "X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN" \
+     -d '{"provider":"aitelier","model":"steward"}'
+   ```
+
+   The header carries the admin token your `.env` sets (`AITELIER_ADMIN_TOKEN`;
+   export it in this shell first); without a write gate it is not checked. The
+   route is kept on every later start.
+3. The project list now shows the **Steward** card pinned first.
+
+The `steward` route needs a vision-capable candidate (it reads photos and PDF
+pages); the keys it uses are listed in the README. On the host, the steward
+needs `pypdfium2` in the checkout's `.venv` to read PDFs and `ffprobe` on the
+service's PATH for voice and video messages; `deploy/install_dsh_host.py`
+installs the first and reports the second. Its memory dates things in the
+host's own time zone unless the unit sets `AITELIER_DSH_MEMORY_TZ` to the
+owner's IANA zone (template:
+`integrations/embed-server/systemd/21-memory-tz.conf`).
+
+**Restarting the steward** (after adding channel tokens, for example): its
+profile is written at start, so stop and start the `aitelier-home` driver from
+the dashboard's driver controls, or with the same API:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/stop -H "X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN"
+curl -fsS -X POST http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/start -H 'Content-Type: application/json' \
+  -H "X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN" -d '{}'
+```
+
+**Chat channels.** Slack: `integrations/dsh-channel-slack/README.md`. WeChat:
+`integrations/dsh-channel-wechat/README.md`. A channel accepts messages only from
+the one account bound to it: open the Steward card → **Channels** → **Bind**,
+and send the six-digit code to the bot from that account within its lifetime.
+
 ## Standing director goal and connection recovery
 
 `integrations/dsh-driver/goal.md` seeds each project's standing director mandate
@@ -247,7 +295,10 @@ model selection still use `worker`. Each child binds one gateway: successive
 children round-robin over `worker.rotate`, while all tool turns in that child
 stay on the same provider unless an endpoint fails. The example pool contains
 OpenCodeGo and Ollama Cloud DeepSeek V4.1 Flash, using the existing `GO_API_KEY`
-and `OLLAMA_API_KEY` secret files. Both endpoints need configured credentials.
+and `OLLAMA_API_KEY` secret files, and falls back to pay-as-you-go DeepSeek
+(`DEEPSEEK_API_KEY`) when neither can serve, so an install holding only the
+DeepSeek key can still dispatch workers. The keys each route needs are listed in
+[the README](../README.md#resident-dsh-drivers-install-from-a-clean-checkout-linux).
 
 The State subscription requests a 240-second wait, below Node fetch's default
 300-second response-header timeout. Ordinary timeouts stay inside the runtime
@@ -296,13 +347,32 @@ are omitted from ordinary model requests. Two runtime tools provide access:
   execution chain. For example, after searching for `list_pipelines`, call
   `call_tool(name="mcp__aitelier__list_pipelines", arguments={})`.
 
-Local AgentMCP (`http://127.0.0.1:9003/mcp`), devmcp (`:7676/mcp`) and zvec
-(`:7999/mcp`) are connected by default as optional capabilities. A service being
-down does not block driver startup. Set `AITELIER_DSH_MCP_AGENTMCP`,
-`AITELIER_DSH_MCP_DEVMCP` or `AITELIER_DSH_MCP_ZVEC` in the host service's
-environment to override a URL; an empty value disables that server. Restart the
-host supervisor after changing this configuration, with native workers settled.
-The driver never starts these external services itself.
+A director can also be given four optional local MCP services: AgentMCP (media,
+OCR, PDF, web), devmcp (files, bash, subagent jobs), zvec (semantic code search)
+and pwmcp (a Playwright browser). None is connected by default: each is
+registered only when the host service's environment names its URL, so a fresh
+install never probes ports another program may own. A service being down does
+not block driver startup, and an empty value is the same as unset. For example,
+a drop-in `~/.config/systemd/user/aitelier-dsh-host.service.d/12-local-mcp.conf`:
+
+```ini
+[Service]
+Environment=AITELIER_DSH_MCP_AGENTMCP=http://127.0.0.1:9003/mcp
+Environment=AITELIER_DSH_MCP_DEVMCP=http://127.0.0.1:7676/mcp
+Environment=AITELIER_DSH_MCP_ZVEC=http://127.0.0.1:7999/mcp
+Environment=AITELIER_DSH_MCP_PWMCP=http://127.0.0.1:8931/mcp
+```
+
+Then `systemctl --user daemon-reload` and restart the host supervisor, with
+native workers settled. Upgrading an install that relied on the former built-in
+ports (the four values above): create this drop-in and `daemon-reload` BEFORE the
+checkout is updated. The unit runs the checkout with `Restart=always`, so any
+restart after the update but before the drop-in is loaded provisions directors
+without these services; the old code reads the same values, so placing it first
+changes nothing. `AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS` rewrites the
+browser URL's port per driver and needs `AITELIER_DSH_MCP_PWMCP` set. The
+steward is given none of the four. The driver never starts these external
+services itself.
 
 The standing instructions include an AgentMCP example: search for
 `agentmcp image` (or OCR/PDF/audio/video), inspect the returned parameter schema,

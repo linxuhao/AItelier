@@ -28,8 +28,13 @@ RUN cd /usr/local/lib/node_modules/@zvec/zvec-grep \
     && grep -q 'maxToolInputElements: 10_000' dist/mcp/tools.js \
     && test "$(node -p 'require("./node_modules/@modelcontextprotocol/server/package.json").version')" = 2.3.1 \
     && npm cache clean --force
-ENV ZVEC_GREP_HOME=/home/linxuhao/.AItelier/zvec-grep-home \
-    HOME=/home/linxuhao/.AItelier/zvec-grep-home
+# The sidecar's home lives under the invoking user's ~/.AItelier. Build with
+# --build-arg HOME_DIR="$HOME" (docker-compose.yml also sets both at run time).
+ARG HOME_DIR
+RUN test -n "$HOME_DIR" || { echo "build with --build-arg HOME_DIR=\"\$HOME\"" >&2; exit 1; }
+ENV AITELIER_HOME=${HOME_DIR}/.AItelier \
+    ZVEC_GREP_HOME=${HOME_DIR}/.AItelier/zvec-grep-home \
+    HOME=${HOME_DIR}/.AItelier/zvec-grep-home
 COPY docker/zvec-grep-entrypoint.sh /usr/local/bin/zvec-grep-entrypoint.sh
 COPY docker/zvec-grep-proxy.js /usr/local/lib/zvec-grep-proxy.js
 COPY docker/zvec-grep-status.mjs /usr/local/lib/zvec-grep-status.mjs

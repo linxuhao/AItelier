@@ -24,6 +24,8 @@ import { PORTFOLIO_TOOLS, registerPortfolioTools } from '../dsh-director/lib/por
 import { validateHost } from '../dsh-director/lib/host.mjs';
 import { CHANNEL_LIMITS } from '../dsh-director/lib/channels.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
+// The zone the runtime falls back to when the unit names none (overfit review 次-1).
+const HOST_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const text = readFileSync(new URL('../dsh-director/roles.json', import.meta.url), 'utf8');
 const table = loadRoles();
@@ -288,10 +290,27 @@ const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_D
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });
 
+test('a host zone Intl cannot use is no memory zone: the plugin keeps its UTC instead of refusing the memory (overfit fix round)', async () => {
+  // TZ= (empty) makes Node resolve 'Etc/Unknown', which memory.timeZone refuses; the zone is
+  // read once at import, so each case is its own process.
+  const { spawnSync } = await import('node:child_process');
+  const script = `import { aitelierHost } from ${JSON.stringify(new URL('./runtime.mjs', import.meta.url).href)};
+    process.stdout.write(JSON.stringify(aitelierHost(${JSON.stringify(env({ AITELIER_DSH_ROLE: 'steward' }))}).config.memory));`;
+  const memoryUnder = (TZ) => {
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, TZ }, encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  };
+  assert.deepEqual(memoryUnder(''), { userId: 'owner' }, 'TZ= : no zone, the plugin uses UTC');
+  assert.deepEqual(memoryUnder('Europe/Paris'), { userId: 'owner', timeZone: 'Europe/Paris' }, 'a real host zone is kept');
+});
+
 test('the AItelier host started as the steward: steward root, memory, portfolio and handoff, no full access; a director host is unchanged', () => {
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }));
   assert.equal(steward.config.rootRole, 'steward');
-  assert.deepEqual(steward.config.memory, { userId: 'owner' });
+  // No AITELIER_DSH_MEMORY_TZ: the host's own zone, not the plugin's UTC (overfit review 次-1).
+  assert.deepEqual(steward.config.memory, { userId: 'owner', timeZone: HOST_TIME_ZONE });
+  assert.ok(HOST_TIME_ZONE, 'the test host names a time zone');
   // Step 21: the owner's time zone reaches memory.timeZone from AITELIER_DSH_MEMORY_TZ.
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_TZ: 'Europe/Paris' })).config.memory,
     { userId: 'owner', timeZone: 'Europe/Paris' });
@@ -299,9 +318,9 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   // Step 21: the local vector channel from AITELIER_DSH_MEMORY_VECTOR_URL / _MODEL, only with a url.
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_URL: 'http://127.0.0.1:18751',
     AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
-    { userId: 'owner', vector: { url: 'http://127.0.0.1:18751', model: 'bge-m3-q8_0' } });
+    { userId: 'owner', timeZone: HOST_TIME_ZONE, vector: { url: 'http://127.0.0.1:18751', model: 'bge-m3-q8_0' } });
   assert.deepEqual(aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_VECTOR_MODEL: 'bge-m3-q8_0' })).config.memory,
-    { userId: 'owner' }, 'no url, no vector channel');
+    { userId: 'owner', timeZone: HOST_TIME_ZONE }, 'no url, no vector channel');
   assert.equal(steward.config.permissionPreset, undefined, 'the steward never runs with danger-full-access');
   assert.deepEqual(steward.capabilities.slice(-7), ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']);
   // Step 24.1a: the catalog ops over the steward's State reads and host writes (the turn audience

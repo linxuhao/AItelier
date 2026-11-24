@@ -24,8 +24,17 @@ git clone https://github.com/linxuhao/AItelier && cd AItelier
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
 printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
 chmod 600 ~/.aitelier-secrets/DEEPSEEK_API_KEY
+[ -f .env ] || cp .env.example .env   # compose refuses to start without it (env_file)
+# Every bind-mount source, as you: Docker would create a missing one as root.
+mkdir -p ~/.AItelier/godot-control
+mkdir -p -m 700 ~/.local/share/dsh-director/media ~/.local/share/aitelier/media-staging \
+  ~/.local/share/aitelier/steward-mcp-secrets
+# The containers run as uid:gid 1000:1000 unless .env says otherwise:
+[ "$(id -u):$(id -g)" = 1000:1000 ] || printf 'AITELIER_UID=%s\nAITELIER_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
 docker compose up -d          # serves the API + MCP endpoint on 127.0.0.1:4444
 ```
+
+(`aitelier server` from the repository's CLI does the directory and uid steps itself.)
 
 The LLM key stays on the AItelier side and never travels through this plugin — see [Which API key goes where](#which-api-key-goes-where).
 

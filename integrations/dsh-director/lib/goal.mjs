@@ -7,7 +7,9 @@ export const ROUND_TOP_UP_TO = 256;
 
 /** Native DSH owns the durable objective and continuation counters.
  *
- *  `goal.md` is the mandate's source of truth. An ACTIVE goal whose objective
+ *  The `objective` the host renders is the mandate's source of truth (whichever
+ *  template the host loaded: a deployment's own mandate, else its default). An
+ *  ACTIVE goal whose objective
  *  differs from the rendering is re-seeded here, by the runtime, through the
  *  native edit API: the model-facing update_goal is limited to direct human
  *  turns, so no message could ever change a running director's mandate.
@@ -28,7 +30,7 @@ export function bindDriverGoal(goals, agent, objective, { onSeed } = {}) {
   }
   // An enabled resident host is authorized to continue its active objective
   // after restart. Preserve explicit pause/block/completion and edited goals.
-  // Only an active goal follows goal.md; paused/blocked/complete are explicit
+  // Only an active goal follows the template; paused/blocked/complete are explicit
   // human states. Native DSH trims objectives, so compare the trimmed text or
   // an unchanged goal would be re-edited (revision churn) on every start.
   if (goal.phase === 'active') {

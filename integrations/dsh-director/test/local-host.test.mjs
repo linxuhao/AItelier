@@ -6,7 +6,10 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, symlink } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { conformance } from '../conformance/index.mjs';
-import { localHost, LOCAL_OWNER } from '../hosts/local.mjs';
+import { localHost, LOCAL_OWNER, LOCAL_SESSION_ENV, HOST_NOTE, TESTED_DSH_VERSION, prerequisiteProblems, dshVersion,
+  apply as applyLocal } from '../hosts/local.mjs';
+import { TodoCli, DEFAULT_SESSION_ENV, processSession, backgroundProcesses } from '../lib/core.mjs';
+import { startupFailure } from '../lib/exit-cause.mjs';
 import { PURGE_WORD, PURGE_CONFIRM_MS, registerOwnerCommands } from '../hosts/local-commands.mjs';
 import { validateHost } from '../lib/host.mjs';
 import { MemoryStore } from '../lib/memory/store.mjs';
@@ -68,8 +71,8 @@ test('local host: work_update and note_write record what the director decides, a
   const root = await freshRoot();
   const host = localHost({ root, ...required });
   const tools = new Map();
-  const scope = { tools: { register: tool => tools.set(tool.name, tool) } };
-  await host.setup(scope, {}, { defineTool: tool => tool, jsonOutput: {} });
+  const scope = { tools: { register: tool => tools.set(tool.name, tool) }, systemPrompt: { section: () => {} } };
+  await host.setup(scope, {}, { defineTool: tool => tool, jsonOutput: {}, runtimeSection: () => {} });
   assert.deepEqual([...tools.keys()], ['work_update', 'note_write']);
   assert.deepEqual(await tools.get('work_update').execute({ id: 'w-live', state: 'done' }), { refused: 'invalid_state',
     reason: 'state must be one of working, input_required, completed, failed, cancelled' });
@@ -254,7 +257,7 @@ test('local host, step 15: without a command registry nothing is registered and 
   const api = fakeApi();
   const events = await localHost({ root, ...required, projectsDir: join(root, 'projects'), pollMs: 10 }).events(api);
   events.stop(); await events.done;
-  assert.deepEqual(localHost({ root }).capabilities, ['progress', 'workState', 'heldWork', 'setup', 'attention'],
+  assert.deepEqual(localHost({ root }).capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'attention'],
     'no projectsDir: no portfolio, no proposals (the host is what it was)');
   assert.equal(localHost({ root }).portfolio, undefined);
 });
@@ -289,7 +292,7 @@ test('local host, step 15: projectsDir is the steward\'s portfolio - every subdi
   const { root, projectsDir } = await projectsFixture();
   const host = localHost({ root, ...required, projectsDir, provider: 'fixture', model: 'fixture-model' });
   assert.equal(validateHost(host), host);
-  assert.deepEqual(host.capabilities, ['progress', 'workState', 'heldWork', 'setup', 'attention', 'portfolio', 'proposals']);
+  assert.deepEqual(host.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'attention', 'portfolio', 'proposals']);
   assert.deepEqual(await host.portfolio.projects(), { projects: [
     { project_id: 'alpha', title: 'Alpha', director: { phase: 'dormant', at: '2026-11-03T02:00:00Z' }, open_questions: 1 },
     { project_id: 'beta', title: null, director: null, open_questions: 0 }] });
@@ -805,4 +808,200 @@ test('local host, review 467: steward.md tells a standalone steward to use its o
   assert.match(md, /`同意 proposal <id>` to approve, `拒绝 proposal <id>` to decline/);
   assert.match(md, /send that line back from Slack or WeChat as\s+well as decide on the dashboard/);
   assert.match(md, /If your context snapshot has owner_commands, your owner has no Slack, WeChat or\s+dashboard: give them the commands it names instead of that line/);
+});
+
+// ---- Overfit review 2026-11-24 (standalone): what a stranger's first start needs.
+
+test('local host config: provider and model are required, the rest has working defaults', () => {
+  assert.throws(() => validateHost(localHost({ root: '/tmp/x' })), /missing config: provider; missing config: model/);
+  const { config } = localHost({ root: '/tmp/x', provider: 'p', model: 'm', permissionPreset: 'danger-full-access' });
+  assert.ok(config.sessionEnv.startsWith(LOCAL_SESSION_ENV + '_'), config.sessionEnv);
+  assert.ok(!LOCAL_SESSION_ENV.startsWith('DSH_'), 'DSH drops ambient DSH_* variables from every model shell');
+  assert.equal(config.permissionPreset, 'danger-full-access');
+  assert.equal(config.startupErrorDetail, true);
+  assert.equal(config.planKeysOptional, true);
+  assert.equal(localHost({ root: '/tmp/x' }).config.permissionPreset, undefined, 'no preset unless asked for');
+});
+
+test('local host session tag: one variable per director root, so two directors on one machine do not see each other\'s jobs', () => {
+  // Review r2 (nit): with one fixed variable and the default sessionId every local director's
+  // jobs carried DIRECTOR_LOCAL_SESSION=director, so watch_process and idle_dormant of one
+  // director counted the other's jobs.
+  const env = options => localHost({ provider: 'p', model: 'm', ...options }).config.sessionEnv;
+  const a = env({ root: '/tmp/director-a' }), b = env({ root: '/tmp/director-b' });
+  assert.notEqual(a, b);
+  for (const name of [a, b]) assert.match(name, /^DIRECTOR_LOCAL_SESSION_[0-9a-f]{12}$/);
+  assert.equal(env({ root: '/tmp/director-a/../director-a/' }), a, 'the same root, written another way, is the same director');
+  assert.equal(env({ root: '/tmp/director-a', sessionEnv: 'MY_TAG' }), 'MY_TAG', 'a configured variable wins');
+});
+
+test('core default session tag (a host that names no sessionEnv) is not a DSH_ name', async () => {
+  // Union review 2026-11-24 (standalone f2): DSH 0.2.1-rc.5 drops DSH_* from every model shell, so
+  // with the old default DSH_DIRECTOR_SESSION the director's own job carried no tag:
+  // watch_process refused it (not_this_driver) and its end event never arrived.
+  assert.ok(!DEFAULT_SESSION_ENV.startsWith('DSH_'), DEFAULT_SESSION_ENV);
+  const proc = await mkdtemp(join(tmpdir(), 'proc-'));
+  roots.push(proc);
+  await mkdir(join(proc, '4242'));
+  await writeFile(join(proc, '4242', 'environ'), `PATH=/bin\0${DEFAULT_SESSION_ENV}=dir-1\0`);
+  await writeFile(join(proc, '4242', 'stat'), '4242 (sh) S 1');
+  assert.equal(processSession(4242, proc), 'dir-1', 'the default is what processSession reads');
+  assert.deepEqual(backgroundProcesses('dir-1', 1, proc), [4242], 'and what idle_dormant counts');
+});
+
+test('local host dshEntry: the running entry with its symlinks resolved (a global dsh is a link)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-entry-'));
+  roots.push(dir);
+  await mkdir(join(dir, 'lib/node_modules/@deepseek-ai/dsh/lib'), { recursive: true });
+  const real = join(dir, 'lib/node_modules/@deepseek-ai/dsh/lib/bin.js');
+  await writeFile(real, '');
+  await writeFile(join(dir, 'lib/node_modules/@deepseek-ai/dsh/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '9.9.9' }));
+  await mkdir(join(dir, 'bin'));
+  await symlink(real, join(dir, 'bin/dsh'));
+  const saved = process.argv[1];
+  process.argv[1] = join(dir, 'bin/dsh');
+  try { assert.equal(localHost({ root: '/tmp/x' }).config.dshEntry, real); }
+  finally { process.argv[1] = saved; }
+  assert.equal(localHost({ root: '/tmp/x', dshEntry: '/given' }).config.dshEntry, '/given');
+  assert.equal(dshVersion(join(dir, 'bin/dsh')), '9.9.9');
+  assert.equal(dshVersion(join(dir, 'nowhere.js')), undefined);
+});
+
+test('local host roles(): its two recording tools are shown to the director, nothing else changes', async () => {
+  const { loadRoles } = await import('../lib/roles.mjs');
+  const host = localHost({ root: '/tmp/x' });
+  const table = loadRoles(host.config.rolesFile);
+  const effective = host.roles(table);
+  assert.deepEqual(effective.director.presented, [...table.director.presented, 'work_update', 'note_write']);
+  assert.deepEqual({ ...effective, director: table.director }, table);
+  assert.deepEqual(table.director.presented.includes('work_update'), false, 'the table itself is not modified');
+});
+
+test('local host setup: the director reads the host note after its role prompt; a steward does not', async () => {
+  const run = async rootRole => {
+    const sections = [], calls = [];
+    const scope = { tools: { register: () => {} }, systemPrompt: { section: section => sections.push(section) } };
+    await localHost({ root: '/tmp/x', ...(rootRole ? { rootRole } : {}) }).setup(scope, {},
+      { defineTool: tool => tool, jsonOutput: {}, runtimeSection: () => calls.push('runtime') });
+    return { sections, calls };
+  };
+  const director = await run();
+  assert.deepEqual(director.calls, ['runtime']);
+  assert.equal(director.sections.length, 1);
+  assert.equal(director.sections[0].text, HOST_NOTE);
+  assert.ok(director.sections[0].order > 12, 'after the role prompt (order 12)');
+  assert.match(HOST_NOTE, /work_update/); assert.match(HOST_NOTE, /note_write/); assert.match(HOST_NOTE, /inbox\/answer-<id>\.json/);
+  const steward = await run('steward');
+  assert.deepEqual(steward, { sections: [], calls: [] });
+});
+
+test('local host prerequisites: each missing piece is named, and a working machine has none', async () => {
+  const cwd = new URL('../todo', import.meta.url).pathname;
+  const state = await mkdtemp(join(tmpdir(), 'dsh-prereq-'));
+  roots.push(state);
+  const real = new TodoCli({ python: 'python3', cwd, stateDir: state, module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR' });
+  assert.deepEqual(await prerequisiteProblems({ todo: real }), []);
+  const noPython = new TodoCli({ python: '/nonexistent/python3', cwd, stateDir: state, module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR' });
+  const [problem] = await prerequisiteProblems({ todo: noPython });
+  assert.match(problem, /^python not found: \/nonexistent\/python3/);
+  // The CLI lists a template it cannot load with its error: with no PyYAML that is every template.
+  const noYaml = { python: 'python3', run: async () => ({ code: 0, result: { templates: [{ name: 'a', error: "ModuleNotFoundError: No module named 'yaml'" }] } }) };
+  // Review r2: Debian and Ubuntu's python3 has no pip, and pip refuses their system Python
+  // (PEP 668), so the distribution's package is named first.
+  assert.deepEqual(await prerequisiteProblems({ todo: noYaml }), ['PyYAML is missing for python3 (Debian/Ubuntu: apt install python3-yaml; '
+    + `otherwise python3 -m pip install -r ${new URL('../requirements.txt', import.meta.url).pathname}, in a venv if pip refuses)`]);
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  assert.ok(readme.includes('apt install python3-yaml'), 'README.md names the Debian/Ubuntu package');
+  const requirements = await readFile(new URL('../requirements.txt', import.meta.url), 'utf8');
+  assert.ok(requirements.includes('apt install python3-yaml'), 'requirements.txt names the Debian/Ubuntu package');
+  const noGit = await prerequisiteProblems({ todo: real, git: '/nonexistent/git' });
+  assert.deepEqual(noGit, ['git not found (no /nonexistent/git on PATH): install git']);
+  assert.match((await prerequisiteProblems({ todo: real, platform: 'win32' }))[0], /^Windows is not supported/);
+  // A steward needs neither python nor (without memory) git.
+  assert.deepEqual(await prerequisiteProblems({ todo: noPython, director: false, git: '/nonexistent/git' }), []);
+  assert.equal((await prerequisiteProblems({ todo: noPython, director: false, memory: true, git: '/nonexistent/git' })).length, 1);
+});
+
+test('local host install(): refuses to start naming what is missing; another DSH release only warns', async () => {
+  const warned = [];
+  const api = (python, dshEntry = '/nowhere/bin.js') => ({ todo: new TodoCli({ python, cwd: new URL('../todo', import.meta.url).pathname,
+    stateDir: '/tmp/x/state', module: 'dsh_todo', stateDirEnv: 'DSH_TODO_STATE_DIR' }), config: { dshEntry },
+  ctx: { logger: { warn: line => warned.push(line) } } });
+  await assert.rejects(localHost({ root: '/tmp/x' }).install(api('/nonexistent/python3')),
+    /^Error: dsh-director local host cannot start here: python not found/);
+  await localHost({ root: '/tmp/x' }).install(api('python3'));
+  assert.deepEqual(warned, [`dsh-director local host: tested on DSH ${TESTED_DSH_VERSION}, running an unknown version`]);
+});
+
+test('local host progress: a failed phase is printed to stderr once per distinct error', async () => {
+  const root = await freshRoot();
+  const host = localHost({ root });
+  const printed = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  try {
+    await host.progress({ phase: 'running', subagents: [], error: '' });
+    await host.progress({ phase: 'failed', subagents: [], error: 'Model completion: no API key for deepseek-official\nmore' });
+    await host.progress({ phase: 'failed', subagents: [], error: 'Model completion: no API key for deepseek-official\nmore' });
+    await host.progress({ phase: 'waiting', subagents: [], error: '' });
+    await host.progress({ phase: 'failed', subagents: [], error: 'Model completion: no API key for deepseek-official\nmore' });
+  } finally { console.error = saved; }
+  assert.deepEqual(printed, ['dsh-director failed: Model completion: no API key for deepseek-official',
+    'dsh-director failed: Model completion: no API key for deepseek-official']);
+  assert.equal((await readFile(join(root, 'progress.jsonl'), 'utf8')).trim().split('\n').length, 5, 'progress.jsonl keeps every report');
+});
+
+test('local host apply(): the session tag is set on this process, and put back on dispose', () => {
+  const key = 'DIRECTOR_LOCAL_SESSION_TEST';
+  delete process.env[key];
+  const handlers = {}, provided = [];
+  const ctx = { on: (name, fn) => { handlers[name] = fn; }, provide: (name, value) => provided.push([name, value]) };
+  applyLocal(ctx, { root: '/tmp/x', sessionId: 'dir-1', sessionEnv: key });
+  assert.equal(process.env[key], 'dir-1');
+  assert.equal(provided[0][0], 'directorHost');
+  handlers.dispose();
+  assert.equal(process.env[key], undefined);
+});
+
+test('startupFailure: with detail the first line of the reason follows the exit line; without, only the exit line', () => {
+  const printed = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  try {
+    const ctx = () => ({ logger: { error: () => {} }, get: () => undefined });
+    const slot = Symbol.for('dsh.exit-cause');
+    delete globalThis[slot];
+    startupFailure(ctx(), new Error('directorHost refused: missing config: provider\nsecond line'), { detail: true });
+    delete globalThis[slot];
+    startupFailure(ctx(), new Error('a reason a host prints itself'));
+    delete globalThis[slot];
+  } finally { console.error = saved; }
+  assert.deepEqual(printed, ['dsh exit cause: dsh-director startup: Error', 'dsh-director startup: directorHost refused: missing config: provider',
+    'dsh exit cause: dsh-director startup: Error']);
+});
+
+test('startupFailure: an error with a code keeps its class on the exit line, and the reason still follows (README.md says so)', async () => {
+  const printed = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  try {
+    const slot = Symbol.for('dsh.exit-cause');
+    delete globalThis[slot];
+    const error = Object.assign(new Error("ENOENT: no such file or directory, open '/nonexistent/roles.json'"), { code: 'ENOENT' });
+    startupFailure({ logger: { error: () => {} }, get: () => undefined }, error, { detail: true });
+    delete globalThis[slot];
+  } finally { console.error = saved; }
+  assert.deepEqual(printed, ['dsh exit cause: dsh-director startup: connection-level ENOENT',
+    "dsh-director startup: ENOENT: no such file or directory, open '/nonexistent/roles.json'"]);
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  assert.ok(readme.includes('dsh exit cause: dsh-director startup: connection-level ENOENT'), 'README.md shows the coded exit line too');
+});
+
+test('the tested DSH release is the repository\'s pin, and README.md names it', async t => {
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  assert.ok(readme.includes(`@deepseek-ai/dsh@${TESTED_DSH_VERSION}`) && readme.includes(`DSH \`${TESTED_DSH_VERSION}\``), 'README.md names another DSH release');
+  // The pin lives beside the backend adapter; a copy of this plugin alone has no such file.
+  const pin = await readFile(new URL('../../dsh-driver/package.json', import.meta.url), 'utf8').catch(() => undefined);
+  if (!pin) return t.skip('no ../dsh-driver/package.json next to this plugin');
+  assert.equal(JSON.parse(pin).dependencies['@deepseek-ai/dsh'], TESTED_DSH_VERSION);
 });

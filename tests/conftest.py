@@ -8,6 +8,12 @@ import tempfile
 # Keep an explicit caller setting intact; this must precede api/litellm imports.
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
+# The owner's language (core/owner_text.py): with the variable unset it falls back to the
+# repository .env, so pin it - a run in a checkout whose .env says zh reads what CI reads
+# (core/dotenv_boot.py: configuration belongs to the process you started). Tests that need
+# 'zh' or an unset variable set it themselves.
+os.environ["AITELIER_OWNER_LANGUAGE"] = "en"
+
 # Isolate the ENTIRE data directory for the test session. Defense in depth —
 # the primary guards now live in the code itself (core/datadir.py authority,
 # REQUIRED constructor paths, lifespan _test_mode skip; see

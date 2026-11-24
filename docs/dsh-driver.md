@@ -94,7 +94,8 @@ The backend retains its Docker deployment.
 The host installation at `~/.local/share/aitelier-dsh/releases/<fingerprint>/`
 uses Node 24 and the pinned DSH dependencies from the same Dockerfile stage as
 the image. The service connects to the
-backend via `http://127.0.0.1:4444`, retains per-driver tokens, and uses the host's
+backend via `http://127.0.0.1:$AITELIER_PORT` (4444 unless `.env` sets it; `--api-url`
+overrides), retains per-driver tokens, and uses the host's
 existing GitHub secret-file credential helper. Provider API keys remain in the
 backend model gateway. No Docker socket is mounted into the backend.
 
@@ -206,11 +207,95 @@ can select an installed DSH executable and `AITELIER_DSH_API_URL` overrides the
 default loopback backend URL. Use a complete `dsh` installation from this pinned
 version, not an older globally installed command.
 
+## The steward (project `aitelier-home`)
+
+The steward is not a separate service: it is the driver of the one State project
+whose id is exactly `aitelier-home` (`core/dsh_driver.py` `RESERVED_ROLES`). Any
+other project's driver is a director. A fresh backend has no such project, so
+there is no steward until you create it and start its driver, once:
+
+1. In the dashboard's project list, **New project**: id `aitelier-home` (exactly),
+   any title, and leave "start driver" **unticked**.
+2. Start its driver on the `steward` route (the dashboard's start button, on a
+   project that has no driver yet, picks the `driver` route instead):
+
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/start \
+     -H 'Content-Type: application/json' -H "X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN" \
+     -d '{"provider":"aitelier","model":"steward"}'
+   ```
+
+   The header carries the admin token your `.env` sets (`AITELIER_ADMIN_TOKEN`;
+   export it in this shell first); without a write gate it is not checked. The
+   route is kept on every later start.
+3. The project list now shows the **Steward** card pinned first.
+
+The `steward` route needs a vision-capable candidate (it reads photos and PDF
+pages); the keys it uses are listed in the README. On the host, the steward
+needs `pypdfium2` in the checkout's `.venv` to read PDFs and `ffprobe` on the
+service's PATH for voice and video messages; `deploy/install_dsh_host.py`
+installs the first and reports the second. Its memory dates things in the
+host's own time zone unless the unit sets `AITELIER_DSH_MEMORY_TZ` to the
+owner's IANA zone (template:
+`integrations/embed-server/systemd/21-memory-tz.conf`).
+
+The fixed words the steward's chat channels, question pushes and confirmations
+show the owner, the lines code posts into a bound group (bind, quota and media
+notices, the withheld sentence), and the reply phrases its prompt names, follow
+one setting:
+`AITELIER_OWNER_LANGUAGE` in the repository `.env`, `en` (the default) or `zh`
+(`core/owner_text.py`, `integrations/dsh-director/lib/owner-text.mjs`). The
+backend and the DSH host both read that line; a running steward takes it at its
+next start. Either language's phrase decides: `approve proposal <id>` or
+`同意 proposal <id>`, `decline proposal <id>` or `拒绝 proposal <id>`, and
+`confirm <code>` / `cancel <code>` or `确认 <code>` / `取消 <code>` - always the
+whole message, exactly, lower case.
+
+**Restarting the steward** (after adding channel tokens, for example): its
+profile is written at start, so stop and start the `aitelier-home` driver from
+the dashboard's driver controls, or with the same API:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/stop -H "X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN"
+curl -fsS -X POST http://127.0.0.1:4444/api/dsh-drivers/aitelier-home/start -H 'Content-Type: application/json' \
+  -H "X-AItelier-Admin-Token: $AITELIER_ADMIN_TOKEN" -d '{}'
+```
+
+**Chat channels.** Slack: `integrations/dsh-channel-slack/README.md`. WeChat:
+`integrations/dsh-channel-wechat/README.md`. A channel accepts messages only from
+the one account bound to it: open the Steward card → **Channels** → **Bind**,
+and send the six-digit code to the bot from that account within its lifetime.
+
 ## Standing director goal and connection recovery
 
-`integrations/dsh-driver/goal.md` seeds each project's standing director mandate
+The director mandate is a text file, read only for backend-managed directors
+(the ones the backend starts through `integrations/dsh-driver`). A standalone
+director on the local host never reads it; its standing goal is the host's
+`objective` (see `integrations/dsh-director/README.md`). The runtime reads the deployment's own
+mandate, `director-goal.md` in the AItelier data root (`$AITELIER_HOME`, else
+`~/.AItelier/director-goal.md`), when that file exists, and otherwise the
+repository's neutral default, `integrations/dsh-driver/goal.md`. The default
+grants no standing authority: it tells the director to ask the owner before
+anything that leaves the machine or cannot be undone (push, publish or release,
+deploy, shared or production systems, spending, contacting anyone).
+
+**The override is an authorization the operator grants.** Every backend-managed
+director on the host runs with full access as the installing user and no approval prompts (see
+below), so whatever `director-goal.md` says it may do, it will do without asking.
+Read it before the first driver start, and write in it only what the owner
+allows: the project's scope, which outward actions are allowed and within what
+bounds (for example "may push to the project's own remote branches"), which
+models or providers to prefer, and what to clean up. Keep it owner-readable only
+(`chmod 600`). `{{project_id}}` is replaced by each project's id. A file that
+exists but cannot be read (or is empty, or a link to a missing file) stops every
+backend-managed director at start with `director goal override <path> ...` in the host journal
+(standalone directors are unaffected);
+it is never replaced by the default silently. The steward has no mandate and is
+not affected.
+
+The chosen text seeds each project's standing director mandate
 as a native DSH goal when its session has no current goal, and re-seeds an ACTIVE
-goal's objective from it on every start (see "Deploying a changed `goal.md`"). The native goal starts
+goal's objective from it on every start (see "Deploying a changed mandate"). The native goal starts
 the first director round. When that round ends, the runtime disarms immediate
 native continuation without changing the durable active phase, objective or
 round counters. Automatic notifications and idle reviews resume work instead of
@@ -223,14 +308,15 @@ Retained project-inbox messages are delivered after the first native goal round
 is admitted, so bootstrap messages cannot displace that round.
 
 Session resume preserves goal identity, counters and the existing project
-snapshot; an active goal's objective follows `goal.md`. The enabled resident host explicitly re-arms an active goal
+snapshot; an active goal's objective follows the mandate file. The enabled resident host explicitly re-arms an active goal
 after restart, while paused, blocked, completed and explicitly cleared goals remain unchanged.
 Native round limits remain in force; restart does not reset them or bypass a
 blocker. No additional goal store or scheduler is introduced. The director
 maintains State/note/inboxes, checks issues and unfinished delivery beyond the
-frontier, prioritizes critical defects, and aims for four independent native
-subagents when actionable work exists. The owner's push/publish scope,
-model preferences and cleanup policy are part of that mandate. At each scheduling
+frontier, prioritizes critical defects, and runs independent native subagents
+in parallel when actionable work exists. The owner's push/publish scope,
+model preferences and cleanup policy belong in the deployment's override, not in
+the repository default. At each scheduling
 round, new task or worker completion, the director checks ready work and free
 workers, dispatches bounded implementation/investigation/verification by default,
 and focuses on prioritization, acceptance and integration. An assignment is a
@@ -261,7 +347,10 @@ model selection still use `worker`. Each child binds one gateway: successive
 children round-robin over `worker.rotate`, while all tool turns in that child
 stay on the same provider unless an endpoint fails. The example pool contains
 OpenCodeGo and Ollama Cloud DeepSeek V4.1 Flash, using the existing `GO_API_KEY`
-and `OLLAMA_API_KEY` secret files. Both endpoints need configured credentials.
+and `OLLAMA_API_KEY` secret files, and falls back to pay-as-you-go DeepSeek
+(`DEEPSEEK_API_KEY`) when neither can serve, so an install holding only the
+DeepSeek key can still dispatch workers. The keys each route needs are listed in
+[the README](../README.md#resident-dsh-drivers-install-from-a-clean-checkout-linux).
 
 The State subscription requests a 240-second wait, below Node fetch's default
 300-second response-header timeout. Ordinary timeouts stay inside the runtime
@@ -310,13 +399,32 @@ are omitted from ordinary model requests. Two runtime tools provide access:
   execution chain. For example, after searching for `list_pipelines`, call
   `call_tool(name="mcp__aitelier__list_pipelines", arguments={})`.
 
-Local AgentMCP (`http://127.0.0.1:9003/mcp`), devmcp (`:7676/mcp`) and zvec
-(`:7999/mcp`) are connected by default as optional capabilities. A service being
-down does not block driver startup. Set `AITELIER_DSH_MCP_AGENTMCP`,
-`AITELIER_DSH_MCP_DEVMCP` or `AITELIER_DSH_MCP_ZVEC` in the host service's
-environment to override a URL; an empty value disables that server. Restart the
-host supervisor after changing this configuration, with native workers settled.
-The driver never starts these external services itself.
+A director can also be given four optional local MCP services: AgentMCP (media,
+OCR, PDF, web), devmcp (files, bash, subagent jobs), zvec (semantic code search)
+and pwmcp (a Playwright browser). None is connected by default: each is
+registered only when the host service's environment names its URL, so a fresh
+install never probes ports another program may own. A service being down does
+not block driver startup, and an empty value is the same as unset. For example,
+a drop-in `~/.config/systemd/user/aitelier-dsh-host.service.d/12-local-mcp.conf`:
+
+```ini
+[Service]
+Environment=AITELIER_DSH_MCP_AGENTMCP=http://127.0.0.1:9003/mcp
+Environment=AITELIER_DSH_MCP_DEVMCP=http://127.0.0.1:7676/mcp
+Environment=AITELIER_DSH_MCP_ZVEC=http://127.0.0.1:7999/mcp
+Environment=AITELIER_DSH_MCP_PWMCP=http://127.0.0.1:8931/mcp
+```
+
+Then `systemctl --user daemon-reload` and restart the host supervisor, with
+native workers settled. Upgrading an install that relied on the former built-in
+ports (the four values above): create this drop-in and `daemon-reload` BEFORE the
+checkout is updated. The unit runs the checkout with `Restart=always`, so any
+restart after the update but before the drop-in is loaded provisions directors
+without these services; the old code reads the same values, so placing it first
+changes nothing. `AITELIER_DSH_MCP_PWMCP_DRIVER_PORTS` rewrites the
+browser URL's port per driver and needs `AITELIER_DSH_MCP_PWMCP` set. The
+steward is given none of the four. The driver never starts these external
+services itself.
 
 The standing instructions include an AgentMCP example: search for
 `agentmcp image` (or OCR/PDF/audio/video), inspect the returned parameter schema,
@@ -390,7 +498,11 @@ fits a task, add one that way; never improvise items.
 
 The plugin ships a default set in `integrations/dsh-director/todo/todo_templates/`,
 used when the host names no directory: `change_files` (change named files inside
-a scope) and `cost_audit`. `cost_audit` is the read-only audit director.md asks
+a scope), `docs_change`, `code_change`, `test_fix`, `investigate`, the batch
+template `find_verify` and `cost_audit`. This repository's `todo_templates/`
+links to the plugin's files except `find_verify`, whose prompts here carry this
+deployment's attempt and test rules (the plugin's copy differs only in that
+wording). `cost_audit` is the read-only audit director.md asks
 for when the owner asks, a reported slowdown, or every 20 delivered work items:
 the child times the project's check commands once (given as data in
 `measure_commands`, any language or runner, or none), judges them against
@@ -570,7 +682,8 @@ Director flow:
 6. When the plan is complete, call `todo_finish`, then `report_external_attempt` with its report.
 7. Review the delivery and `record_evidence` a separate report.
 
-Deploying a changed `goal.md`. The mandate's source of truth is
+Deploying a changed mandate. The mandate's source of truth is the deployment's
+`director-goal.md` (see "Standing director goal"), else
 `integrations/dsh-driver/goal.md` in the repository. Edit it and restart the host
 service (`aitelier-dsh-host.service`): on every start `bindDriverGoal` renders the
 file (`{{project_id}}` replaced) and, for each director whose native goal is
@@ -580,14 +693,18 @@ not touched, and the usual re-arm follows. Paused, blocked, completed and
 explicitly cleared goals are preserved (a cleared goal is deliberately not
 recreated); an objective that already matches is not edited again.
 
-`goal.md` is therefore a non-human authorization channel: whoever changes it
-rewrites every active director's mandate at the next restart. Every applied edit
+The mandate file is therefore a non-human authorization channel: whoever changes it
+rewrites every active director's mandate at the next restart. Adding, removing or
+changing `director-goal.md`, or updating a checkout whose default `goal.md`
+changed while no override exists, is such a change. Every applied edit
 appends one line to the append-only `goal-seed.jsonl` in the driver state
 directory (`AITELIER_DSH_STATE_DIR`; the headless host shows no logger output, so
 this file is the log): `at`, `goal_id`, `old_revision`, `new_revision`,
-`old_objective_sha256`, `new_objective_sha256`, `goal_md_sha256` and
-`goal_md_commit` (the last commit touching `goal.md` in the repository the runtime
-loaded it from, else in `AITELIER_TODO_CWD`, else `unknown`). It answers "what was
+`old_objective_sha256`, `new_objective_sha256`, `goal_md_file` (the file loaded),
+`goal_md_override` (true for the deployment's file), `goal_md_sha256` (of that
+file's bytes) and `goal_md_commit` (the last commit touching the loaded file in
+its own repository; for the default also in `AITELIER_TODO_CWD`; else `unknown`).
+It answers "what was
 this director told at the time": hash the objective text and match it against
 `new_objective_sha256` of the latest record at or before that time (objectives are
 hashed as DSH stores them, trimmed); the previous record's new digest equals the
@@ -598,8 +715,8 @@ This has to be the runtime, not a message: the model-facing `update_goal` only
 accepts a direct human turn, and an owner message delivered through the driver
 inbox does not count. The converse also holds: an objective changed by hand with
 `update_goal` or `/goal edit` on an active goal is overwritten at the next start if
-it differs from `goal.md`. To make a lasting change, edit `goal.md`; to keep a
-manual objective, pause the goal first.
+it differs from the mandate file. To make a lasting change, edit the mandate
+file; to keep a manual objective, pause the goal first.
 
 ## Checks
 

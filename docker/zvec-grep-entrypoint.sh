@@ -3,9 +3,6 @@
 # host-owned control worker. Projects retain automatic baseline indexing;
 # run worktrees are prepared only from recorded owner demand.
 set -u
-PROJECTS="${AITELIER_PROJECTS_DIR:-/home/linxuhao/.AItelier/projects}"
-WORKTREES="${AITELIER_WORKTREES_DIR:-/home/linxuhao/.AItelier/worktrees}"
-ZVEC_HOME="${ZVEC_GREP_HOME:-/home/linxuhao/.AItelier/zvec-grep-home}"
 EMBED="${ZVEC_GREP_EMBEDDING:-local/potion-code-16m-v2}"
 # This script and the worker module are delivered by the read-only source mount,
 # so a merge reaches the running sidecar by one recreate. The image still bakes
@@ -30,7 +27,13 @@ if [ "${1:-}" = "--path-only" ]; then
   exit 0
 fi
 
-CONTROL="${AITELIER_HOME:-/home/linxuhao/.AItelier}/semantic-index-control"
+# Every default derives from AITELIER_HOME (docker-compose.yml sets it from the
+# invoking user's HOME); there is no built-in home to fall back on.
+STATE="${AITELIER_HOME:?AITELIER_HOME must be set (docker-compose.yml sets it)}"
+PROJECTS="${AITELIER_PROJECTS_DIR:-$STATE/projects}"
+WORKTREES="${AITELIER_WORKTREES_DIR:-$STATE/worktrees}"
+ZVEC_HOME="${ZVEC_GREP_HOME:-$STATE/zvec-grep-home}"
+CONTROL="$STATE/semantic-index-control"
 mkdir -p "$CONTROL" || exit 1
 # Lock before clearing daemon metadata or starting any process. A competing
 # sidecar cannot run either the old scanner or a second control writer.

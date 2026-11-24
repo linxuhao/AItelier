@@ -21,18 +21,19 @@ import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
   mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia, createPdfReader,
-  basicsFlag } from './steward-host.mjs';
+  basicsFlag, ownerLanguageSetting } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { createOfficeRunner } from './office.mjs';
 import { createCalcRunner } from './calc.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
 import { CHANNEL_LOGIN_EVENTS, processChannelLoginRequests } from './channel-login-requests.mjs';
 import { SCHEDULE_EVENTS, ScheduleTimer, deleteSchedule, listSchedules, setSchedule } from './schedules.mjs';
-import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit } from './goal.mjs';
+import { appendGoalSeedRecord, bindDriverGoal, driverGoalSection, goalMdCommit, loadGoalTemplate } from './goal.mjs';
 import { labels, texts, stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource,
   askTheUser, continuationQuestion, reviewInstruction } from './aitelier-texts.mjs';
 import * as core from '../dsh-director/lib/core.mjs';
 import { exitCause, failureClass } from '../dsh-director/lib/exit-cause.mjs';
+import { memoryTimeZoneProblem } from '../dsh-director/lib/host.mjs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, rename } from 'node:fs/promises';
@@ -49,9 +50,14 @@ export const inject = [];
  *  generic director.md, and the worker's State limits after the generic worker.md. */
 const stateSkill = await readFile(new URL('./state.md', import.meta.url), 'utf8');
 const workerStateSkill = await readFile(new URL('./worker-state.md', import.meta.url), 'utf8');
-const goalFile = fileURLToPath(new URL('./goal.md', import.meta.url));
-const goalTemplate = await readFile(goalFile, 'utf8');
-export const driverGoal = project => goalTemplate.replaceAll('{{project_id}}', project);
+// The director mandate: the deployment's override (goal.mjs goalOverrideFile) when
+// present, else the repository's neutral goal.md. An override that exists but cannot
+// be used is held as an error: a director's install() then refuses to start.
+const goalLoad = await loadGoalTemplate(fileURLToPath(new URL('./goal.md', import.meta.url)));
+export const driverGoal = project => {
+  if (goalLoad.error) throw goalLoad.error;
+  return goalLoad.text.replaceAll('{{project_id}}', project);
+};
 export { stateInjectionSource, runtimeEventSource, todoBriefSource, continueSource, askTheUser, continuationQuestion, reviewInstruction };
 
 /** Does an event tick carry anything worth waking the driver for?
@@ -292,6 +298,14 @@ export function projectInboxDigest(page, {
 // ---- The director's pieces, re-exported with this deployment's labels bound ----
 /** The environment variable core/dsh_driver.py sets on every driver process. */
 export const SESSION_ENV = 'AITELIER_DSH_SESSION';
+/** A zone Intl resolved for this host, kept only when memory.timeZone would accept it: an empty
+ *  TZ resolves to 'Etc/Unknown', which openMemory refuses, so that host keeps the plugin's UTC. */
+function hostTimeZone(zone) {
+  return zone && zone !== 'Etc/Unknown' && !memoryTimeZoneProblem(zone) ? zone : undefined;
+}
+/** This host's own IANA time zone (TZ, else /etc/localtime), the steward memory's zone when the
+ *  unit names none (AITELIER_DSH_MEMORY_TZ). Undefined where Intl cannot name a usable one. */
+const HOST_TIME_ZONE = hostTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
 export const { NOTHING_LEFT, MAX_AUTO_CONTINUE, processAlive, watchRefusal, DORMANT_MIN_MINUTES,
   DORMANT_MAX_MINUTES, wakeAfterRefusal, pruneDepartedChildren, LiveChildren, phaseReport, continuationWaitKey,
   DORMANT_COMPACT_MIN_TOKENS, IdleReview, awaitingFinish, batchesToRedispatch, batchRedispatchRows, todoSummary,
@@ -557,13 +571,14 @@ export function stateRequest(send, { log = {}, retryMs = 90000 } = {}) {
   };
 }
 
-export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime } = {}) {
+export function aitelierHost(env = process.env, { request: suppliedRequest, runtime: suppliedRuntime, dotenv } = {}) {
   const project = env.AITELIER_DSH_PROJECT;
   const hostExecution = env.AITELIER_DSH_EXECUTION === 'host';
   // Plugin step 12: the backend starts the reserved steward project with this role. The
   // steward gets no full-access preset, no project work, no goal mandate and no State tools
   // beyond its own (the server enforces the same: steward_read_only).
   const steward = env.AITELIER_DSH_ROLE === 'steward';
+  const ownerLanguage = ownerLanguageSetting(env, dotenv);
   // A supplied request (tests) serves the State reads before install() runs; a
   // supplied, already initialised DriverRuntime (the conformance suite) lets context()
   // and events() run without the DSH-scoped install().
@@ -687,12 +702,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       ...(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS ? { maxActiveSubagents: Number(env.AITELIER_DSH_MAX_ACTIVE_SUBAGENTS) } : {}),
       dormantMinuteMs: env.AITELIER_DSH_DORMANT_MINUTE_MS, idleReviewMs: env.AITELIER_DSH_IDLE_REVIEW_MS,
       permissionPreset: hostExecution && !steward ? 'danger-full-access' : undefined,
+      // The owner's language (ownerLanguageSetting); absent, the plugin's English.
+      ...(ownerLanguage ? { ownerLanguage } : {}),
       // The owner's memory lives on the host, outside every container mount (design 3.3).
       ...(steward ? { rootRole: 'steward', memory: { userId: env.AITELIER_DSH_MEMORY_USER || 'owner',
         ...(env.AITELIER_DSH_MEMORY_ROOT ? { root: env.AITELIER_DSH_MEMORY_ROOT } : {}),
         // Step 21 (design-steward 3.8.1): the owner's time zone for search's dates and the
-        // index's date words; the host unit's drop-in sets it (Europe/Paris), default UTC.
-        ...(env.AITELIER_DSH_MEMORY_TZ ? { timeZone: env.AITELIER_DSH_MEMORY_TZ } : {}),
+        // index's date words: the host unit's drop-in (AITELIER_DSH_MEMORY_TZ), else this
+        // host's own zone; the plugin's UTC only when neither names one.
+        ...((env.AITELIER_DSH_MEMORY_TZ || HOST_TIME_ZONE) ? { timeZone: env.AITELIER_DSH_MEMORY_TZ || HOST_TIME_ZONE } : {}),
         // Step 21 (design-steward 3.8.2): the local embedding server, only when its url is set
         // (the drop-in 20-memory-vector.conf sets both); off otherwise.
         ...(env.AITELIER_DSH_MEMORY_VECTOR_URL ? { vector: { url: env.AITELIER_DSH_MEMORY_VECTOR_URL,
@@ -708,6 +726,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
     /** Host-scoped: the completion bridge, the provider key, project_work, the State runtime. */
     async install({ ctx, defineTool, llm, roles, todoPlans, batchRedispatch, ownerMessageSent, turnAudience: audienceOf,
       externalContent: external, groupSend }) {
+      // A director whose mandate override cannot be read does not start (the steward has no mandate).
+      if (!steward && goalLoad.error) throw goalLoad.error;
       if (steward) mirrorOwnerMessage = ownerMessageSent;
       if (steward && typeof groupSend === 'function') sendToGroup = groupSend;
       if (typeof audienceOf === 'function') turnAudience = audienceOf;
@@ -1200,7 +1220,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         // Session observers cannot append reentrantly to their own log.
         queueMicrotask(() => { if (!isDisposed()) ctx.agents.withoutInitiator(deliverInbox); });
       });
-      const objective = driverGoal(project);
+      const objective = steward ? undefined : driverGoal(project);
       let seeded;
       const goal = steward ? undefined : bindDriverGoal(ctx.goals, agent, objective, { onSeed: (after, before) => { seeded = { after, before }; } });
       if (seeded) {
@@ -1221,7 +1241,9 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
           const record = { at: new Date().toISOString(), goal_id: after.id, old_revision: before.revision, new_revision: after.revision,
             old_objective_sha256: sha(before.objective), new_objective_sha256: sha(after.objective),
             rounds_started: after.roundsStarted, old_max_goal_rounds: before.maxGoalRounds, new_max_goal_rounds: after.maxGoalRounds,
-            goal_md_sha256: sha(goalTemplate), goal_md_commit: await goalMdCommit(goalFile, { cwd: env.AITELIER_TODO_CWD }) };
+            goal_md_file: goalLoad.file, goal_md_override: goalLoad.override, goal_md_sha256: sha(goalLoad.text),
+            // An override outside a repository has no commit; never report the default's in its place.
+            goal_md_commit: await goalMdCommit(goalLoad.file, { cwd: goalLoad.override ? undefined : env.AITELIER_TODO_CWD }) };
           ctx.logger.info(`director goal ${after.id} re-seeded: ${JSON.stringify(record)}`);
           const written = await appendGoalSeedRecord(env.AITELIER_DSH_STATE_DIR, record);
           if (!written.written) ctx.logger.error(`director goal ${after.id} was re-seeded but its trace was NOT written (${written.error})`);
@@ -1374,7 +1396,8 @@ export function apply(ctx) {
   // see dropIndexedGitConfig: the tool shell's secret-name filter leaves COUNT without KEY_0
   dropIndexedGitConfig(process.env);
   installExitDiagnosis(process);
-  ctx.provide('directorHost', aitelierHost(process.env));
+  // The entry alone names this checkout's .env for the owner's language (ownerLanguageSetting).
+  ctx.provide('directorHost', aitelierHost(process.env, { dotenv: new URL('../../.env', import.meta.url) }));
 }
 
 /**

@@ -56,7 +56,10 @@ export function registerConfirmTools(scope, { ctx, defineTool, jsonOutput, Harne
       let sent;
       try {
         sent = await confirm.deliver({ code: created.code, text: created.text, replyTo: created.reply_to_message_id,
-          channel: created.channel, ...(created.group_ref ? { groupRef: created.group_ref } : {}) }, exec.signal);
+          channel: created.channel, ...(created.group_ref ? { groupRef: created.group_ref } : {}),
+          // The asker's question's channel ref (step 23 Slack, D8): a channel that threads answers under it.
+          ...(created.group_ref && typeof created.reply_to_ref === 'string' && created.reply_to_ref ? { replyToRef: created.reply_to_ref } : {}) },
+        exec.signal);
       } catch (error) { sent = { refused: 'not_delivered', reason: String(error?.message ?? error).slice(0, 200) }; }
       if (!sent || sent.refused) {
         // Never a code for a text the person did not get: the record is voided.

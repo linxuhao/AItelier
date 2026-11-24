@@ -224,6 +224,9 @@ aitelier server                   # Backend container (start/reuse)
 
 ### Resident DSH drivers: install from a clean checkout (Linux)
 
+(To run one director with no backend at all - a single DSH process and plain files - see
+[integrations/dsh-director/README.md](integrations/dsh-director/README.md).)
+
 The optional built-in director runs **one DSH driver per State DAG on the host**;
 the AItelier backend stays in Docker. Drivers and native subagents have full
 access as the installing Linux user, use independent worktrees, and can call
@@ -234,16 +237,28 @@ only in disposable containers, not on the host or in the production backend.
 Prerequisites: Python 3.12+ with `venv`/pip, Git, working Docker with Compose v2,
 and a systemd user session (`systemctl --user`). Use the same user and `HOME` for
 the backend and drivers. On Ubuntu/Debian, install `python3.12-venv` if
-`python3.12 -m venv` reports missing `ensurepip`. Complete the model-key setup above; the shipped
-`driver` route uses `GO_API_KEY` for OpenCode Go, then `DEEPSEEK_API_KEY` as
-fallback. Set `GITHUB_TOKEN` as a secret file if private GitHub clone/push is
-needed. Provider keys are read by the backend model gateway.
+`python3.12 -m venv` reports missing `ensurepip`. Complete the model-key setup above.
+Set `GITHUB_TOKEN` as a secret file if private GitHub clone/push is
+needed. Provider keys are read by the backend model gateway. The shipped example
+routes (`model_routes.example.json`) read these key files, tried in this order;
+each of the three routes below ends with pay-as-you-go DeepSeek, so
+`DEEPSEEK_API_KEY` alone serves them, and each other key only adds a cheaper plan
+in front of it:
+
+| Route | Used by | Key files, in order |
+|---|---|---|
+| `driver` | each project's director | `GO_API_KEY`, `DEEPSEEK_API_KEY` |
+| `worker` | the directors' native subagents | `GO_API_KEY` / `OLLAMA_API_KEY` (rotated), then `DEEPSEEK_API_KEY` |
+| `steward` | the steward (project `aitelier-home`) | `OLLAMA_API_KEY`, `GO_API_KEY`, `DEEPSEEK_API_KEY` |
 
 From the repository root, **before the first backend start**:
 
 ```bash
-# Creates .venv, installs Python deps, builds the Dockerfile's dsh-runtime stage
-# from the committed npm lockfile, and renders a service for this checkout.
+# Creates .venv, installs Python deps (and the steward's PDF reader), builds the
+# Dockerfile's dsh-runtime stage from the committed npm lockfile, and renders a
+# service for this checkout. It also creates the directories docker-compose.yml
+# bind-mounts (as you, not root), writes your uid/gid to .env as
+# AITELIER_UID/AITELIER_GID, and reports a missing ffprobe. Safe to rerun.
 # No preinstalled Node/DSH, production image or migration /tmp files needed.
 python3.12 deploy/install_dsh_host.py --no-start
 
@@ -252,12 +267,28 @@ systemctl --user enable --now aitelier-dsh-host.service
 loginctl enable-linger "$USER"     # start the user service at boot without login
 ```
 
+**Before starting any driver, decide its mandate.** Directors run with full
+access and no approval prompts, so their standing goal is an authorization you
+grant. The repository ships a neutral default
+(`integrations/dsh-driver/goal.md`) that asks the owner before any push,
+publish, deploy or other outward or irreversible action. To grant more, write
+your own mandate to `~/.AItelier/director-goal.md` (`chmod 600`); it replaces the
+default for every backend-managed director on this host at its next start. A
+standalone director (`integrations/dsh-director` with the local host) never reads
+it: its standing goal is the host's `objective`. See
+[Standing director goal](docs/dsh-driver.md#standing-director-goal-and-connection-recovery).
+
 The installer creates the identity pepper secret if absent, enables driver
 identity in `.env`, and selects host mode in `~/.AItelier/dsh-drivers/runtime.json`.
 It preserves existing credentials, sessions and cursors. It does not create
 projects or start their agents: open **Driver status** on the dashboard and
 start the desired State DAG's driver. That driver's own token is provisioned
 by AItelier. The checkout may live outside `~/AItelier`.
+
+**The steward** (the owner's assistant, with Slack/WeChat channels) is the
+driver of one reserved project, `aitelier-home`, and a fresh backend has none:
+create that project and start its driver on the `steward` route once, as
+[the driver guide](docs/dsh-driver.md#the-steward-project-aitelier-home) shows.
 
 **Startup and shutdown:** the backend uses Docker's `unless-stopped` policy;
 the separate DSH service is enabled at boot by the commands above. Restarting
@@ -299,18 +330,26 @@ provider" (exception: a self-hosted endpoint with no auth still wants a
 placeholder file with any content — the OpenAI client refuses to start with no
 key at all).
 
-Before the first `docker compose up -d`, create both host dirs **as your
+Before the first `docker compose up -d`, create the host dirs it mounts **as your
 user** — if a bind-source dir does not exist, the Docker daemon creates it as
 `root:root`, and the container (which runs as your uid) crash-loops on
 `sqlite3.OperationalError: unable to open database file` without ever
 mentioning permissions:
 
 ```bash
-mkdir -p ~/.AItelier
+mkdir -p ~/.AItelier/godot-control
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
 printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME> && chmod 600 ~/.aitelier-secrets/<KEY_NAME>
 # <KEY_NAME> comes from YOUR provider tables — the probe in Quick Start prints the list.
+# The steward's media and connection secrets, also bind-mounted:
+mkdir -p -m 700 ~/.local/share/dsh-director/media ~/.local/share/aitelier/media-staging \
+  ~/.local/share/aitelier/steward-mcp-secrets
+# The containers run as AITELIER_UID:AITELIER_GID, default 1000:1000; the CLI
+# fills them in, a bare `docker compose` does not:
+[ "$(id -u):$(id -g)" = 1000:1000 ] || printf 'AITELIER_UID=%s\nAITELIER_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
 ```
+
+`deploy/install_dsh_host.py` (above) does all of this for you.
 
 Keys in `.env` also work (`env_file:` passes them through, and the resolver
 falls back to the environment) — but then they sit in the container's
@@ -457,6 +496,12 @@ tunnel is dark with nothing logging an error. Leave the variable unset and
 AItelier stays on loopback.
 
 Other than that, a clean checkout starts with no pre-existing Docker resources.
+The one exception is opt-in: the **zvec-grep** semantic-search sidecar runs from
+a locally built image that is not published, so it sits behind the compose
+profile `zvec-grep` and a default `docker compose up -d` neither needs nor starts
+it (`semantic_search` then answers "unavailable"). A host that has the image
+enables it with `COMPOSE_PROFILES=zvec-grep` and `AITELIER_ZVEC_LIFECYCLE=1` in
+`.env` (see `.env.example`).
 Every capability that needs something outside this repo — the LLM key, web
 search, media generation, the Godot gates — is optional, refuses with a message
 naming the config it wants, and is listed in

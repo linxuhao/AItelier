@@ -189,6 +189,8 @@ async function run(t, { steward, mode = 'tool' }) {
       AITELIER_DRIVER_ID: 'drv-chan', AITELIER_DSH_PROJECT: project, AITELIER_DSH_SESSION: 'chan-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'), CHANNELS_TEST_MODE: mode,
+      // This deployment's owner reads Chinese (core/owner_text.py; core/dsh_driver.py passes it resolved).
+      AITELIER_OWNER_LANGUAGE: 'zh',
       ...(steward ? { AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } : {}) } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);

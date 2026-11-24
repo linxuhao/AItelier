@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
-import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource, driverGoal } from './runtime.mjs';
+import { DriverRuntime, TodoCli, todoSummary, unfinishedWithoutChild, stateInjectionSource, runtimeEventSource, todoBriefSource } from './runtime.mjs';
 import { watchProgress } from './progress.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -1205,14 +1205,15 @@ test('idle review and snapshot views: unfinished plans without a live child, and
 });
 
 test('prompts: dispatch picks a template and binds params, adds templates by reviewed change, and no longer prefers pipelines', async () => {
-  const goal = driverGoal('alpha'), driver = await driverGuide();
+  // The repository's default mandate, not whatever override this machine's deployment has.
+  const goal = readFileSync(new URL('./goal.md', import.meta.url), 'utf8'), driver = await driverGuide();
   for (const text of [goal, driver]) {
     assert.match(text, /todo_templates/); assert.match(text, /todo_plan/); assert.match(text, /params/);
     assert.match(text, /todo_templates\//, 'adding a template under todo_templates/ is not named');
     assert.match(text, /todo_status/); assert.match(text, /todo_finish/);
   }
-  assert.match(goal, /经过评审的代码改动/); assert.match(driver, /reviewed code\s+change/);
-  assert.doesNotMatch(goal, /已有适用的 pipeline|没有适用 pipeline/);
+  assert.match(goal, /reviewed code change/); assert.match(driver, /reviewed code\s+change/);
+  assert.doesNotMatch(goal, /pipeline/);
   assert.doesNotMatch(driver, /Delegate bounded work to DSH subagent or an AItelier pipeline/);
 });
 

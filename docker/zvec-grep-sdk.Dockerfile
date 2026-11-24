@@ -5,12 +5,14 @@
 # 1.21.0's install script gets a 404 for its CUDA tarball). This file changes
 # only the MCP SDK packages on top of that accepted image:
 #   docker tag sha256:4efa1423eb59b0544d8d45828bf93e61189cbbadbe4fdb3ba32d3a2f19837874 aitelier-zg:accepted-4efa1423
-#   docker build -f docker/zvec-grep-sdk.Dockerfile \
+#   docker build -f docker/zvec-grep-sdk.Dockerfile --build-arg HOME_DIR="$HOME" \
 #     --build-arg BASE=aitelier-zg:accepted-4efa1423 -t aitelier-zg:mcp-sdk-2.3.1 .
 # then pin the new image id in docker-compose.yml.
 # The RUN body is the same step as in docker/zvec-grep.Dockerfile.
 ARG BASE
 FROM ${BASE}
+ARG HOME_DIR
+RUN test -n "$HOME_DIR" || { echo "build with --build-arg HOME_DIR=\"\$HOME\"" >&2; exit 1; }
 ENV HOME=/root
 RUN cd /usr/local/lib/node_modules/@zvec/zvec-grep \
     && npm pkg set "dependencies.@modelcontextprotocol/core=2.3.1" \
@@ -22,4 +24,4 @@ RUN cd /usr/local/lib/node_modules/@zvec/zvec-grep \
     && grep -q 'maxToolInputElements: 10_000' dist/mcp/tools.js \
     && test "$(node -p 'require("./node_modules/@modelcontextprotocol/server/package.json").version')" = 2.3.1 \
     && npm cache clean --force
-ENV HOME=/home/linxuhao/.AItelier/zvec-grep-home
+ENV HOME=${HOME_DIR}/.AItelier/zvec-grep-home

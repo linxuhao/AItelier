@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
+import { stewardPromptInLanguage } from '../dsh-director/lib/owner-text.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -421,7 +422,9 @@ test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry th
       AITELIER_DRIVER_ID: 'drv-grp', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 'grp-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } });
+      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory'),
+      // An 'en' owner (the gcf test below is the 'zh' one): named here, never read from a .env.
+      AITELIER_OWNER_LANGUAGE: 'en' } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);
     const until = async (what, met, ms = 90000) => {
@@ -468,6 +471,16 @@ test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry th
     // The owner turn's requests carry no byte of the group turn.
     const ownerTurn = seen.model.filter(m => m.session === 'grp-root' && m.body.includes('m-owner-2'));
     assert.ok(ownerTurn.length && ownerTurn.every(m => !m.body.includes('GROUP_Q_ADAPTER') && !m.body.includes('GROUP_ADAPTER_ANSWER')));
+    // Overfit 2026-11-24 items 12+14 (integration review, should): index.mjs passes the owner's
+    // language into the steward's prompt. This host has every feature, so an 'en' owner's prompt is
+    // steward.md with its passages in English, in every root request, group turns included.
+    const english = stewardPromptInLanguage(await readFile(join(here, '../dsh-director/steward.md'), 'utf8'), 'en');
+    assert.match(english, /`approve proposal <id>` to approve/);
+    const systems = seen.model.filter(m => m.session === 'grp-root' && m.purpose !== 'compaction').map(m => JSON.parse(m.body)
+      .filter(message => message.role === 'system').map(message => typeof message.content === 'string' ? message.content
+        : message.content.map(block => block.text ?? '').join('')).join('\n'));
+    assert.ok(systems.length >= 2 && systems.every(system => system.includes(english.trim())),
+      'the adapter\'s steward prompt is the English one: ' + JSON.stringify(systems.map(system => system.includes(english.trim()))));
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
@@ -548,6 +561,40 @@ export function apply(ctx) {
 }
 `;
 
+// Overfit review 2026-11-24 (重-10): a line typed straight into the steward's session, as DSH's
+// client sends one (a user message whose source is {kind: 'user'}), once <dir>/typed.say exists;
+// /test/typed-done once the turn it opened has ended.
+const TYPED_PROBE = String.raw`
+import { readFile, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+export const name = 'fixture-typed-line';
+export const inject = ['agents'];
+const post = path => fetch(process.env.AITELIER_URL + path, { method: 'POST', body: '{}' }).catch(() => {});
+export function apply(ctx, { dir, session }) {
+  let text, opened = false, busy = false;
+  const timer = setInterval(async () => {
+    if (busy || text !== undefined) return;
+    busy = true;
+    try {
+      const line = await readFile(join(dir, 'typed.say'), 'utf8').catch(() => undefined);
+      const agent = ctx.agents.get(session);
+      if (line === undefined || !agent) return;
+      const { createUserMessage } = await import(createRequire(process.env.AITELIER_DSH_ENTRY).resolve('@deepseek-ai/dsh-llm'));
+      text = line;
+      agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user', rpcId: 'typed-1' } }));
+      await rm(join(dir, 'typed.say'));
+    } finally { busy = false; }
+  }, 50);
+  ctx.on('session/event', (s, event) => {
+    if (s?.id !== session || text === undefined) return;
+    if (event.type === 'user/message' && JSON.stringify(event.data).includes(text)) opened = true;
+    else if (event.type === 'turn/end' && opened) { opened = false; void post('/test/typed-done'); }
+  });
+  ctx.on('dispose', () => clearInterval(timer));
+}
+`;
+
 // The family member asks, and once the steward's group reply went out, replies with the code.
 const CONFIRM_CHANNEL = String.raw`
 export const name = 'fixture-group-confirm-channel';
@@ -590,7 +637,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       { kind: 'conn', visibility: 'private', pinned_name: 'mcp__sw__calme__list_events', available: true },
       { kind: 'conn', visibility: 'public', pinned_name: 'mcp__sw__calfam__list_events', available: true }] }] } };
   const systems = [];
-  let relays = 0;
+  let relays = 0, typedDone = false;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString();
@@ -602,6 +649,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     if (url === '/test/inbound') { seen.inbound.push(body); return send({}); }
     if (url === '/test/mcp') { seen.mcp.push(body); return send({}); }
     if (url === '/test/system') { systems.push(body.system); return send({}); }
+    if (url === '/test/typed-done') { typedDone = true; return send({}); }
     if (url === '/test/wait-first-reply') { await replied; return send({}); }
     if (url.startsWith('/test/')) return send({});
     seen.state.push({ path: url, body });
@@ -653,6 +701,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     await mkdir(profile, { recursive: true });
     await writeFile(join(directory, 'provider.mjs'), CONFIRM_PROVIDER);
     await writeFile(join(directory, 'sw-tools.mjs'), SW_TOOLS);
+    await writeFile(join(directory, 'typed.mjs'), TYPED_PROBE);
     await writeFile(join(directory, 'channel.mjs'), CONFIRM_CHANNEL);
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
@@ -662,7 +711,8 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
         { id: 'fixture-sw-tools', name: join(directory, 'sw-tools.mjs') },
         { id: 'dsh-director', name: join(here, '../dsh-director/index.mjs') },
         { id: 'aitelier-driver', name: join(here, 'runtime.mjs') },
-        { id: 'dsh-channel-wechat', name: join(directory, 'channel.mjs') }] },
+        { id: 'dsh-channel-wechat', name: join(directory, 'channel.mjs') },
+        { id: 'fixture-typed-line', name: join(directory, 'typed.mjs'), config: { dir: directory, session: 'gcf-root' } }] },
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -671,7 +721,9 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       AITELIER_DRIVER_ID: 'drv-gcf', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 'gcf-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } });
+      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory'),
+      // A 'zh' owner: steward.md's own language, so the prompt pin below is the a1416299ee file whole.
+      AITELIER_OWNER_LANGUAGE: 'zh' } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);
     const commands = name => seen.state.filter(s => s.path === '/api/state/commands/' + name);
@@ -718,8 +770,27 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       + JSON.stringify(systems.map(system => system.includes(LINE))) + '\n' + (systems.find(system => !system.includes(LINE)) ?? '').slice(-1500) + trace);
     assert.equal(new Set(systems.map(system => system.slice(system.indexOf('Your basic capabilities')))).size, 1, 'one text');
     assert.ok(systems.every(system => !system.includes('calme') && !system.includes('calfam')));
+    // Overfit review 2026-11-24 (重-11): on the AItelier adapter the steward's role prompt is still
+    // steward.md as it was at a1416299ee, whole (test-fixtures/steward.md.a1416299ee, `git show`n).
+    const baseSteward = await readFile(new URL('./test-fixtures/steward.md.a1416299ee', import.meta.url), 'utf8');
+    assert.ok(systems.every(system => system.includes(baseSteward.trim())), 'the adapter\'s steward prompt is steward.md unchanged');
     assert.match(resultOf('b1'), /mcp__sw__calfam__list_events/, trace);
     assert.doesNotMatch(resultOf('b1'), /calme/, trace);
+    // Overfit review 2026-11-24 (重-10): the adapter records its owner's turns itself (syncConversation,
+    // from the backend's conversation: empty here), so the plugin adds no second writer - a line
+    // typed straight into the session, as DSH's client sends one, opens a turn and reaches no memory.
+    const TYPED = 'TYPED_LINE_' + randomUUID();
+    await writeFile(join(directory, 'typed.say'), TYPED);
+    const typedBy = Date.now() + 60000;
+    while (!typedDone && Date.now() < typedBy && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(typedDone, 'the typed line\'s turn never ended' + trace);
+    proc.kill('SIGTERM'); await once(proc, 'exit');
+    const store = await MemoryStore.open({ root: join(directory, 'memory'), userId: 'owner' });
+    try {
+      const entries = [...store.entries.values()];
+      assert.deepEqual(entries.filter(e => e.source === 'conversation').map(e => [e.id, e.text]), [], 'the plugin recorded a turn on the adapter');
+      assert.ok(!entries.some(e => e.text.includes(TYPED)), 'the typed line reached memory');
+    } finally { await store.close(); }
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

@@ -28,12 +28,25 @@ export interface HostConfig {
   /** The todo CLI: `python -m <module>` in `cwd` (default: the process's directory) with
    *  python defaulting to python3; the CLI reads its state directory from `stateDirEnv`. */
   todo: { python?: string; cwd?: string; module: string; stateDirEnv: string };
-  /** Environment variable carrying the session id on the driver's processes (default DSH_DIRECTOR_SESSION). */
+  /** Environment variable carrying the session id on the driver's processes (default DIRECTOR_SESSION).
+   *  The host sets it on the DSH process. A DSH_-prefixed name never reaches a job a model shell
+   *  starts (DSH rebuilds that namespace per shell call); the local host uses DIRECTOR_LOCAL_SESSION_<hash of its root>. */
   sessionEnv?: string;
+  /** When the director cannot start, print the first line of the reason after the exit line
+   *  (default false: the host prints its own, redacted). The local host sets it. */
+  startupErrorDetail?: boolean;
+  /** The host's work items carry no node key or context hash: todo_plan and todo_batch_plan take
+   *  both as optional (node_key defaults to attempt_id). Default false: both required. */
+  planKeysOptional?: boolean;
   /** Included in review notices when set. */
   projectId?: string;
   /** DSH permission preset applied to the director session on start, e.g. 'danger-full-access'. */
   permissionPreset?: string;
+  /** The owner's language for the fixed lines the plugin itself sends the owner on a chat
+   *  channel (lib/owner-text.mjs: receipt, truncation tail and limit, channel-down alert, bind
+   *  and decision lines) and for the reply phrases the steward's prompt names: 'en' or 'zh', by
+   *  its primary subtag ('zh-CN' is 'zh'); absent or anything else, 'en'. */
+  ownerLanguage?: string;
   /** The worker capacity this host expects (default: DSH's own maxActiveSubagents). The guard
    *  uses the smaller of this and the limit DSH runs with, so it is never above DSH's. */
   maxActiveSubagents?: number;
@@ -137,8 +150,9 @@ export interface DirectorApi {
   /** Step 25 C11 (capability `groups`): send one line into a bound group (a group reminder the
    *  host posted with post_group_notice) through the channel's group send and the bridge's one
    *  queue, like a group reply. true when the channel took it; never rejects; false without
-   *  channels. */
-  groupSend(channel: string, groupRef: string, text: string): Promise<boolean>;
+   *  channels. `options.replyToRef` (step 23 Slack, D8): the group message the line answers (a
+   *  confirmation text answers its asker's question), which Slack threads under. */
+  groupSend(channel: string, groupRef: string, text: string, options?: { replyToRef?: string }): Promise<boolean>;
   /** undefined during install(); the director's agent from setup() on. */
   readonly agent: unknown;
 }
@@ -191,7 +205,10 @@ export interface DirectorHost {
     list(signal?: AbortSignal): Promise<Array<{ id: string; text: string }>>;
   };
   /** v1.2, plugin step 11: whether `id` names a message the owner wrote; memory_forget
-   *  needs it (the steward forgets only when the owner asked) [none: memory_forget refuses]. */
+   *  needs it (the steward forgets only when the owner asked) [none: memory_forget refuses].
+   *  A host with it owns its owner's conversation and records each turn into memory itself
+   *  (api.memory.recordTurn); without it the plugin records the root session's own turns - each
+   *  user message DSH's client sent and the root's replies in that turn (lib/memory/turns.mjs). */
   memory?: { ownerMessage(id: string, signal?: AbortSignal): Promise<boolean> };
   /** v1.2, plugin step 12: the steward's read-only view of every project, behind
    *  portfolio_projects / portfolio_project / portfolio_conversation [none: not registered].
@@ -647,7 +664,17 @@ export interface OwnerChannels {
     login?(): Promise<ChannelLoginAnswer>;
     sendFile?(file: { to?: string; groupRef?: string; replyToRef?: string; kind: 'image' | 'voice' | 'file'; mime: string; name: string;
       path: string; caption?: string }): Promise<{ ref?: string }>;
-    mediaKinds?: Array<'image' | 'voice' | 'file'> }): () => void;
+    mediaKinds?: Array<'image' | 'voice' | 'file'>;
+    /** Step 23 (optional; a channel with groups): one line into a bound group. `replyToRef` is the
+     *  group message the line answers (a quota notice, a confirmation line, the steward's reply):
+     *  Slack answers in that message's thread (design-steward 7.7.19, D8), WeChat ignores it. A
+     *  refusal before anything is sent throws {status: 409, code: not_logged_in | room_not_bound |
+     *  room_paused} or {status: 429, code: room_backstop}. */
+    sendGroup?(groupRef: string, text: string, options?: { replyToRef?: string }): Promise<{ ref?: string }>;
+    /** Step 23 (optional): the host's whitelist, set whole - the channel's bound account and each
+     *  bound group with its @ prefix and, when it has one, its dashboard name (the bridge's PUT
+     *  /rooms; Slack keeps it in memory and names a paused group by it). */
+    setRooms?(rooms: { ownerRef: string | null; rooms: Array<{ room_ref: string; prefix: string; label?: string }> }): Promise<void> }): () => void;
   /** Step 24.2: `attachments` (optional) - what storeMedia answered for each of the message's
    *  files: each EXACTLY one of `ref` (an m_ library ref storeMedia gave; a channel's own ids
    *  never come here) or `refused` (too_large | type | unsupported | gone - a channel writes

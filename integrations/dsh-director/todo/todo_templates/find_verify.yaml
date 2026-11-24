@@ -1,0 +1,96 @@
+name: find_verify
+version: 1
+kind: batch
+description: >-
+  Read-only review or investigation fan-out under ONE work-item attempt: one finder per
+  dimension reports findings, the runtime deduplicates and caps them and expands one
+  verifier per finding, bound to a session that found nothing in this batch, which tries
+  to refute it against the reviewed commit; the runtime then writes a summary that is not
+  evidence (a verdict rests on each verify report's evidence). Use todo_batch_plan, not todo_plan.
+params:
+  target:
+    type: str
+    required: true
+    description: What is reviewed (a candidate, a change, a subsystem); goes into every prompt.
+  reviewed_sha:
+    type: str
+    required: true
+    description: The reviewed commit. Every verify report's artifact_ref must equal it.
+  dimensions:
+    type: list[str]
+    required: true
+    description: One finder per entry (for example correctness, security, tests). Entries that differ only in case, spacing or punctuation are refused as duplicates.
+  max_findings_per_finder:
+    type: int
+    default: 8
+    description: A finder reporting more findings fails its item instead of being truncated.
+  max_verify:
+    type: int
+    default: 8
+    description: At most this many verifiers; findings beyond it are listed as unverified in the summary, never dropped.
+  scope:
+    type: list[str]
+    required: true
+    description: Globs of the reviewed checkout the finders and verifiers look at.
+# Concurrent finder / verifier containers; v1 counts concurrent sub-plans per stage (offered or
+# bound, not yet passed). The deadline only produces a notice; nothing is stopped.
+budget:
+  max_parallel: 4
+  max_parallel_verify: 4
+  deadline_minutes: 120
+stages:
+  - id: find
+    per: dimensions
+    report: reports/find-${item}.json
+    prompt: |
+      You are a FINDER in todo batch ${batch}. Sub-plan: ${subplan}
+      Review ${target} at commit ${reviewed_sha} in the checkout ${workspace} for problems of ONE
+      dimension only: ${dimension}. Look at: ${scope}. This is read-only work: do not modify the
+      checkout and do not commit.
+      Work the plan item by item with todo_status, todo_begin and todo_done, attempt_id ${subplan}
+      (item find). If this prompt ends with a prompt_sha256 line, pass that value as prompt_sha256
+      to todo_begin.
+      Write your report as one JSON object to the path below:
+        {"findings": [{"id": "f1", "file": "<path relative to the checkout>", "line": 12,
+                       "claim": "<what is wrong>", "failure_scenario": "<how it fails>"}]}
+      At most ${max_findings_per_finder} findings, most important first; ids unique and plain
+      ([A-Za-z0-9._-]); line is optional. Report only what you can point at in the code. An empty
+      findings list is a valid answer. Other sessions will try to refute each finding.
+      Report: ${report}
+    items:
+      - id: find
+        title: "Find ${item} problems in ${target}"
+        predicates:
+          - predicate: report_json
+            args: {path: "${report}", require_keys: [findings]}
+          - predicate: findings_shape
+            args: {path: "${report}", max: $max_findings_per_finder}
+  - id: verify
+    per: findings
+    after: find
+    cap: $max_verify
+    distinct_from: find
+    report: reports/verify-${item}.json
+    prompt: |
+      You are a VERIFIER in todo batch ${batch}. Sub-plan: ${subplan}
+      Another session reported the finding below against ${target} at commit ${reviewed_sha}
+      (checkout ${workspace}); it is cited from ${find_report}. Try to REFUTE it: read the code and
+      run what you need (where the project's own rules say its tests run). Do not modify the
+      checkout and do not commit.
+      Finding: ${finding}
+      Work the plan with todo_status, todo_begin and todo_done, attempt_id ${subplan} (item verify).
+      If this prompt ends with a prompt_sha256 line, pass that value as prompt_sha256 to todo_begin.
+      Write your verdict as one JSON object to the path below:
+        {"finding_id": "${finding_id}", "verdict": "confirmed" | "refuted" | "unsure",
+         "evidence": "<what you ran or read, and what it showed>", "artifact_ref": "${reviewed_sha}"}
+      Report: ${report}
+    items:
+      - id: verify
+        title: "Verify finding ${item} against ${target}"
+        predicates:
+          - predicate: report_json
+            args: {path: "${report}", require_keys: [finding_id, verdict, evidence, artifact_ref]}
+          - predicate: verdict_enum
+            args: {path: "${report}", finding_id: "${item}", artifact_ref: $reviewed_sha}
+fan_in:
+  report: reports/find-verify-summary.json

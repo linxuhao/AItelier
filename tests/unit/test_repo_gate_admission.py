@@ -37,8 +37,8 @@ import pytest
 from aitelier import gate_admission
 from aitelier.gate_evidence import release_disposition, report_state
 from aitelier.tools.run_tests import impl as rt
-from tests.gate_fixture import (HOLDER, HarnessRig, install_entry_executor,
-                                red_report, write_gate)
+from tests.gate_fixture import (GATE_PY, HOLDER, HarnessRig, embed_env,
+                                install_entry_executor, red_report, write_gate)
 
 
 
@@ -423,41 +423,38 @@ def test_a_contended_run_that_went_red_stays_a_measured_red(tmp_path, monkeypatc
 
 RENDER_HOLD_SEC = 0.5   # how long the gate's request stays queued, once seen
 GATE_POST_DEADLINE_SEC = 60
+# A slow-POST arm: the directory exists this much longer than the hold before
+# the gate actually POSTs. On a witness that slept from the marker the request
+# would arrive after the lock was released and the contention would be zero.
+# Every `_contended_red_run` uses this delay by default, so the two contended-
+# red tests below run with it too, not only the named witness.
+SLOW_POST_DELAY_SEC = RENDER_HOLD_SEC + 0.75
 
 
-def _await_gate_request(home: Path, deadline: float = GATE_POST_DEADLINE_SEC) -> bool:
-    """Wait until the fixture gate has created its report directory.
-
-    `GATE_PY` makes that directory immediately before it POSTs its engine
-    request, so its appearance is the test's only view of "the request is
-    about to arrive". Dynamic on purpose: a fixed sleep would either race the
-    gate or hold the render lock for a wait the test cannot name.
-    """
-    end = time.monotonic() + deadline
-    while time.monotonic() < end:
-        if any(p.is_dir() and p.name.startswith("fixture-gate-")
-               for p in (home / "gate-reports").rglob("*")):
-            return True
-        time.sleep(0.02)
-    return False
-
-
-def _contended_red_run(tmp_path, monkeypatch):
+def _contended_red_run(tmp_path, monkeypatch, *, gate_program=None):
     """Run the REAL gate path over a repo whose gate QUEUES behind a render owner.
 
     A holder operation owns the harness's render lock; the gate's request is
     posted while the holder renders, so the harness queues it and answers with
     `render_owner_waited_for_owner_ids` = the holder's owner id once the test
     releases the lock. The gate then measures a red, so the report is a red.
-    Nothing here supplies a gate dict.
+    Nothing here supplies a gate dict. Every caller runs the SLOW-POST gate
+    unless it explicitly overrides `gate_program`: the delayed POST is the
+    DEFAULT shape of this rig, not a property of one witness test, so both
+    contended-red nodeids below exercise it too.
     """
+    if gate_program is None:
+        # The executor scrubs the child environment, so the knob must travel
+        # INSIDE the gate program the child runs, never on the pytest parent.
+        gate_program = embed_env(
+            GATE_PY, FIXTURE_GATE_POST_DELAY_SEC=str(SLOW_POST_DELAY_SEC))
     rig = HarnessRig(tmp_path / "harness", monkeypatch)
     monkeypatch.setenv("GODOT_BUILDER_URL", rig.base)
-    home = tmp_path / "home"
-    monkeypatch.setenv("AITELIER_HOME", str(home))
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
     rig.script_report = red_report()
     install_entry_executor(monkeypatch)
     repo = _repo(tmp_path)
+    (repo / "gate.py").write_text(gate_program, encoding="utf-8")
     out = tmp_path / "out"
     results: dict = {}
 
@@ -469,10 +466,16 @@ def _contended_red_run(tmp_path, monkeypatch):
     worker = threading.Thread(target=run)
     worker.start()
     try:
-        assert _await_gate_request(home), "the gate never posted its engine request"
-        # The request is on its way and the holder still owns the render, so it
-        # has to queue. Hold it there long enough that the wait is a number a
-        # reader can see, then let it through.
+        # Wait for the harness's OWN view of the request arriving and queuing
+        # behind the holder, not for the gate's pre-POST report directory.
+        # The deadline is a ceiling on the observation, never the verdict.
+        assert rig.await_queued_request(GATE_POST_DEADLINE_SEC), (
+            "the gate's request never reached the harness queue behind the holder")
+        # The request is now known to be queued with the holder still owning
+        # the render. Hold it there a further fixed window measured FROM THAT
+        # INSTANT -- not from a marker that may precede a slow POST -- so the
+        # wait the product measures is a property of the rig, not of the host's
+        # scheduler, then let it through.
         time.sleep(RENDER_HOLD_SEC)
     finally:
         rig.let_go()
@@ -524,6 +527,47 @@ def test_the_real_gate_path_repeats_the_contention_in_the_red_runs_summary(
     _, report, holder = _contended_red_run(tmp_path, monkeypatch)
     contention = report["render_contention"]
 
+    assert contention["state"] == "waited", contention
+    assert contention["owners"] == [holder]
+    assert "render_contention_absent" not in report
+    summary = report["summary"]
+    assert summary.startswith("Render contention:"), summary[:200]
+    assert holder in summary, summary[:300]
+    assert f"{contention['wait_sec']:.3f}s" in summary, summary[:300]
+
+
+def test_the_real_gate_path_with_a_slow_post_still_reports_the_queued_owner(
+        tmp_path, monkeypatch):
+    """Both contended-red surfaces, with the POST delayed past the hold window.
+
+    `FIXTURE_GATE_POST_DELAY_SEC` lives inside `GATE_PY` and `_contended_red_run`
+    delivers it with `embed_env` by default (the executor scrubs the child
+    environment), so this witness needs no special setup of its own. The report
+    directory exists `SLOW_POST_DELAY_SEC` before the POST, so a witness that
+    slept from that marker would release the holder before the request ever
+    queued: the wait would be zero and both surfaces would read `none`. The rig
+    now waits for the harness's own arrival observation, so the delay only
+    moves the marker -- the measured wait is still the product's.
+    """
+    result, report, holder = _contended_red_run(tmp_path, monkeypatch)
+
+    # Structured surface: the gate result the fold receives.
+    gate = report["repo_gate"]
+    admission = gate["admission"]
+    assert admission["state"] == gate_admission.ANSWERED
+    (request,) = admission["requests"]
+    assert request["outcome"] == "answered"
+    assert admission["queued_behind"] == [holder], admission
+    assert admission["render_owner_wait_sec"] > 0.3, admission
+    assert gate["measured"] == rt.REPO_GATE_MEASURED_FAIL
+    assert gate["render_contention"] == {
+        "owners": [holder],
+        "wait_sec": round(admission["render_owner_wait_sec"], 3),
+        "state": "waited"}, gate.get("render_contention")
+    assert report["passed"] is False and result["passed"] is False
+
+    # Reader surface: the same real path's red-run summary.
+    contention = report["render_contention"]
     assert contention["state"] == "waited", contention
     assert contention["owners"] == [holder]
     assert "render_contention_absent" not in report

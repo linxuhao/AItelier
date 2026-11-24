@@ -45,7 +45,8 @@ TESTS = Path(__file__).resolve().parents[1]
 SETTINGS = (
     "FIXTURE_GATE_CLIENT_TIMEOUT",   # tests/gate_fixture.py:37, default "60"
     "FIXTURE_GATE_NOISE",            # tests/gate_fixture.py:38, default "0"
-    "FIXTURE_GATE_OP",               # tests/gate_fixture.py:39, default: basename of the repo
+    "FIXTURE_GATE_POST_DELAY_SEC",   # tests/gate_fixture.py:39, default "0" (slow-POST arm)
+    "FIXTURE_GATE_OP",               # tests/gate_fixture.py:40, default: basename of the repo
     "RED_GATE_MODE",                 # test_repo_gate_red_beats_absence.py:36, no default
 )
 

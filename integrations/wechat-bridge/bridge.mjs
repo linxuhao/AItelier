@@ -33,6 +33,7 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { needsPreparation, preparePicture } from './prepare-image.mjs';
 
 // Loopback by default: the token is the only lock, so the socket must not be
 // reachable from another machine. Inside its container the bridge has to listen on
@@ -115,9 +116,11 @@ export const IMAGE_EXTENSIONS = Object.freeze(['jpg', 'jpeg', 'png', 'gif', 'web
 const VOICE_EXTENSIONS = ['silk', 'sil', 'slk', 'amr'];
 /** What the fork can send as a voice bar or an image bubble, nothing else (it transcodes
  *  nothing): a voice bar is SILK its encodeVoice made from 16 kHz mono 16-bit PCM of at most
- *  voiceMaxMs; an image bubble is a real JPEG of at most imageMaxBytes (the crate's small tier).
- *  Anything else goes as a file attachment. */
-export const MEDIA_SEND = Object.freeze({ voiceSampleRate: 16_000, voiceMaxMs: 60_000, imageMaxBytes: 64 * 1024 });
+ *  voiceMaxMs; an image bubble is a real JPEG of at most imageMaxBytes. That bound is the
+ *  crate's measured small-object profile (65520 bytes, not the old 64 KiB guess; see
+ *  prepare-image.mjs): a picture over it is decoded, downscaled and re-encoded before the
+ *  send rather than being written off as a file. Anything else goes as a file attachment. */
+export const MEDIA_SEND = Object.freeze({ voiceSampleRate: 16_000, voiceMaxMs: 60_000, imageMaxBytes: 65_520 });
 const MEDIA_KINDS = ['image', 'voice', 'file'];
 /** POST /login's bounds: at least minGapMs between two accepted requests, at most perHour
  *  in any hour and perDay in any 24 hours (counted in this process's memory: a restart starts
@@ -470,20 +473,27 @@ const splitName = name => {
   return dot > 0 ? [name.slice(0, dot), name.slice(dot + 1).toLowerCase()] : [name, ''];
 };
 /** How to send one file, in order until one goes, each step with what it goes out as. An image
- *  that is a bubble JPEG first as an image (under its own .jpg/.jpeg name, else `<stem>.jpg`); a
- *  voice whose bytes are voice-bar PCM (`voicePcm`) first as a voice bar (`pcm`: the bridge
- *  encodes it and names the SILK `<durationMs>.silk` only then); then, and for everything else
- *  at once, the same bytes as a file under their own name, with `.bin` added when that name
- *  would make the fork send it as an image or a voice bar. */
-export function sendPlan({ kind, name, bytes }, limits = MEDIA_SEND) {
+ *  that is a bubble JPEG - either as it arrived, or `prepared` from bytes that could not be a
+ *  bubble (prepare-image.mjs) - goes first as an image under its own .jpg/.jpeg name, else
+ *  `<stem>.jpg`; a voice whose bytes are voice-bar PCM (`voicePcm`) first as a voice bar
+ *  (`pcm`: the bridge encodes it and names the SILK `<durationMs>.silk` only then); then, and
+ *  for everything else at once, the ORIGINAL bytes as a file. A fallback that would otherwise
+ *  carry an image extension gets `.file` (not `.bin`): the name still says what the bytes are,
+ *  and the fork's carrier() reads the last extension, so it really sends a file. A voice
+ *  extension still gets `.bin`, which is what keeps its voice-bar-then-file fallback as it was. */
+export function sendPlan({ kind, name, bytes, prepared }, limits = MEDIA_SEND) {
   const clean = cleanName(name) || kind;
   const [stem, extension] = splitName(clean);
   // The extension as the fork's carrier() reads it (all after the last dot, the whole name when
   // it has none), so '.png', 'png' or 'silk' never reach its image or voice carrier as a file.
   const forkExtension = clean.slice(clean.lastIndexOf('.') + 1).toLowerCase();
-  const asFile = { as: 'file', name: IMAGE_EXTENSIONS.includes(forkExtension) || VOICE_EXTENSIONS.includes(forkExtension) ? `${clean}.bin` : clean };
-  if (kind === 'image' && isBubbleJpeg(bytes, limits))
-    return [{ as: 'image', name: extension === 'jpg' || extension === 'jpeg' ? clean : `${stem}.jpg` }, asFile];
+  const asFile = { as: 'file', name: IMAGE_EXTENSIONS.includes(forkExtension) ? `${clean}.file`
+    : VOICE_EXTENSIONS.includes(forkExtension) ? `${clean}.bin` : clean };
+  if (kind === 'image') {
+    const bubbleName = extension === 'jpg' || extension === 'jpeg' ? clean : `${stem}.jpg`;
+    if (prepared && isBubbleJpeg(prepared, limits)) return [{ as: 'image', name: bubbleName, bytes: prepared }, asFile];
+    if (isBubbleJpeg(bytes, limits)) return [{ as: 'image', name: bubbleName }, asFile];
+  }
   const pcm = kind === 'voice' ? voicePcm(bytes, limits) : undefined;
   return pcm ? [{ as: 'voice', pcm }, asFile] : [asFile];
 }
@@ -1334,7 +1344,9 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
     let failure;
     for (const [i, step] of plan.entries()) {
       try {
-        const box = step.as === 'voice' ? await voiceBox(step.pcm) : makeFileBox(bytes, step.name);
+        // A prepared image step carries its re-encoded bytes; its file fallback still carries
+        // the original bytes, under the original name (with a .file carrier suffix when needed).
+        const box = step.as === 'voice' ? await voiceBox(step.pcm) : makeFileBox(step.bytes ?? bytes, step.name);
         const sent = await say(box);
         return [200, { ref: sent?.id ?? null, sent_as: step.as }];
       } catch (error) {
@@ -1442,8 +1454,13 @@ export function createBridge({ makeBot, types, token, ringSize = RING_SIZE, maxW
         const query = url.searchParams;
         const to = query.get('to') ?? '', room = query.get('room') ?? '', kind = query.get('kind') ?? '';
         const mime = query.get('mime') ?? '', name = query.get('name') ?? '';
+        // A picture bigger than the crate's small tier (or a PNG, or a JPEG too large in
+        // dimensions for the thumbnail the fork derives from it) is prepared here, once, from
+        // the real bytes. A picture that already fits the carrier is left alone; one that
+        // cannot be decoded stays a file under a truthful name.
+        const prepared = kind === 'image' && needsPreparation(bytes, mediaSend) ? preparePicture(bytes, mediaSend) : undefined;
         const plan = MEDIA_KINDS.includes(kind) && name.length <= 255 && mime.length <= 200
-          ? sendPlan({ kind, name, bytes }, mediaSend) : undefined;
+          ? sendPlan({ kind, name, bytes, prepared }, mediaSend) : undefined;
         if (!plan || !bytes.length || Boolean(to) === Boolean(room)) return sendReply(sendKind, response, 400, { error: 'bad_request' });
         if (typeof makeFileBox !== 'function') return sendReply(sendKind, response, 501, { error: 'not_supported' });
         const [status, result] = await sendFile({ to, room }, bytes, plan);

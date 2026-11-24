@@ -346,16 +346,24 @@ Hz 16-bit named `<durationMs>ms.wav`, an image named `<messageId>.jpg|.png` by i
 - `POST /send-file?to=<wxid>|room=<room>&kind=image|voice|file&mime=&name=` with the
   file's bytes as the body (at most 25 MiB, `413 body_too_large`) → `{ref, sent_as}`. The
   fork transcodes nothing, so only what it can carry is tried as a bubble: an image that is
-  a real JPEG (`FF D8 FF`) of at most 64 KiB (the crate's small tier) goes first as an image
-  (its own `.jpg`/`.jpeg` name, else `<stem>.jpg`); a voice that is a PCM WAV, mono, 16 kHz,
-  16-bit and at most 60 s goes first as a voice bar - its PCM through `encodeVoice`, the
-  SILK named `<durationMs>.silk`. When the encoder is missing or refuses, or the puppet
-  refuses the bubble, the same bytes go again as a file (`sent_as: "file"`); everything
-  else (PNG, GIF, WebP, a larger JPEG, a WAV of another shape or longer, another format)
-  goes as a file at once. A file goes under its own name, `.bin` added when that name would
-  read as an image or a voice. A send the fork reports as `outcome is uncertain` may have
-  gone, so it is `502 send_failed` and nothing is sent again. Group sends share the group
-  queue and its backstop.
+  a real JPEG (`FF D8 FF`) of at most 65520 bytes and at most 320 px on each side goes first
+  as an image (its own `.jpg`/`.jpeg` name, else `<stem>.jpg`). Those are the crate's own
+  bounds: `wechat-protocol` 2.2.0's `jpeg_dimensions` refuses a JPEG variant over 65520 bytes
+  ("JPEG variant outside small-object profile"), and the fork passes the one original as all
+  three variants, so `PreparedImageUpload::validate` also bounds it by the thumbnail's 320 px.
+  A picture outside them (a generated PNG of hundreds of KB, a larger or wider JPEG) is
+  decoded, downscaled and re-encoded as a fitting JPEG first (`prepare-image.mjs`; PNG via
+  node:zlib, JPEG via the vendored pure-JS jpeg-js 0.4.4) and then sent as an image; one that
+  cannot be decoded goes as a file. A voice that is a PCM WAV, mono, 16 kHz, 16-bit and at
+  most 60 s goes first as a voice bar - its PCM through `encodeVoice`, the SILK named
+  `<durationMs>.silk`. When the encoder is missing or refuses, or the puppet refuses the
+  bubble, the ORIGINAL bytes go again as a file (`sent_as: "file"`); everything else (GIF,
+  WebP, a WAV of another shape or longer, another format) goes as a file at once. A file
+  goes under its own name, `.file` added when that name would read as an image (so WeChat
+  shows a real PNG rather than `<name>.bin`), `.bin` when it would read as a voice - the
+  voice-bar fallback is unchanged. A send the fork reports as `outcome is uncertain` may
+  have gone, so it is `502 send_failed` and nothing is sent again. Group sends share the
+  group queue and its backstop.
 
 Message texts are never logged.
 

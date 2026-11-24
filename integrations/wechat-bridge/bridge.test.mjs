@@ -11,6 +11,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
+import jpegCodec from './vendor/jpeg-js/index.js';
+import { rgbaPng } from './test-fixtures/rgba-png.mjs';
+import { preparePicture, needsPreparation, jpegEdges, SMALL_OBJECT_BYTES, SMALL_OBJECT_EDGE } from './prepare-image.mjs';
 import { createBridge, splitText, bindHost, SEND_CHUNK, HOST, CONTAINER_HOST, LOGIN_LIMITS, MEDIA_LIMITS, MEDIA_FETCH, MEDIA_SEND, mediaOf,
   sendPlan, voicePcm, isBubbleJpeg, inboundVoiceMs, wavByteCap, isGoneError, RESUME_LIMITS, accountRecord, ACCOUNT_FILE,
   RING_SIZE, GROUP_RING_SIZE, STRANGER_RING_SIZE, MEDIA_STORE_BYTES, MEDIA_STORE_DIR, groupMediaSenderProbe, isBase64Content,
@@ -933,6 +937,13 @@ const wav = (rate, dataBytes, { channels = 1, bits = 16 } = {}) => {
 /** A JPEG's first bytes (FF D8 FF E0) padded to `size` bytes. */
 const jpeg = size => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(size - 4, 7)]);
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+/** A real generated-picture-shaped PNG (hundreds of KB of incompressible RGB + opaque alpha). */
+const generatedPng = (width = 512, height = 384) => rgbaPng(
+  Buffer.concat([randomBytes(width * height * 3), Buffer.alloc(width * height, 255)]), width, height);
+/** A real JPEG larger than the old 64 KiB bound (noise at 320 x 320). */
+const noisyJpeg = (width = 320, height = 320, quality = 80) => Buffer.from(jpegCodec.encode({
+  data: Buffer.concat([randomBytes(width * height * 3), Buffer.alloc(width * height, 255)]), width, height,
+}, quality).data);
 /** A 1:1 (or `roomId`) media message: its payload as the fork carries it, its text (`text`, a
  *  caption in a group), and the FileBox its fetch hands over (`bytes` in `chunk`-sized parts;
  *  `gate` holds the stream until resolved; `fail` makes the first `fails` fetches throw it;
@@ -2172,15 +2183,19 @@ test('media restart: the byte cap can drop the copy of an event still in its rin
 
 test('send-file: the plan follows what the fork can send: a bubble JPEG as an image, voice-bar PCM as a voice, the rest as a file', () => {
   const small = jpeg(MEDIA_SEND.imageMaxBytes), pcm16k = wav(32000, 3200);
-  assert.deepEqual(MEDIA_SEND, { voiceSampleRate: 16000, voiceMaxMs: 60000, imageMaxBytes: 65536 });
-  // An image bubble only for a real JPEG of at most 64 KiB, named .jpg when its name is not;
-  // the file it falls back to never carries an image extension.
+  assert.deepEqual(MEDIA_SEND, { voiceSampleRate: 16000, voiceMaxMs: 60000, imageMaxBytes: 65520 });
+  // An image bubble only for a real JPEG of at most the crate's 65520-byte small tier, named
+  // .jpg when its name is not; the file it falls back to never carries an image carrier.
   assert.deepEqual(sendPlan({ kind: 'image', name: 'photo.jpeg', bytes: small }),
-    [{ as: 'image', name: 'photo.jpeg' }, { as: 'file', name: 'photo.jpeg.bin' }]);
+    [{ as: 'image', name: 'photo.jpeg' }, { as: 'file', name: 'photo.jpeg.file' }]);
   assert.deepEqual(sendPlan({ kind: 'image', name: 'image-ab12.png', bytes: small }),
-    [{ as: 'image', name: 'image-ab12.jpg' }, { as: 'file', name: 'image-ab12.png.bin' }]);
-  assert.deepEqual(sendPlan({ kind: 'image', name: 'image-ab12.png', bytes: PNG_BYTES }), [{ as: 'file', name: 'image-ab12.png.bin' }]);
-  assert.deepEqual(sendPlan({ kind: 'image', name: 'big.jpg', bytes: jpeg(MEDIA_SEND.imageMaxBytes + 1) }), [{ as: 'file', name: 'big.jpg.bin' }]);
+    [{ as: 'image', name: 'image-ab12.jpg' }, { as: 'file', name: 'image-ab12.png.file' }]);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'image-ab12.png', bytes: PNG_BYTES }), [{ as: 'file', name: 'image-ab12.png.file' }]);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'big.jpg', bytes: jpeg(MEDIA_SEND.imageMaxBytes + 1) }), [{ as: 'file', name: 'big.jpg.file' }]);
+  // A prepared step carries its own JPEG bytes; its file fallback keeps the original name/bytes.
+  const prepared = jpeg(400);
+  assert.deepEqual(sendPlan({ kind: 'image', name: 'chart.png', bytes: PNG_BYTES, prepared }),
+    [{ as: 'image', name: 'chart.jpg', bytes: prepared }, { as: 'file', name: 'chart.png.file' }]);
   assert.deepEqual(sendPlan({ kind: 'image', name: 'chart', bytes: Buffer.from('GIF89a') }), [{ as: 'file', name: 'chart' }]);
   assert.ok(isBubbleJpeg(small) && !isBubbleJpeg(PNG_BYTES) && !isBubbleJpeg(Buffer.from([0xff, 0xd8])));
   // A voice bar for 16 kHz mono 16-bit PCM WAV of at most 60 s (the bridge encodes it at send
@@ -2192,13 +2207,16 @@ test('send-file: the plan follows what the fork can send: a bubble JPEG as an im
     assert.deepEqual(sendPlan({ kind: 'voice', name: 'v.wav', bytes }), [{ as: 'file', name: 'v.wav' }]);
   assert.ok(voicePcm(wav(32000, 32000 * 60)), 'exactly 60 s is a voice bar');
   assert.deepEqual(sendPlan({ kind: 'file', name: '../a/报告.pdf', bytes: Buffer.from('%PDF') }), [{ as: 'file', name: '.._a_报告.pdf' }]);
-  assert.deepEqual(sendPlan({ kind: 'file', name: 'chart.png', bytes: small }), [{ as: 'file', name: 'chart.png.bin' }]);
+  assert.deepEqual(sendPlan({ kind: 'file', name: 'chart.png', bytes: small }), [{ as: 'file', name: 'chart.png.file' }]);
   for (const name of ['x.silk', 'x.SIL', 'x.slk', 'x.amr'])
     assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.bin' }]);
   // The fork's carrier() takes all after the last dot (the whole name when there is none) as the
-  // extension: a name that is only an extension, with or without its dot, gets .bin too.
-  assert.deepEqual(sendPlan({ kind: 'image', name: '.png', bytes: PNG_BYTES }), [{ as: 'file', name: '.png.bin' }]);
-  for (const name of ['png', '.png', 'JPG', 'silk', '.silk', 'amr', '.amr'])
+  // extension: a name that is only an extension gets a carrier suffix too. A voice extension
+  // keeps its old .bin fallback; an image extension gets .file so WeChat shows a real file name.
+  assert.deepEqual(sendPlan({ kind: 'image', name: '.png', bytes: PNG_BYTES }), [{ as: 'file', name: '.png.file' }]);
+  for (const name of ['png', '.png', 'JPG'])
+    assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.file' }], name);
+  for (const name of ['silk', '.silk', 'amr', '.amr'])
     assert.deepEqual(sendPlan({ kind: 'file', name, bytes: Buffer.from('x') }), [{ as: 'file', name: name + '.bin' }], name);
   assert.deepEqual(sendPlan({ kind: 'voice', name: '.amr', bytes: Buffer.from('#!AMR') }), [{ as: 'file', name: '.amr.bin' }]);
   assert.deepEqual(sendPlan({ kind: 'file', name: 'report', bytes: Buffer.from('x') }), [{ as: 'file', name: 'report' }]);
@@ -2240,7 +2258,77 @@ test('send-file: an image the fork cannot carry as a bubble goes as a file; a re
     const wide = jpeg(4000);
     assert.deepEqual(await postFile(s, { ...query, mime: 'image/jpeg', name: 'wide.jpg' }, wide), [200, { ref: 'file-out-3', sent_as: 'file' }]);
     assert.deepEqual(bot.files.map(f => [f.name, f.bytes.length]),
-      [['chart.png.bin', PNG_BYTES.length], ['big.jpg.bin', big.length], ['wide.jpg.bin', wide.length]]);
+      [['chart.png.file', PNG_BYTES.length], ['big.jpg.file', big.length], ['wide.jpg.file', wide.length]]);
+  } finally { await s.bridge.close(); }
+});
+
+// iss-cee4c9f19e76400f: the crate's small-object tier is 65520 bytes, and the fork sends the
+// one original as the standard AND thumbnail variant, so the same JPEG must also fit 320 px.
+// On 9e48e9030f every one of these pictures went out as `<name>.bin` and WeChat showed no image.
+test('prepare-image: the measured small-object ceiling, and real pictures prepared to fit it', () => {
+  assert.equal(SMALL_OBJECT_BYTES, 65520);
+  assert.equal(SMALL_OBJECT_EDGE, 320);
+  const picture = generatedPng();
+  assert.ok(picture.length > 500_000, 'an owner-shaped generated PNG');
+  assert.ok(needsPreparation(picture, MEDIA_SEND));
+  const prepared = preparePicture(picture, MEDIA_SEND);
+  assert.ok(prepared && isBubbleJpeg(prepared, MEDIA_SEND));
+  assert.ok(prepared.length <= SMALL_OBJECT_BYTES && prepared.length < picture.length);
+  assert.deepEqual(jpegEdges(prepared), { width: 320, height: 240 });
+  assert.equal(needsPreparation(prepared, MEDIA_SEND), false, 'a prepared bubble is left alone');
+  const large = noisyJpeg();
+  assert.ok(large.length > MEDIA_SEND.imageMaxBytes, 'a real JPEG outside the old bound');
+  const smaller = preparePicture(large, MEDIA_SEND);
+  assert.ok(smaller && isBubbleJpeg(smaller, MEDIA_SEND) && smaller.length <= SMALL_OBJECT_BYTES);
+  assert.equal(needsPreparation(smaller, MEDIA_SEND), false);
+  assert.equal(preparePicture(PNG_BYTES, MEDIA_SEND), undefined, 'undecodable bytes are never called a bubble');
+});
+
+test('send-file: a generated PNG to a 1:1 peer goes as an image, not a .bin file', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    const picture = generatedPng();
+    assert.deepEqual(await postFile(s, { to: 'wxid_owner', kind: 'image', mime: 'image/png', name: 'image-ab12.png' }, picture),
+      [200, { ref: 'file-out-1', sent_as: 'image' }]);
+    assert.equal(bot.files.length, 1, 'nothing was sent as a file as well');
+    const sent = bot.files[0];
+    assert.equal(sent.name, 'image-ab12.jpg');
+    assert.ok(isBubbleJpeg(sent.bytes, MEDIA_SEND) && sent.bytes.length <= SMALL_OBJECT_BYTES);
+    assert.deepEqual(jpegEdges(sent.bytes), { width: 320, height: 240 });
+    assert.ok(!sent.bytes.equals(picture), 'the bytes the puppet got are the prepared JPEG');
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: a generated picture goes as an image into a bound WeChat group', async () => {
+  const s = await mediaBridge({ sendLimits: { sendGapMs: 0, backstopPerHour: 10 },
+    prepare: bot => { bot.Room = { load: id => ({ say: async box => ({ id: await bot.puppet.messageSendFile(id, box) }) }) }; } });
+  try {
+    const bot = await s.login();
+    await withRooms(s);
+    const picture = generatedPng();
+    const query = { room: ROOM, kind: 'image', mime: 'image/png', name: 'image-ab12.png' };
+    assert.deepEqual(await postFile(s, query, picture), [200, { ref: 'file-out-1', sent_as: 'image' }]);
+    assert.deepEqual(bot.files.map(f => [f.to, f.name]), [[ROOM, 'image-ab12.jpg']]);
+    const large = noisyJpeg();
+    assert.ok(large.length > 65536);
+    assert.deepEqual(await postFile(s, { ...query, mime: 'image/jpeg', name: 'big.jpg' }, large),
+      [200, { ref: 'file-out-2', sent_as: 'image' }]);
+    assert.equal(bot.files[1].name, 'big.jpg');
+    assert.ok(isBubbleJpeg(bot.files[1].bytes, MEDIA_SEND) && bot.files[1].bytes.length <= SMALL_OBJECT_BYTES);
+  } finally { await s.bridge.close(); }
+});
+
+test('send-file: a prepared bubble the puppet refuses falls back to the ORIGINAL bytes under a truthful name', async () => {
+  const s = await mediaBridge();
+  try {
+    const bot = await s.login();
+    bot.refuse = name => name.endsWith('.jpg');
+    bot.refusal = 'prepare an image send: JPEG variant outside small-object profile';
+    const picture = generatedPng();
+    assert.deepEqual(await postFile(s, { to: 'wxid_owner', kind: 'image', mime: 'image/png', name: 'image-ab12.png' }, picture),
+      [200, { ref: 'file-out-1', sent_as: 'file' }]);
+    assert.deepEqual([bot.files[0].name, bot.files[0].bytes.equals(picture)], ['image-ab12.png.file', true]);
   } finally { await s.bridge.close(); }
 });
 

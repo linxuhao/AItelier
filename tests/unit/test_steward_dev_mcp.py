@@ -27,11 +27,12 @@ from core.state_graph import StateGraphError
 from tests.unit import test_steward_connections as tsc
 from tests.unit.test_steward_capability_proposals import approve as approve_route
 from tests.unit.test_steward_capability_proposals import propose as propose_route
-from tests.unit.test_steward_capability_routes import key, put
+from tests.unit.test_steward_capability_routes import basics, key, put, table
 from tests.unit.test_steward_connection_proposals import approve as approve_change
 from tests.unit.test_steward_connection_proposals import owner_source, version
 from tests.unit.test_steward_connections import (FakeUpstream, add, body_of, discover, listed, rpc,  # noqa: F401
                                                  server, shown, world)
+from tests.unit.test_steward_oauth_confirm import ask, dashboard
 
 DEV_URL = "http://dev_mcp:7676/mcp"
 DEV_ADDRESS = tsc.ADDRESSES["dev_mcp"]
@@ -335,6 +336,20 @@ def test_a_connection_moved_onto_dev_mcp_keeps_no_loosened_flag(world):
     assert (rows(world, "box")["bash"]["outward"], rows(world, "box")["subagent_start"]["allowed"]) == (1, 0)
 
 
+def test_a_pin_on_another_job_kept_by_a_move_onto_dev_mcp_is_shown_not_allowed(world):
+    # A private connection pinned on `search`, then moved onto dev_mcp (the conn_uid is
+    # kept): the gateway refuses the call, so the panel and basics must not show it usable.
+    add(world, conn_id="box", visibility="private")
+    discover(world, "box", tools=DEV_TOOLS)
+    allow(world, ["search"], conn_id="box")
+    put(world, "search", [{"kind": "conn", "conn_id": "box", "raw_name": "search"}])
+    assert table(world)["search"]["status"] == {"dot": "green", "reasons": ["ok"]}
+    add(world, conn_id="box", url=DEV_URL, visibility="private", label="Box")
+    assert table(world)["search"]["status"] == {"dot": "red", "reasons": ["tool_not_allowed"]}
+    row = next(r for r in basics(world)["rows"] if r["id"] == "search")
+    assert row["route"][0]["available"] is False and row["route"][0]["pinned_name"] is None
+
+
 def test_only_a_private_dev_mcps_pinnable_tools_are_ever_served(world):
     ready_dev(world)
     assert sorted(t["raw_name"] for t in listed(world)["connections"][0]["tools"]) == [
@@ -398,6 +413,22 @@ def test_a_write_tool_never_runs_without_a_confirmation(world, server, upstream)
     assert code_of(call(server, world, "dev__bash", {"path": "/", "cmd": "df -h"})) == "confirmation_required"
     assert code_of(call(server, world, "dev__apply_patch", {"root": "/", "patch": "x"})) == "confirmation_required"
     assert "tools/call" not in upstream.methods
+
+
+def test_no_confirmation_is_asked_for_a_dev_mcp_call_the_code_route_does_not_pin(world):
+    # Never ask the owner to confirm a call the gateway will refuse (the confirmation
+    # mirrors the gateway's dev-mcp condition, as it mirrors its argument checks).
+    ready_dev(world)
+    owner_turn(world)
+    v = pin(world, "list_dir")["setting"]["version"]
+    asker = dashboard(world, "check the disk", "dev-o-1")["message_id"]
+    for name in ("mcp__sw__dev__bash", "mcp__sw__dev__apply_patch"):
+        with pytest.raises(StateGraphError, match="tool_not_allowed"):
+            ask(world, asker, {"path": "/", "cmd": "df -h"}, name=name)
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_steward_confirmations").fetchone()[0] == 0
+    pin(world, "list_dir", "bash", expect=v)
+    assert ask(world, asker, {"path": "/", "cmd": "df -h"}, name="mcp__sw__dev__bash")["code"]
 
 
 def test_a_group_turn_never_reaches_it(world, server, upstream):

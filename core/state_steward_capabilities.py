@@ -306,8 +306,9 @@ class _Facts:
         self.tools = {(r["conn_id"], r["raw_name"]): r for r in rows}
         self.lost = sc._collisions(rows)
 
-    def code(self, entry) -> str:
-        """One entry's reason code (design "八"); `ok` and `connection_error` are usable."""
+    def code(self, entry, cap_id) -> str:
+        """One entry's reason code (design "八") on the job `cap_id`; `ok` and
+        `connection_error` are usable."""
         if entry["kind"] in ("native", "host"):
             return "see_driver_status"
         if entry["kind"] == "missing":
@@ -316,6 +317,11 @@ class _Facts:
         tool = self.tools.get((entry["conn_id"], entry["raw_name"]))
         if row is None or row["conn_uid"] != entry["conn_uid"] or tool is None:
             return "tool_gone"
+        if self.sc.is_dev_mcp(row) and (cap_id != DEV_MCP_CAPABILITY or entry["raw_name"] not in DEV_MCP_PINNABLE
+                                        or row["visibility"] != "private"):
+            # A pin no command writes but a connection moved onto dev_mcp keeps (24.4c): the
+            # gateway refuses it, so it is never shown usable.
+            return "tool_not_allowed"
         if not tool["allowed"]:
             return "tool_not_allowed"
         if tool["allowed_sha256"] != tool["schema_sha256"]:
@@ -367,7 +373,7 @@ def for_steward(conn):
             if e["kind"] == "host":
                 item["tool"] = e["tool"]
             if e["kind"] == "conn":
-                code = facts.code(e)
+                code = facts.code(e, cap["id"])
                 item["visibility"] = facts.visibility(e)
                 usable = code in ("ok", "connection_error")
                 tool = facts.tools.get((e["conn_id"], e["raw_name"]))
@@ -473,7 +479,7 @@ class StewardCapabilities:
             for cap in CAPABILITIES:
                 row = stored.get(cap["id"])
                 entries = json.loads(row["route_json"]) if row else []
-                codes = [facts.code(e) for e in entries]
+                codes = [facts.code(e, cap["id"]) for e in entries]
                 route = [{**e, "reason": code, **({"visibility": facts.visibility(e)} if e["kind"] == "conn" else {})}
                          for e, code in zip(entries, codes)]
                 out[cap["id"]] = {

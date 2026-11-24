@@ -25,6 +25,7 @@ import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { measuredEntryForTest, withoutCallerMode } from './dsh-entry.mjs';
 import { MemoryStore } from '../dsh-director/lib/memory/store.mjs';
+import { stewardPromptInLanguage } from '../dsh-director/lib/owner-text.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -421,7 +422,9 @@ test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry th
       AITELIER_DRIVER_ID: 'drv-grp', AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_DSH_SESSION: 'grp-root',
       AITELIER_DSH_PROVIDER: 'fixture', AITELIER_DSH_MODEL: 'fixture-model', AITELIER_URL: `http://127.0.0.1:${server.address().port}`,
       AITELIER_DSH_STATE_DIR: directory, AITELIER_SECRETS_DIR: join(directory, 'no-secrets'),
-      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory') } });
+      AITELIER_DSH_ROLE: 'steward', AITELIER_DSH_MEMORY_USER: 'owner', AITELIER_DSH_MEMORY_ROOT: join(directory, 'memory'),
+      // An 'en' owner (the gcf test below is the 'zh' one): named here, never read from a .env.
+      AITELIER_OWNER_LANGUAGE: 'en' } });
     proc.stdout.on('data', chunk => output += chunk);
     proc.stderr.on('data', chunk => output += chunk);
     const until = async (what, met, ms = 90000) => {
@@ -468,6 +471,16 @@ test('real pinned DSH, the AItelier adapter: a group turn\'s tool reads carry th
     // The owner turn's requests carry no byte of the group turn.
     const ownerTurn = seen.model.filter(m => m.session === 'grp-root' && m.body.includes('m-owner-2'));
     assert.ok(ownerTurn.length && ownerTurn.every(m => !m.body.includes('GROUP_Q_ADAPTER') && !m.body.includes('GROUP_ADAPTER_ANSWER')));
+    // Overfit 2026-11-24 items 12+14 (integration review, should): index.mjs passes the owner's
+    // language into the steward's prompt. This host has every feature, so an 'en' owner's prompt is
+    // steward.md with its passages in English, in every root request, group turns included.
+    const english = stewardPromptInLanguage(await readFile(join(here, '../dsh-director/steward.md'), 'utf8'), 'en');
+    assert.match(english, /`approve proposal <id>` to approve/);
+    const systems = seen.model.filter(m => m.session === 'grp-root' && m.purpose !== 'compaction').map(m => JSON.parse(m.body)
+      .filter(message => message.role === 'system').map(message => typeof message.content === 'string' ? message.content
+        : message.content.map(block => block.text ?? '').join('')).join('\n'));
+    assert.ok(systems.length >= 2 && systems.every(system => system.includes(english.trim())),
+      'the adapter\'s steward prompt is the English one: ' + JSON.stringify(systems.map(system => system.includes(english.trim()))));
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

@@ -108,9 +108,27 @@ test('composed, every feature set: no cut fails on a swapped passage and none le
     const features = new Set(STEWARD_PROMPT_FEATURES.filter((_, i) => mask & (1 << i)));
     const zh = stewardPromptFor(md, { features, language: 'zh' }), en = stewardPromptFor(md, { features, language: 'en' });
     assert.equal(zh, stewardPrompt(md, features), [...features].join());
+    assert.equal(en, stewardPromptInLanguage(stewardPrompt(md, features), 'en'), [...features].join());
     assert.ok(!ZH_PASSAGE.test(en), [...features].join());
     // Each passage swapped exactly where its section was kept.
     for (const [from, to] of EN_PASSAGES) assert.equal(en.split(to).length - 1, zh.split(from).length - 1, `${[...features].join()}: ${to}`);
   }
   for (const [, to] of EN_PASSAGES) assert.ok(!md.includes(to), to);
+});
+
+// Integration review (nit): the order. On steward.md either order gives the same text, so the order
+// is pinned on a text where it shows: a passage split by a section the host lacks is whole, and
+// swapped, only once the cut has run.
+test('composed: the cuts run first and the language swaps the text they leave', () => {
+  const cut = STEWARD_CUTS.find(c => !c.through && !c.else && c.needs.length === 1 && c.needs[0] === 'channels');
+  const [zhPassage, enPassage] = EN_PASSAGES.find(([from]) => from.startsWith('only '));
+  const half = zhPassage.length >> 1;
+  const text = zhPassage.slice(0, half) + cut.from + zhPassage.slice(half);
+  const features = new Set(STEWARD_PROMPT_FEATURES.filter(name => name !== 'channels'));
+  assert.equal(stewardPromptFor(text, { features, language: 'zh' }), zhPassage);
+  assert.equal(stewardPromptFor(text, { features, language: 'en' }), enPassage);
+  assert.equal(stewardPromptFor(text, { features: ALL, language: 'en' }), text, 'kept whole, the split passage is no passage');
+  // steward.md's own cuts hold no passage, in either language, so a cut never misses its text there.
+  for (const { from, through } of STEWARD_CUTS) for (const pair of EN_PASSAGES) for (const part of pair)
+    assert.ok(!from.includes(part) && !(through ?? '').includes(part), part);
 });

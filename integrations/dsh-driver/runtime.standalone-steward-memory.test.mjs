@@ -129,9 +129,14 @@ test('real pinned DSH, two boots: a standalone steward records its owner\'s turn
     await writeFile(join(sayDir, name + '.tmp'), text);
     await rename(join(sayDir, name + '.tmp'), join(sayDir, name + '.say'));
   };
-  // No ownerLanguage in this host's config: the plugin's English.
-  const stewardSkill = stewardPromptFor(await readFile(join(here, '../dsh-director/steward.md'), 'utf8'), { language: undefined,
-    features: stewardPromptFeatures(localHost({ root: '/tmp/x', provider: 'p', model: 'm' }).capabilities, { memory: { userId: 'owner' } }) });
+  // No ownerLanguage in this host's config (the plugin's default, English). Every language passage
+  // sits in a section this host lacks, so its prompt reads the same in either language
+  // (dsh-director/test/steward-prompt.test.mjs, the local host); the language shows only on a
+  // host with those sections (runtime.group.test.mjs, 'en' and 'zh').
+  const stewardMd = await readFile(join(here, '../dsh-director/steward.md'), 'utf8');
+  const stewardFeatures = stewardPromptFeatures(localHost({ root: '/tmp/x', provider: 'p', model: 'm' }).capabilities, { memory: { userId: 'owner' } });
+  const stewardSkill = stewardPromptFor(stewardMd, { language: undefined, features: stewardFeatures });
+  assert.equal(stewardSkill, stewardPromptFor(stewardMd, { language: 'zh', features: stewardFeatures }));
   const rootRequests = () => requests.filter(r => r.session === ROOT && r.purpose !== 'compaction' && r.tools.length);
   try {
     await mkdir(join(root, 'inbox'), { recursive: true });

@@ -120,7 +120,10 @@ def container_user_note(repo):
     """docker-compose.yml interpolates `user: ${AITELIER_UID:-1000}:${AITELIER_GID:-1000}`
     only when it creates a container, so a backend created without these values
     keeps running as 1000:1000 and cannot write this user's ~/.AItelier."""
-    user = setting(repo, 'AITELIER_UID', '1000') + ':' + setting(repo, 'AITELIER_GID', '1000')
+    # Compose's ${VAR:-1000} treats an empty value exactly like an absent one.
+    uid = setting(repo, 'AITELIER_UID', '1000') or '1000'
+    gid = setting(repo, 'AITELIER_GID', '1000') or '1000'
+    user = uid + ':' + gid
     if user == '1000:1000':
         return None
     return (f'Containers run as {user} (AITELIER_UID:AITELIER_GID), not the compose default 1000:1000. '

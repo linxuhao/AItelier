@@ -161,6 +161,9 @@ def test_a_container_user_other_than_the_compose_default_asks_for_a_backend_recr
     assert installer.container_user_note(repo) is None
     (repo / '.env').write_text('AITELIER_UID=1000\nAITELIER_GID=1000\n')
     assert installer.container_user_note(repo) is None
+    # An empty value is compose's ${VAR:-1000}: still the default user, no note.
+    (repo / '.env').write_text('AITELIER_UID=\nAITELIER_GID=\n')
+    assert installer.container_user_note(repo) is None
     (repo / '.env').write_text('AITELIER_DRIVER_IDENTITY=on\nAITELIER_UID=4242\nAITELIER_GID=1000\n')
     note = installer.container_user_note(repo)
     assert '4242:1000' in note and 'recreate' in note and 'identity' not in note.lower()

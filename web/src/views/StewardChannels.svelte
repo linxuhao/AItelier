@@ -196,7 +196,8 @@
               onclick={() => void newQr(channel)}>{t('steward.chanNewQr')}</button>
           {/if}
         </div>
-        {#if channel === 'wechat'}<StewardGroups {channel} bound={r.bound} />{/if}
+        <!-- Step 23: WeChat groups, and Slack private channels (7.7.19), each channel's own. -->
+        <StewardGroups {channel} bound={r.bound} />
       </article>
     {/each}
     <label class="default">{t('steward.chanDefault')}

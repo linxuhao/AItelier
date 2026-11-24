@@ -192,4 +192,27 @@ describe('StewardGroups', () => {
       expect(box.checked).toBe(false);
     });
   });
+
+  // Step 23, Slack (design-steward 7.7.19): a private channel is a group like a WeChat one, without
+  // the media switch (the backend lists it without media_keep), and its code is posted as a mention.
+  it('Slack: a bound private channel shows no media switch, and its code help says private channel, invite and mention', async () => {
+    const slackGroup: OwnerGroup = {...group(), channel: 'slack', group_ref: 'C0PRIVATE', mention_prefix: '<@U0BOT>'};
+    api.listOwnerGroups.mockResolvedValue({groups: [slackGroup], groups_per_channel: 3});
+    api.createGroupCode.mockResolvedValue({code: 'G-ABCD-EFGH', expires_at: 'x'});
+    const view = render(StewardGroups, {channel: 'slack', bound: true});
+    await waitFor(() => expect(view.container.querySelector('[data-group="C0PRIVATE"]')).not.toBeNull());
+    expect(view.container.querySelector('[data-media-keep-box]')).toBeNull();
+    const input = view.container.querySelector('[data-group-label]') as HTMLInputElement;
+    await fireEvent.input(input, {target: {value: '家庭频道'}});
+    await fireEvent.click(view.container.querySelector('[data-group-add]') as HTMLElement);
+    await waitFor(() => expect(api.createGroupCode).toHaveBeenCalledWith('slack', '家庭频道'));
+    const help = await waitFor(() => {
+      const text = view.container.querySelector('[data-group-code] p')?.textContent ?? '';
+      expect(text).not.toBe('');
+      return text;
+    });
+    expect(help).toContain('private channel');
+    expect(help).toContain('/invite @AItelier Steward');
+    expect(help).toContain('Slack Connect');
+  });
 });

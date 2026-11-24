@@ -488,7 +488,10 @@ export function groupReplies({ turns, reply, sendGroup, warn, mirror }) {
       return reply({ questionId: questions.at(-1), alsoAnswers: questions.slice(0, -1), body, turn: String(event.data?.turn ?? turn.turn) })
         .then(sent => {
           if (sent?.owner_notice?.message_id && mirror) void mirror(sent.owner_notice.message_id, sent.owner_notice.body);
-          return sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text) : warn('group reply refused: ' + String(sent?.refused));
+          // The question's own channel ref (step 23 Slack, D8): a channel that threads answers under it.
+          return sent?.text ? sendGroup(sent.channel, sent.group_ref, sent.text,
+            ...(typeof sent.reply_to_ref === 'string' && sent.reply_to_ref ? [{ replyToRef: sent.reply_to_ref }] : []))
+            : warn('group reply refused: ' + String(sent?.refused));
         })
         .catch(error => warn('group reply: ' + short(error)));
     }

@@ -1,8 +1,10 @@
 # dsh-channel-slack
 
-The owner's Slack direct messages as an owner channel: a DSH plugin that registers the
-channel `slack` with the `ownerChannels` service (provided by dsh-director when its host
-declares the `channels` capability). Design: step 19, §7.2.
+The owner's Slack direct messages as an owner channel, and the private channels the owner
+binds as steward groups: a DSH plugin that registers the channel `slack` with the
+`ownerChannels` service (provided by dsh-director when its host declares the `channels`
+capability). Design: step 19, §7.2; groups: step 23, §7.7.19 (the WeChat group design with
+only this platform layer changed).
 
 ## What it does
 
@@ -62,7 +64,8 @@ declares the `channels` capability). Design: step 19, §7.2.
   the DM of `to` with the SDK's `filesUploadV2` (`files.getUploadURLExternal`, the upload,
   `files.completeUploadExternal`; the old `files.upload` was retired 2025-11-12), the caption
   as its initial comment; at most the library's outbound bound (25 MiB). Kinds: image, voice,
-  file. A `groupRef` is refused `channel_no_media` (no Slack groups). The ref is the file id.
+  file. With a `groupRef` instead of `to` it uploads into that bound group's channel (the
+  same checks as `sendGroup` below). The ref is the file id.
 - `send(text, {replyToRef, to})` → posts to the DM of `to`, the account the service has
   bound (it re-reads the binding and passes it on every send). The plugin keeps no idea
   of its own about who the owner is; without `to` the send fails. Text over 3500
@@ -70,6 +73,38 @@ declares the `channels` capability). Design: step 19, §7.2.
 - `status()` → `{connected}` from the socket's own state events, with a `detail` when not
   connected (`connecting`, `disconnected`, `disconnected: <slack error>` such as
   `invalid_auth`, or why it is not configured).
+- Private channels as steward groups (step 23, design-steward §7.7.19). The only channel
+  event the app subscribes to is `app_mention`: a channel message that does not mention the
+  bot is never sent to the app (D6), so un-mentioned files are out of scope too (a Slack
+  group has no media switch; the backend refuses one, `channel_no_kept_media`). The host
+  hands the plugin its whitelist (`setRooms`: the bound account and each bound group, kept in
+  memory; until the first list arrives a mention waits). A mention in a bound channel goes to
+  `inbound` as a group message - `conversationRef` the channel id, `messageRef`
+  `<channel>:<ts>` (a `ts` is unique only within its channel), the bot's own mention taken
+  out of the text, `asked: true`, its files through `storeMedia` with the channel - on its
+  own lane per channel, never holding up a DM. In any other conversation a mention goes in
+  only when the bound account wrote nothing but a group code (`@AItelier Steward G-XXXX-XXXX`),
+  as a bind with the bot's mention `<@U...>` as the group's prefix; anything else is dropped,
+  unanswered and with no text logged. What the backend does with either is exactly what it
+  does for a WeChat group (who may ask, the quotas of D11 - 60 questions per group and hour,
+  20 per person - the turn audience, guards, storage and family memory).
+- A group is a **private channel shared with no other organization**: before a group code is
+  taken, and again on every message and every send of a bound group, `conversations.info`
+  must say `is_private`, not `is_im`/`is_mpim`, and not `is_ext_shared`/`is_pending_ext_shared`
+  (D4 (a), D5 (a)); the envelope's own `is_ext_shared_channel` is checked first. A code posted
+  in a public channel, a Slack Connect channel, a DM or a group DM binds nothing (logged
+  `a group code in <channel> not taken: <why>`). A bound channel found shared or public is
+  **paused**: its events are dropped and nothing is sent into it (`room_paused`) for the rest
+  of the process, and the channel's status says `n group(s) paused (...): unbind on the
+  dashboard`; unbinding it lifts the pause. A restart judges it again on its next message or
+  send.
+- `sendGroup(channel, text, {replyToRef?})` → posts into a bound group: under the thread of
+  the message it answers (`replyToRef`, a group `messageRef`; a question asked inside a
+  thread is answered in that thread, D8), else into the channel (a reminder); `unfurl_links`
+  and `unfurl_media` false; escaped like every text except the bot's own mention (the
+  group's prefix, which a confirmation line asks people to write). The backend gives a Slack
+  reply no WeChat quote line. A channel not bound is refused `room_not_bound`, a paused one
+  `room_paused`, both before anything is posted.
 - Reconnects itself: the SDK's own reconnect is turned off (`autoReconnectEnabled: false`)
   because in @slack/socket-mode 3.1.1 a reconnect that Slack refuses (a revoked token,
   for instance) leaves a rejected promise nobody handles, which would end the steward's
@@ -85,10 +120,12 @@ the owner's messages.
 ### A. From the manifest (recommended)
 
 [`slack-app-manifest.json`](slack-app-manifest.json) describes exactly the app this
-plugin needs: Socket Mode on, no Request URL, the bot scopes `chat:write`, `files:read`
-(downloading the owner's files), `files:write` (sending files), `im:history`, `im:write`,
-the one bot event `message.im`, and a Messages tab people can write in. It
-holds no token and no URL.
+plugin needs: Socket Mode on, no Request URL, the bot scopes `app_mentions:read` (mentions
+in the bound channels), `chat:write`, `files:read` (downloading files), `files:write`
+(sending files), `groups:read` (`conversations.info`: is a channel private, is it shared),
+`im:history`, `im:write`, the two bot events `message.im` and `app_mention`, and a Messages
+tab people can write in. No `chat:write.public`, no `mpim:*`, no `channels:*` and no
+history scope of any channel. It holds no token and no URL.
 
 1. **Create the app.** At <https://api.slack.com/apps>: **Create New App → From a
    manifest**, pick the workspace, choose the **JSON** tab, replace its content with the
@@ -119,8 +156,9 @@ Steward**, Messages tab) and write to it.
 ### B. By hand
 
 Create an app **From scratch**, then: enable **Socket Mode** and make an app-level token
-with `connections:write` (`xapp-`); bot token scopes `chat:write`, `files:read`,
-`files:write`, `im:history`, `im:write`; **Event Subscriptions** on, bot event `message.im`, no Request URL; **App
+with `connections:write` (`xapp-`); bot token scopes `app_mentions:read`, `chat:write`,
+`files:read`, `files:write`, `groups:read`, `im:history`, `im:write`; **Event
+Subscriptions** on, bot events `message.im` and `app_mention`, no Request URL; **App
 Home → Messages Tab** on, with "Allow users to send Slash commands and messages from the
 messages tab" ticked; do not turn on **Agents & AI Apps**. Install it to the workspace
 (`xoxb-`), then save the tokens and restart as in A.
@@ -153,6 +191,29 @@ and `files:write` under **OAuth & Permissions → Bot Token Scopes**), **Save Ch
 effect only on a reinstall. If the Bot User OAuth Token shown afterwards differs from the
 saved one, save it again (`save_token xoxb- slack-bot-token`, as above) and restart the
 steward. Files sent before the reinstall are not fetched again.
+
+### Adding the group scopes to an app made before step 23 (Slack private channels)
+
+An app installed before step 23 has no `app_mention` event and no `app_mentions:read` or
+`groups:read` scope: a mention in a channel never reaches the steward. Open the app's **App
+Manifest** page, replace the whole manifest with `slack-app-manifest.json` (JSON tab),
+**Save Changes**, then **reinstall** the app (**Install App → Reinstall to Workspace →
+Allow**): new scopes and events take effect only on a reinstall. If the Bot User OAuth Token
+shown afterwards differs from the saved one, save it again (`save_token xoxb-
+slack-bot-token`, as above) and restart the steward.
+
+Then bind a channel, on the dashboard and in Slack:
+
+1. Make (or pick) a **private** channel that is not a Slack Connect channel (no other
+   organization in it). Public channels, shared channels and group DMs cannot be bound.
+2. Invite the steward: `/invite @AItelier Steward` in that channel.
+3. Dashboard → steward → **Channels** → Slack → **Add group**: give the group a name (unlike
+   your other groups') and take the code (`G-XXXX-XXXX`, 10 minutes, once).
+4. In the channel, **from your bound Slack account**, send `@AItelier Steward G-XXXX-XXXX`
+   and nothing else. The steward answers with its one-line notice; a refused code is
+   answered with nothing (the steward's log says why).
+5. Anyone in the channel can now ask it by mentioning it; it answers in the asker's thread.
+   A follow-up inside the thread must mention it again (only mentions reach the app).
 
 ### Where the tokens live, and the restart
 

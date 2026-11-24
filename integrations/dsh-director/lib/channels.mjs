@@ -271,8 +271,9 @@ const START_PLACEHOLDERS = new Set(['bridge not reached yet', 'connecting']);
  *  they take room from the answered exchanges; past both, a kept entry's sender name longer
  *  than keptNameChars is shortened - a kept entry itself is never dropped here. */
 /** The bridge's group-send answers it gives before say() runs (wechat-bridge groupSend): nothing
- *  was sent, so a notice spends no attempt on them. */
-const GROUP_SEND_REFUSED_BEFORE = Object.freeze({ 409: ['not_logged_in', 'room_not_bound'], 429: ['room_backstop'] });
+ *  was sent, so a notice spends no attempt on them. Step 23 Slack (7.7.19): the Slack channel's
+ *  room_paused - a bound channel found shared or public, refused before anything is posted. */
+const GROUP_SEND_REFUSED_BEFORE = Object.freeze({ 409: ['not_logged_in', 'room_not_bound', 'room_paused'], 429: ['room_backstop'] });
 export const GROUP_LIMITS = Object.freeze({ mergeMax: 5, turnToolCalls: 6, recentChars: 1500, keptChars: 4000, keptNameChars: 8 });
 /** Group media wake (2026-11-23 defect: the steward's group turn had no image block): how many
  *  of this group's KEPT images one @-turn attaches as native blocks, most recent first. The
@@ -885,12 +886,14 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   /** One line into a group: {sent: true}; {refused: code} when it was refused before anything
    *  was sent (no sender, or the bridge's 409 not_logged_in / room_not_bound or 429
    *  room_backstop, which it answers before say()); else {failed: why} - a send that may have
-   *  started, a host send_timeout among them. */
-  const trySendGroup = async (channel, groupRef, line) => {
+   *  started, a host send_timeout among them. `options.replyToRef` (step 23 Slack, D8): the group
+   *  message the line answers, which a channel that threads (Slack) replies under; WeChat ignores it. */
+  const trySendGroup = async (channel, groupRef, line, options) => {
     const entry = registered.get(channel);
     if (!entry?.sendGroup || !text(line)) { log('group_send_skipped', { channel, group_ref: groupRef }); return { refused: 'channel_down' }; }
     try {
-      await within(Promise.resolve(entry.sendGroup(groupRef, line)), limits.sendMs, 'send_timeout');
+      await within(Promise.resolve(entry.sendGroup(groupRef, line, ...(text(options?.replyToRef) ? [{ replyToRef: options.replyToRef }] : []))),
+        limits.sendMs, 'send_timeout');
       log('group_sent', { channel, group_ref: groupRef, length: line.length });
       return { sent: true };
     } catch (error) {
@@ -900,7 +903,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       return { failed: code || short(error) };
     }
   };
-  const sendGroupLine = async (channel, groupRef, line) => (await trySendGroup(channel, groupRef, line)).sent === true;
+  const sendGroupLine = async (channel, groupRef, line, options) => (await trySendGroup(channel, groupRef, line, options)).sent === true;
   /** Whether `channel`'s live groups include this room - the read the wake's own label
    *  lookup and the bridge's whitelist use (host.groups.list, the backend's owner groups).
    *  It is asked before a group message's first byte is fetched (storeMedia); a host that
@@ -1104,7 +1107,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       if (result?.bound && !result.duplicate) {
         log('group_bound', seen);
         await refreshRooms();
-        await sendGroupLine(channel, groupRef, result.notice);
+        await sendGroupLine(channel, groupRef, result.notice, { replyToRef: messageRef });
       } else log('group_bind_refused', { ...seen, reason: String(result?.refused ?? 'duplicate') });
       return { accepted: result?.bound === true };
     }
@@ -1112,10 +1115,11 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
     // cap, before the group and member quotas; a confirming reply is always accepted, so its
     // 「正在执行」 comes with a wake); the group gets the backend's one line, which its send
     // budget already counted.
-    if (result?.confirmation_line && mentioned) await sendGroupLine(channel, groupRef, result.confirmation_line);
+    // The lines that answer this one message go under it where the channel threads (Slack, D8).
+    if (result?.confirmation_line && mentioned) await sendGroupLine(channel, groupRef, result.confirmation_line, { replyToRef: messageRef });
     if (result?.refused) {
       log('group_message_refused', { ...seen, reason: String(result.refused) });
-      if (result.notice && mentioned) await sendGroupLine(channel, groupRef, result.notice);
+      if (result.notice && mentioned) await sendGroupLine(channel, groupRef, result.notice, { replyToRef: messageRef });
       // The relay did not keep it (the switch went off between the two checks, stale, ...):
       // what storeMedia kept for it is taken back at once (the library withdraws only kept rows).
       if (!mentioned) for (const item of attachments ?? []) if (text(item?.ref)) {
@@ -1578,7 +1582,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
 
   return {
     service, ownerMessageSent, login,
-    /** Step 23: one line into a bound group (the steward's reply, as the host formatted it). */
+    /** Step 23: one line into a bound group (the steward's reply, as the host formatted it), with
+     *  the group message it answers when it answers one ({replyToRef}, Slack threads it). */
     sendGroup: sendGroupLine,
     /** Step 24.2 (7.8.12): where a file answering owner message `replyTo` would go, or {refused}. */
     ownerMediaTarget: (replyTo, kind) => ownerMediaTarget(replyTo, kind).catch(error => ({ refused: 'unavailable', reason: short(error) })),

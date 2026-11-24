@@ -979,7 +979,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // groupReplies). An owner turn's words never go to a group.
   if (groupTurns && channels && host.groups) {
     const watch = groupReplies({ turns: groupTurns, reply: args => host.groups.reply(args),
-      sendGroup: (channel, groupRef, text) => channels.sendGroup(channel, groupRef, text), warn: line => ctx.logger.warn(line),
+      sendGroup: (channel, groupRef, text, options) => channels.sendGroup(channel, groupRef, text, options), warn: line => ctx.logger.warn(line),
       mirror: (messageId, text) => channels.ownerMessageSent(messageId, text) });
     ctx.on('session/event', (session, event) => { if (session === agent.session) void watch(event); });
     setTimeout(redeliver, 1000).unref?.();

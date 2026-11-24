@@ -520,4 +520,4 @@ def test_the_served_guide_says_legacy_cas_custody_is_historical():
     assert "not an HTTP API" in text
     # Literals other tests and readers quote stay untouched.
     assert "state-db:git-bundle:sha256:" in text
-    assert "256 MiB" in text
+    assert "512 MiB" in text

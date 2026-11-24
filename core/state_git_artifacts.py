@@ -56,18 +56,21 @@ from concurrent.futures import Future
 from pathlib import Path
 
 from core import closed_git
+from core.state_bundle_limits import MAX_BUNDLE_BYTES
 from core.state_graph import StateConflict, now
 from core.state_report_integrity import _read_regular_nofollow
 
-MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 CANDIDATE_REF = "refs/aitelier/candidate"
 # Wall-clock guard for ONE Git subprocess while a candidate REPORT is imported
 # and normalized. It ends a Git that hangs; it does not judge the candidate, so
 # it sits far above any real run.
 # Measured 2026-11-12 (Git 2.47.3, a core to itself, a 116.8 MiB bundle carrying
 # 1.05 GB of blobs): the normalizing pack-objects needs 109 s of CPU, which at
-# the same cost per MiB is about 240 s for a bundle at MAX_BUNDLE_BYTES. The
-# former fixed 120 s refused that candidate whenever the host was 10% slower.
+# the same cost per MiB (about 0.93 s/MiB) is about 480 s for a bundle at
+# MAX_BUNDLE_BYTES (512 MiB). The 1800 s guard still holds: it stays roughly 4x
+# above that single-step cost, leaving room for a slower host or a longer blob
+# history before a hung Git is ended. The former fixed 120 s refused that
+# candidate whenever the host was 10% slower.
 # Materialization is not under this guard and keeps 120 s per step: it runs
 # inside the deployment admission fence and, for the fetch into the project's
 # repository, that repository's lock.
@@ -330,7 +333,7 @@ KEYFRAME_MAX_DEPENDENTS = 200
 # (within 2x either way). Different repositories' candidates interleave, and a
 # delta against another repository's keyframe is never useful.
 KEYFRAME_CANDIDATES = 2
-# Covers a dictionary of MAX_BUNDLE_BYTES plus a target of MAX_BUNDLE_BYTES (2**29 at 256 MiB).
+# Covers a dictionary of MAX_BUNDLE_BYTES plus a target of MAX_BUNDLE_BYTES (2**30 at 512 MiB).
 # Frames written with a smaller window (28) still decode: the decoder only caps it.
 _WINDOW_LOG = (2 * MAX_BUNDLE_BYTES - 1).bit_length()
 

@@ -1,4 +1,7 @@
-"""The steward in the owner's family group (step 23, design-steward 7.7): WeChat first.
+"""The steward in the owner's family group (step 23, design-steward 7.7): WeChat first, then
+Slack private channels (7.7.19: the same rules, only the platform layer changes - here, a Slack
+reply carries no WeChat quote line since Slack answers in the asker's thread, and a Slack group
+has no media switch, its app receiving only mentions).
 
 The owner binds up to GROUP_LIMITS["groups_per_channel"] groups per channel (step 23.1,
 design-steward 7.7.24), each with a group code (`G-XXXX-XXXX`, 10 minutes, once, kind 'group'
@@ -640,10 +643,13 @@ class StateGroups:
         (group_media_notice). Turning it off stops storing at once and deletes this group's kept
         rows here, in this transaction; the host purges the library's copies, the receipt is
         recorded, and only then is the off-notice posted. A click that changes nothing keeps the
-        epoch. Answers {state, backend_rows_deleted?}."""
+        epoch. Answers {state, backend_rows_deleted?}. A Slack group has no switch (7.7.19): its app
+        is sent only mentions, so there is never an un-mentioned file to keep (channel_no_kept_media)."""
         self.steward._owner()
         if not isinstance(on, bool):
             raise StateGraphError("invalid_request: on is true or false")
+        if channel == "slack":
+            raise StateGraphError("channel_no_kept_media: Slack sends the steward only the messages that mention it")
         moment = _now()
         deleted = None
         with self.store.transaction(write=True) as conn:
@@ -775,8 +781,9 @@ class StateGroups:
                     "SELECT * FROM state_group_members WHERE channel=? AND group_ref=? ORDER BY ordinal", key)]
                 group = {"channel": row["channel"], "group_ref": row["group_ref"], "label": row["label"],
                          "mention_prefix": row["mention_prefix"], "bound_at": row["bound_at"],
-                         "messages_30d": stats[0], "last_message_at": stats[1], "members": members,
-                         "media_keep": self._media_keep_view(conn, row, cutoff)}
+                         "messages_30d": stats[0], "last_message_at": stats[1], "members": members}
+                if row["channel"] != "slack":  # a Slack group has no media switch (set_group_media_keep)
+                    group["media_keep"] = self._media_keep_view(conn, row, cutoff)
                 if channel == row["channel"] and group_ref == row["group_ref"]:
                     # A kept medium of the last day shows as its sender and placeholder; never its ref.
                     group["messages"] = [dict(m) for m in conn.execute(
@@ -1099,7 +1106,9 @@ class StateGroups:
         code writes (WITHHELD_OWNER_LINE: this group's name and the kind, never the reply),
         a steward message the host mirrors like any other (`owner_notice`), at most
         withheld_owner_lines_per_hour per group (r44w). Formatted as one WeChat message: 「first 20 characters of the
-        question」 on the first line, at most reply_chars in all, cut with '…'. Answered
+        question」 on the first line, at most reply_chars in all, cut with '…' - on Slack
+        (7.7.19, D8) without the quote line, the reply going into the asker's thread instead:
+        `reply_to_ref` is the question's channel ref, for the plugin to thread under. Answered
         once per request_key: the replay returns the first answer.
 
         A question this turn never stamped - one its recorded audience left out of question_ids,
@@ -1131,10 +1140,11 @@ class StateGroups:
             if self._live_group(conn, channel, group) is None:
                 raise StateConflict("group_not_bound")
             reason = self.exit_check(conn, body, moment)
-            quote = "「" + "".join(question["body"].split())[:20] + "」"
+            # Slack threads the reply under its question (D8); WeChat quotes the question instead.
+            quote = "" if channel == "slack" else "「" + "".join(question["body"].split())[:20] + "」\n"
             text = (WITHHELD_TEXT if reason else body.strip())
-            room = GROUP_LIMITS["reply_chars"] - len(quote) - 1
-            text = quote + "\n" + (text if len(text) <= room else text[:room - 1] + "…")
+            room = GROUP_LIMITS["reply_chars"] - len(quote)
+            text = quote + (text if len(text) <= room else text[:room - 1] + "…")
             message_id = self._out_row(conn, channel, group, "reply", text, moment, reply_to=question_id,
                                        original=body if reason else None, reason=reason, request_key=request_key)
             notice = self._withheld_owner_notice(conn, channel, group, message_id, reason, moment) if reason else None
@@ -1143,7 +1153,8 @@ class StateGroups:
                              "group_ref=? AND direction='in' AND answered_by IS NULL AND turn=?",
                              (message_id, other, channel, group, str(turn)))
             result = {"message_id": message_id, "channel": channel, "group_ref": group, "text": text,
-                      "withheld": bool(reason), **({"owner_notice": notice} if notice else {})}
+                      "withheld": bool(reason), "reply_to_ref": question["channel_message_ref"],
+                      **({"owner_notice": notice} if notice else {})}
             self._retain(conn, moment)
             out = self.steward._record(conn, "post_group_reply", request_key, request_hash, result)
         if reason:

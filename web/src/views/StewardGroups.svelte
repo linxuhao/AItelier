@@ -6,7 +6,8 @@
   // channel has groups_per_channel groups. What a group may see is decided once for everything
   // (public projects), never here. Each group also has its media switch (design/steward-group-media.md
   // section 9, owner 2026-11-23): files posted without @ are kept one day only while it is on, and it
-  // is on only once the group was told; the backend decides every state, this shows it.
+  // is on only once the group was told; the backend decides every state, this shows it. A Slack
+  // group (a private channel, 7.7.19) has no switch: the backend lists it without media_keep.
   import { onMount } from 'svelte';
   import { clearGroupRecords, createGroupCode, deleteFamilyMemory, listOwnerGroups, nameGroupMember, setFamilyNote,
     setGroupMediaKeep, unbindOwnerGroup, type GroupMediaKeep, type OwnerChannelName, type OwnerGroup } from '../lib/api';
@@ -129,7 +130,7 @@
   {/each}
   {#if code}
     <div class="code" data-group-code><code>{code.code}</code>
-      <p>{t('steward.groupCodeHelp')}</p></div>
+      <p>{t(channel === 'slack' ? 'steward.groupCodeHelpSlack' : 'steward.groupCodeHelp')}</p></div>
   {/if}
   {#if full}
     <p class="muted" data-groups-full>{t('steward.groupFull').replace('{n}', String(cap))}</p>

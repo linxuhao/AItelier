@@ -83,6 +83,8 @@ def test_the_requester_of_a_group_turn_is_its_one_asker_and_the_conversation_is_
     row = record(world, asked["code"])
     assert (row["requester_kind"], row["channel"], row["conversation_ref"], row["sender_ref"], row["audience"],
             row["status"]) == ("member", "wechat", ROOM, MEMBER, "group", "pending")
+    # Step 23 Slack (D8): it names the question's channel ref, so a channel that threads answers under it.
+    assert asked["reply_to_ref"] == "q1"
     # The owner asking in the group is the owner, in the group.
     owner_q = gask(world, "q2", sender=OWNER_WX)["message_id"]
     group_turn(world, senders=(OWNER_WX,), turn="gt2")

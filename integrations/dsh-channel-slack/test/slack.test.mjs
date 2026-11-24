@@ -9,8 +9,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { apply, HELD_PER_SENDER, inject, isOwnerDm, loadSlack, MEDIA_LIMITS, name, readTokens, reconnectDelay, slackChannel, slackFileUrl,
-  splitText, SLACK_TEXT_LIMIT } from '../index.mjs';
+import { apply, groupRefusal, HELD_PER_SENDER, inject, isGroupMention, isOwnerDm, loadSlack, MEDIA_LIMITS, name, readTokens,
+  reconnectDelay, slackChannel, slackFileUrl, splitText, SLACK_TEXT_LIMIT, withoutMention } from '../index.mjs';
 
 const quiet = { info() {}, warn() {} };
 
@@ -21,11 +21,27 @@ class FakeSocket extends EventEmitter {
   async disconnect() { this.disconnected = true; this.emit('disconnected'); }
 }
 
+// Step 23 (design-steward 7.7.19): the bot's own user id and what conversations.info says of a
+// private channel (groups:read).
+const BOT = 'UBOT';
+const PRIVATE_CHANNEL = Object.freeze({ is_channel: true, is_group: false, is_im: false, is_mpim: false, is_private: true,
+  is_ext_shared: false, is_pending_ext_shared: false, is_shared: false });
+
 class FakeWeb {
   static last;
   constructor(token, options) {
     this.token = token; this.options = options; this.posted = []; this.opened = []; FakeWeb.last = this;
-    this.conversations = { open: async ({ users }) => (this.opened.push(users), { ok: true, channel: { id: 'D-' + users } }) };
+    // Step 23: conversations.info answers what `infos` says of a conversation (a private channel
+    // unless a test says otherwise; an Error is thrown as the SDK throws it).
+    this.infos = {}; this.infoCalls = [];
+    this.conversations = { open: async ({ users }) => (this.opened.push(users), { ok: true, channel: { id: 'D-' + users } }),
+      info: async ({ channel }) => {
+        this.infoCalls.push(channel);
+        const info = this.infos[channel] ?? { id: channel, ...PRIVATE_CHANNEL };
+        if (info instanceof Error) throw info;
+        return { ok: true, channel: info };
+      } };
+    this.auth = { test: async () => ({ ok: true, user_id: BOT }) };
     this.chat = { postMessage: async args => (this.posted.push(args), { ok: true, ts: `17000000${this.posted.length}.000100` }) };
     this.uploaded = [];
   }
@@ -507,7 +523,7 @@ test('the pinned Slack SDK resolves from the DSH runtime install and has what th
   assert.match(webSource, /this\.files\.completeUploadExternal\(/);
 });
 
-test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mode, plain DMs, the scopes of every call', async () => {
+test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mode, DMs, private-channel mentions, the scopes of every call', async () => {
   const here = new URL('..', import.meta.url);
   const raw = readFileSync(new URL('slack-app-manifest.json', here), 'utf8');
   const manifest = JSON.parse(raw);
@@ -520,7 +536,10 @@ test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mo
   // Every Web API method the plugin calls, and the bot scope Slack requires for it.
   // filesUploadV2 is the SDK's wrapper over files.getUploadURLExternal and
   // files.completeUploadExternal, both files:write.
-  const methodScopes = { 'conversations.open': 'im:write', 'chat.postMessage': 'chat:write', filesUploadV2: 'files:write' };
+  // Step 23 (design-steward 7.7.19): conversations.info (a group's kind: private, shared, a DM)
+  // is groups:read; auth.test (the bot's own id, when an event does not name it) needs no scope.
+  const methodScopes = { 'conversations.open': 'im:write', 'chat.postMessage': 'chat:write', filesUploadV2: 'files:write',
+    'conversations.info': 'groups:read', 'auth.test': null };
   // Comments stripped first, so both scans below measure code: a comment that mentions the
   // web client must not count as a use of it (index.mjs carries no // or /* inside a string).
   const source = readFileSync(new URL('index.mjs', here), 'utf8')
@@ -548,13 +567,20 @@ test('slack-app-manifest.json makes exactly the app this plugin needs: Socket Mo
     await channel.stop();
   }
   assert.ok(manifest.oauth_config.scopes.bot.includes(downloadScopes.url_private_download), 'the manifest grants the download its scope');
-  // The one event the plugin takes (isOwnerDm: a message in an im) and its scope.
-  const eventScopes = { 'message.im': 'im:history' };
+  // The two events the plugin takes (isOwnerDm: a message in an im; isGroupMention: a mention of
+  // the bot, step 23 - never a channel's other messages, D6) and their scopes.
+  const eventScopes = { 'message.im': 'im:history', app_mention: 'app_mentions:read' };
   assert.deepEqual(manifest.settings.event_subscriptions.bot_events, Object.keys(eventScopes));
   assert.ok(isOwnerDm({ type: 'message', channel_type: 'im', user: 'U1', text: 'x' }));
+  assert.ok(isGroupMention({ type: 'app_mention', channel: 'C1', user: 'U1', ts: '1.2', text: `<@${BOT}> x` }));
   // Exactly the scopes those need: none missing, none extra.
-  const needed = [...new Set([...Object.values(methodScopes), ...Object.values(eventScopes), ...Object.values(downloadScopes)])].sort();
+  const needed = [...new Set([...Object.values(methodScopes), ...Object.values(eventScopes), ...Object.values(downloadScopes)])]
+    .filter(Boolean).sort();
   assert.deepEqual([...manifest.oauth_config.scopes.bot].sort(), needed);
+  // 7.7.19: no posting into channels the bot was not invited to, no group DMs, no public channels'
+  // or private channels' history (un-mentioned messages are never sent to the app at all).
+  for (const scope of manifest.oauth_config.scopes.bot)
+    assert.doesNotMatch(scope, /^(chat:write\.public|mpim:|channels:|groups:history)/, scope);
   assert.equal(manifest.oauth_config.scopes.user, undefined);
   // People can write to the bot from its Messages tab.
   assert.equal(manifest.features.app_home.messages_tab_enabled, true);
@@ -783,13 +809,14 @@ test('sendFile uploads with filesUploadV2 to the DM of `to`, the caption as its 
   assert.equal('channel' in web.uploaded[0] || 'channels' in web.uploaded[0], false, 'channel_id, not the deprecated channels');
 });
 
-test('sendFile refuses a group, an unknown kind, no recipient, and a file over the outbound bound, uploading nothing', async () => {
+test('sendFile refuses an unbound group, an unknown kind, no recipient, and a file over the outbound bound, uploading nothing', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'slack-send-'));
   const small = join(dir, 'a.png'), big = join(dir, 'big.bin');
   writeFileSync(small, PNG);
   writeFileSync(big, Buffer.alloc(MEDIA_LIMITS.outbound_bytes + 1));
   const { channel, web } = await started();
-  await assert.rejects(channel.sendFile({ groupRef: 'C1', kind: 'image', name: 'a.png', path: small }), { code: 'channel_no_media' });
+  // Step 23: a group's file goes only into a bound private channel (below); this one is not bound.
+  await assert.rejects(channel.sendFile({ groupRef: 'C1', kind: 'image', name: 'a.png', path: small }), { code: 'room_not_bound' });
   await assert.rejects(channel.sendFile({ to: 'U1', kind: 'video', name: 'a.png', path: small }), { code: 'channel_no_media' });
   await assert.rejects(channel.sendFile({ kind: 'image', name: 'a.png', path: small }), { code: 'recipient_unknown' });
   await assert.rejects(channel.sendFile({ to: 'U1', kind: 'file', name: 'big.bin', path: big }), { code: 'too_large' });
@@ -867,5 +894,359 @@ test('a 204 or an empty 200 is gone for good: the message goes in at once, the f
   await tick(30);
   assert.deepEqual(requests.map(r => r.url), urls, 'each fetched once');
   assert.doesNotMatch(warnings.join('\n'), /not delivered/, 'not held');
+  await channel.stop();
+});
+
+
+// ---- step 23: private channels as steward groups (design-steward 7.7.19; proposal r2 section 9) ----
+
+const TS = '1763481600.000300';
+const mention = (over = {}) => ({ type: 'app_mention', channel: 'C1', user: 'U2', text: `<@${BOT}> 武侠做到哪了`, ts: TS,
+  event_ts: TS, ...over });
+// An Events API envelope as Socket Mode carries it: the payload names the app's bot user
+// (`authorizations`) and whether the conversation is shared with another organization.
+const groupEnvelope = (event, body = {}) => {
+  const acks = [];
+  return { acks, ack: async () => { acks.push(true); }, envelope_id: 'e-2', type: 'events_api',
+    body: { authorizations: [{ user_id: BOT, is_bot: true }], is_ext_shared_channel: false, ...body, event } };
+};
+const ROOMS = { ownerRef: 'U1', rooms: [{ room_ref: 'C1', prefix: `<@${BOT}>` }] };
+const grouped = async (ownerChannels = registry(), extra = {}) => {
+  const world = await started(ownerChannels, extra);
+  await world.channel.setRooms(ROOMS);
+  return world;
+};
+const settle = () => tick(20);
+const platformError = code => Object.assign(new Error(`An API error occurred: ${code}`),
+  { code: 'slack_webapi_platform_error', data: { ok: false, error: code } });
+
+test('a mention in a bound private channel is a group question: ref <channel>:<ts>, the mention taken off, asked', async () => {
+  const { channel, socket, ownerChannels, web } = await grouped();
+  const env = groupEnvelope(mention({ text: `<@${BOT}> 武侠 &lt;做到&gt; 哪了` }));
+  await deliver(socket, env);
+  await until(() => ownerChannels.calls.length === 1);
+  assert.deepEqual(ownerChannels.calls, [{ channel: 'slack', senderRef: 'U2', messageRef: `C1:${TS}`, text: '武侠 <做到> 哪了',
+    at: '2025-11-18T16:00:00.000Z', conversationRef: 'C1', asked: true }]);
+  assert.deepEqual(env.acks, [true]);
+  assert.deepEqual(web.infoCalls, ['C1'], 'the channel is still private and not shared: asked on every message');
+  // Two channels may carry the same ts: the ref is the channel's and the ts.
+  await deliver(socket, groupEnvelope(mention({ channel: 'C2' })));
+  await channel.setRooms({ ...ROOMS, rooms: [...ROOMS.rooms, { room_ref: 'C2', prefix: `<@${BOT}>` }] });
+  await deliver(socket, groupEnvelope(mention({ channel: 'C2' })));
+  await until(() => ownerChannels.calls.length === 2);
+  assert.equal(ownerChannels.calls[1].messageRef, `C2:${TS}`);
+  await channel.stop();
+});
+
+test('withoutMention takes the bot\'s own mentions out wherever they are, and only its own', () => {
+  assert.equal(withoutMention(`<@${BOT}>  hi`, BOT), 'hi');
+  assert.equal(withoutMention(`hi <@${BOT}|steward> there`, BOT), 'hi there');
+  assert.equal(withoutMention(`<@U2> <@${BOT}> ask <@U2>`, BOT), '<@U2> ask <@U2>');
+  assert.equal(withoutMention(`<@${BOT}>`, BOT), '');
+  assert.equal(withoutMention('<@UBOTX> hi', BOT), '<@UBOTX> hi');
+});
+
+test('un-mentioned channel messages, bots, edits and incomplete mentions are ignored (D6), and acked', async () => {
+  const { channel, socket, ownerChannels, web } = await grouped();
+  const ignored = [
+    { type: 'message', channel_type: 'group', channel: 'C1', user: 'U2', text: 'no mention', ts: TS },
+    { type: 'message', channel_type: 'channel', channel: 'C1', user: 'U2', text: `<@${BOT}> in a message event`, ts: TS },
+    mention({ bot_id: 'B9' }),
+    mention({ subtype: 'message_changed' }),
+    mention({ user: undefined }),
+    mention({ channel: undefined }),
+    mention({ ts: undefined }),
+    mention({ text: undefined }),
+    mention({ text: `<@${BOT}>` }), // nothing after the mention, no file
+  ];
+  const envs = ignored.map(event => groupEnvelope(event));
+  for (const env of envs) await deliver(socket, env);
+  await settle();
+  assert.deepEqual(ownerChannels.calls, []);
+  assert.deepEqual(envs.map(env => env.acks.length), envs.map(() => 1));
+  assert.equal(isGroupMention(mention()), true);
+  assert.equal(isGroupMention(mention({ bot_id: 'B9' })), false);
+  assert.equal(web.posted.length, 0);
+  await channel.stop();
+});
+
+test('a mention waits for the host\'s first room list: before it, nothing is taken or judged', async () => {
+  const { channel, socket, ownerChannels, web } = await started();
+  await deliver(socket, groupEnvelope(mention()));
+  await settle();
+  assert.deepEqual(ownerChannels.calls, []);
+  assert.deepEqual(web.infoCalls, []);
+  await channel.setRooms(ROOMS);
+  await until(() => ownerChannels.calls.length === 1);
+  assert.equal(ownerChannels.calls[0].conversationRef, 'C1');
+  await channel.stop();
+});
+
+test('in a channel that is not bound only the bound account\'s group code, alone after the mention, goes in - as a bind', async () => {
+  const warnings = [];
+  const { channel, socket, ownerChannels, web } = await grouped(registry(), { log: { info() {}, warn: line => warnings.push(line) } });
+  const code = 'G-7K2M-Q9XD';
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> hello` })));
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', user: 'U2', text: `<@${BOT}> ${code}` })));
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> ${code} please` })));
+  await settle();
+  assert.deepEqual(ownerChannels.calls, [], 'a member, a question or more words: dropped');
+  assert.deepEqual(web.infoCalls, [], 'and not even judged');
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> ${code}` })));
+  await until(() => ownerChannels.calls.length === 1);
+  assert.deepEqual(ownerChannels.calls[0], { channel: 'slack', senderRef: 'U1', messageRef: `C9:${TS}`, text: code,
+    at: '2025-11-18T16:00:00.000Z', conversationRef: 'C9', groupBind: { prefix: `<@${BOT}>`, code } });
+  assert.deepEqual(web.infoCalls, ['C9']);
+  assert.ok(warnings.every(line => !line.includes('hello') && !line.includes(code)), 'no text and no code in a log line');
+  // Before the owner bound an account there is nobody whose code counts.
+  await channel.setRooms({ ownerRef: null, rooms: [] });
+  await deliver(socket, groupEnvelope(mention({ channel: 'C8', user: 'U1', text: `<@${BOT}> ${code}` })));
+  await settle();
+  assert.equal(ownerChannels.calls.length, 1);
+  await channel.stop();
+});
+
+test('D4, D5: a group code in a public channel, a Slack Connect channel, a DM or a group DM binds nothing', async () => {
+  const warnings = [];
+  const { channel, socket, ownerChannels, web } = await grouped(registry(), { log: { info() {}, warn: line => warnings.push(line) } });
+  const code = 'G-7K2M-Q9XD';
+  web.infos = {
+    C2: { id: 'C2', ...PRIVATE_CHANNEL, is_private: false },
+    C3: { id: 'C3', ...PRIVATE_CHANNEL, is_ext_shared: true, is_shared: true },
+    C4: { id: 'C4', ...PRIVATE_CHANNEL, is_pending_ext_shared: true },
+    D5: { id: 'D5', is_im: true, is_private: true },
+    G6: { id: 'G6', ...PRIVATE_CHANNEL, is_mpim: true, is_group: true },
+    G7: platformError('missing_scope'),
+  };
+  for (const room of ['C2', 'C3', 'C4', 'D5', 'G6', 'G7'])
+    await deliver(socket, groupEnvelope(mention({ channel: room, user: 'U1', text: `<@${BOT}> ${code}` })));
+  // The envelope's own word is enough: a shared channel is refused before anything is asked.
+  await deliver(socket, groupEnvelope(mention({ channel: 'C10', user: 'U1', text: `<@${BOT}> ${code}` }), { is_ext_shared_channel: true }));
+  await settle();
+  assert.deepEqual(ownerChannels.calls, []);
+  assert.deepEqual([...web.infoCalls].sort(), ['C2', 'C3', 'C4', 'D5', 'G6', 'G7']);
+  assert.deepEqual(web.posted, [], 'a refused code is answered with nothing');
+  const reasons = Object.fromEntries(warnings.map(line => /group code in (\w+) not taken: (\w+)/.exec(line)?.slice(1) ?? [line, line]));
+  assert.deepEqual(reasons, { C2: 'not_private', C3: 'shared', C4: 'shared', D5: 'not_a_channel', G6: 'not_a_channel', G7: 'unreadable',
+    C10: 'shared' });
+  assert.ok(warnings.every(line => !line.includes(code)));
+  assert.equal(groupRefusal({ ...PRIVATE_CHANNEL }), undefined);
+  assert.equal(groupRefusal(undefined), 'unreadable');
+  await channel.stop();
+});
+
+test('D5: a bound channel that became shared drops its events and is paused - nothing more taken or sent', async () => {
+  const warnings = [];
+  const { channel, socket, ownerChannels, web } = await grouped(registry(), { log: { info() {}, warn: line => warnings.push(line) } });
+  await deliver(socket, groupEnvelope(mention({ text: `<@${BOT}> secret question` }), { is_ext_shared_channel: true }));
+  await settle();
+  assert.deepEqual(ownerChannels.calls, []);
+  assert.match(channel.status().detail, /1 group paused/);
+  assert.equal(channel.status().connected, true);
+  assert.ok(warnings.some(line => /C1 paused: shared/.test(line)) && warnings.every(line => !line.includes('secret')));
+  // Paused: a later event (whatever the envelope says now) is dropped, a send is refused before Slack is asked.
+  await deliver(socket, groupEnvelope(mention({ ts: '1763481601.000100' })));
+  await settle();
+  assert.deepEqual(ownerChannels.calls, []);
+  await assert.rejects(channel.sendGroup('C1', 'a reminder'), { code: 'room_paused', status: 409 });
+  const dir = mkdtempSync(join(tmpdir(), 'slack-group-'));
+  const path = join(dir, 'a.png');
+  writeFileSync(path, PNG);
+  await assert.rejects(channel.sendFile({ groupRef: 'C1', kind: 'image', name: 'a.png', path }), { code: 'room_paused' });
+  assert.deepEqual(web.posted, []);
+  assert.deepEqual(web.uploaded, []);
+  // The owner unbinds it: the host's next list no longer has it, and the pause goes with it.
+  await channel.setRooms({ ownerRef: 'U1', rooms: [] });
+  assert.equal(channel.status().detail, undefined);
+  await channel.stop();
+});
+
+test('D4, D5: a bound channel conversations.info finds shared or public is paused too, even when the envelope did not say', async () => {
+  const { channel, socket, ownerChannels, web } = await grouped();
+  web.infos.C1 = { id: 'C1', ...PRIVATE_CHANNEL, is_ext_shared: true };
+  await deliver(socket, groupEnvelope(mention(), { is_ext_shared_channel: undefined }));
+  await settle();
+  assert.deepEqual(ownerChannels.calls, []);
+  await assert.rejects(channel.sendGroup('C1', 'x'), { code: 'room_paused' });
+  // A send is checked as well: a channel made public since is paused before anything is posted.
+  await channel.setRooms({ ...ROOMS, rooms: [...ROOMS.rooms, { room_ref: 'C2', prefix: `<@${BOT}>` }] });
+  web.infos.C2 = { id: 'C2', ...PRIVATE_CHANNEL, is_private: false };
+  await assert.rejects(channel.sendGroup('C2', 'a reminder'), { code: 'room_paused', status: 409 });
+  assert.deepEqual(web.posted, []);
+  assert.match(channel.status().detail, /2 groups paused/);
+  await channel.stop();
+});
+
+test('a conversations.info failure that is not a final answer is asked again, never a pause', async () => {
+  const { channel, socket, ownerChannels, web } = await grouped(registry(), { retryMs: 5 });
+  let failures = 2;
+  web.conversations.info = async ({ channel: room }) => {
+    web.infoCalls.push(room);
+    if (failures-- > 0) throw platformError('internal_error');
+    return { ok: true, channel: { id: room, ...PRIVATE_CHANNEL } };
+  };
+  await deliver(socket, groupEnvelope(mention()));
+  await until(() => ownerChannels.calls.length === 1);
+  assert.deepEqual(web.infoCalls, ['C1', 'C1', 'C1']);
+  assert.equal(channel.status().detail, undefined, 'not paused');
+  // On a send the failure fails that send; the group is not paused.
+  failures = 1;
+  await assert.rejects(channel.sendGroup('C1', 'x'), /internal_error/);
+  await channel.sendGroup('C1', 'y');
+  assert.deepEqual(web.posted.map(p => p.text), ['y']);
+  await channel.stop();
+});
+
+test('D8: the reply goes into the asker\'s thread, unfurls off, escaped, the bot\'s own mention kept as a mention', async () => {
+  const { channel, socket, ownerChannels, web } = await grouped();
+  await deliver(socket, groupEnvelope(mention()));
+  await deliver(socket, groupEnvelope(mention({ ts: '1763481700.000100', thread_ts: '1763481500.000100' })));
+  await until(() => ownerChannels.calls.length === 2);
+  const answer = await channel.sendGroup('C1', `a <b> & <@U2> — 回复「<@${BOT}> 确认 K1」`, { replyToRef: `C1:${TS}` });
+  assert.deepEqual(web.posted[0], { channel: 'C1', text: `a &lt;b&gt; &amp; &lt;@U2&gt; — 回复「<@${BOT}> 确认 K1」`, thread_ts: TS,
+    unfurl_links: false, unfurl_media: false });
+  assert.deepEqual(answer, { ref: 'C1:170000001.000100' });
+  // A question asked inside a thread is answered in that thread (its parent's ts).
+  await channel.sendGroup('C1', 'in the thread', { replyToRef: 'C1:1763481700.000100' });
+  assert.equal(web.posted[1].thread_ts, '1763481500.000100');
+  // A question from before a restart (not remembered): its own ts; a long reply stays in one thread.
+  await channel.sendGroup('C1', 'x'.repeat(SLACK_TEXT_LIMIT + 1), { replyToRef: 'C1:1763400000.000100' });
+  assert.deepEqual(web.posted.slice(2).map(p => [p.thread_ts, p.text.length, p.unfurl_links, p.unfurl_media]),
+    [['1763400000.000100', SLACK_TEXT_LIMIT, false, false], ['1763400000.000100', 1, false, false]]);
+  // A line that answers nobody (a reminder) goes into the channel itself; a ref of another channel threads nothing.
+  await channel.sendGroup('C1', 'reminder');
+  await channel.sendGroup('C1', 'other', { replyToRef: `C2:${TS}` });
+  assert.equal('thread_ts' in web.posted.at(-2), false);
+  assert.equal('thread_ts' in web.posted.at(-1), false);
+  await assert.rejects(channel.sendGroup('C9', 'not bound'), { code: 'room_not_bound', status: 409 });
+  await channel.stop();
+});
+
+test('a mention\'s files are stored for its room as asked, then the question goes in with the refs', async () => {
+  const host = mediaHost({ bound: ['U1', 'U2'] });
+  const { fetch } = fakeFetch({ [FILE_URL]: png });
+  const { channel, socket } = await grouped(host, { fetch });
+  await deliver(socket, groupEnvelope(mention({ text: `<@${BOT}> 这张图是什么`, files: [slackFile()] })));
+  await until(() => host.calls.length === 1);
+  assert.deepEqual(host.asked, [{ channel: 'slack', senderRef: 'U2', messageRef: `C1:${TS}`, index: 0, kind: 'image', mime: 'image/png',
+    name: 'photo.png', conversationRef: 'C1', asked: true }]);
+  assert.deepEqual(host.calls[0].attachments, [{ kind: 'image', ref: 'm_0000000000000001' }]);
+  assert.equal(host.calls[0].conversationRef, 'C1');
+  await channel.stop();
+});
+
+test('sendFile into a bound private channel uploads to it (its caption escaped); an unbound one is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slack-group-'));
+  const path = join(dir, 'a.png');
+  writeFileSync(path, PNG);
+  const { channel, web } = await grouped();
+  assert.deepEqual(await channel.sendFile({ groupRef: 'C1', kind: 'image', name: 'a.png', path, caption: 'a < b' }), { ref: 'F-1' });
+  assert.deepEqual({ ...web.uploaded[0], file: undefined }, { channel_id: 'C1', file: undefined, filename: 'a.png', initial_comment: 'a &lt; b' });
+  assert.deepEqual(web.opened, [], 'no DM is opened for a group');
+  await assert.rejects(channel.sendFile({ groupRef: 'C9', kind: 'image', name: 'a.png', path }), { code: 'room_not_bound' });
+  assert.equal(web.uploaded.length, 1);
+  await channel.stop();
+});
+
+test('without authorizations in the envelope the bot\'s id is asked once (auth.test)', async () => {
+  const { channel, socket, ownerChannels, web } = await grouped();
+  let asked = 0;
+  web.auth.test = async () => (asked++, { ok: true, user_id: BOT });
+  const env = groupEnvelope(mention());
+  delete env.body.authorizations;
+  await deliver(socket, env);
+  const again = groupEnvelope(mention({ ts: '1763481601.000100' }));
+  delete again.body.authorizations;
+  await deliver(socket, again);
+  await until(() => ownerChannels.calls.length === 2);
+  assert.equal(ownerChannels.calls[0].text, '武侠做到哪了');
+  assert.equal(asked, 1);
+  await channel.stop();
+});
+
+test('a group\'s held question does not hold up the owner\'s DM, and a DM is never a group message', async () => {
+  const ownerChannels = registry(message => (message.conversationRef ? { accepted: false, reason: 'unavailable' } : { accepted: true }));
+  const { channel, socket } = await grouped(ownerChannels, { retryMs: 10 });
+  await deliver(socket, groupEnvelope(mention({ user: 'U1' })));
+  await deliver(socket, envelope(dm()));
+  await until(() => ownerChannels.calls.some(m => m.messageRef === 'c-1'));
+  const direct = ownerChannels.calls.find(m => m.messageRef === 'c-1');
+  assert.equal('conversationRef' in direct, false);
+  assert.equal('asked' in direct, false);
+  await channel.stop();
+});
+
+test('apply registers sendGroup and setRooms for the host\'s group path', () => {
+  const registered = [];
+  apply({ logger: quiet, on() {}, ownerChannels: { register: channel => (registered.push(channel), () => {}) } },
+    { secretsDir: mkdtempSync(join(tmpdir(), 'slack-none-')) });
+  assert.equal(typeof registered[0].sendGroup, 'function');
+  assert.equal(typeof registered[0].setRooms, 'function');
+});
+
+// ---- step 23 review round (rv-sg): bind replays, the paused group named, the bind notice's thread ----
+
+test('a redelivered bind envelope after the bind took is dropped, never a group question (Socket Mode retry)', async () => {
+  const code = 'G-7K2M-Q9XD';
+  let channel;
+  // What the director does on a bind it took: refreshRooms -> setRooms with the new room, before inbound answers.
+  const ownerChannels = registry(async message => {
+    if (message.groupBind) await channel.setRooms({ ownerRef: 'U1', rooms: [{ room_ref: 'C9', prefix: `<@${BOT}>`, label: '家' }] });
+    return { accepted: true };
+  });
+  ({ channel } = await started(ownerChannels));
+  const socket = FakeSocket.last;
+  await channel.setRooms({ ownerRef: 'U1', rooms: [] });
+  const bind = () => groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> ${code}` }));
+  await deliver(socket, bind());
+  await until(() => ownerChannels.calls.length === 1);
+  const again = bind();
+  again.body.retry_attempt = 1;
+  await deliver(socket, again);
+  await deliver(socket, bind());
+  await settle();
+  assert.equal(ownerChannels.calls.length, 1, 'the same message ref is not taken a second time');
+  assert.ok(ownerChannels.calls[0].groupBind);
+  // A later question in the bound channel is taken as usual.
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', ts: '1763481700.000100' })));
+  await until(() => ownerChannels.calls.length === 2);
+  assert.equal(ownerChannels.calls[1].messageRef, 'C9:1763481700.000100');
+  assert.equal(ownerChannels.calls[1].asked, true);
+  await channel.stop();
+});
+
+test('D5 (a): a paused group is named in the status by the name the dashboard shows, so the owner knows which to unbind', async () => {
+  const { channel, socket, web } = await started();
+  await channel.setRooms({ ownerRef: 'U1', rooms: [{ room_ref: 'C1', prefix: `<@${BOT}>`, label: '家人' },
+    { room_ref: 'C2', prefix: `<@${BOT}>`, label: '工作' }, { room_ref: 'C0000ABCDEF', prefix: `<@${BOT}>` }] });
+  await deliver(socket, groupEnvelope(mention({ channel: 'C2' }), { is_ext_shared_channel: true }));
+  await settle();
+  const detail = channel.status().detail;
+  assert.match(detail, /「工作」/);
+  assert.doesNotMatch(detail, /家人/);
+  assert.match(detail, /unbind/);
+  // A group with no name is named as the dashboard names it: its ref's last six.
+  web.infos.C0000ABCDEF = { id: 'C0000ABCDEF', ...PRIVATE_CHANNEL, is_private: false };
+  await assert.rejects(channel.sendGroup('C0000ABCDEF', 'x'), { code: 'room_paused' });
+  assert.match(channel.status().detail, /「工作」 shared/);
+  assert.match(channel.status().detail, /「ABCDEF」 not_private/);
+  await channel.stop();
+});
+
+test('D8: the bind notice goes into the thread the owner posted the code in (its root, not the code message)', async () => {
+  const code = 'G-7K2M-Q9XD';
+  let channel;
+  const ownerChannels = registry(async message => {
+    if (message.groupBind) await channel.setRooms({ ownerRef: 'U1', rooms: [{ room_ref: 'C9', prefix: `<@${BOT}>` }] });
+    return { accepted: true };
+  });
+  ({ channel } = await started(ownerChannels));
+  const socket = FakeSocket.last, web = FakeWeb.last;
+  await channel.setRooms({ ownerRef: 'U1', rooms: [] });
+  await deliver(socket, groupEnvelope(mention({ channel: 'C9', user: 'U1', text: `<@${BOT}> ${code}`, ts: '1763481700.000100',
+    thread_ts: '1763481500.000100' })));
+  await until(() => ownerChannels.calls.length === 1);
+  await channel.sendGroup('C9', 'NOTICE', { replyToRef: 'C9:1763481700.000100' });
+  assert.equal(web.posted[0].thread_ts, '1763481500.000100');
   await channel.stop();
 });

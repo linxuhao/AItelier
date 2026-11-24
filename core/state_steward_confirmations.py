@@ -363,13 +363,13 @@ class StateStewardConfirmations:
 
     def create(self, name, arguments, requester_message_id, audience="owner", question_ids=None):
         """The host's request for one confirmation: {code, text, channel, reply_to_message_id,
-        expires_at} (a group's also group_ref). Refused: no_requester, ambiguous_requester,
-        not an allowed outward tool of a connection this turn may use, a dev-mcp tool the job
-        `code` does not pin, too many pending, too long to confirm, invalid arguments, a
-        group's send budget or account cap; a group's text the exit check holds back answers
-        {refused: withheld} (nothing created to confirm, nothing to send). `question_ids` (a
-        group turn): every question the turn took - the audience record names only its first
-        step's senders."""
+        expires_at} (a group's also group_ref and reply_to_ref, its question's channel ref).
+        Refused: no_requester, ambiguous_requester, not an allowed outward tool of a connection
+        this turn may use, a dev-mcp tool the job `code` does not pin, too many pending, too long
+        to confirm, invalid arguments, a group's send budget or account cap; a group's text the
+        exit check holds back answers {refused: withheld} (nothing created to confirm, nothing to
+        send). `question_ids` (a group turn): every question the turn took - the audience record
+        names only its first step's senders."""
         from core import state_steward_capabilities as caps
         from core import state_steward_connections as sc
         from core.state_steward import steward_project
@@ -454,6 +454,10 @@ class StateStewardConfirmations:
                           # A withheld text is kept for the owner's panel and can never be confirmed.
                           "cancelled" if withheld else "pending", _iso(now),
                           json.dumps({"withheld": withheld}) if withheld else None))
+            # The asker's question's channel ref (step 23 Slack, D8): a channel that threads
+            # posts the text under it (WeChat ignores it).
+            reply_to_ref = conn.execute("SELECT channel_message_ref FROM state_group_messages WHERE message_id=?",
+                                        (requester_message_id,)).fetchone()[0] if group is not None else None
             if withheld:
                 from core.state_groups import WITHHELD_REASONS
                 result = {"refused": "withheld", "reason": WITHHELD_REASONS[withheld]}
@@ -466,7 +470,7 @@ class StateStewardConfirmations:
             # Committed above (the code a live-code hit retired, the kept text); nothing is sent.
             return result
         return {"code": code, "status": "pending", "text": text, "channel": requester["channel"],
-                **({"group_ref": group["group_ref"]} if group is not None else {}),
+                **({"group_ref": group["group_ref"], "reply_to_ref": reply_to_ref} if group is not None else {}),
                 "reply_to_message_id": requester_message_id, "expires_at": _iso(now + TTL)}
 
     def _group_requester(self, conn, message_id, question_ids):

@@ -481,7 +481,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       : Promise.resolve({ mirrored: false, reason: 'no_channels' }),
     /** Step 25 C11: one line into a bound group (a group reminder the host posted), through the
      *  same channel send and bridge queue as a group reply: true when the channel took it. */
-    groupSend: (channel, groupRef, text) => channels ? channels.sendGroup(channel, groupRef, text) : Promise.resolve(false),
+    groupSend: (channel, groupRef, text, options) => channels ? channels.sendGroup(channel, groupRef, text, options) : Promise.resolve(false),
     ownerChannelLogin: channel => channels ? channels.login(channel) : Promise.resolve({ refused: 'no_channels' }),
     setHostError: async message => { hostError = message; await report(currentPhase()).catch(() => {}); },
     clearHostError: () => { hostError = ''; return report(currentPhase()); },
@@ -1002,7 +1002,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // groupReplies). An owner turn's words never go to a group.
   if (groupTurns && channels && host.groups) {
     const watch = groupReplies({ turns: groupTurns, reply: args => host.groups.reply(args),
-      sendGroup: (channel, groupRef, text) => channels.sendGroup(channel, groupRef, text), warn: line => ctx.logger.warn(line),
+      sendGroup: (channel, groupRef, text, options) => channels.sendGroup(channel, groupRef, text, options), warn: line => ctx.logger.warn(line),
       mirror: (messageId, text) => channels.ownerMessageSent(messageId, text) });
     ctx.on('session/event', (session, event) => { if (session === agent.session) void watch(event); });
     setTimeout(redeliver, 1000).unref?.();

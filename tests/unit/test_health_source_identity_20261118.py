@@ -12,8 +12,8 @@ Three existing fields cannot answer "did my deploy load what I merged?":
 
 So the answer carries one more field, ``source_identity``: the root this process
 imported from, a digest over the covered modules' files captured ONCE at import,
-and the moment of that capture. These tests execute the property rather than
-describe it:
+the whole checkout's git commit and dirty state captured alongside it, and the
+moment of that capture. These tests execute the property rather than describe it:
 
 * the field is there, and the four pre-existing fields keep their shapes
   (``test_the_answer_carries_the_identity_beside_the_unchanged_fields``);
@@ -30,6 +30,12 @@ describe it:
   probe pool (``test_two_calls_report_one_identity``,
   ``test_the_route_still_runs_the_payload_in_its_own_probe_pool``).
 
+The four-file digest cannot see a merge that leaves those four files unchanged.
+A real scratch repository proves the added `vcs` half: two commits give two
+reported ids, a later commit does not move an earlier capture, and a git
+failure (no repository, no git on PATH, a non-zero exit, a timeout) is DECLARED
+with commit=None and dirty=None while /health still answers ok.
+
 The three pre-existing /health contracts are pinned next door and are run
 unchanged alongside this file: ``test_health_reports_process_age.py`` (uptime
 advances), ``test_health_reports_the_gate_export.py`` (the gate digest follows a
@@ -39,12 +45,15 @@ queue behind State work).
 """
 import hashlib
 import json
+import re
+import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 import api.main as main
+from core import source_identity
 
 # The digest set, fixed in api/main.py. The mutated file below must be one of
 # them, and it must be a module this process imported - both are asserted.
@@ -90,7 +99,10 @@ def test_the_answer_carries_the_identity_beside_the_unchanged_fields(client):
         assert set(body["process"]) == {"started_at", "uptime_seconds", "reason"}
 
         identity = body["source_identity"]
-        assert set(identity) == {"root", "digest", "captured_at", "files", "reason"}
+        # The five old keys keep their names and meanings; `vcs` is the added
+        # whole-tree fact, asserted in its own tests below.
+        assert set(identity) == {"root", "digest", "captured_at", "files",
+                                 "reason", "vcs"}
         assert identity["reason"] is None
         assert Path(identity["root"]).is_dir()
         assert isinstance(identity["digest"], str) and len(identity["digest"]) == 64
@@ -211,3 +223,154 @@ def test_the_route_still_runs_the_payload_in_its_own_probe_pool(client, monkeypa
     # The sizing is the frozen part: two probe threads, whatever the payload does.
     assert main._HEALTH_PROBE_THREADS == 2
     assert main._health_probe_pool()._max_workers == 2
+
+
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}\Z")
+
+
+def _git(repo, *args):
+    """A real git command against a scratch repository the test created."""
+    done = subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True, check=True, timeout=30)
+    return done.stdout.strip()
+
+
+def _scratch_repo(path):
+    """A clean checkout with the covered files present, made in tmp_path."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-q")
+    _git(path, "config", "user.email", "health@example.invalid")
+    _git(path, "config", "user.name", "health test")
+    for rel in source_identity.SOURCE_IDENTITY_MODULES:
+        covered = path / rel
+        covered.parent.mkdir(parents=True, exist_ok=True)
+        covered.write_text(f"# {rel}\nfirst\n", encoding="utf-8")
+    _git(path, "add", "--", *source_identity.SOURCE_IDENTITY_MODULES)
+    _git(path, "commit", "-q", "-m", "first commit")
+    return path
+
+
+def _commit_file(repo, rel, text, message):
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    _git(repo, "add", "--", rel)
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _assert_degraded(record, reason_fragment):
+    """Both git facts are absent and DECLARED; the digest half is untouched."""
+    vcs = record["vcs"]
+    assert set(vcs) == {"commit", "dirty", "reason"}
+    assert vcs["commit"] is None
+    assert vcs["dirty"] is None
+    assert isinstance(vcs["reason"], str) and vcs["reason"]
+    assert reason_fragment in vcs["reason"], vcs["reason"]
+    assert isinstance(record["digest"], str) and len(record["digest"]) == 64
+    assert list(record["files"]) == list(source_identity.SOURCE_IDENTITY_MODULES)
+    assert record["reason"] is None
+    # The failure is declared, never raised out of capture or out of /health.
+    assert main.health_check()["status"] == "ok"
+
+
+def test_two_distinct_commits_give_two_reported_vcs_commits(tmp_path):
+    repo = _scratch_repo(tmp_path / "two-commits")
+    first_commit = _git(repo, "rev-parse", "HEAD")
+    assert _COMMIT_ID.fullmatch(first_commit)
+
+    first = source_identity.capture(repo)
+    assert first["vcs"]["commit"] == first_commit
+    assert first["vcs"]["dirty"] is False
+    assert first["vcs"]["reason"] is None
+
+    second_commit = _commit_file(repo, "core/state_channels.py",
+                                 "a merge outside the digest\n", "merge elsewhere")
+    assert _COMMIT_ID.fullmatch(second_commit)
+    assert second_commit != first_commit
+    assert _git(repo, "rev-parse", "HEAD") == second_commit
+
+    second = source_identity.capture(repo)
+    assert second["vcs"]["commit"] == second_commit
+    assert second["vcs"]["dirty"] is False
+    assert first["vcs"]["commit"] == first_commit
+    # Exactly why the added field exists: the four covered files never changed.
+    assert first["digest"] == second["digest"]
+
+
+def test_a_capture_never_follows_the_repo_or_a_second_answer(tmp_path):
+    repo = _scratch_repo(tmp_path / "snapshot")
+    before = _git(repo, "rev-parse", "HEAD")
+    captured = source_identity.capture(repo)
+    assert captured["vcs"]["commit"] == before
+
+    after = _commit_file(repo, "core/state_channels.py",
+                         "merged after import\n", "merge after capture")
+    assert after != before
+    assert _git(repo, "rev-parse", "HEAD") == after
+    assert captured["vcs"]["commit"] == before
+    assert captured["vcs"]["dirty"] is False
+    assert source_identity.capture(repo)["vcs"]["commit"] == after
+
+    first = main.health_check()["source_identity"]
+    second = main.health_check()["source_identity"]
+    assert first["captured_at"] == second["captured_at"] == \
+        main._SOURCE_IDENTITY["captured_at"]
+    assert first["vcs"]["commit"] == second["vcs"]["commit"] == \
+        main._SOURCE_IDENTITY["vcs"]["commit"]
+    # The app was imported from this checkout, whose HEAD names a real commit.
+    assert _COMMIT_ID.fullmatch(first["vcs"]["commit"])
+
+
+def test_not_a_git_repository_is_declared(tmp_path):
+    plain = tmp_path / "plain-tree"                 # a real directory, no .git
+    plain.mkdir()
+    for rel in source_identity.SOURCE_IDENTITY_MODULES:
+        target = plain / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("readable\n", encoding="utf-8")
+
+    _assert_degraded(source_identity.capture(plain), "not a git repository")
+
+
+def test_git_absent_from_path_is_declared(tmp_path, monkeypatch):
+    repo = _scratch_repo(tmp_path / "without-git")
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+
+    _assert_degraded(source_identity.capture(repo), "git not found on PATH")
+
+
+def test_a_nonzero_git_exit_is_declared(tmp_path, monkeypatch):
+    repo = _scratch_repo(tmp_path / "failing-git")
+
+    def refuse(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 128, stdout="",
+                                           stderr="fatal: deliberate git failure")
+
+    monkeypatch.setattr(source_identity.subprocess, "run", refuse)
+    record = source_identity.capture(repo)
+    _assert_degraded(record, "exit 128")
+    assert "deliberate git failure" in record["vcs"]["reason"]
+
+
+def test_a_git_timeout_is_declared(tmp_path, monkeypatch):
+    repo = _scratch_repo(tmp_path / "hanging-git")
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 5.0))
+
+    monkeypatch.setattr(source_identity.subprocess, "run", hang)
+    _assert_degraded(source_identity.capture(repo), "timed out")
+
+
+def test_an_unreadable_covered_file_keeps_its_own_reason(tmp_path):
+    repo = _scratch_repo(tmp_path / "missing-covered-file")
+    (repo / MUTATED_FILE).unlink()
+    record = source_identity.capture(repo)
+
+    assert record["digest"] is None
+    assert MUTATED_FILE in record["reason"]
+    assert record["vcs"]["commit"] == _git(repo, "rev-parse", "HEAD")
+    assert record["vcs"]["reason"] is None

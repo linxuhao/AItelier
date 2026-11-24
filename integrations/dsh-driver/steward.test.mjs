@@ -290,6 +290,21 @@ const env = (extra = {}) => ({ AITELIER_DSH_PROJECT: 'aitelier-home', AITELIER_D
   AITELIER_DSH_MODEL: 'm', AITELIER_DSH_STATE_DIR: '/tmp/x', AITELIER_DSH_ENTRY: '/tmp/dsh.mjs', AITELIER_DRIVER_ID: 'drv-home',
   AITELIER_DSH_EXECUTION: 'host', ...extra });
 
+test('a host zone Intl cannot use is no memory zone: the plugin keeps its UTC instead of refusing the memory (overfit fix round)', async () => {
+  // TZ= (empty) makes Node resolve 'Etc/Unknown', which memory.timeZone refuses; the zone is
+  // read once at import, so each case is its own process.
+  const { spawnSync } = await import('node:child_process');
+  const script = `import { aitelierHost } from ${JSON.stringify(new URL('./runtime.mjs', import.meta.url).href)};
+    process.stdout.write(JSON.stringify(aitelierHost(${JSON.stringify(env({ AITELIER_DSH_ROLE: 'steward' }))}).config.memory));`;
+  const memoryUnder = (TZ) => {
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, TZ }, encoding: 'utf8' });
+    assert.equal(child.status, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  };
+  assert.deepEqual(memoryUnder(''), { userId: 'owner' }, 'TZ= : no zone, the plugin uses UTC');
+  assert.deepEqual(memoryUnder('Europe/Paris'), { userId: 'owner', timeZone: 'Europe/Paris' }, 'a real host zone is kept');
+});
+
 test('the AItelier host started as the steward: steward root, memory, portfolio and handoff, no full access; a director host is unchanged', () => {
   const steward = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward' }));
   assert.equal(steward.config.rootRole, 'steward');

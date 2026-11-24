@@ -34,7 +34,7 @@ const BACKEND_ONLY = ['dashboard', 'Slack', 'WeChat', 'slack', 'wechat', 'Daily 
   'channel_at'];
 
 for (const [label, options] of [['with projectsDir and memory', { projectsDir: '/tmp/projects', memory: { userId: 'o' } }],
-  ['bare', {}]]) {
+  ['with projectsDir only', { projectsDir: '/tmp/projects' }], ['with memory only', { memory: { userId: 'o' } }], ['bare', {}]]) {
   test(`the local host's steward (${label}) is told only what it can do`, () => {
     const host = localHost({ root: '/tmp/x', provider: 'p', model: 'm', rootRole: 'steward', ...options });
     const prompt = stewardPrompt(md, stewardPromptFeatures(host.capabilities, { memory: host.config.memory }));
@@ -47,12 +47,20 @@ for (const [label, options] of [['with projectsDir and memory', { projectsDir: '
     if (options.memory) {
       assert.match(prompt, /Each\nconversation turn is recorded automatically/);
       assert.match(prompt, /and keep what matters in their memory/);
-    } else assert.ok(!prompt.includes('memory_'), prompt);
+      assert.match(prompt, /from memory, answer it\./);
+      // Review round 2 (nit): memory_forget refuses on this host (no owner message to cite), so the
+      // steward is sent to its owner's forget command, not told to cite a message id.
+      assert.ok(!prompt.includes('citing the id of that message'), prompt);
+      assert.match(prompt, /give them the forget command\nyour context snapshot's owner_commands names/);
+    } else for (const word of ['memory_', 'memory entry', 'from memory']) assert.ok(!prompt.includes(word), word + ':\n' + prompt);
     if (options.projectsDir) {
       assert.match(prompt, /read every project \(portfolio_projects, portfolio_project, portfolio_conversation\)/);
       assert.match(prompt, /make a proposal/);
       assert.match(prompt, /when your context snapshot has owner_commands, give them\n {2}the command it names/);
       assert.ok(!prompt.includes('starting or stopping'), 'the local host proposes only a new project');
-    } else for (const word of ['portfolio_', 'propose']) assert.ok(!prompt.includes(word), word);
+      assert.match(prompt, /answer from the projects/);
+      assert.match(prompt, /a project made\nprogress they care about/);
+    } else for (const word of ['portfolio_', 'propose', 'project made', 'project is stuck', 'from the projects', 'which project'])
+      assert.ok(!prompt.includes(word), word + ':\n' + prompt);
   });
 }

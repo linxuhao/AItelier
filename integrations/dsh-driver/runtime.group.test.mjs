@@ -548,6 +548,40 @@ export function apply(ctx) {
 }
 `;
 
+// Overfit review 2026-11-24 (重-10): a line typed straight into the steward's session, as DSH's
+// client sends one (a user message whose source is {kind: 'user'}), once <dir>/typed.say exists;
+// /test/typed-done once the turn it opened has ended.
+const TYPED_PROBE = String.raw`
+import { readFile, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+export const name = 'fixture-typed-line';
+export const inject = ['agents'];
+const post = path => fetch(process.env.AITELIER_URL + path, { method: 'POST', body: '{}' }).catch(() => {});
+export function apply(ctx, { dir, session }) {
+  let text, opened = false, busy = false;
+  const timer = setInterval(async () => {
+    if (busy || text !== undefined) return;
+    busy = true;
+    try {
+      const line = await readFile(join(dir, 'typed.say'), 'utf8').catch(() => undefined);
+      const agent = ctx.agents.get(session);
+      if (line === undefined || !agent) return;
+      const { createUserMessage } = await import(createRequire(process.env.AITELIER_DSH_ENTRY).resolve('@deepseek-ai/dsh-llm'));
+      text = line;
+      agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user', rpcId: 'typed-1' } }));
+      await rm(join(dir, 'typed.say'));
+    } finally { busy = false; }
+  }, 50);
+  ctx.on('session/event', (s, event) => {
+    if (s?.id !== session || text === undefined) return;
+    if (event.type === 'user/message' && JSON.stringify(event.data).includes(text)) opened = true;
+    else if (event.type === 'turn/end' && opened) { opened = false; void post('/test/typed-done'); }
+  });
+  ctx.on('dispose', () => clearInterval(timer));
+}
+`;
+
 // The family member asks, and once the steward's group reply went out, replies with the code.
 const CONFIRM_CHANNEL = String.raw`
 export const name = 'fixture-group-confirm-channel';
@@ -590,7 +624,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
       { kind: 'conn', visibility: 'private', pinned_name: 'mcp__sw__calme__list_events', available: true },
       { kind: 'conn', visibility: 'public', pinned_name: 'mcp__sw__calfam__list_events', available: true }] }] } };
   const systems = [];
-  let relays = 0;
+  let relays = 0, typedDone = false;
   const server = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const raw = Buffer.concat(chunks).toString();
@@ -602,6 +636,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     if (url === '/test/inbound') { seen.inbound.push(body); return send({}); }
     if (url === '/test/mcp') { seen.mcp.push(body); return send({}); }
     if (url === '/test/system') { systems.push(body.system); return send({}); }
+    if (url === '/test/typed-done') { typedDone = true; return send({}); }
     if (url === '/test/wait-first-reply') { await replied; return send({}); }
     if (url.startsWith('/test/')) return send({});
     seen.state.push({ path: url, body });
@@ -653,6 +688,7 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     await mkdir(profile, { recursive: true });
     await writeFile(join(directory, 'provider.mjs'), CONFIRM_PROVIDER);
     await writeFile(join(directory, 'sw-tools.mjs'), SW_TOOLS);
+    await writeFile(join(directory, 'typed.mjs'), TYPED_PROBE);
     await writeFile(join(directory, 'channel.mjs'), CONFIRM_CHANNEL);
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
@@ -662,7 +698,8 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
         { id: 'fixture-sw-tools', name: join(directory, 'sw-tools.mjs') },
         { id: 'dsh-director', name: join(here, '../dsh-director/index.mjs') },
         { id: 'aitelier-driver', name: join(here, 'runtime.mjs') },
-        { id: 'dsh-channel-wechat', name: join(directory, 'channel.mjs') }] },
+        { id: 'dsh-channel-wechat', name: join(directory, 'channel.mjs') },
+        { id: 'fixture-typed-line', name: join(directory, 'typed.mjs'), config: { dir: directory, session: 'gcf-root' } }] },
     ]));
     const token = join(directory, 'token');
     await writeFile(token, 'fixture-only-driver-token', { mode: 0o600 });
@@ -724,6 +761,21 @@ test('real pinned DSH, the AItelier adapter: a group turn calls public connectio
     assert.ok(systems.every(system => system.includes(baseSteward.trim())), 'the adapter\'s steward prompt is steward.md unchanged');
     assert.match(resultOf('b1'), /mcp__sw__calfam__list_events/, trace);
     assert.doesNotMatch(resultOf('b1'), /calme/, trace);
+    // Overfit review 2026-11-24 (重-10): the adapter records its owner's turns itself (syncConversation,
+    // from the backend's conversation: empty here), so the plugin adds no second writer - a line
+    // typed straight into the session, as DSH's client sends one, opens a turn and reaches no memory.
+    const TYPED = 'TYPED_LINE_' + randomUUID();
+    await writeFile(join(directory, 'typed.say'), TYPED);
+    const typedBy = Date.now() + 60000;
+    while (!typedDone && Date.now() < typedBy && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(typedDone, 'the typed line\'s turn never ended' + trace);
+    proc.kill('SIGTERM'); await once(proc, 'exit');
+    const store = await MemoryStore.open({ root: join(directory, 'memory'), userId: 'owner' });
+    try {
+      const entries = [...store.entries.values()];
+      assert.deepEqual(entries.filter(e => e.source === 'conversation').map(e => [e.id, e.text]), [], 'the plugin recorded a turn on the adapter');
+      assert.ok(!entries.some(e => e.text.includes(TYPED)), 'the typed line reached memory');
+    } finally { await store.close(); }
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));

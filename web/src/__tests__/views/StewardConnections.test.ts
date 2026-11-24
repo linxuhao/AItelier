@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
+import { t } from '../../lib/i18n.svelte';
 
 const api = vi.hoisted(() => ({
   listStewardConnections: vi.fn(), saveStewardConnection: vi.fn(), deleteStewardConnection: vi.fn(),
@@ -37,10 +38,29 @@ const tools = (): StewardConnectionTools => ({conn_id: 'media', instructions: '<
   tools: [
     {raw_name: 'ocr_image', gw_name: 'ocr_image', name: 'mcp__sw__media__ocr_image', description: '<img src=x onerror=alert(1)>',
       input_schema: {}, annotations: {readOnlyHint: true}, schema_sha256: 'a', allowed: true, outward: false, egress: true,
-      blocked_args: ['image_url'], daily_cap: null, state: 'allowed'},
+      blocked_args: ['image_url'], daily_cap: null, state: 'allowed', locked: [], locked_reason: null},
     {raw_name: 'web_search', gw_name: 'web_search', name: 'mcp__sw__media__web_search', description: 'Search', input_schema: {},
       annotations: null, schema_sha256: 'b', allowed: true, outward: false, egress: true, blocked_args: [], daily_cap: 5,
-      state: 'changed'},
+      state: 'changed', locked: [], locked_reason: null},
+  ]});
+
+// The dev-mcp projection: the backend holds the write tool's outward/egress and the
+// subagent tool's allowed, and reports the read tool as freely editable.
+const LANGS = ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr', 'de', 'es'] as const;
+const devListed = (): StewardConnections => listed({connections: [{...listed().connections[0],
+  conn_id: 'dev', label: 'Dev', url: 'http://dev_mcp:7676/mcp', visibility: 'private'}],
+  effective_tools: [], tool_counts: {all: 3, allowed: 2, outward: 1, changed: 0, new: 0}});
+const devTools = (): StewardConnectionTools => ({conn_id: 'dev', instructions: null, last_probe_at: null, last_error: null,
+  tools: [
+    {raw_name: 'bash', gw_name: 'bash', name: 'mcp__sw__dev__bash', description: 'Shell', input_schema: {},
+      annotations: null, schema_sha256: 's1', allowed: true, outward: true, egress: true, blocked_args: [], daily_cap: null,
+      state: 'allowed', locked: ['outward', 'egress'], locked_reason: 'dev_mcp'},
+    {raw_name: 'subagent_start', gw_name: 'subagent_start', name: 'mcp__sw__dev__subagent_start', description: 'Spawn',
+      input_schema: {}, annotations: null, schema_sha256: 's2', allowed: false, outward: false, egress: true,
+      blocked_args: [], daily_cap: null, state: 'off', locked: ['allowed'], locked_reason: 'dev_mcp'},
+    {raw_name: 'list_dir', gw_name: 'list_dir', name: 'mcp__sw__dev__list_dir', description: 'List', input_schema: {},
+      annotations: null, schema_sha256: 's3', allowed: true, outward: false, egress: true, blocked_args: [], daily_cap: null,
+      state: 'allowed', locked: [], locked_reason: null},
   ]});
 
 beforeEach(() => {
@@ -140,6 +160,69 @@ describe('the connections tab', () => {
     await fireEvent.click(view.container.querySelector('[data-restart-pending] button')!);
     await waitFor(() => expect(api.startDshDriver).toHaveBeenCalledWith('aitelier-home'));
     expect(api.stopDshDriver).toHaveBeenCalledWith('aitelier-home');
+  });
+});
+
+describe('the dev-mcp lock in the connections panel', () => {
+  const devConn = (container: HTMLElement) => container.querySelector('[data-conn="dev"]') as HTMLElement;
+  async function openDevTools() {
+    api.listStewardConnections.mockResolvedValue(devListed());
+    api.stewardConnectionTools.mockResolvedValue(devTools());
+    api.probeStewardConnection.mockResolvedValue(devTools());
+    const view = render(StewardConnectionsView);
+    await waitFor(() => expect(devConn(view.container)).not.toBeNull());
+    await fireEvent.click(devConn(view.container).querySelector('[data-conn-tools-open]')!);
+    await waitFor(() => expect(view.container.querySelector('[data-tool="bash"]')).not.toBeNull());
+    return view;
+  }
+  const tick = (view: {container: HTMLElement}, tool: string, flag: string) =>
+    view.container.querySelector(`[data-tool="${tool}"] [data-tick="${flag}"]`) as HTMLInputElement;
+
+  it('disables only the locked ticks with a translated reason, and a save keeps another tool\'s edit', async () => {
+    const view = await openDevTools();
+    const reason = t('steward.connToolLocked');
+    expect(reason).not.toBe('steward.connToolLocked');
+    expect(tick(view, 'bash', 'outward').disabled).toBe(true);
+    expect(tick(view, 'bash', 'egress').disabled).toBe(true);
+    expect(tick(view, 'bash', 'allowed').disabled).toBe(false);
+    expect(view.container.querySelector('[data-tool="bash"] [data-tool-locked]')?.textContent).toBe(reason);
+    expect(tick(view, 'subagent_start', 'allowed').disabled).toBe(true);
+    expect(tick(view, 'subagent_start', 'outward').disabled).toBe(false);
+    expect(view.container.querySelector('[data-tool="subagent_start"] [data-tool-locked]')?.textContent).toBe(reason);
+    expect(tick(view, 'list_dir', 'allowed').disabled).toBe(false);
+    expect(tick(view, 'list_dir', 'outward').disabled).toBe(false);
+    expect(view.container.querySelector('[data-tool="list_dir"] [data-tool-locked]')).toBeNull();
+
+    await fireEvent.click(tick(view, 'list_dir', 'outward'));
+    await fireEvent.click(view.container.querySelector('[data-conn-save-tools]')!);
+    await waitFor(() => expect(api.setStewardConnectionTools).toHaveBeenCalledTimes(1));
+    const [connId, sent] = api.setStewardConnectionTools.mock.calls[0] as [string, {raw_name: string; [k: string]: unknown}[]];
+    expect(connId).toBe('dev');
+    expect(sent).toHaveLength(3);  // the locked tools are still in the batch
+    const byName = Object.fromEntries(sent.map(c => [c.raw_name, c]));
+    expect(byName.bash).toMatchObject({outward: true, egress: true});  // sent unchanged
+    expect(byName.subagent_start).toMatchObject({allowed: false});
+    expect(byName.list_dir.outward).toBe(true);  // the other tool's edit survives
+  });
+
+  it('names the lock reason in all eight languages and translates a refusal that still arrives', async () => {
+    const keys = ['steward.connToolLocked', 'steward.connToolLockedRefused'];
+    langStore.set('en');
+    const english = Object.fromEntries(keys.map(k => [k, t(k)]));
+    for (const key of keys) expect(english[key], key).not.toBe(key);
+    try {
+      for (const lang of LANGS.slice(1)) {
+        langStore.set(lang);
+        for (const key of keys) expect(t(key), `${lang} ${key}`).not.toBe(english[key]);
+      }
+      langStore.set('zh-CN');
+      api.setStewardConnectionTools.mockRejectedValueOnce(new Error('locked: dev_mcp'));
+      const view = await openDevTools();
+      await fireEvent.click(view.container.querySelector('[data-conn-save-tools]')!);
+      await waitFor(() => expect(view.container.querySelector('[data-conn-tools] [role="alert"]')?.textContent)
+        .toBe(t('steward.connToolLockedRefused')));
+      expect(view.container.textContent).not.toContain('locked: dev_mcp');
+    } finally { langStore.set('en'); }
   });
 });
 

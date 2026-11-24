@@ -662,3 +662,42 @@ def test_compose_passes_the_tunnel_names_to_the_backend():
                 if "AITELIER_STEWARD_HOST_ADDRESSES" in (s.get("environment") or {})]
     assert backends and all(s["environment"]["AITELIER_DEV_MCP_HOSTS"] == "${AITELIER_DEV_MCP_HOSTS:-}"
                             for s in backends)
+
+
+def test_the_panel_sees_the_same_lock_the_write_guard_enforces(world):
+    """The projection must say which ticks the write path refuses, on both sides of the line:
+    a dev-mcp write tool is locked for outward/egress, a subagent_* tool for `allowed`, a
+    dev-mcp read tool and every tool of an ordinary connection stay editable."""
+    ready_dev(world)
+    add(world, conn_id="box", visibility="private")
+    discover(world, "box", tools=DEV_TOOLS)
+    shown_dev = {t["raw_name"]: t for t in execute(
+        world.owner, "list_steward_connection_tools", {"conn_id": "dev"})["tools"]}
+    shown_box = {t["raw_name"]: t for t in execute(
+        world.owner, "list_steward_connection_tools", {"conn_id": "box"})["tools"]}
+    for name in sc.dev_mcp_writes():
+        assert name in shown_dev
+        assert shown_dev[name]["locked"] == ["outward", "egress"]
+        assert shown_dev[name]["locked_reason"] == "dev_mcp"
+    assert shown_dev["subagent_start"]["locked"] == ["allowed"]
+    assert shown_dev["subagent_start"]["locked_reason"] == "dev_mcp"
+    assert shown_dev["list_dir"]["locked"] == []  # an accepted dev-mcp edit
+    assert shown_dev["list_dir"]["locked_reason"] is None
+    assert all(t["locked"] == [] and t["locked_reason"] is None for t in shown_box.values())
+    # The same facts the panel showed are the ones the write guard refuses.
+    hashes = shown(world, "dev")
+    with pytest.raises(StateGraphError, match="locked: dev_mcp"):
+        tools_set(world, [{"raw_name": "bash", "outward": False, "schema_sha256": hashes["bash"]}])
+    with pytest.raises(StateGraphError, match="locked: dev_mcp"):
+        tools_set(world, [{"raw_name": "subagent_start", "allowed": True,
+                           "schema_sha256": hashes["subagent_start"]}])
+
+
+def test_a_locked_flag_in_a_mixed_save_refuses_the_batch_and_keeps_every_row(world):
+    """A legitimate edit earlier in the batch must not survive a locked flag later in it:
+    the whole call is refused and no row changes."""
+    ready_dev(world)
+    before = rows(world)
+    with pytest.raises(StateGraphError, match="locked: dev_mcp"):
+        tools_set(world, [{"raw_name": "list_dir", "outward": False}, {"raw_name": "bash", "outward": False}])
+    assert rows(world) == before

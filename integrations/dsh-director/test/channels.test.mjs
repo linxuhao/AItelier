@@ -543,13 +543,18 @@ test("an executed decision's line names the host's kind and target in both langu
   assert.equal(line('decline', 'stop_driver', 'alpha'), 'proposal prop-x: declined - stop director of alpha. 已拒绝：停止 alpha 项目的导演。');
   const each = { create_project: ['create project alpha', '创建 alpha 项目'], start_driver: ['start director of alpha', '启动 alpha 项目的导演'],
     stop_driver: ['stop director of alpha', '停止 alpha 项目的导演'], archive_project: ['archive project alpha', '归档 alpha 项目'],
-    unarchive_project: ['unarchive project alpha', '取消归档 alpha 项目'] };
+    unarchive_project: ['unarchive project alpha', '取消归档 alpha 项目'], capability_route: ['basic capability alpha', '基础能力 alpha'] };
   assert.deepEqual(Object.keys(each).sort(), [...PROPOSAL_KINDS].sort(), 'every proposal kind has its phrase');
   for (const [kind, [en, zh]] of Object.entries(each)) {
     assert.equal(line('approve', kind, 'alpha'), `proposal prop-x: approved and done - ${en}. 已同意并执行：${zh}。`);
     assert.equal(line('decline', kind, 'alpha'), `proposal prop-x: declined - ${en}. 已拒绝：${zh}。`);
   }
   assert.equal(line('approve', 'rename_project', 'alpha'), 'proposal prop-x: approved and done - rename_project alpha. 已同意并执行：rename_project alpha。');
+  // Step 24.4 (design-steward 7.8.24 "五" 3): the host's target is the resolved route; a long route is cut at 60.
+  assert.equal(line('approve', 'capability_route', 'draw ← media/generate_image'),
+    'proposal prop-x: approved and done - basic capability draw ← media/generate_image. 已同意并执行：基础能力 draw ← media/generate_image。');
+  const route = line('approve', 'capability_route', 'email ← ' + Array.from({ length: 8 }, (_, i) => `mail${i}/search_messages`).join(' → '));
+  assert.ok(route.includes('基础能力 email ← mail0/search_messages') && route.includes('…') && route.length < 200, route);
   const long = line('approve', 'archive_project', 'a'.repeat(5000));
   assert.ok(long.length < 200 && long.includes('a'.repeat(59) + '…') && !long.includes('a'.repeat(60)), long);
   assert.ok(line('approve', 'k'.repeat(5000), 'alpha').length < 200, 'an unknown long kind is cut too');

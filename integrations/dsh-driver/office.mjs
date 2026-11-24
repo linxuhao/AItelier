@@ -53,7 +53,11 @@ export const OFFICE_LIMITS = Object.freeze({
   // An xlsx read (7.8.12c "七"): sheets and rows a call, columns and characters a cell, characters a call.
   readSheets: 3, readRows: 300, readCols: 30, readCellChars: 200, readChars: 8000,
 });
-/** Where the image keeps what a job runs (OnlyOffice Docs 10). The self-check runs all of them. */
+/** Where the image keeps what a job runs (OnlyOffice Docs 10). The self-check runs only part of
+ *  it: `docker image inspect` of the pinned id, allfontsgen (over coreFonts) only when this image's
+ *  font cache is not there yet, and docbuilder making one PDF from the document template, which
+ *  the PDF reader then reads back. It never runs x2t (a docx or pptx read; `themes` is named only
+ *  in x2t's task) or the sheet and dump templates (an xlsx made or read). */
 export const OFFICE_IMAGE_LAYOUT = Object.freeze({
   bin: '/var/www/onlyoffice/documentserver/server/FileConverter/bin',
   x2t: '/var/www/onlyoffice/documentserver/server/FileConverter/bin/x2t',

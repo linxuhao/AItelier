@@ -3,7 +3,9 @@
  *  right: propose only records an open proposal. Registered only when the host provides
  *  `proposals` (host.d.ts v1.2). */
 
-export const PROPOSAL_KINDS = ['create_project', 'start_driver', 'stop_driver', 'archive_project', 'unarchive_project'];
+export const PROPOSAL_KINDS = ['create_project', 'start_driver', 'stop_driver', 'archive_project', 'unarchive_project',
+  // Step 24.4 (design-steward 7.8.24 "五"): a route for one job of the basic capabilities.
+  'capability_route'];
 /** What each kind's payload is, as the propose tool tells the model. */
 const PAYLOADS = {
   create_project: 'create_project {project_id, title, goal, seed_nodes: [{key, goal, acceptance}] - the shape the host\'s add-nodes takes}',
@@ -11,6 +13,7 @@ const PAYLOADS = {
   stop_driver: 'stop_driver {project_id}',
   archive_project: 'archive_project {project_id, reason?} hides a project from your owner\'s project list (nothing is deleted; never your own project; it must be listed now)',
   unarchive_project: 'unarchive_project {project_id, reason?} lists an archived project again',
+  capability_route: 'capability_route {cap_id, route: ["native" | "missing" | a host tool name | a connection tool\'s exact name from search_tools], source: {kind: "owner_message", ref} | {kind: "tool_search"}}: sets which tools do one job of your basic capabilities, first = main',
 };
 
 /** @param proposals host.proposals: { propose({kind, payload, reason}, signal), withdraw({id, reason}, signal), kinds? } -

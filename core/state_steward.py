@@ -62,7 +62,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS state_steward_proposals (
  proposal_id TEXT PRIMARY KEY,
  version INTEGER NOT NULL CHECK(version>0),
- kind TEXT NOT NULL CHECK(kind IN ('create_project','start_driver','stop_driver','archive_project','unarchive_project','connection_change')),
+ kind TEXT NOT NULL CHECK(kind IN ('create_project','start_driver','stop_driver','archive_project','unarchive_project','connection_change','capability_route')),
  payload_json TEXT NOT NULL, reason TEXT NOT NULL,
  status TEXT NOT NULL CHECK(status IN ('open','executing','done','failed','declined','withdrawn','superseded')),
  created_by TEXT NOT NULL, created_at TEXT NOT NULL, supersedes TEXT,
@@ -100,7 +100,8 @@ TARGET_COLUMNS = (
     # turn (else NULL), and that member's sender_ref.
     ("created_via", "TEXT"), ("created_by_ref", "TEXT"))
 
-KINDS = ("create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project", "connection_change")
+KINDS = ("create_project", "start_driver", "stop_driver", "archive_project", "unarchive_project", "connection_change",
+         "capability_route")
 # Owner 2026-11-18: the steward may PROPOSE archiving / unarchiving a project; the
 # owner approves on the card and the backend writes it as that owner. The steward
 # itself keeps no archive permission (archive_project is not on its whitelist).
@@ -108,9 +109,12 @@ ARCHIVE_KINDS = ("archive_project", "unarchive_project")
 # Step 24.1c (design-steward 7.8.10a): the steward proposes changes to its own MCP
 # connections; the backend executes the frozen payload (core.state_steward_connection_proposals).
 CONNECTION_KIND = "connection_change"
+# Step 24.4 (design-steward 7.8.24 "五"): the steward proposes a route of its basic-capabilities
+# table; the backend writes the frozen route (core.state_steward_capabilities).
+CAPABILITY_KIND = "capability_route"
 # The kind CHECK a database created before the archive kinds carries. `_migrate_kinds`
-# rebuilds a table whose kind CHECK is not SCHEMA's (this one, or the five kinds before
-# connection_change) once with SCHEMA's CHECK.
+# rebuilds a table whose kind CHECK is not SCHEMA's (this one, the five kinds before
+# connection_change, or the six before capability_route) once with SCHEMA's CHECK.
 OLD_KIND_CHECK = "CHECK(kind IN ('create_project','start_driver','stop_driver'))"
 _KIND_CHECK = re.compile(r"CHECK\s*\(\s*kind\s+IN\s*\([^)]*\)\s*\)")
 MEMORY_KINDS = ("profile_read", "profile_update", "forgotten_list", "forget", "restore", "purge")
@@ -618,10 +622,13 @@ class StateSteward:
         """Record one OPEN proposal by the steward. Executes nothing."""
         if kind not in KINDS:
             raise StateGraphError(f"unknown_kind: kind must be one of {', '.join(KINDS)}")
-        connection = kind == CONNECTION_KIND
+        connection, capability = kind == CONNECTION_KIND, kind == CAPABILITY_KIND
         if connection:
             from core import state_steward_connection_proposals as ccp
             payload = ccp.validate(payload)
+        elif capability:
+            from core import state_steward_capabilities as caps
+            payload = caps.validate_proposal(payload)
         else:
             payload = self._validate(kind, payload)
         reason = reason.strip()
@@ -640,6 +647,13 @@ class StateSteward:
                 payload = ccp.prepare(conn, payload, steward_project())
                 return self._insert_proposal(conn, request_key, request_hash, kind, payload, reason, supersedes,
                                              {"needs_dashboard": payload["widens"]})
+            if capability:
+                # Resolved in the effective set, checked, the row version and the card frozen. A
+                # route found by tool search (no owner's words) is approved on the card only.
+                payload = caps.prepare_proposal(conn, payload, steward_project(), supersedes)
+                needs = payload["source"]["kind"] != "owner_message"
+                return self._insert_proposal(conn, request_key, request_hash, kind, payload, reason, supersedes,
+                                             {"needs_dashboard": True} if needs else None)
             target = payload["project_id"]
             if kind in ARCHIVE_KINDS and target == steward_project():
                 raise StateGraphError(f"invalid_project: {target} is the steward's own project")
@@ -863,6 +877,28 @@ class StateSteward:
         self._notify()
         return out
 
+    def execute_capability_route(self, proposal_id):
+        """Run an EXECUTING capability_route proposal (design-steward 7.8.24 "五"): the row
+        version, every pinned tool and the route's rules checked again and the frozen route
+        written with the proposal's `done` in ONE transaction. A mismatch fails it (separately)
+        with its code alone and writes nothing; the result (the steward's wake) names kinds only."""
+        from core import state_steward_capabilities as caps
+        try:
+            with self.store.transaction(write=True) as conn:
+                row = self._get(conn, proposal_id)
+                if row["status"] != "executing" or row["kind"] != CAPABILITY_KIND:
+                    return _proposal(row)
+                result = caps.execute_proposal(conn, json.loads(row["payload_json"]), proposal_id)
+                self._finish(conn, proposal_id, "done", result)
+                out = _proposal(self._get(conn, proposal_id))
+        except caps.ExecutionRefused as exc:
+            return self.finish(proposal_id, "failed", {"error": exc.code})
+        except Exception as exc:  # noqa: BLE001 - any failure is the proposal's result, as a code
+            return self.finish(proposal_id, "failed", {"error": str(exc).split(":")[0]
+                                                       if isinstance(exc, StateGraphError) else type(exc).__name__})
+        self._notify()
+        return out
+
     def finish(self, proposal_id, status, result):
         """Write the terminal state of an EXECUTING proposal (and wake the steward)."""
         with self.store.transaction(write=True) as conn:
@@ -945,6 +981,10 @@ class StateSteward:
                 # One transaction: a crash rolled all of it back, so it runs again (and
                 # fails, writing nothing, if the registry moved meanwhile).
                 self.execute_connection_change(row["proposal_id"])
+                continue
+            if row["kind"] == CAPABILITY_KIND:
+                # One transaction too: it runs again (and fails, writing nothing, if the row moved).
+                self.execute_capability_route(row["proposal_id"])
                 continue
             target = json.loads(row["payload_json"])["project_id"]
             if row["kind"] in ARCHIVE_KINDS:

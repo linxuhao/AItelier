@@ -308,6 +308,13 @@ def _plan():
             ("INSERT INTO state_steward_tool_calls(conn_id,raw_name,at,local_day,rpc_error,is_error) "
              "VALUES(?,'tool',?,'2999-01-01',?,0)"),
             (STEWARD_CONNECTION, now, c("state_steward_tool_calls"))),
+        # Step 24.4: one basic-capabilities route the owner set (the canary as the pinned
+        # connection tool's conn_uid).
+        "state_steward_capabilities": (
+            ("INSERT INTO state_steward_capabilities(cap_id,route_json,version,set_via,proposal_id,updated_at) "
+             "VALUES('draw',?,1,'dashboard',NULL,?)"),
+            ('[{"kind": "conn", "conn_id": "%s", "conn_uid": "%s", "raw_name": "tool"}]'
+             % (STEWARD_CONNECTION, c("state_steward_capabilities")), now)),
         # Step 22: a pushed question (the canary as its project, message and segment) and an
         # answer relayed for it (the canary as its source and answer message).
         "state_owner_question_pushes": (

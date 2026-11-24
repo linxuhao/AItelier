@@ -259,6 +259,46 @@ test('MP-1: the route flag and the host error never erase each other - a group-s
   } finally { Date.now = realNow; }
 });
 
+test('24.4 (7.8.24 "八"): the host puts its basic-capabilities flag in its own slot at events() - an unopened memory shows, nothing else is sent', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'steward-state-'));
+  const request = async (path, body, signal) => {
+    if (path === '/api/drivers/me') return { driver_id: 'drv-home' };
+    if (path.endsWith('/context')) return { project_id: 'aitelier-home', driver_id: 'drv-home', event_seq: 1, nodes: [],
+      project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'protocol' };
+    if (path.endsWith('/activity') || path.endsWith('/heartbeat')) return { ok: true };
+    if (path === '/api/state/query/list_director_messages') return { result: { items: [], matched_total: 0, has_more: false } };
+    if (path === '/api/state/query/wait_for_state_change') return new Promise((_, reject) =>
+      signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+    return { result: {} };
+  };
+  const run = async memoryError => {
+    const runtime = new DriverRuntime({ project: 'aitelier-home', driver: 'drv-home', directory: stateDir, request, retryDelayMs: 10 });
+    await runtime.init();
+    const host = aitelierHost(env({ AITELIER_DSH_ROLE: 'steward', AITELIER_MEDIA_ROOT: mkdtempSync(join(tmpdir(), 'steward-media-')),
+      AITELIER_DSH_STATE_DIR: stateDir }), { request, runtime });
+    const slots = { host: '', route: '', basics: '' }, calls = [];
+    const api = { notify: async () => {}, eventMessage: text => text, isDisposed: () => false, ownerMessageSent: async () => {},
+      setHostError: async message => { slots.host = message; }, clearHostError: async () => { slots.host = ''; },
+      setRouteFlag: async text => { slots.route = text ?? ''; },
+      setBasicsFlag: async text => { calls.push(text); slots.basics = text ?? ''; }, memoryError,
+      agent: { session: { snapshotEvents: () => [] }, steer: () => {} },
+      ctx: { logger: { warn() {}, info() {}, error() {} }, on: () => () => {}, goals: { get: () => undefined },
+        agents: { withoutInitiator: fn => fn() }, sessionPersistence: { flush: async () => {} } } };
+    const events = await host.events(api);
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      await api.setHostError('h');
+      return { calls, shown: statusError(slots) };
+    } finally { events.stop(); await Promise.resolve(events.done).catch(() => {}); }
+  };
+  const failed = await run('ENOENT: the memory root is gone');
+  assert.deepEqual(failed.calls, ['basics: memory_unavailable']);
+  assert.equal(failed.shown, 'h\nbasics: memory_unavailable', 'its own line, after the host error; the reason is not shown');
+  const fine = await run(undefined);
+  assert.deepEqual(fine.calls, [], 'nothing failed (the self-checks have not run): nothing is sent');
+  assert.equal(fine.shown, 'h');
+});
+
 test('statusError: the completion or host error, then the route flag on its own line, within the backend\'s 2000 characters (the flag is never cut)', () => {
   assert.equal(statusError({}), '');
   assert.equal(statusError({ host: 'h' }), 'h');

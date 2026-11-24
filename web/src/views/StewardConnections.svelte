@@ -144,6 +144,8 @@
   <p class="intro">{t('steward.connIntro')}</p>
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
+  <!-- Step 24.4: a basic capability pins a private-only tool here, so the connection stays private. -->
+  {#if error.includes('pinned_private_only')}<p class="hint" data-conn-pinned-private-only>{t('steward.connPinnedPrivateOnly')}</p>{/if}
   {#if data?.restart.due.length}
     <div class="pending" data-restart-pending role="status">
       <span>{t('steward.connRestartPending')}</span>

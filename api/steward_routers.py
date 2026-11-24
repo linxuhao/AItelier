@@ -42,8 +42,9 @@ from api import authz
 from api.dsh_driver_routers import manager
 from api.state_graph_routers import get_service
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
-from core.state_steward import (ARCHIVE_KINDS, CONNECTION_KIND, ProposalConflict, ScheduleConflict,
+from core.state_steward import (ARCHIVE_KINDS, CAPABILITY_KIND, CONNECTION_KIND, ProposalConflict, ScheduleConflict,
                                 ScheduleInvalid, impact_is_empty, preview_schedule, stop_impact)
+from core.state_steward_capabilities import CAPABILITIES
 
 router = APIRouter(prefix="/api/steward", tags=["Steward"])
 
@@ -102,6 +103,9 @@ async def approve(proposal_id: str, body: Approve, service=Depends(get_service),
     if row["kind"] == CONNECTION_KIND:
         # Step 24.1c (7.8.10a): before anything reads a project_id - this kind has none.
         return await asyncio.to_thread(steward.execute_connection_change, proposal_id)
+    if row["kind"] == CAPABILITY_KIND:
+        # Step 24.4 (7.8.24): no project_id either.
+        return await asyncio.to_thread(steward.execute_capability_route, proposal_id)
     if row["kind"] in ARCHIVE_KINDS:
         return await asyncio.to_thread(steward.execute_archive, proposal_id)
     if row["kind"] == "stop_driver":
@@ -307,30 +311,12 @@ def unbind_channel(channel: Channel, service=Depends(get_service)):
     return service.channels.unbind(channel)
 
 
-# --- the basic-capabilities table (owner 2026-11-23) ------------------------------------------
-# The catalog is the owner's list of capabilities and the facts/tools to look for. It holds
-# no verdict: for each row the provider is resolved at request time, native fact first,
-# then an effective MCP tool, else missing. A row may carry both kinds of fact.
-CAPABILITIES = (
-    {"id": "vision", "label": "看图 (Vision)", "tool": None, "native_fact": "steward_image_route"},
-    {"id": "ocr", "label": "图片转文字 (OCR)", "tool": "ocr_image", "native_fact": None},
-    {"id": "pdf", "label": "读 PDF", "tool": "ocr_pdf", "native_fact": "pdf_reader"},
-    {"id": "office_read", "label": "读 Word/Excel/PPT", "tool": None, "native_fact": None},
-    {"id": "office_write", "label": "生成 Office 文档", "tool": None, "native_fact": None},
-    {"id": "transcribe", "label": "语音转文字", "tool": "transcribe_audio", "native_fact": None},
-    {"id": "tts", "label": "发语音条", "tool": "generate_speech", "native_fact": None},
-    {"id": "draw", "label": "画图", "tool": "generate_image", "native_fact": None},
-    {"id": "music", "label": "生成音乐", "tool": "generate_music", "native_fact": None},
-    {"id": "sfx", "label": "音效", "tool": "gen_sfx", "native_fact": None},
-    {"id": "video", "label": "视频", "tool": None, "native_fact": None},
-    {"id": "search", "label": "联网搜索", "tool": "web_search", "native_fact": None},
-    {"id": "fetch", "label": "读网页", "tool": "web_fetch", "native_fact": None},
-    {"id": "email", "label": "邮件", "tool": None, "native_fact": None},
-    {"id": "calendar", "label": "日历/提醒", "tool": None, "native_fact": None},
-    {"id": "cloud_files", "label": "网盘", "tool": None, "native_fact": None},
-    {"id": "memory", "label": "记忆与历史对话", "tool": None, "native_fact": None},
-    {"id": "code", "label": "计算/跑代码", "tool": None, "native_fact": None},
-)
+# --- the basic-capabilities table (owner 2026-11-23; step 24.4, design-steward 7.8.24) -----------
+# The catalog (core.state_steward_capabilities.CAPABILITIES) is the owner's fixed list and the
+# facts/tools DETECTION looks for. Detection holds no verdict: for each row the provider is
+# resolved at request time, native fact first, then an effective MCP tool, else missing, and it
+# never reads the owner's setting. The setting (the route the owner set), an open proposal of the
+# steward's, the route's status and the editor's spec are added to each row beside it.
 
 
 def _routes():
@@ -375,7 +361,10 @@ def _native_fact(name, service):
     that case the adapter keeps its legacy image behaviour, but we do not claim a
     measured native capability from it. `pdf_reader` is the host-side reader the steward
     driver is given: its script, its interpreter and pypdfium2 in that interpreter.
+    `plugin_builtin` is code inside the steward's plugin itself (its memory): always there.
     """
+    if name == "plugin_builtin":
+        return "plugin"
     if name == "steward_image_route":
         try:
             from core import dsh_driver
@@ -436,10 +425,13 @@ def list_capabilities(service=Depends(get_service)):
     """Each capability with the route resolved from live deployment and State facts.
 
     A native fact wins; otherwise an effective MCP tool; otherwise `missing` names
-    nobody. The view renders these values; it does not decide them.
+    nobody. The view renders these values; it does not decide them. Beside them: the
+    owner's `setting` (null: not set), the steward's open `proposal` for it (or null),
+    the route's `status` {dot, reasons} and the editor's `spec`.
     """
     _owner(service)
     listed = _listed_connections(service)
+    added = _capability_call(service.steward_capabilities.rows)
     rows = []
     for cap in CAPABILITIES:
         fact = _native_fact(cap["native_fact"], service) if cap["native_fact"] else None
@@ -448,8 +440,54 @@ def list_capabilities(service=Depends(get_service)):
         provider = "native" if fact else "mcp" if tool else "missing"
         rows.append({"id": cap["id"], "label": cap["label"], "provider": provider,
                      "conn_id": conn_id, "tool": tool,
-                     "detail": fact or (f"{conn_id}: {tool}" if tool else None)})
+                     "detail": fact or (f"{conn_id}: {tool}" if tool else None), **added[cap["id"]]})
     return {"capabilities": rows}
+
+
+class CapabilityRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_key: str = Field(min_length=1, max_length=320)
+    expect_version: int = Field(ge=0)
+    # {kind: native} | {kind: missing} | {kind: host, tool} | {kind: conn, conn_id, raw_name}
+    route: list[dict] = Field(max_length=64)
+
+
+def _capability_call(call, *args, **kwargs):
+    """One owner call; a refusal keeps its code (version_conflict: 409)."""
+    try:
+        return call(*args, **kwargs)
+    except StateConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except StateGraphError as exc:
+        raise HTTPException(403 if str(exc) == "owner_session_required" else 422, str(exc)) from exc
+
+
+def _key(request_key):
+    from uuid import uuid4
+    return request_key or "dashboard-" + uuid4().hex
+
+
+@router.put("/capabilities/{cap_id}", dependencies=[Depends(authz.require_writer)])
+def set_capability(cap_id: str, body: CapabilityRoute, service=Depends(get_service)):
+    """The owner's route for one job, as of the row version the panel read (0: not set)."""
+    _owner(service)
+    return _capability_call(service.steward_capabilities.set, body.request_key, cap_id, body.expect_version,
+                            route=body.route)
+
+
+@router.delete("/capabilities/{cap_id}", dependencies=[Depends(authz.require_writer)])
+def unset_capability(cap_id: str, expect_version: int, request_key: str | None = None,
+                     service=Depends(get_service)):
+    """Not set again (back to today), as of the row version the panel read."""
+    _owner(service)
+    return _capability_call(service.steward_capabilities.set, _key(request_key), cap_id, expect_version, unset=True)
+
+
+@router.delete("/capabilities", dependencies=[Depends(authz.require_writer)])
+def clear_capabilities(request_key: str | None = None, service=Depends(get_service)):
+    """Every job not set: the table as never set (the stop switch)."""
+    _owner(service)
+    return _capability_call(service.steward_capabilities.clear, _key(request_key))
 
 
 @router.get("/message-sources", dependencies=[Depends(authz.require_reader)])

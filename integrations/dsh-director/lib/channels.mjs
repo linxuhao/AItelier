@@ -54,6 +54,8 @@ const DECIDED = Object.freeze({
   archive_project: t => [`archive project ${t}`, `归档 ${t} 项目`],
   unarchive_project: t => [`unarchive project ${t}`, `取消归档 ${t} 项目`],
   connection_change: t => [`change the steward's connection ${t}`, `修改管家的连接 ${t}`],
+  // Step 24.4 (design-steward 7.8.24 "五" 3): the target is the route the host resolved (cap_id ← entries).
+  capability_route: t => [`basic capability ${t}`, `基础能力 ${t}`],
 });
 const cut = (value, max) => { const s = String(value ?? ''); return s.length > max ? s.slice(0, max - 1) + '…' : s; };
 const decided = ({ kind, target }) => {

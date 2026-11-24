@@ -195,9 +195,13 @@ export function filterCompactionRequest(options, events, createUserMessage) {
  *  starts them at 0, and only a group turn counts (7.7.3 item 3, 7.7.5). */
 export class GroupTurns {
   /** @param connectionTools () => the Set of connection tool names this turn may use (the
-   *  steward's catalog: in a group turn its public connections), or undefined for none. */
-  constructor({ stateDir, limits, log = () => {}, pausedTools = [], neutralKinds = [], connectionTools = () => undefined }) {
-    Object.assign(this, { limits, log, connectionTools });
+   *  steward's catalog: in a group turn its public connections), or undefined for none.
+   *  @param pausedExtra (name) => whether a name the table decides is paused like PAUSED_TOOLS
+   *  (step 24.4, design-steward 7.8.24 "七" 4: the connection tools pinned after memory's native
+   *  entry - reads too - wait after a group turn until the owner writes). */
+  constructor({ stateDir, limits, log = () => {}, pausedTools = [], neutralKinds = [], connectionTools = () => undefined,
+    pausedExtra = () => false }) {
+    Object.assign(this, { limits, log, connectionTools, pausedExtra });
     this.neutral = new Set([...NEUTRAL, ...neutralKinds]);
     this.pausedTools = new Set([...PAUSED_TOOLS, ...pausedTools]);
     this.pauseFile = stateDir ? join(stateDir, 'group-pause.json') : undefined;
@@ -309,7 +313,7 @@ export class GroupTurns {
       return turn ? undefined : answerNow;
     }
     if (FAMILY_TOOLS.has(name)) return name === 'group_reminder_set' ? groupReminderRefusal : familyRefusal;
-    if (this.paused() && this.pausedTools.has(name)) return pausedRefusal;
+    if (this.paused() && (this.pausedTools.has(name) || this.pausedExtra(name) === true)) return pausedRefusal;
     return undefined;
   }
 

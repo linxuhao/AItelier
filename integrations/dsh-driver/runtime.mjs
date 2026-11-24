@@ -20,7 +20,8 @@ import { rolesFile } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { autoReplyBody, boundGroupsSection, catalogOps, confirmOps, forwardFinalText, mediaOps, openProposals, openThreads, OwnerQuestionsTimer, OWNER_QUESTION_EVENTS, recordAutoReply, relayAnswer,
   replyToLetter, stateWake, stewardHostTexts, stewardOps, syncConversation, textOf, turnWatcher, unansweredOwnerMessages, withAttachmentLines,
-  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia, createPdfReader } from './steward-host.mjs';
+  mediaRootFrom, ingestDashboardAttachments, ingestDirectorAttachments, sendUserMessageTool, uploadBody, mediaLine, wakeMedia, createPdfReader,
+  basicsFlag } from './steward-host.mjs';
 import { createMediaLibrary } from '../dsh-director/lib/media.mjs';
 import { createOfficeRunner } from './office.mjs';
 import { MEMORY_REQUEST_EVENTS, processMemoryRequests } from './memory-requests.mjs';
@@ -634,6 +635,12 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       return answer?.pages?.[0]?.text;
     },
     log: line => officeLog(line) }) : undefined;
+  // Step 24.4 (design-steward 7.8.24 "八"): the PDF reader's and the office converter's self-checks
+  // and the owner's memory, as one closed-code flag in its own status slot (setBasicsFlag, which
+  // events() hands over: until then nothing is sent; events() sends the state it finds). Read
+  // again whenever either logs (each self-check logs its outcome); sent only when it changed.
+  let basicsSink = () => {}, memoryError;
+  const basicsChanged = () => { if (steward) basicsSink(basicsFlag({ pdf: pdfReader?.status(), office: officeRunner?.status(), memoryError })); };
   // Step 23 group wake (iss-0d20ef5dd9a44cd0): the optional directorHost hook for a group
   // @-turn's images. The plugin picks this group's own kept refs (and the message's own files)
   // and calls `line`; the read/saveImage step is the same wakeMedia the owner's wake uses, so
@@ -705,10 +712,13 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       mediaLog = (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields));
       attachmentStore = () => ctx.get('attachments');
       routeLog = line => ctx.logger.warn(line);
-      pdfLog = line => (line.startsWith('pdf_reader_unavailable') ? ctx.logger.warn(line) : ctx.logger.info(line));
+      pdfLog = line => { if (line.startsWith('pdf_reader_unavailable')) ctx.logger.warn(line); else ctx.logger.info(line); basicsChanged(); };
       pdfReader?.start().catch(error => ctx.logger.warn(`pdf_reader_unavailable: ${String(error?.code ?? 'error')}`));
       // Started after the PDF reader (its self-check reads back through it); off without an image.
-      officeLog = line => (line.startsWith('office_unavailable') && !line.endsWith('no_image_configured') ? ctx.logger.warn(line) : ctx.logger.info(line));
+      officeLog = line => {
+        if (line.startsWith('office_unavailable') && !line.endsWith('no_image_configured')) ctx.logger.warn(line); else ctx.logger.info(line);
+        basicsChanged();
+      };
       officeRunner?.start().catch(error => ctx.logger.warn(`office_unavailable: ${String(error?.code ?? 'error')}`));
       /** One State request, exactly as the driver has always sent it. Split out of `request`
        *  below so a read that missed its deadline can be tried once more with a longer budget. */
@@ -1029,7 +1039,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
       },
     },
     /** The pending inbox, the driver goal, then the State subscription. */
-    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, setRouteFlag, isDisposed, memory, ownerMessageSent, ownerChannelLogin, groupSend }) {
+    async events({ ctx, agent, notify, eventMessage, setHostError, clearHostError, setRouteFlag, setBasicsFlag, isDisposed, memory,
+      memoryError: memoryFailed, ownerMessageSent, ownerChannelLogin, groupSend }) {
       // The steward's owner conversation goes into memory before each turn sees it.
       const sync = () => steward && memory ? syncConversation({ request, project, me: env.AITELIER_DRIVER_ID, memory })
         .catch(error => ctx.logger.warn('memory sync: ' + String(error?.message ?? error).slice(0, 300))) : undefined;
@@ -1095,6 +1106,15 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         routeFlagSink = text => void Promise.resolve(setRouteFlag?.(text))
           .catch(error => ctx.logger.warn('route flag: ' + String(error?.message ?? error).slice(0, 300)));
         if (routeFlag) routeFlagSink(routeFlag);
+        memoryError = memoryFailed;
+        let shown = '';
+        basicsSink = text => {
+          if (text === shown) return;
+          shown = text;
+          void Promise.resolve(setBasicsFlag?.(text || undefined))
+            .catch(error => ctx.logger.warn('basics flag: ' + String(error?.message ?? error).slice(0, 300)));
+        };
+        basicsChanged();
       }
       runtime.onEvent = async raw => {
         // The owner's memory requests are the runtime's, never a model turn: run them and

@@ -24,8 +24,15 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { installToolDiscovery, searchTools, presentTools } from './tool-discovery.mjs';
+import { StewardCatalog } from '../dsh-director/lib/catalog.mjs';
+import { GroupTurns, GROUP_SOURCE } from '../dsh-director/lib/group-turns.mjs';
+import { GROUP_LIMITS } from '../dsh-director/lib/channels.mjs';
+import { basicsSection, renderBasics } from '../dsh-director/lib/basics.mjs';
 import { loadRoles } from './roles.mjs';
 import { roles as aitelierRoles } from './aitelier-roles.mjs';
 import { discoveryTexts } from './aitelier-texts.mjs';
@@ -334,6 +341,96 @@ if (libraries.status === 'unmeasured') {
       turn = new Set(['mcp__sw__media__web_search', 'mcp__sw__mailme__search_messages']);
       assert.deepEqual((await ctx.systemPrompt.assemble({ scope: root })).tools, before);
     }, effective, 'steward', { catalog: id => (id === 'root' ? turn : undefined) });
+  });
+
+  // Step 24.4 (design-steward 7.8.24 "七" 1-2, "九" 2, "十四" 插件): the owner's table on a real
+  // StewardCatalog, the group guard as index.mjs installs it, search_tools("basics:<id>") and the section.
+  const SW = ['mcp__sw__mailme__search_messages', 'mcp__sw__mailpub__search_messages', 'mcp__sw__media__web_search'];
+  const BASICS_TABLE = { rows: [
+    { id: 'email', route: [{ kind: 'conn', visibility: 'private', pinned_name: SW[0], available: true },
+      { kind: 'conn', visibility: 'public', pinned_name: SW[1], available: true }] },
+    { id: 'search', route: [{ kind: 'missing' }] }] };
+  async function stewardWorld(withBasics) {
+    const cache = { effective_hash: 'h', effective_tools: SW, connections: [
+      { conn_id: 'mailme', visibility: 'private', usable: true, tools: [{ name: SW[0] }] },
+      { conn_id: 'mailpub', visibility: 'public', usable: true, tools: [{ name: SW[1] }] },
+      { conn_id: 'media', visibility: 'public', usable: true, tools: [{ name: SW[2] }] }],
+      ...(withBasics ? { basics: BASICS_TABLE } : {}) };
+    const turns = new GroupTurns({ stateDir: mkdtempSync(join(tmpdir(), 'basics-turns-')), limits: { ...GROUP_LIMITS, turnToolCalls: 100 },
+      connectionTools: () => catalog.catalog('root') });
+    const catalog = new StewardCatalog({ host: { connections: async () => JSON.parse(JSON.stringify(cache)), resyncDue: async () => {},
+      humanInput: () => false }, stateDir: mkdtempSync(join(tmpdir(), 'basics-catalog-')), rootSession: 'root', registryNames: () => SW,
+    audience: () => turns.audience() });
+    await catalog.preStep();
+    let n = 0;
+    const turn = kind => { n += 1; turns.split([kind === 'owner' ? { id: 'o' + n, content: [], source: { kind: 'user' } }
+      : { id: 'g' + n, content: [], source: { kind: GROUP_SOURCE, channel: 'wechat', group_ref: 'r1', question_ids: ['q' + n] } }], 1, 't' + n);
+    assert.equal(turns.audience().kind, kind); };
+    const options = { catalog: id => catalog.catalog(id), ...(withBasics ? { pinned: id => catalog.pinned(id) } : {}) };
+    return { catalog, turns, turn, options };
+  }
+  const registerWorld = (ctx, world) => {
+    for (const name of [...SW, 'read_document']) ctx.tools.register(defineTool({ name, description: name === SW[2] ? 'web search basics' : 'tool ' + name,
+      parameters: {}, output, async execute() { return 'ran ' + name; } }));
+    // index.mjs: the group guard on the root's calls, a nested call judged by name.
+    ctx.tools.guard(exec => exec.agent?.session?.id === 'root' ? world.turns.guard(exec.name, { nested: exec.parent !== undefined }) : undefined);
+  };
+
+  test('step 24.4: basics:<id> answers the pins in route order from this turn\'s catalog only; a private pin stays refused in a group turn, directly and through call_tool', async () => {
+    const world = await stewardWorld(true);
+    await fixture(async ({ ctx, agent, call }) => {
+      const root = agent('root');
+      registerWorld(ctx, world);
+      const names = async (query, limit) => (await call('search_tools', { query, ...(limit ? { limit } : {}) }, root)).value.tools.map(t => t.name);
+      world.turn('owner');
+      assert.deepEqual(await names('basics:email'), [SW[0], SW[1]], 'route order, private and public');
+      assert.deepEqual((await call('search_tools', { query: 'basics:email', limit: 1 }, root)).value, {
+        tools: (await call('search_tools', { query: 'basics:email' }, root)).value.tools, total_matches: 2, has_more: false }, 'not cut by limit');
+      assert.equal((await call(SW[0], {}, root)).value, 'ran ' + SW[0], 'the owner\'s turn runs the private pin');
+      world.turn('group');
+      assert.deepEqual(await names('basics:email'), [SW[1]], 'a group turn: the public pin only, same order');
+      for (const result of [await call(SW[0], {}, root), await call('call_tool', { name: SW[0], arguments: {} }, root)])
+        assert.equal(result.isError, true, 'a private pin in a group turn');
+      assert.equal((await call('call_tool', { name: SW[1], arguments: {} }, root)).value, 'ran ' + SW[1]);
+      world.turn('owner');
+      // missing tells, it does not hide (risk (x)): no pin, the tool is still found by an ordinary search.
+      assert.deepEqual(await names('basics:search'), []);
+      assert.ok((await names('web search')).includes(SW[2]));
+      // An unset row is an ordinary query.
+      assert.deepEqual(await names('basics:draw'), [SW[2]]);
+    }, effective, 'steward', world.options);
+  });
+
+  test('step 24.4: the request tool list is the same bytes with or without a table, in an owner and a group turn; the section only with a table, one text for both turns, right after the role prompt', async () => {
+    const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const seen = {};
+    for (const withBasics of [false, true]) {
+      const world = await stewardWorld(withBasics);
+      await fixture(async ({ ctx, agent }) => {
+        const root = agent('root');
+        registerWorld(ctx, world);
+        root.ctx.systemPrompt.section({ name: 'dsh-director:driver-runtime', order: 12, interpolate: false, text: 'STEWARD_PROMPT' });
+        const sync = basicsSection(root.ctx, { name: 'dsh-director:basics', order: 13, basics: () => world.catalog.basics,
+          registered: context => ctx.tools.schemas(context?.agent ?? context?.scope).map(schema => schema.name) });
+        sync();
+        for (const kind of ['owner', 'group']) {
+          world.turn(kind);
+          const assembly = await ctx.systemPrompt.assemble({ agent: root, scope: root });
+          seen[`${withBasics}:${kind}`] = { tools: digest(assembly.tools), names: assembly.sections.map(section => section.name),
+            basics: assembly.sections.find(section => section.name === 'dsh-director:basics')?.text,
+            registered: ctx.tools.schemas(root).map(schema => schema.name) };
+        }
+      }, effective, 'steward', world.options);
+    }
+    const today = seen['false:owner'];
+    for (const key of ['false:group', 'true:owner', 'true:group']) assert.equal(seen[key].tools, today.tools, key + ': the request tool list');
+    for (const key of ['false:owner', 'false:group']) assert.ok(!seen[key].names.includes('dsh-director:basics'), key + ': no section without a table');
+    const names = seen['true:owner'].names;
+    assert.equal(names[names.indexOf('dsh-director:driver-runtime') + 1], 'dsh-director:basics', 'right after the role prompt: ' + names);
+    assert.equal(seen['true:owner'].basics, seen['true:group'].basics, 'one text for an owner and a group turn');
+    assert.equal(digest(seen['true:owner'].basics), digest(renderBasics(BASICS_TABLE, seen['true:owner'].registered)));
+    assert.match(seen['true:group'].basics, /email \(email, mail, inbox\): 1\) connection tool - search_tools\("basics:email"\) \(owner turns only\); 2\) connection tool - search_tools\("basics:email"\) \(owner and group turns\)\./);
+    for (const word of ['mailme', 'mailpub', 'search_messages', 'mcp__sw__']) assert.ok(!seen['true:group'].basics.includes(word), word);
   });
 
   test('step 24.1a: a steward without a host catalog finds nothing and is shown no discovery tool', () => fixture(async ({ ctx, agent, call }) => {

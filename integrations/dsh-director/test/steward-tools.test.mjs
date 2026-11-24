@@ -84,7 +84,7 @@ test('proposals: propose passes kind, payload, reason (and supersedes); an unkno
   const tools = collect(registerProposalTools, { proposals });
   assert.deepEqual([...tools.keys()], ['propose', 'withdraw_proposal']);
   // Owner 2026-11-18: archive / unarchive are proposals too (the owner approves, the backend executes).
-  assert.deepEqual(PROPOSAL_KINDS, ['create_project', 'start_driver', 'stop_driver', 'archive_project', 'unarchive_project']);
+  assert.deepEqual(PROPOSAL_KINDS, ['create_project', 'start_driver', 'stop_driver', 'archive_project', 'unarchive_project', 'capability_route']);
   const description = tools.get('propose').description;
   for (const kind of ['archive_project {project_id, reason?}', 'unarchive_project {project_id, reason?}']) assert.ok(description.includes(kind), kind);
   assert.deepEqual(await tools.get('propose').execute({ kind: 'deploy', payload: {}, reason: 'r' }, exec), { refused: 'unknown_kind', kinds: PROPOSAL_KINDS });

@@ -88,8 +88,15 @@ export const defaultDiscoveryTexts = Object.freeze({
  *  `catalog: "host"`, the Set of tool names this turn may find and call beyond the
  *  presented ones (undefined: none yet). Such a role searches only its catalog, and on
  *  its host a call from a session that is not its root - a missing session included,
- *  which roleOf would read as a worker - is refused for search, call and any MCP tool. */
-export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {}, catalog }) {
+ *  which roleOf would read as a worker - is refused for search, call and any MCP tool.
+ *  `pinned(id)` (optional, step 24.4, design-steward 7.8.24 "七" 2): the names one basic
+ *  capability's route pins, in route order (undefined: that row is not set). For such a role a
+ *  query that is exactly `basics:<id>` of a set row answers those names that are in this turn's
+ *  catalog, in route order, unscored and not cut by limit (at most BASICS_MAX); any other query
+ *  is searched as before. The request's tool list, the guards and the catalog are unchanged. */
+export const BASICS_QUERY = /^basics:([a-z_]{1,32})$/;
+export const BASICS_MAX = 8;
+export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {}, catalog, pinned }) {
   const wording = { ...defaultDiscoveryTexts, ...Object.fromEntries(Object.entries(texts).filter(([, v]) => v !== undefined)) };
   const roleFor = sessionId => roles[roleOf(sessionId, rootSession, rootRole)];
   const hostCatalog = roles[rootRole]?.catalog === 'host';
@@ -128,6 +135,13 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
       // A host-catalog role finds only this turn's catalog: never an unlisted native tool,
       // another connection, or a connection this conversation may not use.
       const allowed = catalogFor(session);
+      const asked = typeof query === 'string' ? BASICS_QUERY.exec(query.trim()) : null;
+      const pins = asked && pinned ? pinned(asked[1]) : undefined;
+      if (Array.isArray(pins)) {
+        const byName = new Map(schemas.map(s => [s.name, s]));
+        const tools = pins.filter(name => allowed.has(name) && byName.has(name)).slice(0, BASICS_MAX).map(name => byName.get(name));
+        return { tools, total_matches: tools.length, has_more: false };
+      }
       return searchTools(schemas.filter(s => allowed.has(s.name)), query, limit);
     },
   }));

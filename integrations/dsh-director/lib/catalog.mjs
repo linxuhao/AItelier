@@ -178,6 +178,20 @@ export class StewardCatalog {
   /** Whether the cache marks this connection tool outward (undefined: not in the cache). */
   outward(name) { return this.#tool(name)?.outward; }
 
+  /** Step 24.4 (design-steward 7.8.24 "四", "七"): the owner's basic-capabilities table as the
+   *  cache carries it (`basics`, absent while no row is set), or undefined. */
+  get basics() { return this.cache?.basics ?? undefined; }
+
+  /** The gateway names one capability's route pins, in route order: its connection entries
+   *  that resolve to a connection tool (undefined: the row is not set). Pinning is not allowing -
+   *  what a turn may find and call is still catalog(). */
+  pinned(id) {
+    const rows = this.cache?.basics?.rows;
+    const row = Array.isArray(rows) ? rows.find(r => r?.id === id) : undefined;
+    if (!row || !Array.isArray(row.route)) return undefined;
+    return row.route.filter(entry => entry?.kind === 'conn' && this.isConnectionTool(entry.pinned_name)).map(entry => entry.pinned_name);
+  }
+
   /** The synchronous guard for the root session. */
   refusal(exec) {
     if (exec.agent?.session?.id !== this.rootSession || !this.state.external) return undefined;

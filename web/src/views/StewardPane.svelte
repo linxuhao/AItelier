@@ -57,7 +57,7 @@
     {:else if tab === 'questions'}<StewardQuestions {questions} {projects} {status} onanswer={answer} onanswered={onrefresh} />
     {:else if tab === 'schedules'}<StewardSchedules />
     {:else if tab === 'lists'}<StewardLists />
-    {:else if tab === 'channels'}<div class="channels-with-capabilities"><StewardChannels /><StewardCapabilities /></div>
+    {:else if tab === 'channels'}<div class="channels-with-capabilities"><StewardChannels /><StewardCapabilities {status} onconnect={openConnection} /></div>
     {:else if tab === 'connections'}<StewardConnections {focus} />
     {:else if tab === 'profile'}<StewardProfile />{/if}
   {/snippet}

@@ -65,7 +65,9 @@ CONNECTION_PRIVATE={'state_steward_connections','state_steward_connection_tools'
                     'state_steward_tools_served','state_steward_restart_due','state_steward_restart_done',
                     'state_steward_tool_calls',
                     # Step 24.1b: the confirmations of outward actions and the dashboard-message marks.
-                    'state_steward_confirmations','state_steward_dashboard_messages'}
+                    'state_steward_confirmations','state_steward_dashboard_messages',
+                    # Step 24.4: the basic-capabilities routes the owner set.
+                    'state_steward_capabilities'}
 # Step 24.2b: the dashboard's conversation uploads (which user uploaded which file into which
 # project, and where the hosts stored it) are PRIVATE, with their own canary.
 UPLOAD_PRIVATE={'state_conversation_uploads'}

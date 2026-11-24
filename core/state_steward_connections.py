@@ -813,6 +813,11 @@ class StateStewardConnections:
                             (label, conn_id)).fetchone():
                 raise StateGraphError("label_exists")
             old = conn.execute("SELECT * FROM state_steward_connections WHERE conn_id=?", (conn_id,)).fetchone()
+            if old is not None and old["visibility"] == "private" and visibility == "public":
+                # Step 24.4 (7.8.24 "四"): a pin that must stay private keeps its connection private.
+                from core.state_steward_capabilities import private_pins
+                if private_pins(conn, old["conn_uid"]):
+                    raise StateGraphError("pinned_private_only")
             moved = old is not None and (old["url"], old["auth_kind"], old["header_name"]) != (url, auth_kind, header_name)
             # A private oauth connection made public: the owner confirmed the account as
             # "mine"; for the public role it is checked again (7.8.6, 7.8.10a) - unconfirmed
@@ -1160,9 +1165,16 @@ class StateStewardConnections:
                 (_iso(_utcnow() - RESTART_LIMIT_WINDOW),))]
             for d in done:
                 d.pop("reasons_json", None)
-        return {"connections": connections,
-                "effective_tools": [public_name(e["conn_id"], e["gw_name"]) for e in entries],
-                "effective_hash": effective_hash(entries), "restart": {"due": due, "done": done}}
+            # Step 24.4 (7.8.24 "四"): the basic-capabilities routes the owner set, only while
+            # at least one is set - an empty table answers exactly as before.
+            from core.state_steward_capabilities import for_steward
+            basics = for_steward(conn)
+        answer = {"connections": connections,
+                  "effective_tools": [public_name(e["conn_id"], e["gw_name"]) for e in entries],
+                  "effective_hash": effective_hash(entries), "restart": {"due": due, "done": done}}
+        if basics is not None:
+            answer["basics"] = basics
+        return answer
 
     @writer_only_read("list_steward_connection_tools")
     def list_connection_tools(self, conn_id):

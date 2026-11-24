@@ -211,6 +211,9 @@ class StateService:
         # Step 24.1a: the steward's own MCP connections (after the steward: its identity checks).
         from core.state_steward_connections import StateStewardConnections
         self.steward_connections = StateStewardConnections(self.store, actor, driver_id, steward=self.steward)
+        # Step 24.4: the basic-capabilities routes the owner sets (after the steward: its owner check).
+        from core.state_steward_capabilities import StewardCapabilities
+        self.steward_capabilities = StewardCapabilities(self.store, actor, driver_id, steward=self.steward)
         # Step 22: the directors' questions pushed to the owner's default channel and
         # answered there (after the channels: their binding check and code guard).
         from core.state_owner_questions import StateOwnerQuestions

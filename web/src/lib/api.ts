@@ -913,7 +913,8 @@ export function stateRunSummary(projectId:string):Promise<import('./stateGraph')
 export type StewardProposalStatus = 'open' | 'executing' | 'done' | 'failed' | 'declined' | 'withdrawn' | 'superseded';
 export interface StewardProposal {
   proposal_id: string; version: number;
-  kind: 'create_project' | 'start_driver' | 'stop_driver' | 'archive_project' | 'unarchive_project' | 'connection_change';
+  kind: 'create_project' | 'start_driver' | 'stop_driver' | 'archive_project' | 'unarchive_project' | 'connection_change'
+    | 'capability_route';
   payload: Record<string, any>; reason: string; status: StewardProposalStatus;
   created_at: string; decided_at: string | null; decided_by: string | null; result: unknown;
 }
@@ -1215,13 +1216,57 @@ export function stewardConnectionTools(connId: string): Promise<StewardConnectio
 // The steward's basic-capabilities table: the backend decides each route from the live
 // deployment and the owner's stored connection ticks; the view only renders it.
 export type StewardCapabilityProvider = 'native' | 'mcp' | 'missing';
+/** One entry of a capability's ordered route (design 7.8.24 "三"); the first is the main one.
+ *  What the dashboard sends names a connection tool by `conn_id` + `raw_name` only: the
+ *  backend takes `conn_uid` at the write. A read may add `conn_uid`, the connection's
+ *  `visibility` and the entry's status `reason` (design "八"). */
+export type StewardRouteEntry =
+  | {kind: 'native'; reason?: string} | {kind: 'missing'; reason?: string} | {kind: 'host'; tool: string; reason?: string}
+  | {kind: 'conn'; conn_id: string; raw_name: string; conn_uid?: string; visibility?: StewardVisibility | null; reason?: string};
+export type StewardRouteKind = StewardRouteEntry['kind'];
+export interface StewardCapabilitySetting {route: StewardRouteEntry[]; version: number; set_via: 'dashboard' | 'proposal'}
+/** The steward's open capability_route proposal on this capability (approve/decline it with `version`). */
+export interface StewardCapabilityProposal {
+  proposal_id: string; version: number; route: (StewardRouteEntry | string)[]; reason: string;
+  source: {kind: 'owner_message' | 'tool_search'; [key: string]: unknown} | null;
+}
+/** The row's dot and its closed reason codes (design "八"): one per route entry, after
+ *  `fallback_in_use` when a later entry is the one in use. */
+export interface StewardCapabilityStatus {dot: 'green' | 'yellow' | 'red' | 'grey'; reasons: string[]}
+export interface StewardCapabilitySpec {allows: StewardRouteKind[]; host_tools: string[]; private_only: boolean}
 export interface StewardCapability {
   id: string; label: string; provider: StewardCapabilityProvider;
   conn_id: string | null; tool: string | null; detail: string | null;
+  /** Step 24.4: the owner's route (null = not set = today), the steward's open proposal,
+   *  the row's status and what the editor may offer. Absent from an older backend. */
+  setting?: StewardCapabilitySetting | null; proposal?: StewardCapabilityProposal | null;
+  status?: StewardCapabilityStatus | null; spec?: StewardCapabilitySpec;
 }
 export interface StewardCapabilities { capabilities: StewardCapability[] }
 export function listStewardCapabilities(): Promise<StewardCapabilities> {
   return _get('/api/steward/capabilities');
+}
+/** The route as the dashboard sends it: a connection entry carries only conn_id + raw_name. */
+function _routeBody(route: StewardRouteEntry[]): StewardRouteEntry[] {
+  return route.map(e => e.kind === 'conn' ? {kind: 'conn', conn_id: e.conn_id, raw_name: e.raw_name}
+    : e.kind === 'host' ? {kind: 'host', tool: e.tool} : {kind: e.kind});
+}
+/** Set one capability's ordered route. `expectVersion` is the row version the owner saw (0 = no row);
+ *  a stale one is refused `version_conflict`. A repeated `requestKey` replays the first answer. */
+export function setStewardCapability(capId: string, expectVersion: number, route: StewardRouteEntry[],
+  requestKey: string = crypto.randomUUID()): Promise<unknown> {
+  return _put('/api/steward/capabilities/' + encodeURIComponent(capId),
+    {request_key: requestKey, expect_version: expectVersion, route: _routeBody(route)});
+}
+/** Remove one capability's route: the row is "not set" again (today's behaviour). */
+export function unsetStewardCapability(capId: string, expectVersion: number,
+  requestKey: string = crypto.randomUUID()): Promise<unknown> {
+  return _del('/api/steward/capabilities/' + encodeURIComponent(capId) + '?request_key=' + encodeURIComponent(requestKey)
+    + '&expect_version=' + expectVersion);
+}
+/** Remove every capability's route (the table's off switch). */
+export function clearStewardCapabilities(requestKey: string = crypto.randomUUID()): Promise<unknown> {
+  return _del('/api/steward/capabilities?request_key=' + encodeURIComponent(requestKey));
 }
 export function setStewardConnectionTools(connId: string, tools: StewardToolChange[]): Promise<StewardConnectionTools> {
   return _put('/api/steward/connections/' + encodeURIComponent(connId) + '/tools', {tools});

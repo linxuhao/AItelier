@@ -145,6 +145,9 @@ PRIVATE_STATE_TABLES = frozenset({
     "state_steward_connections", "state_steward_connection_tools",
     "state_steward_tools_served", "state_steward_restart_due", "state_steward_restart_done",
     "state_steward_tool_calls",
+    # Step 24.4: the basic-capabilities routes the owner set (which connection tool does which
+    # job). No projection.
+    "state_steward_capabilities",
     # Step 22: the questions pushed to the owner's chat channel (code, when pushed and
     # reminded, how closed) and each answer relayed from it. No projection.
     "state_owner_question_pushes", "state_owner_question_answers",

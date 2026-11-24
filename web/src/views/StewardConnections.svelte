@@ -4,7 +4,7 @@
     probeStewardConnection, saveStewardConnection, setStewardConnectionSecret, setStewardConnectionTools,
     setStewardOAuthClient, setStewardOAuthScope, signOutStewardOAuth, startDshDriver, startStewardOAuth, stewardConnectionTools, stopDshDriver,
     type StewardConfirmation, type StewardConnection, type StewardConnectionInput, type StewardConnectionTool,
-    type StewardConnections, type StewardToolChange } from '../lib/api';
+    type StewardConnections, type StewardToolChange, type StewardToolLock } from '../lib/api';
   import { STEWARD_PROJECT_ID } from '../lib/steward';
   import { t } from '../lib/i18n.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -27,6 +27,14 @@
   let drafts = $state<Record<string, StewardToolChange & {blocked: string; cap: string | number | null}>>({});
   let deleteAsk = $state(false), target = $state<string | null>(null);
   function failed(e: unknown) { error = String(e instanceof Error ? e.message : e); }
+  // The backend's refusal code, kept out of the UI: a save can still arrive here from an
+  // older tab or another caller, and must read as a sentence in the owner's language.
+  const LOCKED_CODE = 'locked: dev_mcp';
+  const holds = (tool: StewardConnectionTool, flag: StewardToolLock) => (tool.locked ?? []).includes(flag);
+  function toolFailed(e: unknown) {
+    const text = String(e instanceof Error ? e.message : e);
+    toolsError = text.includes(LOCKED_CODE) ? t('steward.connToolLockedRefused') : text;
+  }
   async function load() {
     try { data = await listStewardConnections(); error = ''; }
     catch (e) { failed(e); }
@@ -65,11 +73,12 @@
     open = connId; toolsError = ''; busy = probe ? 'probe' : busy;
     try {
       const answer = probe ? await probeStewardConnection(connId) : await stewardConnectionTools(connId);
-      if (answer.error) toolsError = t('steward.connProbeFailed').replace('{code}', answer.error);
+      if (answer.error) toolsError = answer.error.includes(LOCKED_CODE) ? t('steward.connToolLockedRefused')
+        : t('steward.connProbeFailed').replace('{code}', answer.error);
       const listed = answer.error ? await stewardConnectionTools(connId) : answer;
       tools = listed.tools; instructions = listed.instructions; draftsOf(listed.tools);
       if (probe) await load();
-    } catch (e) { toolsError = String(e instanceof Error ? e.message : e); }
+    } catch (e) { toolFailed(e); }
     finally { if (probe) busy = ''; }
   }
   async function saveTools() {
@@ -81,14 +90,18 @@
       const changes: StewardToolChange[] = tools.map(r => {
         const d = drafts[r.raw_name];
         const cap = d.cap === null || d.cap === undefined || String(d.cap).trim() === '' ? null : Number(d.cap);
-        return {raw_name: r.raw_name, allowed: d.allowed, outward: d.outward, egress: d.egress,
+        // A locked tick is sent with the value the server already holds, not dropped: the
+        // batch stays whole, so one dev-mcp tool cannot discard another tool's edit.
+        const flag = (name: StewardToolLock, value: boolean) => holds(r, name) ? r[name] : value;
+        return {raw_name: r.raw_name, allowed: flag('allowed', d.allowed), outward: flag('outward', d.outward),
+          egress: flag('egress', d.egress),
           blocked_args: d.blocked.split(',').map(s => s.trim()).filter(Boolean), daily_cap: cap,
           schema_sha256: r.schema_sha256};
       });
       const answer = await setStewardConnectionTools(open, changes);
       tools = answer.tools; draftsOf(answer.tools); notice = t('steward.connSaved');
       await load();
-    } catch (e) { toolsError = String(e instanceof Error ? e.message : e); }
+    } catch (e) { toolFailed(e); }
     finally { busy = ''; }
   }
   // OAuth (7.8.6): the browser signs in at the service in a new tab and comes back to the
@@ -145,7 +158,7 @@
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   <!-- Step 24.4: a basic capability pins a private-only tool here, so the connection stays private. -->
-  {#if error.includes('pinned_private_only')}<p class="hint" data-conn-pinned-private-only>{t('steward.connPinnedPrivateOnly')}</p>{/if}
+  {#if (error + toolsError).includes('pinned_private_only')}<p class="hint" data-conn-pinned-private-only>{t('steward.connPinnedPrivateOnly')}</p>{/if}
   {#if data?.restart.due.length}
     <div class="pending" data-restart-pending role="status">
       <span>{t('steward.connRestartPending')}</span>
@@ -191,7 +204,7 @@
         <div class="actions">
           <button type="button" class="outline" onclick={() => edit(c)}>{t('steward.connEdit')}</button>
           <button type="button" class="outline" disabled={busy !== ''} data-conn-probe onclick={() => void showTools(c.conn_id, true)}>{t('steward.connProbe')}</button>
-          <button type="button" class="outline" onclick={() => void showTools(c.conn_id)}>{t('steward.connTools')}</button>
+          <button type="button" class="outline" data-conn-tools-open onclick={() => void showTools(c.conn_id)}>{t('steward.connTools')}</button>
           <button type="button" class="outline danger" onclick={() => askDelete(c.conn_id)}>{t('steward.connDelete')}</button>
         </div>
         {#if open === c.conn_id}
@@ -200,7 +213,8 @@
             {#if instructions}<details><summary>{t('steward.connInstructions')}</summary><pre class="plain">{instructions}</pre></details>{/if}
             {#each tools as tool (tool.raw_name)}
               {@const d = drafts[tool.raw_name]}
-              <div class="tool" class:changed={tool.state === 'changed'} data-tool={tool.raw_name} data-state={tool.state}>
+              <div class="tool" class:changed={tool.state === 'changed'} data-tool={tool.raw_name} data-state={tool.state}
+                data-locked={tool.locked?.join(' ') || undefined}>
                 <div><code>{tool.raw_name}</code>
                   {#if tool.state === 'changed'}<strong class="changed"> {t('steward.connToolChanged')}</strong>{/if}
                   {#if tool.state === 'collision'}<strong class="changed"> {t('steward.connToolCollision')}</strong>{/if}</div>
@@ -208,12 +222,16 @@
                 {#if tool.annotations}<p class="plain annotations">{JSON.stringify(tool.annotations)}</p>{/if}
                 {#if d}
                   <div class="ticks">
-                    <label><input type="checkbox" bind:checked={drafts[tool.raw_name].allowed} data-tick="allowed" disabled={tool.state === 'collision'} /> {t('steward.connAllowed')}</label>
-                    <label><input type="checkbox" bind:checked={drafts[tool.raw_name].outward} data-tick="outward" /> {t('steward.connOutward')}</label>
-                    <label><input type="checkbox" bind:checked={drafts[tool.raw_name].egress} data-tick="egress" /> {t('steward.connEgress')}</label>
+                    <label><input type="checkbox" bind:checked={drafts[tool.raw_name].allowed} data-tick="allowed"
+                      disabled={tool.state === 'collision' || holds(tool, 'allowed')} /> {t('steward.connAllowed')}</label>
+                    <label><input type="checkbox" bind:checked={drafts[tool.raw_name].outward} data-tick="outward"
+                      disabled={holds(tool, 'outward')} /> {t('steward.connOutward')}</label>
+                    <label><input type="checkbox" bind:checked={drafts[tool.raw_name].egress} data-tick="egress"
+                      disabled={holds(tool, 'egress')} /> {t('steward.connEgress')}</label>
                     <label>{t('steward.connBlocked')} <input type="text" bind:value={drafts[tool.raw_name].blocked} data-tick="blocked" /></label>
                     <label>{t('steward.connCap')} <input type="number" min="1" bind:value={drafts[tool.raw_name].cap} data-tick="cap" /></label>
                   </div>
+                  {#if tool.locked?.length}<p class="hint" data-tool-locked>{t('steward.connToolLocked')}</p>{/if}
                 {/if}
               </div>
             {/each}

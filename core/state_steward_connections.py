@@ -571,6 +571,23 @@ def dev_mcp_writes() -> tuple[str, ...]:
     return tuple(name for name in DEV_MCP_PINNABLE if name not in DEV_MCP_READ)
 
 
+# The value each locked flag must keep. One rule, read by BOTH the write guard and the
+# owner's projection: a second copy in the panel would let a widened pin be editable here.
+DEV_MCP_LOCKED_VALUES = {"allowed": True, "outward": False, "egress": False}
+
+
+def dev_mcp_locked_flags(raw_name: str) -> tuple[str, ...]:
+    """The ticks the dev-mcp lock holds for one tool: a write tool's outward/egress, a
+    subagent_* tool's `allowed`; no flags for anything else (an ordinary connection calls
+    this only after checking `is_dev_mcp`). Derived from the pin's own write list, so a
+    tool added to `DEV_MCP_PINNABLE` is shown locked by the very rule that locks it."""
+    if raw_name in dev_mcp_writes():
+        return ("outward", "egress")
+    if raw_name.startswith(DEV_MCP_SUBAGENT):
+        return ("allowed",)
+    return ()
+
+
 def dev_mcp_hosts() -> set[str]:
     """Other names that reach dev-mcp (its tunnel hostnames), set at deploy time in
     AITELIER_DEV_MCP_HOSTS (comma-separated): a connection written with one is always
@@ -1112,9 +1129,10 @@ class StateStewardConnections:
                         "raw_name", "allowed", "outward", "egress", "blocked_args", "daily_cap", "schema_sha256"}:
                     raise StateGraphError("invalid_tools")
                 # Step 24.4c (7.8.24 "九" 5): dev-mcp's write tools stay outward and egress (every
-                # call confirmed by the owner); its subagent_* tools are never allowed.
-                if locked and ((item["raw_name"] in dev_mcp_writes() and False in (item.get("outward"), item.get("egress")))
-                               or (item["raw_name"].startswith(DEV_MCP_SUBAGENT) and item.get("allowed") is True)):
+                # call confirmed by the owner); its subagent_* tools are never allowed. The
+                # flags come from the same predicate the owner's panel renders as locked.
+                locked_flags = dev_mcp_locked_flags(item["raw_name"]) if locked else ()
+                if any(item.get(flag) is DEV_MCP_LOCKED_VALUES[flag] for flag in locked_flags):
                     raise StateGraphError(DEV_MCP_LOCKED)
                 row = conn.execute("SELECT * FROM state_steward_connection_tools WHERE conn_id=? AND raw_name=?",
                                    (conn_id, item["raw_name"])).fetchone()
@@ -1310,18 +1328,23 @@ class StateStewardConnections:
                             (conn_id,)).fetchall()
         lost = _collisions(rows)
         tools = []
+        dev_locked = is_dev_mcp(row)
         for t in rows:
             definition = json.loads(t["definition_json"])
             state = ("collision" if (t["conn_id"], t["raw_name"]) in lost
                      else "changed" if t["allowed_sha256"] and t["allowed_sha256"] != t["schema_sha256"]
                      else "allowed" if t["allowed"] else "new" if not t["allowed_sha256"] else "off")
+            # The panel must not offer a tick the write guard would refuse. Same predicate as
+            # `tools_set`, so showing a flag as locked and enforcing that lock cannot drift.
+            held = dev_mcp_locked_flags(t["raw_name"]) if dev_locked else ()
             tools.append({"raw_name": t["raw_name"], "gw_name": t["gw_name"],
                           "name": public_name(conn_id, t["gw_name"]),
                           "description": definition.get("description", ""), "input_schema": definition.get("inputSchema"),
                           "annotations": definition.get("annotations"), "schema_sha256": t["schema_sha256"],
                           "allowed": bool(t["allowed"]), "outward": bool(t["outward"]), "egress": bool(t["egress"]),
                           "blocked_args": json.loads(t["blocked_args"]), "daily_cap": t["daily_cap"],
-                          "first_seen_at": t["first_seen_at"], "last_seen_at": t["last_seen_at"], "state": state})
+                          "first_seen_at": t["first_seen_at"], "last_seen_at": t["last_seen_at"], "state": state,
+                          "locked": list(held), "locked_reason": "dev_mcp" if held else None})
         answer = {"conn_id": conn_id, "instructions": row["instructions"], "last_probe_at": row["last_probe_at"],
                   "last_error": row["last_error"], "tools": tools}
         if not instructions:

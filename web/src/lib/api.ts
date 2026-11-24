@@ -1189,11 +1189,16 @@ export interface StewardRestartState {
 export interface StewardConnections {
   connections: StewardConnection[]; effective_tools: string[]; effective_hash: string; restart: StewardRestartState;
 }
+/** The flags the backend holds for a tool (the dev-mcp lock): the panel disables those
+ *  ticks and sends their stored values back unchanged, so one locked tool cannot roll back
+ *  the rest of a save. An empty list means the owner may edit every flag. */
+export type StewardToolLock = 'allowed' | 'outward' | 'egress';
 export interface StewardConnectionTool {
   raw_name: string; gw_name: string; name: string; description: string; input_schema: unknown;
   annotations: Record<string, unknown> | null; schema_sha256: string;
   allowed: boolean; outward: boolean; egress: boolean; blocked_args: string[]; daily_cap: number | null;
   state: 'new' | 'allowed' | 'off' | 'changed' | 'collision';
+  locked: StewardToolLock[]; locked_reason: 'dev_mcp' | null;
 }
 export interface StewardConnectionTools {
   conn_id: string; instructions: string | null; last_probe_at: string | null; last_error: string | null;

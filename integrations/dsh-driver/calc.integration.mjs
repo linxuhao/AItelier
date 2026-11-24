@@ -1,12 +1,18 @@
 /** Step 24.4b (design-steward 7.8.24 "十四" 24.4b 集成测试): calculate's sandbox against the REAL
  *  calc image and docker, run by the director in the deploy window on the steward's host:
  *
- *    AITELIER_CALC_IT_IMAGE=sha256:... node --test calc.integration.test.mjs
+ *    AITELIER_CALC_IT_IMAGE=sha256:... node --test calc.integration.mjs
  *
- *  Without that variable every test here is skipped (the unit suite's containers have no docker;
- *  calc.test.mjs covers the host's side with a fake one). Nothing is downloaded: every job is a
- *  disposable container of the pinned image, labelled with this run's own host label, so a
- *  steward host on the same daemon is never touched. */
+ *  This file is named so that `node --test` discovery does NOT find it, and it is deliberately
+ *  absent from the npm test script: it needs a real docker daemon and a prebuilt image, which the
+ *  suite's own containers do not have, so under discovery it could only ever appear as eight
+ *  skipped tests. The repo's gate over this suite (tests/integration/test_driver_node_suite_runs.py)
+ *  counts a skip as RED - it requires every test the runner reports to have passed - so an arm
+ *  that is discovered but cannot run would red the python suite on every tree. Invoke it
+ *  explicitly, as above. Without AITELIER_CALC_IT_IMAGE its eight tests skip and it exits 0, so a
+ *  bare run is safe anywhere; calc.test.mjs covers the host's side with a fake docker. Nothing is
+ *  downloaded: every job is a disposable container of the pinned image, labelled with this run's
+ *  own host label, so a steward host on the same daemon is never touched. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statfsSync, writeFileSync } from 'node:fs';

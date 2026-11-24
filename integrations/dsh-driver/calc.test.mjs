@@ -6,7 +6,7 @@
  *  the owner first, the wall clock and its kill, startup cleanup, the self-check and its retry,
  *  the logs; and calcMediaOps (inputs in, outputs stored by magic and audience) over a real media
  *  library. The wrapper itself (docker/calc/run.py) is tested in tests/unit/test_calc_run.py; the
- *  real image in calc.integration.test.mjs (only with AITELIER_CALC_IT_IMAGE). */
+ *  real image in calc.integration.mjs (only with AITELIER_CALC_IT_IMAGE). */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';

@@ -12,12 +12,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { measuredEntryForTest, withoutHostWiring } from './dsh-entry.mjs';
+import { localSessionEnv } from '../dsh-director/hosts/local.mjs';
+import { INTERNAL_ENV, INTERNAL_VALUE } from '../dsh-director/lib/core.mjs';
 
 const PROVIDER = String.raw`
 import { createRequire } from 'node:module';
@@ -71,6 +74,10 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
   const here = dirname(fileURLToPath(import.meta.url));
   const directory = await mkdtemp(join(homedir(), 'dsh-memory-'));
   const root = join(directory, 'director'), memRoot = join(directory, 'memory');
+  // The local host tags its own driver (and every job a shell starts) with this
+  // root-specific variable (local.mjs localSessionEnv + apply), not an AItelier-
+  // launched-driver variable - the fixture drives director-local with this root.
+  const sessionEnv = localSessionEnv(root);
   const events = [], requests = [];
   let output = '', proc;
   const server = createServer(async (req, res) => {
@@ -89,16 +96,37 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
     while (!met() && Date.now() < deadline && proc.exitCode === null) await new Promise(resolve => setTimeout(resolve, 100));
     assert.ok(met(), what + '\n' + JSON.stringify(events.map(e => [e.type, e.data?.message?.toolCallId ?? e.data?.source?.kind ?? ''])) + '\n' + output.slice(-3000));
   };
+  // Read the tag off the processes the fixture actually creates, never off a comment.
+  const environ = pid => { try { return readFileSync(`/proc/${pid}/environ`, 'latin1').split('\0'); } catch { return []; } };
+  const tagged = pid => environ(pid).includes(`${sessionEnv}=mem-root`);
+  const alive = pid => { try { return readFileSync(`/proc/${pid}/stat`, 'latin1').replace(/^.*\) /s, '')[0] !== 'Z'; } catch { return false; } };
+  const helperPids = () => readdirSync('/proc').filter(n => /^\d+$/.test(n)).map(Number)
+    .filter(pid => alive(pid) && tagged(pid) && environ(pid).includes(`${INTERNAL_ENV}=${INTERNAL_VALUE}`)).sort((a, b) => a - b);
   try {
     await mkdir(join(root, 'inbox'), { recursive: true });
     await writeFile(join(root, 'inbox', 'start.json'), JSON.stringify({ task: 'begin' }));
     const profile = join(directory, 'home/profiles/driver'); await mkdir(profile, { recursive: true });
     await writeFile(join(directory, 'fixture-memory-provider.mjs'), PROVIDER);
+    // The host's openMemory does not forward a `grepHelper` option, so inject it at the
+    // store boundary from a fixture plugin loaded before the director opens its memory:
+    // the resident helper then carries the host's tag as well as its internal marker.
+    await writeFile(join(directory, 'fixture-grep-tag.mjs'), `\
+import { MemoryStore } from ${JSON.stringify(join(here, '../dsh-director/lib/memory/store.mjs'))};
+const open = MemoryStore.open;
+MemoryStore.open = function (options) {
+  return open.call(this, { ...options, grepHelper: { ...(options.grepHelper ?? {}),
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', ${JSON.stringify(sessionEnv)}: 'mem-root' } } });
+};
+export const name = 'fixture-grep-tag';
+export const inject = [];
+export function apply() {}
+`);
     await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } } }));
     await writeFile(join(profile, 'cordis.patch.yml'), JSON.stringify([
       { id: 'hmr', disabled: true },
       ...['tool-subagent-fork', 'tool-workflow', 'plan-mode', 'tool-todo'].map(id => ({ id, disabled: true })),
-      { insert: [{ id: 'fixture', name: join(directory, 'fixture-memory-provider.mjs') },
+      { insert: [{ id: 'fixture-grep-tag', name: join(directory, 'fixture-grep-tag.mjs') },
+        { id: 'fixture', name: join(directory, 'fixture-memory-provider.mjs') },
         { id: 'director', name: join(here, '../dsh-director/index.mjs') },
         { id: 'director-local', name: join(here, '../dsh-director/hosts/local.mjs'), config: { root, sessionId: 'mem-root',
           provider: 'fixture', model: 'fixture-model', dshEntry: entry, pollMs: 100, idleReviewMs: 600000,
@@ -107,10 +135,11 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
     const environment = withoutHostWiring(process.env);
     const launch = boot => {
       const child = spawn(process.execPath, [entry, '--profile', 'driver'], { cwd: directory, env: { ...environment,
-        // Tagged like a launched driver (AItelier sets AITELIER_DSH_SESSION the same way): the
-        // memory store's resident grep helper inherits this tag, and idle_dormant must still
-        // not count that helper as a background job the model started (2026-11-20).
-        DSH_DIRECTOR_SESSION: 'mem-root',
+        // The local host's own dynamic session tag (local.mjs sets it on this driver).
+        // The resident memory grep helper carries this tag too, but idle_dormant must not
+        // count it as a job the agent started: what excludes it is the runtime's internal
+        // marker (core.mjs INTERNAL_ENV / backgroundProcesses), not the tag.
+        [sessionEnv]: 'mem-root',
         DSH_HOME: join(directory, 'home'), MEM_TEST_DSH_ENTRY: entry, MEM_TEST_BOOT: boot, MEM_TEST_URL: `http://127.0.0.1:${server.address().port}` } });
       child.stdout.on('data', chunk => output += chunk); child.stderr.on('data', chunk => output += chunk);
       return child;
@@ -119,7 +148,15 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
 
     // ---- boot 1
     proc = launch('1');
+    await until('child DSH never carried the host session tag', () => tagged(proc.pid));
     await until('boot 1 never went dormant', () => result('d1'));
+    // The helper is alive at the very call idle_dormant must accept, and it carries BOTH
+    // the host tag and the internal marker - read off /proc, not from a comment.
+    const helpersAtDormant = helperPids();
+    t.diagnostic(`child pid=${proc.pid} carries ${sessionEnv}=mem-root: ${tagged(proc.pid)}; ` +
+      `tagged internal grep helper pids at the dormant call: ${JSON.stringify(helpersAtDormant)}`);
+    assert.ok(helpersAtDormant.length, 'the tagged, internally-marked grep helper is alive at the dormant call');
+    assert.equal(json('d1').dormant, true, 'idle_dormant was refused: ' + JSON.stringify(json('d1')));
     assert.equal(json('p1').updated, true, JSON.stringify(json('p1')));
     assert.match(json('n1').id, /^n-/);
     const s1 = json('s1');
@@ -132,7 +169,6 @@ test('real pinned DSH, two boots: the profile reaches the post-compaction snapsh
     assert.deepEqual(s1.ranked.hits.map(h => [h.id, h.shown]), [[json('n1').id, 'see_grep']]);
     assert.match(s1.ranked.text, / → 见 grep$/);
     assert.match(s1.budget, /^\d+\/6000 字 · omitted 0$/);
-    assert.equal(json('d1').dormant, true, JSON.stringify(json('d1')));
     const listed = requests.find(r => r.session === 'mem-root' && r.tools.length)?.tools ?? [];
     assert.ok(!listed.some(name => name.startsWith('memory_')), 'registered, not presented: ' + JSON.stringify(listed));
     await until('dormancy did not compact', () => compactions() >= 1);

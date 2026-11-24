@@ -189,18 +189,16 @@ after it, that file's two `[main]` rows failed. The flag is now restored by the
 test that sets it.
 
 pytest-timeout, where installed, bounds a hung row with `--timeout <seconds>`.
-Installing it has a side effect: `core/repository_executor_entry.py`
-adds `--timeout=120 --timeout-method=thread` to repository-gate pytest runs that
-request `pytest_timeout` whenever the plugin is importable. To try the plugins
-in an older image, install them into a directory on `PYTHONPATH`. The gate's
-child process builds its own environment and starts `python3` from a fixed
-`PATH`, so it sees neither that directory nor a venv the suite runs in. Gate
-tests that drive the entry in-process therefore fail with
-`unrecognized arguments: --timeout=120` when pytest-timeout is installed either
-way. Install only `pytest-xdist execnet` for such runs. Because pyproject dependencies go into the product image, pinning
-pytest-timeout would switch that 120 s gate limit on for every target repository,
-and two slow-tier rows take longer than 120 s. It stays unpinned until the owner
-accepts that.
+`core/repository_executor_entry.py` adds `--timeout=120 --timeout-method=thread`
+to repository-gate pytest runs that request `pytest_timeout` only when the gate's
+own child interpreter, started with the gate's own environment, can import the
+plugin. A plugin installed only for the interpreter running the suite (a
+directory on `PYTHONPATH`, or a venv) is invisible to that child, so the gate
+rows run without the flag rather than failing with
+`unrecognized arguments: --timeout=120`. Because pyproject dependencies go into
+the product image, pinning pytest-timeout would switch that 120 s gate limit on
+for every target repository, and two slow-tier rows take longer than 120 s. It
+stays unpinned until the owner accepts that.
 
 ## Sharding by measured duration
 

@@ -87,6 +87,21 @@ def test_actual_container_entry_captures_real_pytest_and_junit(tmp_path, failing
     assert candidate._junit_node_ids(junit) == {"tests/test_fixture.py::test_fixture"}
 
 
+def test_entry_asks_the_child_interpreter_for_pytest_timeout(tmp_path, monkeypatch):
+    # A pytest_timeout this process can import but the child's scrubbed
+    # environment cannot (a PYTHONPATH or venv install in the test runner)
+    # must not put --timeout on the child's command line.
+    outer = tmp_path / "outer-only"
+    outer.mkdir()
+    (outer / "pytest_timeout.py").write_text("")
+    monkeypatch.syspath_prepend(str(outer))
+    repo = _fixture(tmp_path)
+    result = entry.run({"repo": str(repo), "timeout": 60, "pytest_timeout": True,
+                        "args": ["python3", "-m", "pytest", "tests", "-q", "-p", "no:cacheprovider"]})
+    assert "unrecognized arguments" not in result["stderr"], result["stderr"][-600:]
+    assert result["returncode"] == 0, result
+
+
 def _witness_pid(witness):
     """The pid a witness file carries, or a named failure -- never `int('')`.
 

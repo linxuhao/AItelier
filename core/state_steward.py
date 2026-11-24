@@ -179,11 +179,42 @@ def impact_is_empty(impact) -> bool:
 
 
 def _proposal(row) -> dict:
+    """The owner's projection: the frozen payload exactly as stored, including the
+    capability_route card (upstream-written descriptions and raw tool names)."""
     return {"proposal_id": row["proposal_id"], "version": row["version"], "kind": row["kind"],
             "payload": json.loads(row["payload_json"]), "reason": row["reason"], "status": row["status"],
             "created_at": row["created_at"], "decided_at": row["decided_at"],
             "decided_by": row["decided_by"],
             "result": json.loads(row["result_json"]) if row["result_json"] else None}
+
+
+def _steward_proposal(row) -> dict:
+    """The steward's projection of one proposal read with its own credential.
+
+    A capability_route's frozen payload carries the dashboard's card: each connection
+    entry's description and raw tool name, written by the upstream server (7.8.24 "五").
+    Those words are the owner's alone, so a steward-scoped proposal read keeps only the
+    route's kinds and fixed codes - the same projection the plugin's `openProposals`
+    applies to its own snapshot. Every other kind stays `_proposal`'s row.
+    """
+    out = _proposal(row)
+    if row["kind"] != "capability_route":
+        return out
+    from core.state_steward_capabilities import HOST_TOOLS
+    payload = out["payload"] if isinstance(out["payload"], dict) else {}
+    entries = payload.get("entries") or payload.get("route") or []
+    codes = []
+    for entry in entries if isinstance(entries, list) else []:
+        kind = entry if isinstance(entry, str) else entry.get("kind") if isinstance(entry, dict) else None
+        tool = entry.get("tool") if isinstance(entry, dict) else None
+        if kind in ("native", "missing"):
+            codes.append(kind)
+        elif kind == "host" and tool in HOST_TOOLS:
+            codes.append(f"host:{tool}")
+        else:
+            codes.append("conn")
+    out["payload"] = {"cap_id": payload.get("cap_id"), "entries": codes}
+    return out
 
 
 def _carrier_still_bound(conn, carrier):
@@ -690,6 +721,13 @@ class StateSteward:
         return self._record(conn, "create_steward_proposal", request_key, request_hash,
                             {"proposal_id": proposal_id, "version": 1, "status": "open", **(extra or {})})
 
+    def _proposal_projector(self):
+        """The caller's projection of a proposal row (7.8.24 "五"): a steward
+        credential gets the card-free view; the owner and everyone else keep
+        `_proposal`'s row. One choice for reads and for a conflict's carried row.
+        """
+        return _steward_proposal if self.is_steward() and not self.is_owner_session() else _proposal
+
     def withdraw_proposal(self, project_id, request_key, proposal_id, reason):
         """The steward takes back one of its own OPEN proposals."""
         reason = reason.strip()
@@ -705,7 +743,7 @@ class StateSteward:
             if row["created_by"] != self.actor:
                 raise StateGraphError("not_your_proposal")
             if row["status"] != "open":
-                raise ProposalConflict(_proposal(row))
+                raise ProposalConflict(self._proposal_projector()(row))
             conn.execute("UPDATE state_steward_proposals SET status='withdrawn',version=version+1,"
                          "decided_at=?,decided_by=?,result_json=? WHERE proposal_id=?",
                          (now(), self.actor, canonical({"reason": reason}), proposal_id))
@@ -724,17 +762,19 @@ class StateSteward:
     @writer_only_read("list_steward_proposals")
     def list_proposals(self, status="open", limit=50):
         self._owner_or_steward()
+        project = self._proposal_projector()
         where = "" if status == "all" else "WHERE status='open'"
         with self.store.transaction() as conn:
             rows = conn.execute(f"SELECT * FROM state_steward_proposals {where} "
                                 "ORDER BY created_at DESC, proposal_id DESC LIMIT ?", (limit,)).fetchall()
-        return {"proposals": [_proposal(r) for r in rows]}
+        return {"proposals": [project(r) for r in rows]}
 
     @writer_only_read("list_steward_proposals")
     def get_proposal(self, proposal_id):
         self._owner_or_steward()
+        project = self._proposal_projector()
         with self.store.transaction() as conn:
-            return _proposal(self._get(conn, proposal_id))
+            return project(self._get(conn, proposal_id))
 
     @writer_only_read("list_steward_proposals")
     def impact(self, proposal_id):

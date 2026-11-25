@@ -82,18 +82,57 @@ def test_the_tunnel_network_is_selected_by_name_with_a_harmless_default():
         "— a bare name would join the wrong network on every other host")
 
 
-# ── One compose file, so the CLI and a hand-run compose cannot disagree ─────
+# ── The CLI loads compose's default file pair, not just the base ─────────────
 
-def test_the_cli_passes_only_the_base_file(monkeypatch):
-    """No overlay to opt into means no way for the CLI and a hand-run
-    `docker compose` to be looking at different files."""
+def test_the_cli_passes_the_default_compose_file_set(tmp_path, monkeypatch):
+    """A hand-run compose loads base + host-local override; so must the CLI.
+
+    On 2026-11-25 the CLI passed only `-f docker-compose.yml` while the operator's
+    hand-run `docker compose up -d` also loaded docker-compose.override.yml. The
+    CLI's container silently lost the tailnet publish, MCP allowed hosts and the
+    loop-stack watchdog variable. Both shapes are checked in a tmp project, so a
+    gitignored override in the real checkout cannot flip this test's verdict.
+    """
+    project = (tmp_path / "project").resolve()
+    project.mkdir()
+    base = project / "docker-compose.yml"
+    base.write_text("services: {}\n", encoding="utf-8")
+    override = project / "docker-compose.override.yml"
+    base_only = ["--project-directory", str(project), "-f", str(base)]
+
+    for net in ("vip-gateway_default", None):
+        if net is None:
+            monkeypatch.delenv("AITELIER_EDGE_NETWORK", raising=False)
+        else:
+            monkeypatch.setenv("AITELIER_EDGE_NETWORK", net)
+        assert srv._compose_files(project) == base_only, (
+            "without an override, the base alone — and no dependence on the "
+            "edge network variable — is compose's default")
+
+    override.write_text("services: {}\n", encoding="utf-8")
+    pair = base_only + ["-f", str(override)]
+    for net in ("vip-gateway_default", "another-network", None):
+        if net is None:
+            monkeypatch.delenv("AITELIER_EDGE_NETWORK", raising=False)
+        else:
+            monkeypatch.setenv("AITELIER_EDGE_NETWORK", net)
+        assert srv._compose_files(project) == pair, (
+            "the override must follow the base in the same order compose uses, "
+            "with no help from the edge network variable")
+
+
+def test_the_module_default_names_the_repositorys_compose_files(monkeypatch):
+    """With no explicit root, the project directory is _PROJECT_ROOT. Assert
+    the same default pair against the tree the module actually imports from;
+    never create or delete the gitignored override to make the test pass."""
+    expected = ["-f", str(srv._COMPOSE_FILE)]
+    if (ROOT / "docker-compose.override.yml").is_file():
+        expected += ["-f", str(ROOT / "docker-compose.override.yml")]
+
     monkeypatch.setenv("AITELIER_EDGE_NETWORK", "vip-gateway_default")
-    with_net = srv._compose_files()
+    assert srv._compose_files() == expected
     monkeypatch.delenv("AITELIER_EDGE_NETWORK", raising=False)
-    assert srv._compose_files() == with_net, (
-        "the file list still varies with the environment — that is the split "
-        "that let a plain `up -d` drop the public path")
-    assert with_net.count("-f") == 1
+    assert srv._compose_files() == expected
 
 
 def test_no_compose_overlay_file_remains():

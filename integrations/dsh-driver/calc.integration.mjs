@@ -27,7 +27,12 @@ const logs = [];
 let runner;
 const run = async (code, inputs = []) => {
   if (!runner) {
-    runner = createCalcRunner({ image, tmpRoot: join(work, 'calc-tmp'), log: line => logs.push(line) });
+    // The wrapper answers at its own CHILD_SECONDS=25 bound; the driver's default 30 s wall
+    // backstop leaves only 5 s of slack, which a loaded host can eat, turning the wrapper's
+    // answer into {refused: "timeout"}. Lift only the backstop well past the wrapper so the
+    // timed_out assertion below measures the wrapper's real answer, not the driver's kill.
+    runner = createCalcRunner({ image, tmpRoot: join(work, 'calc-tmp'), log: line => logs.push(line),
+      limits: { wallMs: 60000 } });
     await runner.start();
     assert.equal(runner.status().state, 'ready', logs.join('\n'));
   }

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -64,7 +65,23 @@ def _connect() -> None:
     _rpc("notifications/initialized", {}, notify=True)
 
 
+# A slow generation (a reference-image render takes ~270 s) answers with its job id
+# instead of blocking past a gateway's cut; a tool here wants the finished link, so it
+# keeps waiting on that job (each wait is at most ~2 minutes server side) up to this long.
+_JOB = re.compile(r"media_job_wait\(job_id='([^']+)'\)")
+_JOB_DEADLINE = 1800.0
+
+
 def call_tool(name: str, arguments: dict) -> str:
+    """Call one MCP tool and return its text result, waiting out a pending media job."""
+    text = _call_once(name, arguments)
+    deadline = time.monotonic() + _JOB_DEADLINE
+    while (job := _JOB.search(text)) and time.monotonic() < deadline:
+        text = _call_once("media_job_wait", {"job_id": job.group(1)})
+    return text
+
+
+def _call_once(name: str, arguments: dict) -> str:
     """Call one MCP tool and return its text result.
 
     Retries once from a clean session on a 404: the server hands out a session id

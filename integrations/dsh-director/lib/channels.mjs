@@ -530,7 +530,7 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   const placeholderSince = new Map();
   // A plugin's structured pause snapshot, normalised on the boundary: unknown shapes are
   // dropped, not passed through. A quiet plugin reports [] explicitly (clearing old badges);
-  // a status() that threw reports no snapshot at all, so State leaves the pauses as they were.
+  // a status() that threw reports no snapshot at all, so the pauses stay as they were.
   const pausedGroupsOf = value => Array.isArray(value) ? value.flatMap(row =>
     row && typeof row.groupRef === 'string' && row.groupRef && row.groupRef.length <= 200
       && typeof row.reason === 'string' && row.reason && row.reason.length <= 40

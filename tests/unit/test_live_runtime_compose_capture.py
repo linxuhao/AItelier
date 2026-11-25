@@ -32,7 +32,14 @@ def operated_backend(tmp_path, monkeypatch):
 with open(os.environ['OWNED_COMMAND_LOG'], 'a') as log:
     log.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1] == 'compose':
-    expected = ['-f', os.environ['OWNED_COMPOSE_FILE'], 'ps', '-q', 'aitelier']
+    # Compose's default pair: the base, then the host-local override when it
+    # exists. Derived from the project directory, never from the CLI helper.
+    expected = ['-f', os.environ['OWNED_COMPOSE_FILE']]
+    override = os.path.join(os.path.dirname(os.environ['OWNED_COMPOSE_FILE']),
+                            'docker-compose.override.yml')
+    if os.path.isfile(override):
+        expected += ['-f', override]
+    expected += ['ps', '-q', 'aitelier']
     if 'OWNED_COMPOSE_ROOT' in os.environ:
         expected = ['--project-directory', os.environ['OWNED_COMPOSE_ROOT']] + expected
     assert sys.argv[2:] == expected
@@ -198,11 +205,15 @@ def test_source_imports_and_owned_container_caps():
 
 
 @pytest.mark.parametrize('mismatch', [False, True])
+@pytest.mark.parametrize('with_override', [False, True])
 def test_explicit_canonical_compose_root_keeps_normal_identity_verification(
-        operated_backend, tmp_path, monkeypatch, mismatch):
+        operated_backend, tmp_path, monkeypatch, mismatch, with_override):
     facts, log = operated_backend
     canonical = tmp_path/'canonical-project'; canonical.mkdir()
     compose_file = canonical/'docker-compose.yml'; compose_file.write_text('services: {}\n')
+    override_file = canonical/'docker-compose.override.yml'
+    if with_override:
+        override_file.write_text('services: {}\n')
     monkeypatch.setenv('OWNED_COMPOSE_ROOT', str(canonical))
     monkeypatch.setenv('OWNED_COMPOSE_FILE', str(compose_file))
     if mismatch:
@@ -213,8 +224,11 @@ def test_explicit_canonical_compose_root_keeps_normal_identity_verification(
     else:
         assert server._live_runtime_observation('http://127.0.0.1:4444', compose_root=canonical) == facts
     commands = [json.loads(line) for line in log.read_text().splitlines()]
-    assert commands[0] == ['compose', '--project-directory', str(canonical), '-f',
-                           str(compose_file), 'ps', '-q', 'aitelier']
+    expected_files = ['-f', str(compose_file)]
+    if with_override:
+        expected_files += ['-f', str(override_file)]
+    assert commands[0] == ['compose', '--project-directory', str(canonical),
+                           *expected_files, 'ps', '-q', 'aitelier']
     assert commands[1] == ['inspect', '--format', '{{.State.Pid}}', 'a'*64]
     # The compose-capture CLI path is importable on its own: a bare interpreter
     # that imports it loads none of the runtime DB stack (a fresh interpreter,
@@ -229,3 +243,51 @@ def test_explicit_compose_root_refuses_unusable_project(tmp_path, kind):
     if kind == 'relative': root = Path('relative-project')
     with pytest.raises((ValueError, FileNotFoundError)):
         server._compose_files(root)
+
+
+@pytest.mark.parametrize('with_override', [False, True])
+def test_compose_up_executes_composes_default_file_pair(tmp_path, monkeypatch, with_override):
+    """The defect end to end, through the real _compose -> subprocess.run path.
+
+    On 2026-11-25 _compose_up executed `compose -f <base> up -d --no-deps
+    aitelier` while a hand-run `docker compose up -d` in the same directory also
+    loaded the gitignored override. The resulting container silently lost the
+    tailnet publish, MCP allowed hosts and the loop-stack watchdog variable.
+    Nothing here stubs _compose: the argv is what the fake executable actually
+    received. The module default is pointed at a tmp project so no file is
+    created in the real checkout.
+    """
+    project = (tmp_path / 'project').resolve()
+    project.mkdir()
+    compose_file = project / 'docker-compose.yml'
+    compose_file.write_text('services: {}\n')
+    override_file = project / 'docker-compose.override.yml'
+    if with_override:
+        override_file.write_text('services: {}\n')
+    monkeypatch.setattr(server, '_PROJECT_ROOT', project)
+    monkeypatch.setattr(server, '_COMPOSE_FILE', compose_file)
+
+    log = tmp_path / 'up-argv.jsonl'
+    executable = tmp_path / 'docker'
+    executable.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
+with open(os.environ['OWNED_UP_LOG'], 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\\n')
+''')
+    executable.chmod(0o700)
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('OWNED_UP_LOG', str(log))
+
+    # Stub only what is not under test: filesystem provisioning, image
+    # freshness and the post-up network diagnostic.
+    monkeypatch.setattr(server, '_ensure_host_dirs', lambda: None)
+    monkeypatch.setattr(server, '_image_exists', lambda: True)
+    monkeypatch.setattr(server, '_image_deps_are_stale', lambda: False)
+    monkeypatch.setattr(server, '_warn_if_edge_network_is_alone', lambda: None)
+
+    server._compose_up(no_deps=True)
+
+    expected = ['compose', '-f', str(compose_file)]
+    if with_override:
+        expected += ['-f', str(override_file)]
+    expected += ['up', '-d', '--no-deps', 'aitelier']
+    assert [json.loads(line) for line in log.read_text().splitlines()] == [expected]

@@ -114,15 +114,21 @@ def _compose_env() -> dict:
 
 
 def _compose_files(compose_root: str | Path | None = None) -> list[str]:
-    """The -f arguments for every compose call: the base file, and only it.
+    """The -f arguments for every compose call: compose's DEFAULT file pair.
 
-    There used to be an opt-in `docker-compose.edge.yml` overlay carrying the
-    cloudflared network, added here whenever AITELIER_EDGE_NETWORK was set. That
-    made the CLI and a hand-run `docker compose` disagree about which files were
-    in play, and on 2026-08-25 a rebuild run as a plain `docker compose up -d`
-    recreated the container without the gateway network: healthy container,
-    localhost still 200, public path gone, nothing said so. The network now
-    lives in the base file, selected by name — one file, nothing to forget.
+    A hand-run `docker compose` in a project directory loads docker-compose.yml
+    and, when present, docker-compose.override.yml — the host-local, gitignored
+    file operators use for the tailnet publish, allowed hosts and the loop-stack
+    watchdog. Passing only the base explicitly made the CLI disagree with that
+    hand-run form: on 2026-11-25 its `up -d --no-deps aitelier` created a
+    container the hand-run command would not, silently dropping all three. Mirror
+    the default pair in both branches so a missing override changes nothing.
+
+    Neither list varies with AITELIER_EDGE_NETWORK: the old opt-in
+    `docker-compose.edge.yml` overlay was removed after 2026-08-25, when a plain
+    `docker compose up -d` recreated a container without the gateway network —
+    healthy, localhost 200, public path gone, nothing said so. The network now
+    lives in the base file, selected by name.
     """
     if compose_root is not None:
         root = Path(compose_root)
@@ -135,8 +141,16 @@ def _compose_files(compose_root: str | Path | None = None) -> list[str]:
         # An accepted host CLI may be imported from its immutable worktree while
         # observing an already initialized canonical backend, without restarting
         # it or constructing a second runtime. Select its Compose project too.
-        return ["--project-directory", str(root), "-f", str(compose)]
-    return ["-f", str(_COMPOSE_FILE)]
+        files = ["--project-directory", str(root), "-f", str(compose)]
+        override = root / "docker-compose.override.yml"
+        if override.is_file():
+            files += ["-f", str(override)]
+        return files
+    files = ["-f", str(_COMPOSE_FILE)]
+    override = _PROJECT_ROOT / "docker-compose.override.yml"
+    if override.is_file():
+        files += ["-f", str(override)]
+    return files
 
 
 def _ensure_host_dirs() -> None:
@@ -514,7 +528,7 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
         if not _wait_healthy(client, max_wait):
             raise RuntimeError(
                 f"Docker backend did not become healthy within {max_wait}s "
-                f"(check: docker compose -f {_COMPOSE_FILE} logs)"
+                "(check: docker compose logs)"
             )
     except BaseException as exc:
         _finish_deployment(clearance, success=False, error=exc)

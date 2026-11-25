@@ -1082,6 +1082,8 @@ export interface OwnerGroup {
   messages_30d: number; last_message_at: string | null; members: GroupMember[];
   messages?: GroupRecord[]; family_note?: {text: string; updated_at: string} | null; family_memory?: FamilyMemoryEntry[];
   media_keep?: GroupMediaKeep;
+  /** A Slack group's pause as the bridge reported it; null while the group is running. */
+  paused?: {reason: string; at: string} | null;
 }
 const groupPath = (channel: OwnerChannelName, groupRef: string) =>
   '/api/steward/groups/' + encodeURIComponent(channel) + '/' + encodeURIComponent(groupRef);

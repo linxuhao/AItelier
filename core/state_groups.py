@@ -315,6 +315,10 @@ def _initialize_schema(db) -> None:
         add_column_if_missing(conn, "state_owner_groups", "media_purged_at", "TEXT")
         add_column_if_missing(conn, "state_owner_groups", "media_purge_reason", "TEXT")
         add_column_if_missing(conn, "state_owner_groups", "media_purge_rows", "INTEGER NOT NULL DEFAULT 0")
+        # A group bound to a paused channel (the bridge's structured status snapshot): the short
+        # reason code and when it was suspended, or NULL while the group is running.
+        add_column_if_missing(conn, "state_owner_groups", "paused_reason", "TEXT")
+        add_column_if_missing(conn, "state_owner_groups", "paused_at", "TEXT")
         for (channel, group_ref) in conn.execute(
                 "SELECT channel,group_ref FROM state_owner_groups WHERE revoked_at IS NULL AND "
                 "(label IS NULL OR trim(label)='') ORDER BY bound_at").fetchall():
@@ -578,8 +582,8 @@ class StateGroups:
             row = self._live_group(conn, channel, group_ref)
             if row is not None:
                 group = row["group_ref"]
-                conn.execute("UPDATE state_owner_groups SET revoked_at=? WHERE channel=? AND group_ref=?",
-                             (_now().isoformat(), channel, group))
+                conn.execute("UPDATE state_owner_groups SET revoked_at=?, paused_reason=NULL, paused_at=NULL "
+                             "WHERE channel=? AND group_ref=?", (_now().isoformat(), channel, group))
                 # design/steward-group-media.md (R2): the media switch is off, and what it kept is
                 # purged by the host under a new epoch (the revoked row keeps it).
                 self._media_keep_reset(conn, channel, group, _now(), "unbind")
@@ -777,7 +781,9 @@ class StateGroups:
                     "SELECT * FROM state_group_members WHERE channel=? AND group_ref=? ORDER BY ordinal", key)]
                 group = {"channel": row["channel"], "group_ref": row["group_ref"], "label": row["label"],
                          "mention_prefix": row["mention_prefix"], "bound_at": row["bound_at"],
-                         "messages_30d": stats[0], "last_message_at": stats[1], "members": members}
+                         "messages_30d": stats[0], "last_message_at": stats[1], "members": members,
+                         "paused": {"reason": row["paused_reason"], "at": row["paused_at"]}
+                         if row["paused_reason"] is not None else None}
                 if row["channel"] != "slack":  # a Slack group has no media switch (set_group_media_keep)
                     group["media_keep"] = self._media_keep_view(conn, row, cutoff)
                 if channel == row["channel"] and group_ref == row["group_ref"]:
@@ -823,7 +829,8 @@ class StateGroups:
         conn.execute("UPDATE state_owner_channel_codes SET used_at=? WHERE code_hash=?", (moment.isoformat(), code_hash))
         conn.execute("INSERT INTO state_owner_groups(channel,group_ref,label,mention_prefix,bound_at,revoked_at) "
                      "VALUES(?,?,?,?,?,NULL) ON CONFLICT(channel,group_ref) DO UPDATE SET label=excluded.label,"
-                     "mention_prefix=excluded.mention_prefix,bound_at=excluded.bound_at,revoked_at=NULL",
+                     "mention_prefix=excluded.mention_prefix,bound_at=excluded.bound_at,revoked_at=NULL,"
+                     "paused_reason=NULL,paused_at=NULL",
                      (channel, group_ref, label, prefix, moment.isoformat()))
         # design/steward-group-media.md (R2, invariant (d)): a new binding starts with the switch
         # off (the column default) and a rebind returns it to off - binding never means storing.

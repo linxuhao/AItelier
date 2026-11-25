@@ -936,7 +936,7 @@ test('status: read when the channel registers, then reported to the host only wh
   try {
     const unregister = channels.service.register(channel);
     await channels.pollStatus();
-    assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'bridge not reached yet' }]);
+    assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'bridge not reached yet', pausedGroups: [] }]);
     await channels.pollStatus();
     await channels.pollStatus();
     assert.equal(reports.length, 1, 'the same status is not reported again');
@@ -947,13 +947,13 @@ test('status: read when the channel registers, then reported to the host only wh
     wechat.now = { connected: true };
     await channels.pollStatus();
     await channels.pollStatus();
-    assert.deepEqual(reports.slice(1), [{ channel: 'wechat', connected: false, detail: 'scan needed', qrSvg: QR_SVG },
-      { channel: 'wechat', connected: true }]);
+    assert.deepEqual(reports.slice(1), [{ channel: 'wechat', connected: false, detail: 'scan needed', qrSvg: QR_SVG, pausedGroups: [] },
+      { channel: 'wechat', connected: true, pausedGroups: [] }]);
     // Taken back (the channel plugin stops): disconnected, once.
     unregister();
     unregister();
     await channels.pollStatus();
-    assert.deepEqual(reports.slice(3), [{ channel: 'wechat', connected: false, detail: 'channel plugin stopped' }]);
+    assert.deepEqual(reports.slice(3), [{ channel: 'wechat', connected: false, detail: 'channel plugin stopped', pausedGroups: [] }]);
     // Logged: the channel and whether it is connected - never the detail or the QR.
     assert.deepEqual(logs.filter(([event]) => event.startsWith('channel_status')).map(([, fields]) => fields),
       [{ channel: 'wechat', connected: false }, { channel: 'wechat', connected: false }, { channel: 'wechat', connected: true },
@@ -969,10 +969,10 @@ test('status: nothing reaches the host before it is ready; the poll runs on its 
   assert.deepEqual(reports, [], 'the host is not ready yet');
   channels.ready();
   await new Promise(resolve => setTimeout(resolve, 40));
-  assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'bridge not reached yet' }]);
+  assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'bridge not reached yet', pausedGroups: [] }]);
   wechat.now = { connected: true };
   await new Promise(resolve => setTimeout(resolve, 60));
-  assert.deepEqual(reports.at(-1), { channel: 'wechat', connected: true }, 'picked up by the timer, no explicit poll');
+  assert.deepEqual(reports.at(-1), { channel: 'wechat', connected: true, pausedGroups: [] }, 'picked up by the timer, no explicit poll');
   channels.stop();
   const count = reports.length;
   wechat.now = { connected: false, detail: 'later' };
@@ -1009,11 +1009,39 @@ test('status: a status() that throws reads as disconnected; a long detail is cut
   wechat.now = { connected: 'yes', detail: 'd'.repeat(400), qrSvg: 42, extra: 'x' };
   channels.service.register(channel);
   await channels.pollStatus();
-  assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'd'.repeat(300) }]);
+  assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'd'.repeat(300), pausedGroups: [] }]);
   channels.service.register({ name: 'slack', status: () => { throw new Error('boom'); }, async send() { return {}; } });
   await channels.pollStatus();
   assert.deepEqual(reports.at(-1), { channel: 'slack', connected: false, detail: 'status unavailable' });
+  assert.ok(!('pausedGroups' in reports.at(-1)), 'a status() that threw still holds its pause: no snapshot, no clear');
   channels.stop();
+});
+
+test('status: a structured pause snapshot crosses the boundary, and a snapshot-only change is reported', async () => {
+  const { channels, reports, wechat, channel } = statusSetup();
+  channels.ready();
+  try {
+    channels.service.register(channel);
+    await channels.pollStatus();
+    assert.deepEqual(reports.at(-1).pausedGroups, [], 'no pause yet');
+    const at = '2026-11-24T10:00:00.000Z';
+    wechat.now = { connected: false, detail: 'bridge not reached yet', pausedGroups: [
+      { groupRef: 'C1', reason: 'shared', at }, { junk: true }, { groupRef: 'C2', reason: 'missing_scope' }, null] };
+    await channels.pollStatus();
+    assert.deepEqual(reports.at(-1), { channel: 'wechat', connected: false, detail: 'bridge not reached yet',
+      pausedGroups: [{ groupRef: 'C1', reason: 'shared', at }] }, 'well-shaped rows cross; unknown shapes are dropped');
+    const before = reports.length;
+    await channels.pollStatus();
+    assert.equal(reports.length, before, 'the same snapshot is not reported again');
+    wechat.now = { ...wechat.now, pausedGroups: [{ groupRef: 'C2', reason: 'not_private', at }] };
+    await channels.pollStatus();
+    assert.equal(reports.length, before + 1, 'a snapshot-only change still re-reports');
+    assert.deepEqual(reports.at(-1).pausedGroups, [{ groupRef: 'C2', reason: 'not_private', at }]);
+    wechat.now = { ...wechat.now, pausedGroups: [] };
+    await channels.pollStatus();
+    assert.equal(reports.length, before + 2);
+    assert.deepEqual(reports.at(-1).pausedGroups, [], 'an empty snapshot clears the old one');
+  } finally { channels.stop(); }
 });
 
 test('status: a host without reportStatus is never asked, and nothing polls', async () => {

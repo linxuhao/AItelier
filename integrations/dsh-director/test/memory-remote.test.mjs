@@ -54,6 +54,14 @@ const until = async (pred, what, ms = 4000) => {
 // The one negative assertion ("enabling the remote does not backfill") has nothing to wait for,
 // only a window in which nothing may arrive.
 const quiet = () => new Promise(resolve => setTimeout(resolve, 200));
+// Where the assertion is a COUNT ("one /add per turn"), returning at the first match is not
+// enough: a duplicate push a few milliseconds later would go unseen, and the fixed sleep this
+// replaced did see it. `exactly` waits for the arrival and then holds the same window before the
+// caller asserts the exact count.
+const exactly = async (list, count, what) => {
+  await until(() => list.length >= count, what);
+  await quiet();
+};
 const pendingFile = (root) => join(root, USER + '.ranked-pending.json');
 
 test('protocol mapping: one /add per turn, /search mapped, the source names the remote', async (t) => {
@@ -61,7 +69,7 @@ test('protocol mapping: one /add per turn, /search mapped, the source names the 
   t.after(() => srv.close());
   const store = await openRemote(root, srv);
   await store.recordTurn('turn-9', [{ role: 'owner', text: '想做记账工具' }, { role: 'steward', text: '记下了' }]);
-  await until(() => srv.adds.length === 1, 'the /add push of turn-9');
+  await exactly(srv.adds, 1, 'the /add push of turn-9');
   assert.equal(srv.adds.length, 1);
   assert.deepEqual({ ...srv.adds[0], messages: srv.adds[0].messages.map(m => [m.role, m.content]) },
     { request_id: 'turn-9', user_id: 'u-1', session_id: 's-1', messages: [['user', '想做记账工具'], ['assistant', '记下了']] });
@@ -145,7 +153,7 @@ test('enabling the remote does not backfill the existing log', async () => {
   const store = await openRemote(root, srv);
   await quiet();
   assert.deepEqual(srv.adds, []);
-  assert.ok(!existsSync(join(root, USER + '.ranked-pending.json')));
+  assert.ok(!existsSync(pendingFile(root)));
   await store.close(); await srv.close();
 });
 
@@ -155,7 +163,8 @@ test('AMI ids: a forgotten turn is filtered by turn even though the remote rewro
   const store = await openRemote(root, srv, { amiIds: true, onCheck: c => checks.push(c) });
   await store.recordTurn('bank', [{ role: 'owner', text: '我的银行卡号是 6222 0000' }]);
   await store.recordTurn('idea', [{ role: 'owner', text: '想做记账工具' }]);
-  await until(() => srv.adds.length === 2, 'both /add pushes before the search');
+  await exactly(srv.adds, 2, 'both /add pushes before the search');
+  assert.equal(srv.adds.length, 2, 'one /add per recorded turn');
   // The remote answers with extracted, rewritten facts - not our text.
   srv.data = () => [
     { id: amiPrefix('u-1', 'bank') + '-f0', content: 'User has a bank card ending 0000', score: 0.8 },
@@ -202,7 +211,7 @@ test('f4: a write spooled during a purge reaches the remote index once the spool
   await store.flush();
   store.faults = { afterVerify: async () => { assert.equal((await store.recordTurn('during', [{ role: 'owner', text: 'said during the purge' }])).spooled, true); } };
   assert.equal((await store.purge(['t-gone-0'])).purged, true);
-  await until(() => srv.adds.length === 3, 'the replayed add');
+  await exactly(srv.adds, 3, 'the replayed add');
   assert.deepEqual(srv.adds.map(a => a.request_id), ['keep', 'gone', 'during']);
   await store.close();
 });

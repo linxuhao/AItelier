@@ -22,7 +22,11 @@ from tests.support import state_template
 
 
 async def eventually(check):
-    async with asyncio.timeout(5):
+    # A preparation wait, never an assertion: it holds until a supervised child dies or the
+    # host writes its journal, which is scheduled work rather than a fixed delay. 20 s is the
+    # same tolerance `journal()` below uses (2026-11-24: one full-suite arm red at the old 5 s
+    # bound while the same nodeid passed 3/3 alone in under 3 s on the same tree).
+    async with asyncio.timeout(20):
         while not check():
             await asyncio.sleep(0.01)
 

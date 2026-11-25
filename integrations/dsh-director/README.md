@@ -28,7 +28,9 @@ host they do not load), or several directors coordinating.
   `todo: { python: <dir>/bin/python3 }` in the config below).
 - **git**, for plans and their delivery.
 - **A model key.** DSH's built-in DeepSeek route, provider `deepseek-official`, reads
-  `DEEPSEEK_API_KEY` (from the environment or DSH's credential store).
+  `DEEPSEEK_API_KEY` (from the environment or DSH's credential store). Any other model behind an
+  OpenAI-compatible endpoint (a self-hosted server, a gateway) works too: see
+  [Another model](#another-model).
 
 At startup the local host checks python3, PyYAML and git and refuses to start, naming each
 one that is missing.
@@ -51,6 +53,15 @@ compaction service, in `headless` for the credentials service (the log says
 npm install -g @deepseek-ai/dsh@0.2.1-rc.5
 cd integrations/dsh-director            # in your checkout of this repository
 sudo apt install python3-yaml           # Debian/Ubuntu; elsewhere: python3 -m pip install -r requirements.txt
+```
+
+`npm install -g` writes into Node's global prefix. With a Node installed for the whole system
+that prefix belongs to root; instead of `sudo`, give npm one of your own and put its `bin` on
+your `PATH` (in `~/.bashrc` or wherever your shell reads it):
+
+```sh
+npm config set prefix ~/.npm-global
+export PATH=~/.npm-global/bin:$PATH
 ```
 
 ## 2. Write the profile
@@ -103,6 +114,39 @@ EOF
 | `todo` | `{ python: 'python3' }` and the plugin's own todo package | `python` names another interpreter |
 | `pollMs` | `2000` | how often `inbox/` is read |
 | `sessionEnv` | `DIRECTOR_LOCAL_SESSION_<hash of root>` | the variable that tags every process this DSH starts with the director's session; the plugin sets it itself. One per `root`, so two directors started side by side do not count each other's jobs. One exception, one way: a director B started from inside director A's job (A's shell) inherits A's variable as well as its own, so A counts B's DSH and every job B starts as A's own background jobs, and A's `idle_dormant` is refused with `background_processes` while they run; B does not count A's. Start each director from its own shell. A name you set must not start with `DSH_`: DSH drops those from every model shell |
+
+### Another model
+
+The profile above names DeepSeek's route twice: `agentOptions` (the workers) and
+`director-local`'s `provider`/`model` (the director). For any other model, add a route for it to
+DSH's settings, `${DSH_HOME:-$HOME/.dsh}/settings.yaml`, and name that route and model in both
+places instead. An OpenAI-compatible endpoint, for example a server on your own machine:
+
+```yaml
+llm-pi-ai:
+  providers:
+    local:                          # the route's name: use it as `provider` in the profile
+      apiKeyEnv: LOCAL_API_KEY      # the environment variable holding its key
+      api: openai-completions
+      baseURL: http://127.0.0.1:8000/v1
+      models:
+        - id: my-model              # use it as `model` in the profile
+```
+
+```yaml
+    agentOptions: { provider: local, model: my-model }
+...
+      config:
+        root: $ROOT
+        provider: local
+        model: my-model
+```
+
+Start DSH with that variable set (`export LOCAL_API_KEY=...`) instead of `DEEPSEEK_API_KEY`. The
+model must support tool calls. A gateway that refuses every request although the address and key
+are right usually wants `compat: { supportsDeveloperRole: false, maxTokensField: max_tokens }` on
+the route; DSH's own guide to models (`docs/user/guide/providers.md` in the DSH repository) lists
+the rest.
 
 ## 3. Permissions
 

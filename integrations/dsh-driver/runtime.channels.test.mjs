@@ -249,8 +249,10 @@ test('real pinned DSH, the steward: a channel plugin loads, its messages reach r
     assert.equal(command('record_channel_delivery').length, 1);
     assert.ok(!r.output().includes('hello from slack'), 'a message body reached the log');
     // The channel's status reached the host once (it did not change), and its detail no log.
+    // The pause snapshot crosses with every report, empty or not: an empty one is how the host
+    // clears a pause it can no longer see, so it is part of the body, not an omission.
     assert.deepEqual(command('report_channel_status').map(({ request_key, ...rest }) => rest),
-      [{ channel: 'slack', connected: true, detail: 'FIXTURE_STATUS_DETAIL' }]);
+      [{ channel: 'slack', connected: true, detail: 'FIXTURE_STATUS_DETAIL', paused_groups: [] }]);
     assert.match(command('report_channel_status')[0].request_key, /^channel-status:slack:\d+:[0-9a-f]{16}$/);
     assert.ok(!r.output().includes('FIXTURE_STATUS_DETAIL'), 'a status detail reached the log');
   } finally { await r.close(); }

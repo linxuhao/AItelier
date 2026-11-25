@@ -839,7 +839,8 @@ export function channelOps(request) {
         pausedGroups ?? null]))}`,
       channel, connected: connected === true, ...(typeof detail === 'string' && detail ? { detail } : {}),
       ...(typeof qrSvg === 'string' && qrSvg ? { qr_svg: qrSvg } : {}),
-      ...(Array.isArray(pausedGroups) ? { paused_groups: pausedGroups } : {}) }, signal).then(answered, refused),
+      ...(Array.isArray(pausedGroups) ? { paused_groups: pausedGroups.map(({ groupRef, reason, at }) =>
+        ({ group_ref: groupRef, reason, at })) } : {}) }, signal).then(answered, refused),
     // The channel-down alert (design-steward 7.9.2), called by the plugin's code after a status
     // poll, never by the model: what is due (a read - it writes nothing), may this one go now
     // and through which channel, and how its send went. One key per outage, kind and attempt:

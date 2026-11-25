@@ -529,7 +529,8 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
   // channel is taken back (a plugin loaded again starts its own clock).
   const placeholderSince = new Map();
   // A plugin's structured pause snapshot, normalised on the boundary: unknown shapes are
-  // dropped, not passed through, and no snapshot means none paused (which clears old badges).
+  // dropped, not passed through. A quiet plugin reports [] explicitly (clearing old badges);
+  // a status() that threw reports no snapshot at all, so State leaves the pauses as they were.
   const pausedGroupsOf = value => Array.isArray(value) ? value.flatMap(row =>
     row && typeof row.groupRef === 'string' && row.groupRef && row.groupRef.length <= 200
       && typeof row.reason === 'string' && row.reason && row.reason.length <= 40
@@ -537,7 +538,10 @@ export function createOwnerChannels({ host, groups, media, log = () => {}, repli
       ? [{ groupRef: row.groupRef, reason: row.reason, at: row.at }] : []).slice(0, 20) : [];
   const statusOf = (channel, entry) => {
     let raw;
-    try { raw = entry.status(); } catch { raw = { connected: false, detail: 'status unavailable' }; }
+    try { raw = entry.status(); } catch {
+      placeholderSince.delete(channel);
+      return { connected: false, detail: 'status unavailable' };  // no snapshot: not a resume
+    }
     const connected = raw?.connected === true;
     let detail = text(raw?.detail) ? raw.detail : undefined;
     if (!connected && START_PLACEHOLDERS.has(detail)) {

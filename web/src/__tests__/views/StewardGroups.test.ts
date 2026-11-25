@@ -232,8 +232,16 @@ describe('StewardGroups', () => {
     expect(titleLine).toContain('家庭群');
     expect(titleLine).toContain('已暂停');
     cleanup();
-    api.listOwnerGroups.mockResolvedValue({groups: [{...group(), paused: null}], groups_per_channel: 3});
     langStore.set('en');
+    const english = render(StewardGroups, {channel: 'wechat', bound: true});
+    const enBadge = await waitFor(() => {
+      const el = english.container.querySelector('[data-group-paused]') as HTMLElement;
+      expect(el).not.toBeNull();
+      return el;
+    });
+    expect(enBadge.textContent?.trim()).toBe('Paused');
+    cleanup();
+    api.listOwnerGroups.mockResolvedValue({groups: [{...group(), paused: null}], groups_per_channel: 3});
     const clear = render(StewardGroups, {channel: 'wechat', bound: true});
     await waitFor(() => expect(clear.container.querySelector('[data-group-bound]')).not.toBeNull());
     expect(clear.container.querySelector('[data-group-paused]')).toBeNull();

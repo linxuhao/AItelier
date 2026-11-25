@@ -973,7 +973,9 @@ test('chat channels: a status change is one report_channel_status, each under it
   assert.ok(calls.every(([, body]) => body.request_key.length <= 320 && !body.request_key.includes('svg')));
   const paused = [{ groupRef: 'C1', reason: 'shared', at: '2026-11-24T10:00:00.000Z' }];
   await channels.reportStatus({ channel: 'wechat', connected: true, pausedGroups: paused });
-  assert.deepEqual(calls.at(-1)[1].paused_groups, paused, 'the structured snapshot rides in the command body');
+  assert.deepEqual(calls.at(-1)[1].paused_groups, [{ group_ref: 'C1', reason: 'shared', at: '2026-11-24T10:00:00.000Z' }],
+    'the bridge names are translated to the State command names on the wire');
+  assert.ok(!JSON.stringify(calls.at(-1)[1]).includes('groupRef'), 'no camelCase row reaches State');
   await channels.reportStatus({ channel: 'wechat', connected: true, pausedGroups: [] });
   assert.deepEqual(calls.at(-1)[1].paused_groups, [], 'an empty snapshot clears it at State too');
   assert.equal(new Set(calls.slice(3).map(([, body]) => body.request_key)).size, 2, 'each snapshot gets its own key');

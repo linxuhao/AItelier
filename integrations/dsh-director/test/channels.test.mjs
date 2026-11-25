@@ -1012,7 +1012,8 @@ test('status: a status() that throws reads as disconnected; a long detail is cut
   assert.deepEqual(reports, [{ channel: 'wechat', connected: false, detail: 'd'.repeat(300), pausedGroups: [] }]);
   channels.service.register({ name: 'slack', status: () => { throw new Error('boom'); }, async send() { return {}; } });
   await channels.pollStatus();
-  assert.deepEqual(reports.at(-1), { channel: 'slack', connected: false, detail: 'status unavailable', pausedGroups: [] });
+  assert.deepEqual(reports.at(-1), { channel: 'slack', connected: false, detail: 'status unavailable' });
+  assert.ok(!('pausedGroups' in reports.at(-1)), 'a status() that threw still holds its pause: no snapshot, no clear');
   channels.stop();
 });
 

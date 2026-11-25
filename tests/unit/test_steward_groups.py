@@ -16,10 +16,10 @@ from pathlib import Path
 import pytest
 
 from core import owner_text, state_channels, state_groups, state_schema_setup
-from core.state_commands import ProjectPrivate, _driver_defaults, execute
+from core.state_commands import ProjectPrivate, ReportChannelStatus, _driver_defaults, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 from core.state_service import StateService
-from tests.unit.test_steward_channels import world_baseline  # noqa: F401 (the world fixture needs it)
+from tests.unit.test_steward_channels import HOME, world_baseline  # noqa: F401 (the world fixture needs it)
 from tests.unit.test_steward_channels import (OWNER_HEADERS, bind, client, conversation, refused,  # noqa: F401
                                               world)
 
@@ -1711,3 +1711,38 @@ def test_a_channels_pause_snapshot_marks_only_its_bound_groups_and_clears_on_unb
     assert rows(world, "SELECT paused_reason,paused_at FROM state_owner_groups WHERE group_ref=?", (ROOM2,)) == [(None, None)]
     with pytest.raises(StateGraphError, match="paused_groups"):
         report("paused-too-many", [{"group_ref": ROOM, "reason": "shared", "at": at}] * 21)
+
+
+def test_the_hosts_snake_case_pause_row_reaches_the_projection_and_stays_in_its_channel(world):
+    bound_group(world)
+    # A group on the other platform, bound in the same world: a WeChat report must not touch it.
+    bind(world, "slack", "U0OWNER", key="bind-slack-wire")
+    code = world.owner.groups.issue_group_code("slack", "家庭频道")["code"]
+    execute(world.steward, "bind_owner_group", {"request_key": "slack-group-wire", "channel": "slack",
+        "group_ref": "C0PRIVATE", "sender_ref": "U0OWNER", "code": code, "mention_prefix": "<@U0BOT>",
+        "channel_message_ref": "C0PRIVATE:1763481500.000100"}, allow_write=True)
+    at = "2026-11-24T10:00:00.000Z"
+    # Exactly the body the driver's reportStatus now produces; steward.test.mjs pins the same row.
+    body = {"project_id": HOME, "request_key": "wire-snake", "channel": "wechat", "connected": True,
+            "paused_groups": [{"group_ref": ROOM, "reason": "shared", "at": at}]}
+    command = ReportChannelStatus.model_validate(body)
+    assert command.paused_groups[0].group_ref == ROOM
+    assert execute(world.steward, "report_channel_status", body, allow_write=True)["channel"] == "wechat"
+    cards = {(g["channel"], g["group_ref"]): g for g in world.owner.groups.owner_view()["groups"]}
+    assert cards[("wechat", ROOM)]["paused"] == {"reason": "shared", "at": at}
+    assert cards[("slack", "C0PRIVATE")]["paused"] is None, "another channel's bound group is untouched"
+
+
+def test_a_rebind_clears_a_leftover_pause(world):
+    bound_group(world)
+    at = "2026-11-24T10:00:00.000Z"
+    execute(world.steward, "report_channel_status", {"project_id": HOME, "request_key": "rebind-pause",
+        "channel": "wechat", "connected": True,
+        "paused_groups": [{"group_ref": ROOM, "reason": "shared", "at": at}]}, allow_write=True)
+    assert rows(world, "SELECT paused_reason,paused_at FROM state_owner_groups WHERE group_ref=?", (ROOM,)) == [("shared", at)]
+    # The upsert a fresh binding uses, without unbind's own clear: it must reset the pause itself.
+    with world.db.get_connection() as conn:
+        world.owner.groups._bind(conn, "wechat", ROOM, "家庭群", "@管家", "rebind-code-hash", state_groups._now())
+        conn.commit()
+    assert rows(world, "SELECT paused_reason,paused_at FROM state_owner_groups WHERE group_ref=?", (ROOM,)) == [(None, None)]
+    assert world.owner.groups.owner_view()["groups"][0]["paused"] is None

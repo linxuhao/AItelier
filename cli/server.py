@@ -367,6 +367,37 @@ def _compose_up(*, no_deps: bool = False):
     _warn_if_edge_network_is_alone()
 
 
+_LOCAL_DEPLOYMENT_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _require_local_deployment_url(base_url: str, *, action: str) -> None:
+    """Refuse to change this compose project for a deployment it does not serve.
+
+    Every compose command below runs in THIS checkout's project, so the URL that
+    justified it has to name the endpoint that project publishes:
+    ``AITELIER_PORT`` is both what docker-compose.yml binds
+    (``127.0.0.1:${AITELIER_PORT:-4444}:4444``) and what the CLI connects to.
+
+    ``--url`` is the supported way to make the two different, and the deployment
+    clearance accepts any loopback host, so ``--url http://127.0.0.1:5555``
+    measured a *different* deployment (a scratch backend started from this same
+    checkout and .env) and then repaired this project — a wrong-object press,
+    which on a host whose project is the production one is also the most
+    expensive press available. A READ-ONLY diagnosis of another deployment stays
+    allowed; only the effect is refused, and it names both addresses.
+    """
+    from urllib.parse import urlsplit
+
+    url = urlsplit(base_url)
+    port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
+    served = int(_DEFAULT_PORT)
+    if url.hostname not in _LOCAL_DEPLOYMENT_HOSTNAMES or port != served:
+        raise RuntimeError(
+            f"refusing to {action} this checkout's backend for {base_url}: it "
+            f"serves http://localhost:{served} (AITELIER_PORT), so a deployment "
+            f"at another address has to be repaired where it runs")
+
+
 def _live_runtime_observation(base_url: str, *, compose_root: str | Path | None = None) -> dict:
     """Fetch initialized live facts and bind them to the backend this CLI operates."""
     from cli.client import raise_for_refusal
@@ -518,6 +549,10 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     if _container_running() and _is_healthy(client):
         return True
 
+    # The reuse answer above is about the local container; everything below
+    # changes THIS compose project, so the URL must name what it serves.
+    _require_local_deployment_url(base_url, action="start or repair")
+
     # A stopped or unhealthy container is a redeploy boundary.  The gate is
     # deliberately after Docker availability checks and before compose changes
     # anything, so an unreadable runtime inventory cannot turn into a replay.
@@ -563,6 +598,7 @@ def restart_server(
         override_decision: Callable[[str, dict], dict | None] | None = None) -> bool:
     """Restart the Docker backend."""
     _require_docker()
+    _require_local_deployment_url(base_url, action="restart")
     clearance = _require_deployment_clearance("restart", base_url=base_url,
                                                backend_service=True,
                                                **({"override_decision": override_decision}
@@ -665,6 +701,7 @@ def recreate_godot_builder(*, override_file: str, binding_file: str,
     if not report.is_absolute() or report.exists() or not report.parent.is_dir():
         raise ValueError("a new absolute owned report path is required")
     _require_docker()
+    _require_local_deployment_url(base_url, action="recreate the Godot builder service")
     clearance = _require_deployment_clearance("redeploy", base_url=base_url,
                                                godot_service=True,
                                                **({"override_decision": override_decision}

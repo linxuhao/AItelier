@@ -73,7 +73,7 @@ Gate composition: `scripts/gate_modes.py` prints targeted/merge/full job plans a
 
 ### Docker deployment & secrets
 
-The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` reuses the container if it is up, otherwise runs `docker compose up -d aitelier`. Docker is mandatory — there is **no host-process fallback** (running uvicorn on the host would make DPE git commits use the host developer's `~/.gitconfig` identity instead of the image's `AItelier` identity).
+The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` reuses the container if it is up, otherwise runs `docker compose up -d aitelier` — for the endpoint this project publishes (`AITELIER_PORT`, which is also the compose host binding). A `--url` naming another deployment is still diagnosed there but is never repaired from here: `_require_local_deployment_url` refuses and names both addresses, because the compose commands act on this checkout's project. Docker is mandatory — there is **no host-process fallback** (running uvicorn on the host would make DPE git commits use the host developer's `~/.gitconfig` identity instead of the image's `AItelier` identity).
 
 ```bash
 docker compose up -d            # build (first run) + start; the CLI does this for you

@@ -291,3 +291,93 @@ with open(os.environ['OWNED_UP_LOG'], 'a') as log:
         expected += ['-f', str(override_file)]
     expected += ['up', '-d', '--no-deps', 'aitelier']
     assert [json.loads(line) for line in log.read_text().splitlines()] == [expected]
+
+
+def _owned_project(tmp_path, monkeypatch):
+    """A tmp compose project plus a fake docker that records every argv it gets."""
+    project = (tmp_path / 'project').resolve()
+    project.mkdir()
+    compose_file = project / 'docker-compose.yml'
+    compose_file.write_text('services: {}\n')
+    monkeypatch.setattr(server, '_PROJECT_ROOT', project)
+    monkeypatch.setattr(server, '_COMPOSE_FILE', compose_file)
+    log = tmp_path / 'argv.jsonl'
+    executable = tmp_path / 'docker'
+    executable.write_text('#!' + sys.executable + '\n' + '''import json, os, sys
+with open(os.environ['OWNED_UP_LOG'], 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\\n')
+''')
+    executable.chmod(0o700)
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('OWNED_UP_LOG', str(log))
+    return project, compose_file, log
+
+
+def _owned_commands(log):
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def _stub_local_repair(monkeypatch, clearance=None):
+    """Only what is not under test: docker availability, the container probe, the
+    deployment gate, health polling and first-run provisioning."""
+    monkeypatch.setattr(server, '_DEFAULT_PORT', '4444')
+    monkeypatch.setattr(server, '_docker_available', lambda: True)
+    monkeypatch.setattr(server, '_container_running', lambda: False)
+    monkeypatch.setattr(server, '_require_deployment_clearance',
+                        lambda *a, **k: ({} if clearance is None else clearance))
+    monkeypatch.setattr(server, '_wait_healthy', lambda client, max_wait: True)
+    monkeypatch.setattr(server, '_ensure_host_dirs', lambda: None)
+    monkeypatch.setattr(server, '_image_exists', lambda: True)
+    monkeypatch.setattr(server, '_image_deps_are_stale', lambda: False)
+    monkeypatch.setattr(server, '_warn_if_edge_network_is_alone', lambda: None)
+
+
+@pytest.mark.parametrize('url', ['http://127.0.0.1:5555', 'http://localhost:5555',
+                                'http://127.0.0.1:4445'])
+def test_repair_refuses_an_endpoint_this_project_does_not_serve(tmp_path, monkeypatch, url):
+    """iss-c986b2ede65846f1: the reuse answer is about the local container, the
+    press is about THIS compose project, and ``--url`` separates the two.
+
+    ``http://127.0.0.1:5555`` is another loopback deployment (a scratch backend
+    started from this checkout and .env). Before the guard, the repair measured
+    that deployment and then recreated this project's container.
+    """
+    project, compose_file, log = _owned_project(tmp_path, monkeypatch)
+    _stub_local_repair(monkeypatch)
+    monkeypatch.setattr(server, '_is_healthy', lambda client: pytest.fail(
+        'a foreign endpoint was diagnosed by the press path'))
+    with pytest.raises(RuntimeError) as refused:
+        server.ensure_server_running(url, max_wait=1)
+    assert url in str(refused.value)
+    assert 'serves http://localhost:4444' in str(refused.value)
+    assert _owned_commands(log) == []
+
+
+@pytest.mark.parametrize('url', ['http://localhost:4444', 'http://127.0.0.1:4444'])
+def test_repair_still_presses_the_endpoint_this_project_serves(tmp_path, monkeypatch, url):
+    """Positive control: the guard is not a blanket refusal."""
+    project, compose_file, log = _owned_project(tmp_path, monkeypatch)
+    _stub_local_repair(monkeypatch)
+    assert server.ensure_server_running(url, max_wait=1) is True
+    assert _owned_commands(log) == [['compose', '-f', str(compose_file),
+                                     'up', '-d', 'aitelier']]
+
+
+@pytest.mark.parametrize('url', ['http://127.0.0.1:5555', 'http://localhost:4445'])
+def test_restart_refuses_an_endpoint_this_project_does_not_serve(tmp_path, monkeypatch, url):
+    project, compose_file, log = _owned_project(tmp_path, monkeypatch)
+    _stub_local_repair(monkeypatch)
+    with pytest.raises(RuntimeError) as refused:
+        server.restart_server(url, max_wait=1)
+    assert url in str(refused.value)
+    assert _owned_commands(log) == []
+
+
+def test_restart_still_restarts_the_endpoint_this_project_serves(tmp_path, monkeypatch):
+    project, compose_file, log = _owned_project(tmp_path, monkeypatch)
+    _stub_local_repair(monkeypatch)
+    assert server.restart_server('http://localhost:4444', max_wait=1) is True
+    assert _owned_commands(log) == [['compose', '-f', str(compose_file),
+                                     'restart', 'aitelier']]

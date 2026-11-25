@@ -40,14 +40,28 @@ async function fixture() {
 
 const openRemote = (root, srv, extra = {}) => MemoryStore.open({ root, userId: USER,
   ranked: remoteRanked({ url: srv.url, name: 'Fixture', userId: 'u-1', sessionId: 's-1', ...extra }) });
-const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+// Wait for the condition the assertion after it reads. A fixed 50 ms sleep let the async /add
+// still be in flight under CPU contention (measured red 2026-11-25 in the six-file runner:
+// "expected 1, got 0 (175.9 ms)", green 3/3 when this file ran alone).
+const until = async (pred, what, ms = 4000) => {
+  const t0 = Date.now();
+  for (;;) {
+    if (await pred()) return;
+    if (Date.now() - t0 > ms) throw new Error(`waited ${Date.now() - t0} ms for ${what}`);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+};
+// The one negative assertion ("enabling the remote does not backfill") has nothing to wait for,
+// only a window in which nothing may arrive.
+const quiet = () => new Promise(resolve => setTimeout(resolve, 200));
+const pendingFile = (root) => join(root, USER + '.ranked-pending.json');
 
 test('protocol mapping: one /add per turn, /search mapped, the source names the remote', async (t) => {
   const srv = await fixture(); const root = newRoot();
   t.after(() => srv.close());
   const store = await openRemote(root, srv);
   await store.recordTurn('turn-9', [{ role: 'owner', text: '想做记账工具' }, { role: 'steward', text: '记下了' }]);
-  await settle();
+  await until(() => srv.adds.length === 1, 'the /add push of turn-9');
   assert.equal(srv.adds.length, 1);
   assert.deepEqual({ ...srv.adds[0], messages: srv.adds[0].messages.map(m => [m.role, m.content]) },
     { request_id: 'turn-9', user_id: 'u-1', session_id: 's-1', messages: [['user', '想做记账工具'], ['assistant', '记下了']] });
@@ -111,8 +125,9 @@ test('a failed add waits in ranked-pending and is replayed once the remote is ba
   const store = await openRemote(root, srv);
   srv.failAdd = true;
   await store.recordTurn('t1', [{ role: 'owner', text: 'kept locally' }]);
-  await settle();
-  assert.ok(JSON.parse(readFileSync(join(root, USER + '.ranked-pending.json'), 'utf8')).t1);
+  await until(() => { try { return Boolean(JSON.parse(readFileSync(pendingFile(root), 'utf8')).t1); } catch { return false; } },
+    'the failed add to be spooled');
+  assert.ok(JSON.parse(readFileSync(pendingFile(root), 'utf8')).t1);
   assert.equal((await store.search('kept')).grep.hits.length, 1, 'the entry is local already');
   srv.failAdd = false;
   await store.search('kept');
@@ -128,7 +143,7 @@ test('enabling the remote does not backfill the existing log', async () => {
   await local.recordTurn('old', [{ role: 'owner', text: 'before the remote' }]);
   await local.flush(); await local.close();
   const store = await openRemote(root, srv);
-  await settle();
+  await quiet();
   assert.deepEqual(srv.adds, []);
   assert.ok(!existsSync(join(root, USER + '.ranked-pending.json')));
   await store.close(); await srv.close();
@@ -140,7 +155,7 @@ test('AMI ids: a forgotten turn is filtered by turn even though the remote rewro
   const store = await openRemote(root, srv, { amiIds: true, onCheck: c => checks.push(c) });
   await store.recordTurn('bank', [{ role: 'owner', text: '我的银行卡号是 6222 0000' }]);
   await store.recordTurn('idea', [{ role: 'owner', text: '想做记账工具' }]);
-  await settle();
+  await until(() => srv.adds.length === 2, 'both /add pushes before the search');
   // The remote answers with extracted, rewritten facts - not our text.
   srv.data = () => [
     { id: amiPrefix('u-1', 'bank') + '-f0', content: 'User has a bank card ending 0000', score: 0.8 },
@@ -187,7 +202,7 @@ test('f4: a write spooled during a purge reaches the remote index once the spool
   await store.flush();
   store.faults = { afterVerify: async () => { assert.equal((await store.recordTurn('during', [{ role: 'owner', text: 'said during the purge' }])).spooled, true); } };
   assert.equal((await store.purge(['t-gone-0'])).purged, true);
-  await settle();
+  await until(() => srv.adds.length === 3, 'the replayed add');
   assert.deepEqual(srv.adds.map(a => a.request_id), ['keep', 'gone', 'during']);
   await store.close();
 });

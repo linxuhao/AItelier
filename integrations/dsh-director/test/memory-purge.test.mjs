@@ -22,7 +22,8 @@ const SECRET = 'PURGE-ME secret account 4242';
  *  which of the two it found. */
 const LEAK = 'secret account 4242';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-purge-'));
-const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, ...extra });
+// The stores here are zh, as the production steward's: their lines and notices as they always were.
+const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, language: 'zh', ...extra });
 const repo = root => join(root, USER);
 const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir, ...args], { cwd: dir, env: gitEnv(dir), maxBuffer: 1 << 28 });
 const logLines = root => readdirSync(join(repo(root), 'log')).filter(n => n.endsWith('.jsonl'))

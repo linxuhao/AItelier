@@ -132,3 +132,10 @@ test('composed: the cuts run first and the language swaps the text they leave', 
   for (const { from, through } of STEWARD_CUTS) for (const pair of EN_PASSAGES) for (const part of pair)
     assert.ok(!from.includes(part) && !(through ?? '').includes(part), part);
 });
+
+test('without handoff the steward is told no director hears it and an approved project waits', () => {
+  const md = readFileSync(new URL('../steward.md', import.meta.url), 'utf8');
+  const local = stewardPrompt(md, new Set(['portfolio', 'proposals', 'memory', 'ownerMessage']));
+  assert.match(local, /No director hears you on this host: you cannot pass anything to one, and a project your\nowner approves waits until your owner starts its director\./);
+  assert.doesNotMatch(stewardPrompt(md, new Set(STEWARD_PROMPT_FEATURES)), /No director hears you/);
+});

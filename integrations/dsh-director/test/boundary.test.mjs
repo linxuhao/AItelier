@@ -16,12 +16,19 @@
  *  docstrings, strings of any quoting, docs, data - is searched for the backend's
  *  name (any case), its capitalised entity word, its route prefix and its tool-name
  *  shapes (see `vocabulary`). There is no tokenizer, so no quoting, comment or
- *  extension can hide a match.
+ *  extension can hide a match. One exception, by file: the npm package's own name and the
+ *  repository it is published from (`PUBLISHED`) are the publisher's names, not the backend's
+ *  vocabulary, and may stand - exactly those strings - in the three files that say what the
+ *  package is and how to install it (`PUBLISHING`): package.json, cordis.patch.yml, README.md.
+ *  Anywhere else, or any other word of the vocabulary on the same line, is still a match.
  *  IMPORTS: in every walked file, whatever its extension, an import-from,
  *  export-from, side-effect import, import() or require() whose literal specifier
  *  names the adapter directory.
  *  RUNNER: the `test` script in package.json names every `*.test.mjs` in test/ and
  *  nothing that is not there, so the documented runner cannot silently skip a file.
+ *  PACKAGE: what `npm pack` puts in the published package is every walked file except the
+ *  development ones (`DEVELOPMENT`: tests, the standalone scenario, the conformance suite,
+ *  the measuring tools), so a runtime file cannot be left out of the package unnoticed.
  *  NOT covered: text or specifiers assembled at run time from pieces (this file
  *  assembles its own tokens that way), and names the backend uses that are not in
  *  this list - the adapter side checks the plugin against the tool names it really
@@ -30,6 +37,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vocabulary, name, entity, route, toolShape } from '../tools/vocabulary.mjs';
@@ -49,6 +57,8 @@ export const EXCLUDED = [`node_modules`, join('test', 'fixtures', 'request-bodie
   join('package-lock.json')];
 export const SHIPPED = [
   join('.gitignore'),
+  join('LICENSE'),
+  join('cordis.patch.yml'),
   join('conformance', 'index.mjs'),
   join('director.md'),
   join('steward.md'),
@@ -181,11 +191,21 @@ export function walk(dir = root, out = []) {
   return out;
 }
 
+// The npm package's name and the repository it is published from, assembled like the tokens,
+// and the files allowed to carry them (the header's one exception).
+export const PUBLISHED = [word('ait', 'elier', '-dsh-director'), word('github.com/linxuhao/', 'AI', 'telier'),
+  word('raw.githubusercontent.com/linxuhao/', 'AI', 'telier')];
+export const PUBLISHING = ['package.json', 'cordis.patch.yml', 'README.md'].map(file => join(root, file));
+// Not in the npm package: the files that test, measure or exercise the plugin.
+export const DEVELOPMENT = rel => ['test', 'standalone', 'conformance', 'tools'].some(dir => rel.startsWith(dir + sep))
+  || rel === '.gitignore';
+
 /** Every violation in one file's text, as "<line>: <reason>". */
 export function scan(text, path) {
   const found = [];
   text.split('\n').forEach((line, i) => {
-    for (const [pattern, reason] of vocabulary) if (pattern.test(line)) found.push(`${i + 1}: ${reason}`);
+    const words = PUBLISHING.includes(path) ? PUBLISHED.reduce((rest, published) => rest.split(published).join(' '), line) : line;
+    for (const [pattern, reason] of vocabulary) if (pattern.test(words)) found.push(`${i + 1}: ${reason}`);
     if (adapterImport.test(line)) found.push(`${i + 1}: adapter import`);
   });
   return found;
@@ -203,6 +223,15 @@ test('no byte of any shipped plugin file carries the backend, and no code import
   const found = [];
   for (const file of walk()) for (const hit of scan(readFileSync(file, 'utf8'), file)) found.push(`${relative(root, file)}:${hit}`);
   assert.deepEqual(found, []);
+});
+
+test('the npm package is every walked file but the development ones', () => {
+  const packed = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root, encoding: 'utf8' });
+  assert.equal(packed.status, 0, packed.error?.message ?? packed.stderr);
+  const files = JSON.parse(packed.stdout)[0].files.map(file => file.path.split('/').join(sep)).sort();
+  const expected = walk().map(path => relative(root, path)).filter(rel => !DEVELOPMENT(rel)).sort();
+  assert.deepEqual({ unpacked: expected.filter(f => !files.includes(f)), extra: files.filter(f => !expected.includes(f)) },
+    { unpacked: [], extra: [] });
 });
 
 test('the documented runner names every test file in test/, and every file it names exists', () => {
@@ -242,6 +271,12 @@ test('the gate refuses one sample of every shape its header says it covers', () 
   for (const text of ["const reason = 'you hold work that is not finished';", "import { x } from './lib/core.mjs';",
     'state_dir = setting("STATE_DIR")', '// a work state, lower case'])
     assert.deepEqual(scan(text, 'x.mjs'), [], 'false alarm: ' + text);
+  // The published names: allowed exactly, and only in the publishing files.
+  const [pkg, repo] = PUBLISHED, manifest = join(root, 'package.json');
+  assert.deepEqual(scan('"name": "' + pkg + '", "url": "git+https://' + repo + '.git"', manifest), []);
+  assert.notDeepEqual(scan("const p = '" + pkg + "';", join(root, 'lib', 'x.mjs')), [], 'a published name outside the publishing files');
+  assert.notDeepEqual(scan(pkg + ' and the ' + entity + ' record', manifest), [], 'another word beside a published name');
+  assert.notDeepEqual(scan('"name": "' + name + '"', manifest), [], 'the bare backend name in package.json');
   // The walk excludes exact paths only: a fixtures directory anywhere else is walked.
   assert.equal(excluded(join('lib', 'fixtures', 'notes.mjs')), false);
   assert.equal(excluded(join('lib', 'node_modules', 'x.mjs')), false);

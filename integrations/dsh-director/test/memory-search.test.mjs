@@ -15,7 +15,8 @@ import { memoryTimeZoneProblem, validateHost } from '../lib/host.mjs';
 
 const USER = 'owner@example.com';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-memsearch-'));
-const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, ...extra });
+// The stores here are zh, as the production steward's: their lines and notices as they always were.
+const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, language: 'zh', ...extra });
 const PARIS = 'Europe/Paris';
 const settle = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
 
@@ -45,15 +46,15 @@ const lineChars = text => text.split('\n').filter(Boolean).reduce((n, l) => n + 
 
 test('1: both forms of `at`, UTC and Europe/Paris (with summer time), seven weekdays, a bad time, the cross-day entry', () => {
   for (const at of ['2026-11-19T10:25:00.123456+00:00', '2026-11-19T10:25:00.123Z'])
-    assert.equal(stamp(at, 'UTC'), '2026-11-19 周四 10:25+00:00', at);
-  assert.equal(stamp('2026-11-19T10:25:00.123456+00:00', PARIS), '2026-11-19 周四 11:25+01:00');
-  assert.equal(stamp('2026-07-01T10:25:00Z', PARIS), '2026-07-01 周三 12:25+02:00', 'summer time: the offset of that moment');
+    assert.equal(stamp(at, 'UTC', 'zh'), '2026-11-19 周四 10:25+00:00', at);
+  assert.equal(stamp('2026-11-19T10:25:00.123456+00:00', PARIS, 'zh'), '2026-11-19 周四 11:25+01:00');
+  assert.equal(stamp('2026-07-01T10:25:00Z', PARIS, 'zh'), '2026-07-01 周三 12:25+02:00', 'summer time: the offset of that moment');
   const week = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  week.forEach((day, i) => assert.equal(stamp(`2026-11-${String(16 + i).padStart(2, '0')}T12:00:00Z`, 'UTC'), `2026-11-${16 + i} ${day} 12:00+00:00`, day));
+  week.forEach((day, i) => assert.equal(stamp(`2026-11-${String(16 + i).padStart(2, '0')}T12:00:00Z`, 'UTC', 'zh'), `2026-11-${16 + i} ${day} 12:00+00:00`, day));
   for (const bad of ['', 'yesterday', '2026-11-19', '2026-11-19T10:25:00', undefined, 42])
-    assert.equal(formatLine({ id: 't-x-0', at: bad, role: 'owner', text: 'hi' }, 'UTC'), '[时间不明] 业主 {t-x-0}: hi', String(bad));
+    assert.equal(formatLine({ id: 't-x-0', at: bad, role: 'owner', text: 'hi' }, 'UTC', { language: 'zh' }), '[时间不明] 业主 {t-x-0}: hi', String(bad));
   // Cross-day: 23:30Z is the next day in Paris - in the line, the group and the date words.
-  assert.equal(stamp('2026-11-19T23:30:00Z', PARIS), '2026-11-20 周五 00:30+01:00');
+  assert.equal(stamp('2026-11-19T23:30:00Z', PARIS, 'zh'), '2026-11-20 周五 00:30+01:00');
   const words = dateWords('2026-11-19T23:30:00Z', PARIS);
   for (const w of ['11月20日', '周五', 'Friday']) assert.ok(words.includes(w), w);
   assert.ok(!words.includes('周四'));
@@ -70,24 +71,86 @@ test('1: the date words are exactly the 3.8.1 list; none for a bad time', () => 
 
 test('1: line shapes: roles, a note, the date-only mark, → 见, the remote line, the profile line', () => {
   const at = '2026-11-19T10:25:00Z';
-  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, PARIS), '[2026-11-19 周四 11:25+01:00] 业主 {t-1-o}: x');
-  assert.equal(formatLine({ id: 't-1-r', at, role: 'steward', text: 'y' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 管家 {t-1-r}: y');
-  assert.equal(formatLine({ id: 'n-1', at, role: 'steward', source: 'note', text: 'z' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 管家（笔记） {n-1}: z');
-  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { dateOnly: true }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}（日期命中）: x');
-  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { see: 'grep' }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}: → 见 grep');
-  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', channel: 'wechat', text: 'x' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 业主（wechat） {t-1-o}: x',
+  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, PARIS, { language: 'zh' }), '[2026-11-19 周四 11:25+01:00] 业主 {t-1-o}: x');
+  assert.equal(formatLine({ id: 't-1-r', at, role: 'steward', text: 'y' }, 'UTC', { language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 管家 {t-1-r}: y');
+  assert.equal(formatLine({ id: 'n-1', at, role: 'steward', source: 'note', text: 'z' }, 'UTC', { language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 管家（笔记） {n-1}: z');
+  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { dateOnly: true, language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}（日期命中）: x');
+  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { see: 'grep', language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}: → 见 grep');
+  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', channel: 'wechat', text: 'x' }, 'UTC', { language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 业主（wechat） {t-1-o}: x',
     'an entry relayed from a chat channel names it after the role');
-  assert.equal(formatLine({ at, role: 'remote', text: 'fact' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 远端: fact');
-  assert.equal(formatLine({ role: 'remote', text: 'fact' }, 'UTC'), '[时间不明] 远端: fact');
-  assert.equal(formatProfileLine(3, 'likes tea'), '[档案 第 3 行] likes tea');
-  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'a\n"b"\\' }, 'UTC'), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}: a\n"b"\\', 'the text as it is, not escaped');
+  assert.equal(formatLine({ at, role: 'remote', text: 'fact' }, 'UTC', { language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 远端: fact');
+  assert.equal(formatLine({ role: 'remote', text: 'fact' }, 'UTC', { language: 'zh' }), '[时间不明] 远端: fact');
+  assert.equal(formatProfileLine(3, 'likes tea', 'zh'), '[档案 第 3 行] likes tea');
+  assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'a\n"b"\\' }, 'UTC', { language: 'zh' }), '[2026-11-19 周四 10:25+00:00] 业主 {t-1-o}: a\n"b"\\', 'the text as it is, not escaped');
+});
+
+test('stranger C: the line shapes follow the owner\'s language - English by default, the Chinese ones for zh', () => {
+  const at = '2026-11-19T10:25:00Z';
+  for (const language of [undefined, 'en', 'en-US', 'fr']) {
+    assert.equal(stamp(at, PARIS, language), '2026-11-19 Thu 11:25+01:00', String(language));
+    assert.equal(formatLine({ id: 't-1-o', at, role: 'owner', text: 'x' }, 'UTC', { language }), '[2026-11-19 Thu 10:25+00:00] owner {t-1-o}: x');
+  }
+  const en = (entry, options = {}) => formatLine({ at, ...entry }, 'UTC', options);
+  assert.equal(en({ id: 't-1-r', role: 'steward', text: 'y' }), '[2026-11-19 Thu 10:25+00:00] steward {t-1-r}: y');
+  assert.equal(en({ id: 'n-1', role: 'steward', source: 'note', text: 'z' }), '[2026-11-19 Thu 10:25+00:00] steward (note) {n-1}: z');
+  assert.equal(en({ id: 't-1-o', role: 'owner', text: 'x' }, { dateOnly: true }), '[2026-11-19 Thu 10:25+00:00] owner {t-1-o} (date match): x');
+  assert.equal(en({ id: 't-1-o', role: 'owner', text: 'x' }, { see: 'grep' }), '[2026-11-19 Thu 10:25+00:00] owner {t-1-o}: → see grep');
+  assert.equal(en({ id: 't-1-o', role: 'owner', channel: 'wechat', text: 'x' }), '[2026-11-19 Thu 10:25+00:00] owner (wechat) {t-1-o}: x');
+  assert.equal(en({ role: 'remote', text: 'fact' }), '[2026-11-19 Thu 10:25+00:00] remote: fact');
+  assert.equal(formatLine({ role: 'remote', text: 'fact' }, 'UTC'), '[time unknown] remote: fact');
+  assert.equal(formatProfileLine(3, 'likes tea'), '[profile line 3] likes tea');
+  // zh: the lines as they always were.
+  assert.equal(stamp(at, PARIS, 'zh'), '2026-11-19 周四 11:25+01:00');
+  assert.equal(stamp(at, PARIS, 'zh-CN'), '2026-11-19 周四 11:25+01:00');
+  assert.equal(formatLine({ id: 'n-1', at, role: 'steward', source: 'note', text: 'z' }, 'UTC', { language: 'zh', dateOnly: true }),
+    '[2026-11-19 周四 10:25+00:00] 管家（笔记） {n-1}（日期命中）: z');
+  assert.equal(formatProfileLine(3, 'likes tea', 'zh'), '[档案 第 3 行] likes tea');
+  // The index's date words are both languages' whatever the owner's: a query in either meets them.
+  assert.deepEqual(dateWords(at, 'UTC'), ['2026-11-19', '2026年11月19日', '11月19日', '周四', '星期四', 'November', 'Nov', 'Thursday', 'Thu']);
+});
+
+test('stranger C: memory_search answers in the owner\'s language - sources, lines and budget; zh as before', async () => {
+  const at = '2026-11-19T10:25:00Z';
+  const search = async language => {
+    const root = newRoot(); const store = await open(root, { language });
+    await store.recordTurn('t1', [{ role: 'owner', at, text: 'the ledger is in euros' }]);
+    await store.flush();
+    try { return await store.search('ledger'); } finally { await store.close(); }
+  };
+  const en = await search();
+  assert.equal(en.grep.source, 'grep · literal match · local memory log');
+  assert.equal(en.ranked.source, 'bm25 · local index');
+  assert.equal(en.grep.text, '[2026-11-19 Thu 10:25+00:00] owner {t-t1-0}: the ledger is in euros');
+  assert.equal(en.ranked.text, '[2026-11-19 Thu 10:25+00:00] owner {t-t1-0}: → see grep');
+  assert.match(en.budget, /^\d+\/6000 chars · omitted 0$/);
+  const zh = await search('zh');
+  assert.equal(zh.grep.source, 'grep · 字面匹配 · 本地记忆日志');
+  assert.equal(zh.ranked.source, 'bm25 · 本地索引');
+  assert.equal(zh.grep.text, '[2026-11-19 周四 10:25+00:00] 业主 {t-t1-0}: the ledger is in euros');
+  assert.equal(zh.ranked.text, '[2026-11-19 周四 10:25+00:00] 业主 {t-t1-0}: → 见 grep');
+  assert.match(zh.budget, /^\d+\/6000 字 · omitted 0$/);
+});
+
+test('stranger C: memory_search\'s description names the marks the owner\'s language shows', () => {
+  const describe = language => {
+    const tools = new Map();
+    registerMemoryTools({ tools: { register: t => tools.set(t.name, t) } }, { defineTool: t => t, jsonOutput: {}, memory: { error: 'x' }, language });
+    return tools.get('memory_search').description;
+  };
+  for (const language of [undefined, 'en']) {
+    assert.match(describe(language), /A ranked line marked \(date match\) is a record from that day/);
+    assert.match(describe(language), /the other says → see grep \/ → see ranked\./);
+    assert.doesNotMatch(describe(language), /[\u4e00-\u9fff]/, 'no Chinese in an English description');
+  }
+  assert.match(describe('zh'), /A ranked line marked （日期命中） is a record from that day/);
+  assert.match(describe('zh'), /the other says → 见 grep \/ → 见 ranked\./);
 });
 
 test('memory-channel-at: a line is dated by channel_at when it is a time, else by at', () => {
   const at = '2026-11-19T10:25:00Z';
-  assert.equal(formatLine({ id: 't-1-o', at, channel_at: '2026-11-19T10:20:00+00:00', role: 'owner', channel: 'wechat', text: 'x' }, PARIS),
+  assert.equal(formatLine({ id: 't-1-o', at, channel_at: '2026-11-19T10:20:00+00:00', role: 'owner', channel: 'wechat', text: 'x' }, PARIS, { language: 'zh' }),
     '[2026-11-19 周四 11:20+01:00] 业主（wechat） {t-1-o}: x', 'the owner\'s write time in the chat app');
-  assert.equal(formatLine({ id: 't-1-o', at, channel_at: 'garbage', role: 'owner', text: 'x' }, PARIS), '[2026-11-19 周四 11:25+01:00] 业主 {t-1-o}: x');
+  assert.equal(formatLine({ id: 't-1-o', at, channel_at: 'garbage', role: 'owner', text: 'x' }, PARIS, { language: 'zh' }), '[2026-11-19 周四 11:25+01:00] 业主 {t-1-o}: x');
   assert.equal(writtenAt({ at }), at);
   assert.equal(writtenAt({ at, channel_at: '2026-11-18T23:50:00+00:00' }), '2026-11-18T23:50:00+00:00');
 });

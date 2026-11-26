@@ -48,7 +48,9 @@
  *  With `projectsDir` (a directory whose every subdirectory is one local host root, its name
  *  the project id) the host also offers the steward `portfolio` (those projects, read-only) and
  *  `proposals` of the one kind it can execute itself: create_project, a new subdirectory with
- *  project.json, notes.md (the goal) and work.json (one work item per seed node). */
+ *  project.json, notes.md (the goal), work.json (one work item per seed node, each `working` with
+ *  no holder: the open state of this contract, held by nobody until a director takes it) and an
+ *  empty inbox/. */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat, rm } from 'node:fs/promises';
 import { readFileSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -56,6 +58,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
+import { startupFailure } from '../lib/exit-cause.mjs';
 import { registerOwnerCommands } from './local-commands.mjs';
 
 export const name = 'dsh-director-local-host';
@@ -331,6 +334,8 @@ export function localHost(options = {}) {
       await writeJson(join(building, 'project.json'), { project_id: payload.project_id, title: payload.title, goal: payload.goal,
         proposal_id: proposalId, created_at: new Date().toISOString() });
       await writeFile(join(building, 'notes.md'), payload.goal.trim() + '\n\n');
+      // The inbox a director started on this project reads, there from the start.
+      await mkdir(join(building, 'inbox'));
       const items = (payload.seed_nodes ?? []).map(node => ({ id: node.key, title: node.goal, state: 'working', acceptance: node.acceptance }));
       await writeJson(join(building, 'work.json'), { items });
       await rename(building, final);
@@ -569,6 +574,15 @@ export function localHost(options = {}) {
      *  the same id; the director recognises it. */
     async events(api) {
       const { ctx, notify, agent, isDisposed } = api;
+      // A wake names the root it wakes: the director, or the steward (rootRole).
+      const eventWord = (options.rootRole ?? 'director') === 'steward' ? 'Steward' : 'Director';
+      // A configured memory that did not open leaves the memory tools refusing for the whole
+      // run; with no dashboard that would go unseen, so it is said on stderr and in every
+      // progress report from here on.
+      if (api.memoryError) {
+        console.error('dsh-director: memory unavailable: ' + String(api.memoryError).split('\n')[0]);
+        await api.setBasicsFlag?.('memory_unavailable: ' + api.memoryError);
+      }
       await mkdir(files.done, { recursive: true });
       if (options.objective && !ctx.goals.get(agent)) ctx.goals.create(agent, { objective: options.objective });
       const sweep = async () => {
@@ -604,7 +618,7 @@ export function localHost(options = {}) {
           // file under the same id, which the director recognises; moving first lost it.
           // The id is this file (name, inode, write time; the inode alone tells a later
           // file of the same name apart while the delivered one sits in done/).
-          await notify('Director event (' + file + '):\n' + text, { id: `inbox:${file}:${ino}:${mtimeMs}` });
+          await notify(eventWord + ' event (' + file + '):\n' + text, { id: `inbox:${file}:${ino}:${mtimeMs}` });
           await rename(join(files.inbox, file), join(files.done, file));
         }
       };
@@ -683,7 +697,11 @@ export function dshVersion(entry) {
 }
 
 export function apply(ctx, config) {
-  const host = localHost(config ?? {});
+  let host;
+  // A refused config (no `root`: a bundle row the profile gave no config) ends the process the
+  // way a refusal at the director's boot does; thrown alone it leaves dsh-director waiting for
+  // this service, and DSH running with nothing to do.
+  try { host = localHost(config ?? {}); } catch (error) { startupFailure(ctx, error, { detail: true }); throw error; }
   // Every process this DSH starts - a job the director's or a worker's shell runs, detached or
   // not - carries the director's session in its environment: watch_process accepts it and
   // idle_dormant sees it (lib/core.mjs processSession, backgroundProcesses).

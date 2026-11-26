@@ -67,6 +67,18 @@ test('local host: an inbox file is delivered once, and a restart does not delive
   assert.equal(second.notified.length, 0, 'delivered again after a restart');
 });
 
+test('local host: a steward root is woken by a "Steward event", a director root by a "Director event"', async () => {
+  for (const [rootRole, word] of [['steward', 'Steward'], ['director', 'Director'], [undefined, 'Director']]) {
+    const root = await freshRoot();
+    await mkdir(join(root, 'inbox'), { recursive: true });
+    await writeFile(join(root, 'inbox', 'a.json'), '{"hello":1}');
+    const api = fakeApi();
+    const events = await localHost({ root, ...required, pollMs: 20, ...(rootRole ? { rootRole } : {}) }).events(api);
+    events.stop(); await events.done;
+    assert.deepEqual(api.notified, [`${word} event (a.json):\n{"hello":1}`], String(rootRole));
+  }
+});
+
 test('local host: work_update and note_write record what the director decides, and the snapshot shows it', async () => {
   const root = await freshRoot();
   const host = localHost({ root, ...required });
@@ -381,6 +393,8 @@ test('local host, step 15: proposals - create_project only; the owner approves w
   const meta = JSON.parse(await readFile(join(projectsDir, 'gamma', 'project.json'), 'utf8'));
   assert.deepEqual([meta.project_id, meta.title, meta.goal, meta.proposal_id], ['gamma', 'Gamma', 'try gamma', 'p-2']);
   assert.match(await readFile(join(projectsDir, 'gamma', 'notes.md'), 'utf8'), /try gamma/);
+  // A director started on the new project reads its inbox at once: the directory is there.
+  assert.deepEqual(await readdir(join(projectsDir, 'gamma', 'inbox')), []);
   assert.match((await commands.run('approve', ' p-2')).text, /not_open/, 'an approval runs once');
   // A taken id fails and writes nothing into the existing project.
   const taken = await commands.run('approve', ' p-3');
@@ -770,6 +784,23 @@ test('local host, review 467: /profile and /purge tell the owner when the config
   again.stop(); await again.done;
 });
 
+test('local host: a configured memory that did not open is said on stderr and in progress.jsonl at startup', async () => {
+  const root = await freshRoot();
+  const printed = [], flags = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  try {
+    const events = await localHost({ root, pollMs: 60000, memory: { userId: 'owner' } })
+      .events({ ...fakeApi(), memoryError: 'memory: locked by process 4242', setBasicsFlag: async text => { flags.push(text); } });
+    events.stop(); await events.done;
+    // Memory that opened, or none configured: nothing is said.
+    const quiet = await localHost({ root, pollMs: 60000 }).events({ ...fakeApi(), setBasicsFlag: async text => { flags.push(text); } });
+    quiet.stop(); await quiet.done;
+  } finally { console.error = saved; }
+  assert.deepEqual(printed, ['dsh-director: memory unavailable: memory: locked by process 4242']);
+  assert.deepEqual(flags, ['memory_unavailable: memory: locked by process 4242']);
+});
+
 test('local host, review 467: /questions and /proposals list oldest first by time, not by file order', async () => {
   const { root, projectsDir } = await projectsFixture();
   await writeFile(join(root, 'questions.json'), JSON.stringify({
@@ -961,6 +992,22 @@ test('local host apply(): the session tag is set on this process, and put back o
   assert.equal(provided[0][0], 'directorHost');
   handlers.dispose();
   assert.equal(process.env[key], undefined);
+});
+
+test('local host apply() without config: the process ends with the reason, it does not wait for a host that will never come', () => {
+  const printed = [], exits = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  const slot = Symbol.for('dsh.exit-cause');
+  delete globalThis[slot];
+  try {
+    const ctx = { on: () => {}, provide: () => assert.fail('provided a host'), logger: { error: () => {} },
+      get: name => name === 'appExit' ? code => exits.push(code) : undefined };
+    assert.throws(() => applyLocal(ctx, undefined), /missing config: root/);
+  } finally { console.error = saved; delete globalThis[slot]; }
+  assert.deepEqual(exits, [1]);
+  assert.deepEqual(printed, ['dsh exit cause: dsh-director startup: Error',
+    'dsh-director startup: directorHost refused: missing config: root (the local host keeps its files there)']);
 });
 
 test('startupFailure: with detail the first line of the reason follows the exit line; without, only the exit line', () => {

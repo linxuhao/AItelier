@@ -49,7 +49,7 @@ from dsh_todo.plan import (MAX_NOTES, PlanStore, Refusal, TodoPlan, item_state, 
                            new_document, require_library_version, save_observations)
 from dsh_todo import batch as todo_batch, templates
 from dsh_todo.hooks import candidate_rejection, setting
-from dsh_todo.runtime import builtin_library
+from dsh_todo.runtime import UNTRACKED_CACHES, builtin_library
 
 _BRIEF_CHARS = 600
 
@@ -475,7 +475,11 @@ def _candidate(out: str, workspace: str, attempt_id: str, plan_hash: str, observ
             raise Refusal("head_not_certified", f"the bundle's tips {sorted(tips)} are not exactly the certified {head}",
                           head=head, certified=certified)
         # `quiescent` is attested below, so look once more, right before writing it.
-        if _git(workspace, "status", "--porcelain") or _git(workspace, "rev-parse", "HEAD") != head:
+        # An untracked interpreter cache (a test run's __pycache__) is not a change, as in the
+        # deliver predicates (runtime.UNTRACKED_CACHES); anything else untracked still is.
+        if (_git(workspace, "status", "--porcelain", "--untracked-files=no")
+                or _git(workspace, "ls-files", "--others", "--exclude-standard", "--", ".", *UNTRACKED_CACHES)
+                or _git(workspace, "rev-parse", "HEAD") != head):
             raise Refusal("not_quiescent", "the working tree changed while the candidate was being produced")
         os.replace(staged, bundle)
     finally:

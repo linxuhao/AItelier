@@ -263,6 +263,19 @@ def _git_status(workspace: Path, *args: str) -> tuple[int, str, str]:
     return done.returncode, done.stdout, (done.stderr or done.stdout or "").strip()
 
 
+# Interpreter caches a test run leaves behind (`python3 -m unittest` writes __pycache__ into a
+# checkout that has no .gitignore). An UNTRACKED one is never a deliverable, so it is neither a
+# change nor dirt; a tracked one is still both.
+UNTRACKED_CACHES = (":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[co]",
+                     ":(exclude,glob)**/.pytest_cache/**")
+
+
+def _untracked(workspace: Path) -> tuple[str, str]:
+    """Untracked, not ignored paths (NUL-separated), interpreter caches left out."""
+    return _git(workspace, "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+                *UNTRACKED_CACHES)
+
+
 def _git(workspace: Path, *args: str) -> tuple[str, str]:
     """(stdout, "") or ("", why it could not be measured).
 
@@ -647,17 +660,17 @@ def builtin_library() -> PredicateLibrary:
 
         The base commit is the plan's `base_sha`, handed in by `evaluate`; a binding
         cannot set it. "Changed" is the union of `git diff base..HEAD`, uncommitted
-        changes to tracked files, and untracked files. Globs: `*` stays inside one
+        changes to tracked files, and untracked files other than interpreter caches. Globs: `*` stays inside one
         path segment, `**` crosses segments, a trailing `/` means everything under.
         """
         base = base_sha
         if not base:
             raise ValueError("changes_within needs the plan's base_sha")
         changed: set[str] = set()
-        for args in (("diff", "--name-only", "--no-renames", "-z", f"{_safe_rev(base)}..HEAD"),
-                     ("diff", "--name-only", "--no-renames", "-z", "HEAD"),
-                     ("ls-files", "--others", "--exclude-standard", "-z")):
-            out, absence = _git(workspace, *args)
+        for read in (lambda: _git(workspace, "diff", "--name-only", "--no-renames", "-z", f"{_safe_rev(base)}..HEAD"),
+                     lambda: _git(workspace, "diff", "--name-only", "--no-renames", "-z", "HEAD"),
+                     lambda: _untracked(workspace)):
+            out, absence = read()
             if absence:
                 return PredicateResult("changes_within", "absent", absence)
             changed.update(p for p in out.split("\0") if p)
@@ -672,7 +685,8 @@ def builtin_library() -> PredicateLibrary:
 
     @library.define("git_delivered")
     def git_delivered(*, workspace: Path, pre_state: Mapping[str, Any], base: str) -> PredicateResult:
-        """HEAD is a descendant of `base`, its tree differs from the base's, and the working tree is clean.
+        """HEAD is a descendant of `base`, its tree differs from the base's, and the working tree is clean
+        (an untracked interpreter cache is not dirt).
 
         A branch reset behind the base, one that diverged from it, and an empty commit
         on top of it are not deliveries.
@@ -683,9 +697,13 @@ def builtin_library() -> PredicateLibrary:
         head, absence = _git(workspace, "rev-parse", "HEAD")
         if absence:
             return PredicateResult("git_delivered", "absent", absence)
-        dirty, absence = _git(workspace, "status", "--porcelain")
+        dirty, absence = _git(workspace, "status", "--porcelain", "--untracked-files=no")
         if absence:
             return PredicateResult("git_delivered", "absent", absence)
+        untracked, absence = _untracked(workspace)
+        if absence:
+            return PredicateResult("git_delivered", "absent", absence)
+        dirty = "\n".join([*dirty.splitlines(), *(p for p in untracked.split("\0") if p)])
         code, _, err = _git_status(workspace, "merge-base", "--is-ancestor", base_commit.strip(), "HEAD")
         if code not in (0, 1):
             return PredicateResult("git_delivered", "absent", f"git merge-base exited {code}: {err[:200]}")

@@ -720,6 +720,28 @@ def test_finish_refuses_while_any_item_fails(cli, repo, base, tmp_path):
     assert not out_dir.exists() or not list(out_dir.iterdir()), "no bundle or report without a full pass"
 
 
+def test_finish_is_not_stopped_by_an_untracked_interpreter_cache(cli, repo, base, tmp_path):
+    # Running a Python project's tests writes __pycache__ into a checkout with no .gitignore;
+    # the final quiescence look refused every such finish (stranger test, 2026-11-26).
+    reach_deliver(cli, repo, base)
+    commit_all(repo)
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "calc.cpython-312.pyc").write_bytes(b"cache")
+    assert deliver_results(cli)["_outcome"] == "pass"
+    done = cli.ok("finish", "--attempt", "att-1", "--out", str(tmp_path / "out"))
+    report = json.loads(Path(done["report"]).read_bytes())
+    assert report["quiescent"] is True and report["artifact"] == git(repo, "rev-parse", "HEAD")
+
+
+def test_finish_still_refuses_an_untracked_file_that_is_not_a_cache(cli, repo, base, tmp_path):
+    reach_deliver(cli, repo, base)
+    commit_all(repo)
+    assert deliver_results(cli)["_outcome"] == "pass"
+    (repo / "notes.txt").write_text("left behind")
+    assert cli.refused("finish", "--attempt", "att-1", "--out", str(tmp_path / "out"))["refused"] in {
+        "unfinished", "not_quiescent"}
+
+
 def test_finish_writes_a_bundle_git_can_verify_and_a_report_state_accepts(cli, repo, base, tmp_path):
     from core.state_graph import StateConflict  # noqa: F401  (import proves the validator's module loads)
     from core.state_report_integrity import _structured_terminal, validate_external_semantics

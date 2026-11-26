@@ -433,7 +433,8 @@ test('sync pages back only until it meets an owner message memory already has', 
 });
 
 test('sync: an owner message relayed from a chat channel is remembered with its channel; a dashboard one has none', async () => {
-  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner' });
+  // zh, as this host's deployment: the lines as they always were.
+  const store = await MemoryStore.open({ root: mkdtempSync(join(tmpdir(), 'steward-mem-')), userId: 'owner', language: 'zh' });
   const conversation = [owner('o1', '2026-11-20T12:48:00Z', '从 slack 问一句'), mine('s1', '2026-11-20T12:49:00Z', '好的', 'o1'),
     owner('o2', '2026-11-20T12:50:00Z', '从面板问一句')];
   const sources = { o1: { direction: 'in', channel: 'slack', sender_ref: 'U0OWNER', channel_message_ref: 'ts-1' },

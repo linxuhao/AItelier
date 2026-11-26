@@ -24,7 +24,7 @@ import { closeSync, constants, existsSync, fsyncSync, openSync, readFileSync, re
   rmSync, statSync, writeSync, chmodSync, mkdirSync, unlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { Bm25Index, bm25Ranked, documentTokens, queryTokens } from './bm25.mjs';
-import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, parseAt, writtenAt } from './render.mjs';
+import { DEFAULT_TIME_ZONE, dateTokens, dayOf, formatLine, formatProfileLine, memoryWords, parseAt, writtenAt } from './render.mjs';
 import { memoryTimeZoneProblem, memoryVectorProblem } from '../host.mjs';
 import { RRF_K, VectorChannel, candidates, filterVectorFile, scanVectorFile } from './vector.mjs';
 import { git, gitOk } from './git.mjs';
@@ -55,11 +55,8 @@ const PRE_SWAP_PHASES = new Set(['forgetting', 'forget_done', 'building', 'verif
  *  at boot) all use these words. */
 const VECTOR_PENDING = 'vector-pending-forget';
 const NOTICE_IDS_SHOWN = 50;
-const vectorPendingText = (since, ids, file, code) =>
-  `本地向量文件自 ${since} 去不掉 ${ids.length} 条已忘掉（或已彻底删除）条目的向量行（${file} · ${code}）；`
-  + '原文已删、搜索取不到，但由原文算出的向量行仍在磁盘上；'
-  + (code === 'CHECK_FAILED' ? '过滤结果没通过双边检查，文件没动，下次过滤通过后会自动去掉。编号：' : '文件恢复可写后会自动去掉。编号：')
-  + ids.slice(0, NOTICE_IDS_SHOWN).join(', ') + (ids.length > NOTICE_IDS_SHOWN ? ' …' : '');
+const vectorPendingText = (since, ids, file, code, words) => words.vectorPending(since, ids.length, file, code,
+  ids.slice(0, NOTICE_IDS_SHOWN).join(', ') + (ids.length > NOTICE_IDS_SHOWN ? ' …' : ''));
 
 export class MemoryUnavailable extends Error {
   constructor(message) { super(message); this.name = 'MemoryUnavailable'; }
@@ -120,10 +117,27 @@ function withoutLinesNaming(text, ids) {
   }).join('\n');
 }
 
+/** Whether `pid` still runs. A zombie has exited (only its parent has not reaped it - in a
+ *  container without an init, nobody ever does), so it holds nothing. */
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+  try { process.kill(pid, 0); } catch (error) { if (error.code !== 'EPERM') return false; }
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // `pid (comm) state ...`: comm may hold spaces and parentheses, the state follows the last ')'.
+    return stat.slice(stat.lastIndexOf(')') + 2)[0] !== 'Z';
+  } catch { return true; } // no /proc (not Linux): kill's answer stands
 }
+
+/** The lock files this process holds, released on its way out: a DSH stopped with SIGTERM gives
+ *  its plugins a few seconds to dispose and then exits whatever they are doing, and a lock left
+ *  behind would refuse the next start for good. */
+const heldLocks = new Set();
+process.on('exit', () => {
+  for (const file of heldLocks) {
+    try { if (Number(readFileSync(file, 'utf8').trim()) === process.pid) unlinkSync(file); } catch {}
+  }
+});
 
 /** A byte stream's '\n'-terminated records, each decoded whole and handed to `take` in
  *  order, in turns (slices.mjs; plugin step 21 perf follow-up): a common word's
@@ -211,7 +225,8 @@ export class MemoryStore {
    *  vector: {url, model, timeoutMs} - the local vector channel fused with BM25 (design 3.8.2;
    *  absent: off, the ranking is BM25's alone); vectorTuning: the worker's backoff and request
    *  limit (tests); grepHelper: options for the resident grep helper (grep-helper.mjs; tests
-   *  hand it a broken helper on purpose). */
+   *  hand it a broken helper on purpose); language: the owner's (lib/owner-text.mjs, default
+   *  'en') - the words of search lines, sources and the owner's notices (render.mjs MEMORY_WORDS). */
   static async open(o) {
     const store = new MemoryStore(o);
     await store.#boot();
@@ -220,11 +235,14 @@ export class MemoryStore {
 
   constructor({ root, userId, ranked, logger = () => {}, now = () => new Date().toISOString(),
     grepTimeoutMs = 5000, syncMonths = 12, backupRemote, warnEntries = 200000, faults, budget = BUDGET, timeZone = DEFAULT_TIME_ZONE,
-    vector, vectorTuning, grepHelper }) {
+    vector, vectorTuning, grepHelper, language }) {
     if (typeof userId !== 'string' || !USER_ID.test(userId)) throw new Error('memory: userId must be 1-128 of letters, digits, @ . _ + - (not starting with .)');
     const zoneProblem = memoryTimeZoneProblem(timeZone);
     if (zoneProblem) throw new Error('memory: ' + zoneProblem);
     this.timeZone = timeZone;
+    // The owner's language (lib/owner-text.mjs): the words search lines, sources and notices use.
+    this.language = language;
+    this.words = memoryWords(language);
     this.root = root; this.userId = userId; this.log = logger; this.now = now;
     this.grepTimeoutMs = grepTimeoutMs; this.syncMonths = syncMonths; this.backupRemote = backupRemote; this.warnEntries = warnEntries;
     this.dir = join(root, userId);
@@ -248,7 +266,7 @@ export class MemoryStore {
     this.forgotten = new Map(); // id -> last record
     this.index = new Bm25Index();
     this.remote = ranked;
-    this.ranked = ranked ?? bm25Ranked(this.index, id => this.entries.get(id)?.text);
+    this.ranked = ranked ?? bm25Ranked(this.index, id => this.entries.get(id)?.text, this.words.bm25Source);
     this.coverage = 'all';
     this.gitState = { ok: true };
     this.purging = false;
@@ -265,7 +283,7 @@ export class MemoryStore {
       this.vector = new VectorChannel(vector, { file: this.vectorFile, tuning: vectorTuning, store: {
         faults: () => this.faults,
         entries: () => this.entries, locked: fn => this.#locked(fn), log: (event, fields) => this.log(event, fields),
-        now: () => this.now(), notice: (kind, text, fields) => this.#notice(kind, text, fields),
+        now: () => this.now(), notice: (kind, text, fields) => this.#notice(kind, text, fields), words: this.words,
         // the reconciliation's step 2 filters through the store, so its failures join the
         // same pending set, notice and status key as a forget's (design 3.8.2, r30)
         pendingForget: () => this.vectorPending.size, filterVectors: ids => this.#filterVectorsBestEffort(ids),
@@ -338,6 +356,7 @@ export class MemoryStore {
         const fd = openSync(this.lockFile, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
         try { writeSync(fd, String(process.pid)); fsyncSync(fd); } finally { closeSync(fd); }
         this.lockHeld = true;
+        heldLocks.add(this.lockFile);
         return;
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
@@ -373,6 +392,7 @@ export class MemoryStore {
     await this.queue;
     if (!this.lockHeld) return;
     this.lockHeld = false;
+    heldLocks.delete(this.lockFile);
     try { if (Number(readFileSync(this.lockFile, 'utf8').trim()) === process.pid) unlinkSync(this.lockFile); } catch {}
   }
 
@@ -446,7 +466,7 @@ export class MemoryStore {
   #load() {
     const started = performance.now();
     this.entries.clear(); this.forgotten.clear(); this.index = new Bm25Index();
-    if (!this.remote) this.ranked = bm25Ranked(this.index, id => this.entries.get(id)?.text);
+    if (!this.remote) this.ranked = bm25Ranked(this.index, id => this.entries.get(id)?.text, this.words.bm25Source);
     // forgotten holds what is forgotten NOW: a restore record takes its id out again.
     for (const row of parseLines(join(this.dir, 'forgotten.jsonl'))) {
       if (row.restored) this.forgotten.delete(row.id); else this.forgotten.set(row.id, row);
@@ -898,7 +918,7 @@ export class MemoryStore {
   #vectorPendingNotice() {
     const round = this.vectorRound;
     const ids = [...this.vectorPending].sort(byId);
-    const text = vectorPendingText(round.since, ids, this.vectorFile, round.code);
+    const text = vectorPendingText(round.since, ids, this.vectorFile, round.code, this.words);
     const fields = { since: round.since, code: round.code, message: round.message, ids };
     try {
       const rows = this.noticeRows ?? this.#readNotices();
@@ -1045,15 +1065,15 @@ export class MemoryStore {
       grep: { ...grepHead, ...out(answers[0]) },
       ranked: ranked.items ? { ...rankedHead, ...out(answers[1]), filtered_forgotten, ...(remote_forget ? { remote_forget } : {}) } : ranked,
       // The entries left to read: one both answers had to omit is one entry, counted once.
-      budget: `${used}/${SEARCH_CHARS} 字 · omitted ${new Set(answers.flatMap(a => a.omitted.map(o =>
+      budget: `${used}/${SEARCH_CHARS} ${this.words.chars} · omitted ${new Set(answers.flatMap(a => a.omitted.map(o =>
         o.line !== undefined ? 'profile:' + o.line : o.id ?? 'ref:' + o.ref))).size}`,
       status: this.statusLine() };
   }
 
   /** The line of a search item; `see` names the answer that shows the entry whole. */
   #line(item, see) {
-    return item.profileLine !== undefined ? formatProfileLine(item.profileLine, item.entry.text)
-      : formatLine(item.entry, this.timeZone, { dateOnly: item.hit.date_only === true, see });
+    return item.profileLine !== undefined ? formatProfileLine(item.profileLine, item.entry.text, this.language)
+      : formatLine(item.entry, this.timeZone, { dateOnly: item.hit.date_only === true, see, language: this.language });
   }
 
   /** Design 3.8.1's one budget: the two answers in turn by rank (grep 1, ranked 1, grep 2, …).
@@ -1171,7 +1191,7 @@ export class MemoryStore {
    *  answering is logged and this query runs the direct spawn instead - the same command, taken
    *  from the same gitSpawnSpec - so a search never fails because of the helper. */
   async #grep(query, k) {
-    const source = 'grep · 字面匹配 · 本地记忆日志';
+    const source = this.words.grepSource;
     const needle = JSON.stringify(query).slice(1, -1);
     const args = ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', needle, '--', 'log', 'profile.md'];
     // One collector per attempt, so a helper that dies mid-stream (or a fallback) leaves no
@@ -1221,7 +1241,7 @@ export class MemoryStore {
     const status = this.vector.statusText();
     const bm = this.index.search(query, C);
     if (!vector) {
-      return { source: 'bm25 · 本地索引 · 向量不可用', status,
+      return { source: this.words.bm25NoVectors, status,
         hits: bm.slice(0, k).map(h => ({ text: this.entries.get(h.id)?.text ?? '', score: Math.round(h.score * 100) / 100, at: h.at, ref: h.id })) };
     }
     this.faults?.onFusion?.({ C, bm25: bm.length, vector: vector.length });
@@ -1620,6 +1640,6 @@ export class MemoryStore {
     this.#journal({ ...plan, phase: 'done', outcome, recovered_from: last.phase, layout,
       ...(finished ? { forget_finished: finished } : {}) });
     this.log('memory/purge-recovered', { purge_id: plan.purge_id, from: last.phase, layout, outcome, forget_finished: finished });
-    return `上次彻底删除（${plan.purge_id}，条目 ${plan.ids.join(', ')}）被中断，结果为：${outcome === 'completed' ? '已完成' : '已回退，未删除'}`;
+    return this.words.purgeRecovered(plan.purge_id, plan.ids.join(', '), outcome === 'completed');
   }
 }

@@ -68,10 +68,11 @@ export const withoutLeadingClockLines = text => text.replace(leadingClockLines, 
 export const CLOCK_TOOL_GAP_MS = 10 * 60 * 1000;
 
 /** The one-line system clock (message-time design 2): `now` (ms) in UTC to the minute,
- *  the owner's local time when `tz` is a time zone, and where it was written. */
-export function clockLine({ now, tz, where } = {}) {
+ *  the owner's local time when `tz` is a time zone (its weekday in the owner's `language`,
+ *  lib/owner-text.mjs), and where it was written. */
+export function clockLine({ now, tz, where, language } = {}) {
   const iso = new Date(now).toISOString();
-  const local = tz ? stamp(iso, tz) : undefined;
+  const local = tz ? stamp(iso, tz, language) : undefined;
   return `${CLOCK_TAG} now ${iso.slice(0, 16)}Z` + (local ? ` · owner's time ${tz} ${local}` : '')
     + (where === 'snapshot' ? ' (context snapshot)' : where === 'tool' ? ' (after tool)' : '');
 }
@@ -83,11 +84,11 @@ export function clockLine({ now, tz, where } = {}) {
  *  clock fails - no line, the time of the last one kept, one log line per session. */
 export class Clock {
   constructor({ session, createMessage, kind = defaultLabels.clock, notInput = [defaultLabels.context], tz,
-    now = Date.now, line = clockLine, log = () => {}, gapMs = CLOCK_TOOL_GAP_MS }) {
+    now = Date.now, line = clockLine, log = () => {}, gapMs = CLOCK_TOOL_GAP_MS, language }) {
     // The owner's time zone (memory.timeZone): one that is not a zone leaves the clock in UTC.
     const problem = memoryTimeZoneProblem(tz);
     if (problem) log(`clock: ${problem}; UTC only`);
-    Object.assign(this, { session, createMessage, kind, tz: problem ? undefined : tz, now, line, log, gapMs });
+    Object.assign(this, { session, createMessage, kind, tz: problem ? undefined : tz, now, line, log, gapMs, language });
     this.notInput = new Set([kind, ...notInput]);
     this.lastAt = -Infinity;
     this.failed = false;
@@ -95,7 +96,7 @@ export class Clock {
   /** The line for `where`, and the time it reads; the caller marks it written. */
   read(where) {
     const at = this.now();
-    return { at, text: this.line({ now: at, tz: this.tz, where }) };
+    return { at, text: this.line({ now: at, tz: this.tz, where, language: this.language }) };
   }
   written(at) { this.lastAt = at; }
   /** The time a message carrying this line records for itself, to be read back from the log:
@@ -146,12 +147,15 @@ export class Clock {
   }
 }
 
+/** The snapshot's header when the host gives none (texts.contextHeader): it names the root's role. */
+export const contextHeader = rootRole => `${rootRole === 'steward' ? 'Steward' : 'Director'} context — startup / post-compaction snapshot:\n`;
+
 /** One durable snapshot per session bootstrap / successful compaction epoch.
  *  `runtime` is the context source: `refresh()` then `render()` give the text after
  *  `header` (and the `clock` line, when there is a clock). */
 export class ContextInjection {
   constructor(session, runtime, createMessage, { kind = defaultLabels.context, section = defaultLabels.contextSection,
-    header = 'Director context — startup / post-compaction snapshot:\n', clock, audience = () => 'owner' } = {}) {
+    header = contextHeader('director'), clock, audience = () => 'owner' } = {}) {
     // `audience()`: whose turn it is (step 23, design-steward 7.7.6). Only an owner turn gets
     // the snapshot; a group turn neither gets it nor counts as having had it.
     Object.assign(this, { session, runtime, createMessage, kind, section, header, clock, audience });

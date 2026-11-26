@@ -25,7 +25,7 @@ import { attachmentLine } from './lib/media.mjs';
 import { registerConnectionTools } from './lib/connections.mjs';
 import { loadRoles, roleOf, validateEffectiveRoles } from './lib/roles.mjs';
 import { validateHost, optionalDefaults, isSettled } from './lib/host.mjs';
-import { defaultLabels, defaultTexts, Clock, ContextInjection, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
+import { defaultLabels, defaultTexts, Clock, ContextInjection, contextHeader, connectionErrorMessage, wakeSourcesFor, endsDormancyFor,
   Continuation, processSession, processAlive, backgroundProcesses, watchRefusal, dormancyRefusal, DORMANT_MIN_MINUTES,
   DORMANT_MAX_MINUTES, wakeAfterRefusal, LiveChildren, phaseReport, continuationWaitKey, DORMANT_COMPACT_MIN_TOKENS,
   IdleReview, TodoCli, settledAttempts, batchRedispatchRows, todoSummary, unfinishedWithoutChild, rebindRefusal,
@@ -333,7 +333,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   }
   // Plugin step 11: the owner's memory, only when the host config asks for it. A memory
   // that cannot start is {error}: its tools answer that, everything else runs.
-  const memory = config.memory ? await openMemory(config.memory, { sessionId: config.sessionId,
+  // Its search lines, sources and notices are in the owner's language (lib/memory/render.mjs).
+  const memory = config.memory ? await openMemory(config.memory, { sessionId: config.sessionId, language: config.ownerLanguage,
     logger: (event, fields) => ctx.logger.info(event + ' ' + JSON.stringify(fields)) }) : undefined;
   // Overfit review 2026-11-24 (重-10): a host without `memory` has no conversation source of its
   // own (it records no turn), so the root session's own turns go into memory from here.
@@ -573,11 +574,11 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // result and every snapshot (lib/core.mjs Clock); children and workers get none. Its
     // local time is the owner's time zone, which only a host with an owner's memory sets.
     const clock = new Clock({ session: subject.session, createMessage: createUserMessage, kind: labels.clock,
-      notInput: [labels.context], tz: config.memory?.timeZone, log: line => ctx.logger.warn(line),
+      notInput: [labels.context], tz: config.memory?.timeZone, language: config.ownerLanguage, log: line => ctx.logger.warn(line),
       // Tests shrink the gap before a tool result's clock; production never sets it.
       ...(Number(config.clockToolGapMs) > 0 ? { gapMs: Number(config.clockToolGapMs) } : {}) });
     const injection = new ContextInjection(subject.session, contextSource, createUserMessage,
-      { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? 'Director context — startup / post-compaction snapshot:\n', clock,
+      { kind: labels.context, section: labels.contextSection, header: texts.contextHeader ?? contextHeader(rootRole), clock,
         // Step 23: never in a group turn (7.7.6).
         ...(groupTurns ? { audience: () => groupTurns.audience().kind } : {}) });
     // Boundary (director, 2026-11-21, iss-9edcdf8c664640fe): the CLOCK LINE is not suppressed
@@ -833,7 +834,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
         finally { observation[Symbol.dispose](); }
       },
     }));
-    if (memory) registerMemoryTools(scope, { defineTool, jsonOutput, memory,
+    if (memory) registerMemoryTools(scope, { defineTool, jsonOutput, memory, language: config.ownerLanguage,
       ownerMessage: host.memory ? (id, signal) => host.memory.ownerMessage(id, signal) : undefined });
     // Plugin step 12: the steward's read-only view of every project and its handoff to a
     // project's director, when the host provides them (which role sees them is roles.json's).

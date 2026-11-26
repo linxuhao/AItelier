@@ -20,15 +20,22 @@ host they do not load), or several directors coordinating.
 - **Linux.** Tested on x86_64. On Windows the plugin refuses to start. macOS is untested: plans
   work there, but `watch_process` cannot see jobs (it reads `/proc`).
 - **DSH `0.2.1-rc.5`** (the release this plugin is tested on) and the Node.js it needs (tested
-  with Node 24). Another DSH release starts with a warning in the DSH log.
+  with Node 24). Another DSH release starts with a warning in the DSH log. The npm package
+  declares `engines.dsh` `>=0.2.1-rc.5 <0.3.0-0`: a DSH outside that range does not load it
+  (`dsh plugin --profile <name> allow-version` accepts the risk for one exact version).
+- **pnpm**, to install the plugin from npm: `dsh plugin` runs it in the profile, and stops with
+  `pnpm was not found` without it (`npm install -g pnpm`). A checkout needs none.
 - **python3 with PyYAML**, for the todo package. On Debian and Ubuntu: `sudo apt install python3-yaml`
   (their python3 has no pip, and pip refuses to install into it). Elsewhere:
   `python3 -m pip install -r requirements.txt`, or in a venv
   (`python3 -m venv <dir> && <dir>/bin/pip install -r requirements.txt`, then set
   `todo: { python: <dir>/bin/python3 }` in the config below).
-- **git**, for plans and their delivery.
+- **git**, for plans and their delivery, with `user.name` and `user.email` set
+  (`git config --global user.name ...`, `git config --global user.email ...`): workers commit.
 - **A model key.** DSH's built-in DeepSeek route, provider `deepseek-official`, reads
-  `DEEPSEEK_API_KEY` (from the environment or DSH's credential store).
+  `DEEPSEEK_API_KEY` (from the environment or DSH's credential store). Any other model behind an
+  OpenAI-compatible endpoint (a self-hosted server, a gateway) works too: see
+  [Another model](#another-model).
 
 At startup the local host checks python3, PyYAML and git and refuses to start, naming each
 one that is missing.
@@ -42,10 +49,38 @@ whole DSH process exits.
 
 DSH's shipped profiles cannot run it either: in `web` the plugin waits forever for the
 compaction service, in `headless` for the credentials service (the log says
-`pending (waiting for service: ...)` and nothing else happens). Use a profile built on
-`@deepseek-ai/dsh-base` alone, as below.
+`pending (waiting for service: ...)` and nothing else happens). `web` waits because its bundle,
+`@deepseek-ai/dsh-web-app`, turns DSH's `compaction-basic` off for the whole process (it runs
+compaction inside its own presets), and the plugin needs that service; one line in the profile's
+`cordis.patch.yml` turns it back on: `- { id: compaction-basic, disabled: false }` (see
+[Talk to it](#talk-to-it)). Use a profile built on `@deepseek-ai/dsh-base` alone, as below, or on
+it and `@deepseek-ai/dsh-web-app` with that line.
 
 ## 1. Install
+
+Two routes: from npm (for using it), or from a checkout of this repository (for changing it).
+Both end in a profile named `director`; only how the plugin gets into it differs.
+
+### From npm
+
+```sh
+npm install -g @deepseek-ai/dsh@0.2.1-rc.5 pnpm
+sudo apt install python3-yaml git       # Debian/Ubuntu; elsewhere: python3 -m pip install PyYAML
+dsh plugin --profile director add aitelier-dsh-director
+```
+
+The last line creates the profile (`${DSH_HOME:-$HOME/.dsh}/profiles/director`, built on
+`@deepseek-ai/dsh-base`), installs the package `aitelier-dsh-director` into it and adds it to the
+profile's bundles. The package's own layer (`cordis.patch.yml`, applied after `dsh-base`) turns
+off the DSH tools the director's protocol does not use (`hmr`, `tool-subagent-fork`,
+`tool-workflow`, `plan-mode`, `tool-todo`) and inserts the plugin's two rows, `dsh-director` and
+`director-local`. What it cannot know, where the director keeps its files and which model it and
+its workers use, goes into the profile's own patch: [section 2](#2-write-the-profile).
+
+`dsh plugin --profile director remove aitelier-dsh-director` takes it out again; another version
+is `dsh plugin --profile director add aitelier-dsh-director@<version>`.
+
+### From a checkout
 
 ```sh
 npm install -g @deepseek-ai/dsh@0.2.1-rc.5
@@ -53,10 +88,60 @@ cd integrations/dsh-director            # in your checkout of this repository
 sudo apt install python3-yaml           # Debian/Ubuntu; elsewhere: python3 -m pip install -r requirements.txt
 ```
 
+The profile then names the plugin's files by their path, and nothing is installed into it
+([section 2](#2-write-the-profile), "From a checkout").
+
+On either route, `npm install -g` writes into Node's global prefix. With a Node installed for
+the whole system that prefix belongs to root; instead of `sudo`, give npm one of your own and put
+its `bin` on your `PATH` (in `~/.bashrc` or wherever your shell reads it):
+
+```sh
+npm config set prefix ~/.npm-global
+export PATH=~/.npm-global/bin:$PATH
+```
+
 ## 2. Write the profile
 
-Run this from `integrations/dsh-director`. `ROOT` is where the director keeps its files; pick
-any directory. Paths must not contain spaces (they are written into YAML unquoted).
+`ROOT` is where the director keeps its files; pick any directory. Paths must not contain spaces
+(they are written into YAML unquoted).
+
+### From npm
+
+The profile exists already (`dsh plugin ... add` made it). Its `cordis.patch.yml` is yours, and
+is applied after every bundle's layer; replace it with the rows only you can fill in:
+
+```sh
+ROOT=$HOME/director
+PROFILE=${DSH_HOME:-$HOME/.dsh}/profiles/director
+mkdir -p "$ROOT/inbox"
+cat > "$PROFILE/cordis.patch.yml" <<EOF
+# Workers: DSH's native subagent tool, on the model the workers should use. A patch replaces a
+# row's whole config, so provider and toolName are restated next to agentOptions.
+- id: tool-subagent
+  config:
+    provider: spawn
+    toolName: subagent
+    agentOptions: { provider: deepseek-official, model: deepseek-flash }
+# The director's host: its files, and the model the director runs on.
+- id: director-local
+  config:
+    root: $ROOT
+    provider: deepseek-official
+    model: deepseek-flash
+EOF
+dsh --profile director --dump-config     # the composed layers, without starting anything
+```
+
+The package carries no `tool-subagent` row of its own: this one would replace it whole anyway.
+Without this row the workers run on `dsh-base`'s (`provider: spawn`, no `agentOptions`), that
+is on DSH's default model rather than one you chose. Without `director-local`'s config the
+director refuses to start (`missing config: root`, see
+[When it does not start](#when-it-does-not-start)).
+
+### From a checkout
+
+Run this from `integrations/dsh-director`. The profile lists only `dsh-base`, and its patch also
+does what the package's layer does, naming the plugin's files by their path:
 
 ```sh
 PLUGIN=$PWD
@@ -92,7 +177,8 @@ cat > "$PROFILE/cordis.patch.yml" <<EOF
 EOF
 ```
 
-`root`, `provider` and `model` are required. Optional keys of `director-local`'s `config`:
+In either route, `root`, `provider` and `model` are required. Optional keys of
+`director-local`'s `config`:
 
 | key | default | what it does |
 |---|---|---|
@@ -104,6 +190,50 @@ EOF
 | `pollMs` | `2000` | how often `inbox/` is read |
 | `sessionEnv` | `DIRECTOR_LOCAL_SESSION_<hash of root>` | the variable that tags every process this DSH starts with the director's session; the plugin sets it itself. One per `root`, so two directors started side by side do not count each other's jobs. One exception, one way: a director B started from inside director A's job (A's shell) inherits A's variable as well as its own, so A counts B's DSH and every job B starts as A's own background jobs, and A's `idle_dormant` is refused with `background_processes` while they run; B does not count A's. Start each director from its own shell. A name you set must not start with `DSH_`: DSH drops those from every model shell |
 
+### Another model
+
+The profile's patch (either route) names DeepSeek's route twice: `agentOptions` in the
+`tool-subagent` row (the workers) and `provider`/`model` in `director-local`'s `config` (the
+director). For any other model, add a route for it to the same patch, as the `llm-pi-ai` row's
+config, and name that route and model in both places instead. An OpenAI-compatible endpoint, for
+example a server on your own machine:
+
+```yaml
+- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      local:                          # the route's name: use it as `provider` in the profile
+        apiKeyEnv: LOCAL_API_KEY      # the environment variable holding its key
+        api: openai-completions
+        baseURL: http://127.0.0.1:8000/v1
+        models:
+          - id: my-model              # use it as `model` in the profile
+```
+
+Put it in every profile that uses the route (a director's, a steward's), not in DSH's
+`${DSH_HOME:-$HOME/.dsh}/settings.yaml`: DSH `0.2.1-rc.5` moves that file into the first profile
+it starts (as this same row of that profile's `cordis.patch.yml`) and renames it
+`settings.yaml.imported`, so a profile started later has no route
+(`Model completion: no adapter registered for provider "local"`). A patch replaces a row's whole
+config, so the row lists every route that profile uses.
+
+```yaml
+    agentOptions: { provider: local, model: my-model }     # in the tool-subagent row
+...
+    provider: local                                        # in director-local's config
+    model: my-model
+```
+
+Start DSH with that variable set (`export LOCAL_API_KEY=...`) instead of `DEEPSEEK_API_KEY`. The
+model must support tool calls, and do them well: the director and its workers do everything
+through tools, and a steward even more so (each of its turns is a run of tool calls). A small
+quantized model has been seen calling `idle_dormant` over and over in one steward turn; if yours
+does that, use a larger one. A gateway that refuses every request although the address and key
+are right usually wants `compat: { supportsDeveloperRole: false, maxTokensField: max_tokens }` on
+the route; DSH's own guide to models (`docs/user/guide/providers.md` in the DSH repository) lists
+the rest.
+
 ## 3. Permissions
 
 By default DSH lets the director and its workers write only inside the directory DSH was
@@ -111,7 +241,8 @@ started in (and temporary directories); a write anywhere else needs an approval,
 profile has no client to approve it in, so it fails (`Permission denied`). Two ways to change
 that:
 
-- start DSH from a directory that contains every checkout the workers will change, or
+- start DSH from a directory that contains every checkout the workers will change (for example
+  from your home directory, if your checkouts are under it), or
 - give the director full access: `DSH_PERMISSION_MODE=danger-full-access` in DSH's environment
   (the whole process), or `permissionPreset: danger-full-access` in the config above (the
   director's session; its workers inherit it).
@@ -126,10 +257,20 @@ export DEEPSEEK_API_KEY=...             # your key
 dsh --profile director
 ```
 
-It keeps running until you stop it (Ctrl-C). Started again, it resumes the same session, and
-workers a restart interrupted are resumed. The first thing to check when nothing seems to
-happen is `$ROOT/progress.jsonl`; a failed model call (no key, an unknown model) is also
-printed to stderr as `dsh-director failed: ...`.
+It keeps running until you stop it: Ctrl-C, or, when it runs in the background, `kill <pid>`
+(SIGTERM, which stops it the same way). Never start a second copy to check on a running one:
+`dsh --profile director --help` boots the whole profile too, and exits with
+`SessionAlreadyOwnedError` because the first one owns the session. Started again, it resumes the
+same session, and workers a restart interrupted are resumed. The first thing to check when
+nothing seems to happen is `$ROOT/progress.jsonl`; a failed model call (no key, an unknown model)
+is also printed to stderr as `dsh-director failed: ...`. Its lines can be long (a report may
+carry a whole model answer); to see only when, which phase and what error:
+
+```sh
+jq -c '{at, phase, error}' "$ROOT/progress.jsonl" | tail -20
+# without jq:
+python3 -c 'import json,sys; [print(r.get("at"), r.get("phase"), str(r.get("error") or "")[:300]) for r in map(json.loads, open(sys.argv[1]))]' "$ROOT/progress.jsonl" | tail -20
+```
 
 ## 5. Give it work
 
@@ -182,7 +323,8 @@ printf '%s\n' '{"answer": "Yes, drop Node 18."}' > "$ROOT/inbox/answer-<question
 ```
 
 The plugin also registers DSH commands for this (`/questions`, `/answer <id> <text>`), but the
-profile above has no chat client to type them in; files are the way in.
+profile above has no chat client to type them in; files are the way in (or add DSH's web app to
+the profile, as in [Talk to it](#talk-to-it)).
 
 ## A steward instead of a director
 
@@ -194,11 +336,26 @@ to `director-local`'s `config`:
 |---|---|
 | `rootRole: steward` | the session named by `sessionId` is the steward, not a director |
 | `memory: { userId: <name> }` | your memory: a git repository under `~/.local/share/dsh-director/memory/<name>/` (`root` puts it elsewhere; keep it outside anything mounted into containers). `timeZone` (an IANA name, default UTC) dates what it shows |
-| `projectsDir` | optional: a directory whose every subdirectory is one local host root (a project) |
+| `projectsDir` | optional: a directory whose every subdirectory is one local host root (a project); below |
+| `ownerLanguage` | optional, default `en`: `en` or `zh` (by its first part, so `zh-CN` is `zh`; anything else is `en`). The language of the fixed text the plugin shows: the reply phrases in the steward's prompt, the memory tools' lines and labels, the weekday in the clock line |
+
+`projectsDir` must exist (create it; one that does not reads as no projects). One project is a
+subdirectory named by its id (letters, digits, `_ . -`, starting with a letter or digit; other
+names are skipped), laid out like a director's `root`:
+
+| file | what the steward reads |
+|---|---|
+| `project.json` | `title` and `goal` (and `project_id`, `proposal_id`, `created_at` when the steward made it) |
+| `work.json` | `{ "items": [{ "id", "title", "state", "holder"? }] }`: counts by state, and the open items |
+| `questions.json` | the open questions of that project's director |
+| `progress.jsonl` | its last line: the director's phase |
+| `notes.md` | the director's notes (the steward writes the goal into it when it makes the project) |
+
+The steward only reads them; a director started with `root` set to that subdirectory works there.
 
 What a steward on this host can do:
 
-- talk with you. Every turn you write to it in a DSH client attached to its session is recorded
+- talk with you. Every turn you write to it in its DSH's web app ([Talk to it](#talk-to-it)) is recorded
   into your memory, with its replies in that turn, by the plugin itself; `memory_search` finds
   them, `memory_note` and `memory_profile_update` keep what it concluded or what you prefer. A
   file in `inbox/` wakes it as an event, like a director, and is not your words, so it is not
@@ -206,8 +363,10 @@ What a steward on this host can do:
 - with `projectsDir`: read every project there (`portfolio_projects`, `portfolio_project`,
   `portfolio_conversation`) and propose one new project (`propose`, kind `create_project`). You
   decide with `/proposals`, `/approve <id>` and `/decline <id> [reason]`; an approved project is a
-  new subdirectory with `project.json`, `notes.md` and `work.json`. Nobody works on it until you
-  start a director for it yourself (a profile of its own, `root` set to that subdirectory).
+  new subdirectory with `project.json`, `notes.md`, `work.json` (one item per seed node, each
+  `working` with no holder: open, and held by nobody yet) and an empty `inbox/`. Nobody works on it
+  until you start a director for it yourself (a profile of its own, `root` set to that
+  subdirectory).
 - ask you questions (`ask_owner`), which you answer with `/questions` and `/answer <id> <text>`, or
   a file `inbox/answer-<id>.json` as above.
 - forget, restore or purge one memory entry only when you type `/forget <id> [reason]`,
@@ -230,6 +389,84 @@ handoffs and letters, the connection catalog) is left out or replaced with what 
 and fixed lines that are left (`lib/owner-text.mjs`). A `zh` host that provides everything gets
 `steward.md` unchanged.
 
+### Talk to it
+
+The profile in section 2 has no client: the steward runs, but nothing you type reaches it. Make
+the steward's profile like that one (say `--profile steward`, with the keys above in
+`director-local`'s `config`), with a `root` of its own and `sessionId: steward`: neither may be a
+director's. Give it DSH's web app as well. The web app,
+`@deepseek-ai/dsh-web-app`, is a bundle DSH itself ships: it is not installed, only listed among
+the bundles in the profile's `package.json` (`dsh plugin ... add @deepseek-ai/dsh-web-app` would
+download a second copy from npm, and stops at its build scripts).
+
+- From npm: write that `package.json` first, then add the package (`dsh plugin ... add` keeps the
+  bundles already listed and appends its own):
+
+  ```sh
+  PROFILE=${DSH_HOME:-$HOME/.dsh}/profiles/steward
+  mkdir -p "$PROFILE"
+  cat > "$PROFILE/package.json" <<'EOF'
+  { "name": "dsh-profile-steward", "private": true, "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] } } }
+  EOF
+  dsh plugin --profile steward add aitelier-dsh-director
+  ```
+
+  On a profile that has the package already, add `"@deepseek-ai/dsh-web-app"` to the `bundles`
+  list of its `package.json` by hand.
+- From a checkout, its `package.json` is
+
+  ```json
+  { "private": true, "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] } } }
+  ```
+
+Either way, its `cordis.patch.yml` also carries the line that turns the compaction service back
+on (the web app turns it off, and the plugin then waits for it forever):
+
+```yaml
+- { id: compaction-basic, disabled: false }
+```
+
+Start it with
+
+```sh
+dsh --profile steward --no-open --port 8123
+```
+
+and open the address it prints after `dsh web:`. On another machine, forward the port first
+(`ssh -L 8123:127.0.0.1:8123 <that machine>`) and open the same address here. Your turns there are
+your conversation with the steward, and the commands above (`/proposals`, `/approve`, `/answer`,
+`/forget` and the rest) are typed there too.
+
+Only one DSH process can own the steward's session: a second `dsh --profile steward` exits with
+`SessionAlreadyOwnedError`, and a separate `dsh web` cannot write to it (`session/writer-held`).
+Talk to it through the web app of the process that runs it.
+
+## Find it in DSH's plugin market
+
+This repository publishes a plugin market index (DSH's index format 1) that lists this package:
+
+```
+https://raw.githubusercontent.com/linxuhao/AItelier/main/market/index.json
+```
+
+DSH reads market indexes only in a profile with its web app and the optional bundle
+`@deepseek-ai/dsh-experimental-plugin-market-bundle` (shipped with DSH, off in every shipped
+profile; list it among the profile's bundles like the web app above). There, add the address as
+an index source on the Plugins page's Discover tab, or in the profile's patch:
+
+```yaml
+- id: plugin-market
+  config:
+    indexes: [https://raw.githubusercontent.com/linxuhao/AItelier/main/market/index.json]
+```
+
+Installing from Discover installs into the profile that web app runs in, and this plugin takes
+over every session of its profile ([Use a profile of its own](#use-a-profile-of-its-own)). So
+install it there only from a new profile made for it (the web app and the market bundle among its
+bundles, like the steward's above), never from the one you work in; then write that profile's
+patch ([section 2](#2-write-the-profile), and the steward's line for `compaction-basic`) and
+start it again.
+
 ## When it does not start
 
 DSH prints two lines and exits:
@@ -251,13 +488,37 @@ The second line is the one to read.
 
 | reason | fix |
 |---|---|
-| `missing config: provider` (or `model`, `root`) | add it to `director-local`'s `config` |
+| `missing config: provider` (or `model`, `root`) | add it to `director-local`'s `config`; installed from npm, that is in the profile's own `cordis.patch.yml` ([section 2](#2-write-the-profile)) |
 | `python not found` / `PyYAML is missing` | install python3 and PyYAML (Debian/Ubuntu: `sudo apt install python3-yaml`; elsewhere `python3 -m pip install -r requirements.txt`, or a venv); or set `todo.python` |
 | `git not found` | install git |
 | `cannot find @deepseek-ai/dsh-tools from config.dshEntry ...` | set `dshEntry` to the `lib/bin.js` of your DSH install |
 | `Windows is not supported` | run it on Linux |
 
 `pending (waiting for service: ...)` with no exit means the profile is not the one above.
+
+A memory that cannot open does not stop a steward; its memory tools refuse instead, for the whole
+run. At startup it says why on stderr, `dsh-director: memory unavailable: <the reason>`, and every
+line of `progress.jsonl` carries `memory_unavailable: <the reason>` in its `error`.
+
+| reason | fix |
+|---|---|
+| `memory: locked by process N` | another process has this memory open: a second DSH with the same `userId` and memory `root`. Stop it (`kill N`) and start again. A lock whose process is gone is taken over by itself at the next start; one left by a process that was killed hard (SIGKILL) while another process now has its number, as after a container restart, is removed by hand (`<memory root>/<userId>.lock`) while no DSH uses that memory. In Docker, run the container with `--init`, so exited processes are reaped |
+
+## Releasing the package
+
+`npm pack` in this directory builds what is published: `files` in `package.json` (the tests,
+`standalone/`, `conformance/` and `tools/` stay out; `test/boundary.test.mjs` fails when a
+runtime file would be left out). After `npm publish`, set that version's `publishTimestamp` in
+the repository's `market/index.json` (`0` until then) to the registry's time of the version, in
+Unix seconds:
+
+```sh
+npm view aitelier-dsh-director@0.1.0 time --json | node -e 'const t = JSON.parse(require("fs").readFileSync(0, "utf8"))["0.1.0"]; console.log(Math.floor(Date.parse(t) / 1000))'
+```
+
+A new version is a new entry in that file's `versions`, with `engines.dsh` equal to
+`package.json`'s; `integrations/dsh-driver/market-index.test.mjs` checks both with DSH's own
+validator.
 
 ## Checking this README
 

@@ -3,6 +3,7 @@
  *  conversion below, so "the 19th in the evening" is the same day in a line's date, in its
  *  day group and in the index. Only for search: the snapshot's lines (7.3) are not these. */
 import { documentTokens } from './bm25.mjs';
+import { ownerLanguage } from '../owner-text.mjs';
 
 // The zone is checked once, where the memory opens (memoryTimeZoneProblem in ../host.mjs).
 export const DEFAULT_TIME_ZONE = 'UTC';
@@ -55,10 +56,40 @@ export function dayOf(at, tz) {
   return z && isoDay(z);
 }
 
-/** `2026-11-19 周四 11:25+01:00`, or undefined. */
-export function stamp(at, tz) {
+/** The words memory shows the steward, in the owner's language (lib/owner-text.mjs: 'en' or
+ *  'zh' by the primary subtag, else 'en'). The 'zh' ones are what memory showed before the
+ *  table existed, byte for byte. The index's date words (dateWords) are both languages' always. */
+export const MEMORY_WORDS = Object.freeze({
+  zh: Object.freeze({ weekday: w => `周${WEEKDAY_ZH[w]}`, role: { owner: '业主', steward: '管家' }, note: '（笔记）',
+    channel: c => `（${c}）`, dateOnly: '（日期命中）', see: '→ 见 ', undated: '时间不明', remote: '远端',
+    profileLine: n => `[档案 第 ${n} 行]`, grepSource: 'grep · 字面匹配 · 本地记忆日志', bm25Source: 'bm25 · 本地索引',
+    bm25NoVectors: 'bm25 · 本地索引 · 向量不可用', vectorSource: model => `bm25+向量 · 本地索引 · ${model}`, chars: '字',
+    // The owner's notices ("Memory notices - tell your owner").
+    vectorPending: (since, count, file, code, ids) => `本地向量文件自 ${since} 去不掉 ${count} 条已忘掉（或已彻底删除）条目的向量行（${file} · ${code}）；`
+      + '原文已删、搜索取不到，但由原文算出的向量行仍在磁盘上；'
+      + (code === 'CHECK_FAILED' ? '过滤结果没通过双边检查，文件没动，下次过滤通过后会自动去掉。编号：' : '文件恢复可写后会自动去掉。编号：') + ids,
+    vectorDown: (since, url, model, code, left) => `本地向量检索自 ${since} 不可用（${url} · ${model} · ${code}），`
+      + `排序检索只用 BM25，可能漏掉意思相近的记录；未嵌入 ${left} 条`,
+    purgeRecovered: (purgeId, ids, completed) => `上次彻底删除（${purgeId}，条目 ${ids}）被中断，结果为：${completed ? '已完成' : '已回退，未删除'}` }),
+  en: Object.freeze({ weekday: w => WEEKDAYS[w], role: { owner: 'owner', steward: 'steward' }, note: ' (note)',
+    channel: c => ` (${c})`, dateOnly: ' (date match)', see: '→ see ', undated: 'time unknown', remote: 'remote',
+    profileLine: n => `[profile line ${n}]`, grepSource: 'grep · literal match · local memory log', bm25Source: 'bm25 · local index',
+    bm25NoVectors: 'bm25 · local index · vectors unavailable', vectorSource: model => `bm25+vectors · local index · ${model}`, chars: 'chars',
+    vectorPending: (since, count, file, code, ids) => `Since ${since} the local vector file still holds the vector rows of ${count} forgotten (or purged) entries (${file} · ${code}); `
+      + 'their text is deleted and search cannot find them, but the vectors computed from it are still on disk; '
+      + (code === 'CHECK_FAILED' ? 'the filtered file failed its two-sided check, so the file was left as it was; they go once a filter passes. Ids: '
+        : 'they go once the file can be written again. Ids: ') + ids,
+    vectorDown: (since, url, model, code, left) => `Local vector search has been unavailable since ${since} (${url} · ${model} · ${code}); `
+      + `ranked search uses BM25 alone and may miss records close in meaning; ${left} entries not embedded`,
+    purgeRecovered: (purgeId, ids, completed) => `The last purge (${purgeId}, entries ${ids}) was interrupted; result: ${completed ? 'completed' : 'rolled back, nothing deleted'}` }),
+});
+/** The words for a host's language value. */
+export const memoryWords = language => MEMORY_WORDS[ownerLanguage(language)];
+
+/** `2026-11-19 Thu 11:25+01:00` (zh: `2026-11-19 周四 11:25+01:00`), or undefined. */
+export function stamp(at, tz, language) {
   const z = zoned(at, tz);
-  return z && `${isoDay(z)} 周${WEEKDAY_ZH[z.weekday]} ${z.hour}:${z.minute}${z.offset}`;
+  return z && `${isoDay(z)} ${memoryWords(language).weekday(z.weekday)} ${z.hour}:${z.minute}${z.offset}`;
 }
 
 /** The date words of `at` (3.8.1): `2026-11-19 2026年11月19日 11月19日 周四 星期四 November
@@ -77,22 +108,22 @@ export function dateTokens(at, tz) {
   return words.length ? documentTokens(words.join(' ')) : [];
 }
 
-const ROLE = { owner: '业主', steward: '管家' };
-
-/** One search line: `[2026-11-19 周四 11:25+01:00] 业主 {t-…-o}: <text>`, dated by writtenAt. A note's role says
- *  （笔记）; an entry with a chat channel names it after the role (`业主（slack）`); `dateOnly`
- *  marks a ranked hit that only its date words matched; `see` replaces the text with
- *  `→ 见 grep` / `→ 见 ranked` (the other answer has the whole entry). A hit with no local
- *  entry (remote) is `远端`, without an id. */
-export function formatLine({ id, at, channel_at, role, source, channel, text }, tz, { dateOnly = false, see } = {}) {
-  const when = stamp(writtenAt({ at, channel_at }), tz);
-  const head = `[${when ?? '时间不明'}] ` + (id === undefined
-    ? '远端'
-    : `${ROLE[role] ?? role}${source === 'note' ? '（笔记）' : ''}${channel ? `（${channel}）` : ''} {${id}}${dateOnly ? '（日期命中）' : ''}`);
-  return `${head}: ${see ? '→ 见 ' + see : text}`;
+/** One search line: `[2026-11-19 Thu 11:25+01:00] owner {t-…-o}: <text>` (zh:
+ *  `[2026-11-19 周四 11:25+01:00] 业主 {t-…-o}: <text>`), dated by writtenAt. A note's role says
+ *  (note) / （笔记）; an entry with a chat channel names it after the role (`owner (slack)` /
+ *  `业主（slack）`); `dateOnly` marks a ranked hit that only its date words matched; `see` replaces
+ *  the text with `→ see grep` / `→ 见 grep` (the other answer has the whole entry). A hit with no
+ *  local entry (remote) is `remote` / `远端`, without an id. */
+export function formatLine({ id, at, channel_at, role, source, channel, text }, tz, { dateOnly = false, see, language } = {}) {
+  const words = memoryWords(language);
+  const when = stamp(writtenAt({ at, channel_at }), tz, language);
+  const head = `[${when ?? words.undated}] ` + (id === undefined
+    ? words.remote
+    : `${words.role[role] ?? role}${source === 'note' ? words.note : ''}${channel ? words.channel(channel) : ''} {${id}}${dateOnly ? words.dateOnly : ''}`);
+  return `${head}: ${see ? words.see + see : text}`;
 }
 
-/** A profile hit: `[档案 第 N 行] <that line>`, no date. */
-export function formatProfileLine(line, text) {
-  return `[档案 第 ${line} 行] ${text}`;
+/** A profile hit: `[profile line N] <that line>` (zh: `[档案 第 N 行]`), no date. */
+export function formatProfileLine(line, text, language) {
+  return `${memoryWords(language).profileLine(line)} ${text}`;
 }

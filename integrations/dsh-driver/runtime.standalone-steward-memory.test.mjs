@@ -199,7 +199,7 @@ test('real pinned DSH, two boots: a standalone steward records its owner\'s turn
       const turnOf = text => conversation.find(e => e.text === text).batch;
       assert.ok(conversation.some(e => e.role === 'steward' && e.text === 'NOTED: the boat is blue.' && e.batch === turnOf(SAY1)),
         'the reply is in the owner\'s turn');
-      assert.ok(conversation.every(e => !e.text.includes('Director event') && !e.text.includes('[system clock]')), 'no wake, no clock line');
+      assert.ok(conversation.every(e => !/(Director|Steward) event/.test(e.text) && !e.text.includes('[system clock]')), 'no wake, no clock line');
     } finally { await store.close(); }
   } finally {
     if (proc && proc.exitCode === null) { proc.kill('SIGTERM'); await once(proc, 'exit'); }

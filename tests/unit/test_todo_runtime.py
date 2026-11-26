@@ -260,6 +260,41 @@ def test_git_delivered_needs_head_past_base_and_a_clean_tree(repo):
     assert _eval(repo, "git_delivered", base="f" * 40).outcome == "absent", "an unreadable base is unmeasured, not failed"
 
 
+def _leave_interpreter_caches(repo: Path) -> None:
+    """What `python3 -m unittest` / pytest leave in a checkout with no .gitignore."""
+    for rel in ("__pycache__/calc.cpython-312.pyc", "src/__pycache__/a.cpython-312.pyc",
+                ".pytest_cache/v/cache/lastfailed", "src/legacy.pyc"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("cache")
+
+
+def test_an_untracked_interpreter_cache_is_neither_a_change_nor_dirt(repo):
+    # A fresh user's Python project: the worker and the gate both run the tests, which
+    # write __pycache__. Counting it failed every such plan until the director edited
+    # the user's .git/info/exclude (stranger test, 2026-11-25).
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "a.py").write_text("a = 2\n")
+    _git(repo, "commit", "-qam", "work")
+    _leave_interpreter_caches(repo)
+    assert _eval(repo, "changes_within", base, scope=["src/a.py"]).outcome == "pass"
+    assert _eval(repo, "git_delivered", base=base).outcome == "pass"
+    (repo / "stray.txt").write_text("1")                                  # anything else still counts
+    assert "stray.txt" in _eval(repo, "changes_within", base, scope=["src/a.py"]).detail
+    assert "not clean" in _eval(repo, "git_delivered", base=base).detail
+
+
+def test_a_tracked_cache_file_still_counts(repo):
+    (repo / "src" / "old.pyc").write_text("v1")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "a repo that tracks a .pyc")
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "src" / "a.py").write_text("a = 2\n")
+    _git(repo, "commit", "-qam", "work")
+    (repo / "src" / "old.pyc").write_text("v2")
+    assert "src/old.pyc" in _eval(repo, "changes_within", base, scope=["src/a.py"]).detail
+    assert "not clean" in _eval(repo, "git_delivered", base=base).detail
+
+
 def test_git_delivered_refuses_a_head_that_is_not_a_descendant_of_the_base(repo):
     first = _git(repo, "rev-parse", "HEAD")
     (repo / "src" / "a.py").write_text("a = 2\n")

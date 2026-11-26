@@ -177,10 +177,10 @@ export class Bm25Index {
 
 /** The RankedIndex (design 3.2) over the local index: `ref` is the local entry id and
  *  `textOf(id)` the entry's text. The store feeds the index itself (it owns the log), so
- *  add here is a no-op. */
-export function bm25Ranked(index, textOf) {
+ *  add here is a no-op. `name` is the source an answer names (the store's, in its owner's language). */
+export function bm25Ranked(index, textOf, name) {
   return {
-    name: 'bm25 · 本地索引',
+    name,
     local: true,
     async add() {},
     async search(query, topK) {

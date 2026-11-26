@@ -38,7 +38,8 @@ async function fixture() {
   return state;
 }
 
-const openRemote = (root, srv, extra = {}) => MemoryStore.open({ root, userId: USER,
+// zh, as the production steward's: its lines as they always were.
+const openRemote = (root, srv, extra = {}) => MemoryStore.open({ root, userId: USER, language: 'zh',
   ranked: remoteRanked({ url: srv.url, name: 'Fixture', userId: 'u-1', sessionId: 's-1', ...extra }) });
 // Wait for the condition the assertion after it reads. A fixed 50 ms sleep let the async /add
 // still be in flight under CPU contention (measured red 2026-11-25 in the six-file runner:

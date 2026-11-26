@@ -44,8 +44,12 @@ whole DSH process exits.
 
 DSH's shipped profiles cannot run it either: in `web` the plugin waits forever for the
 compaction service, in `headless` for the credentials service (the log says
-`pending (waiting for service: ...)` and nothing else happens). Use a profile built on
-`@deepseek-ai/dsh-base` alone, as below.
+`pending (waiting for service: ...)` and nothing else happens). `web` waits because its bundle,
+`@deepseek-ai/dsh-web-app`, turns DSH's `compaction-basic` off for the whole process (it runs
+compaction inside its own presets), and the plugin needs that service; one line in the profile's
+`cordis.patch.yml` turns it back on: `- { id: compaction-basic, disabled: false }` (see
+[Talk to it](#talk-to-it)). Use a profile built on `@deepseek-ai/dsh-base` alone, as below, or on
+it and `@deepseek-ai/dsh-web-app` with that line.
 
 ## 1. Install
 
@@ -143,7 +147,10 @@ llm-pi-ai:
 ```
 
 Start DSH with that variable set (`export LOCAL_API_KEY=...`) instead of `DEEPSEEK_API_KEY`. The
-model must support tool calls. A gateway that refuses every request although the address and key
+model must support tool calls, and do them well: the director and its workers do everything
+through tools, and a steward even more so (each of its turns is a run of tool calls). A small
+quantized model has been seen calling `idle_dormant` over and over in one steward turn; if yours
+does that, use a larger one. A gateway that refuses every request although the address and key
 are right usually wants `compat: { supportsDeveloperRole: false, maxTokensField: max_tokens }` on
 the route; DSH's own guide to models (`docs/user/guide/providers.md` in the DSH repository) lists
 the rest.
@@ -170,10 +177,20 @@ export DEEPSEEK_API_KEY=...             # your key
 dsh --profile director
 ```
 
-It keeps running until you stop it (Ctrl-C). Started again, it resumes the same session, and
-workers a restart interrupted are resumed. The first thing to check when nothing seems to
-happen is `$ROOT/progress.jsonl`; a failed model call (no key, an unknown model) is also
-printed to stderr as `dsh-director failed: ...`.
+It keeps running until you stop it: Ctrl-C, or, when it runs in the background, `kill <pid>`
+(SIGTERM, which stops it the same way). Never start a second copy to check on a running one:
+`dsh --profile director --help` boots the whole profile too, and exits with
+`SessionAlreadyOwnedError` because the first one owns the session. Started again, it resumes the
+same session, and workers a restart interrupted are resumed. The first thing to check when
+nothing seems to happen is `$ROOT/progress.jsonl`; a failed model call (no key, an unknown model)
+is also printed to stderr as `dsh-director failed: ...`. Its lines can be long (a report may
+carry a whole model answer); to see only when, which phase and what error:
+
+```sh
+jq -c '{at, phase, error}' "$ROOT/progress.jsonl" | tail -20
+# without jq:
+python3 -c 'import json,sys; [print(r.get("at"), r.get("phase"), str(r.get("error") or "")[:300]) for r in map(json.loads, open(sys.argv[1]))]' "$ROOT/progress.jsonl" | tail -20
+```
 
 ## 5. Give it work
 
@@ -226,7 +243,8 @@ printf '%s\n' '{"answer": "Yes, drop Node 18."}' > "$ROOT/inbox/answer-<question
 ```
 
 The plugin also registers DSH commands for this (`/questions`, `/answer <id> <text>`), but the
-profile above has no chat client to type them in; files are the way in.
+profile above has no chat client to type them in; files are the way in (or add DSH's web app to
+the profile, as in [Talk to it](#talk-to-it)).
 
 ## A steward instead of a director
 
@@ -238,11 +256,26 @@ to `director-local`'s `config`:
 |---|---|
 | `rootRole: steward` | the session named by `sessionId` is the steward, not a director |
 | `memory: { userId: <name> }` | your memory: a git repository under `~/.local/share/dsh-director/memory/<name>/` (`root` puts it elsewhere; keep it outside anything mounted into containers). `timeZone` (an IANA name, default UTC) dates what it shows |
-| `projectsDir` | optional: a directory whose every subdirectory is one local host root (a project) |
+| `projectsDir` | optional: a directory whose every subdirectory is one local host root (a project); below |
+| `ownerLanguage` | optional, default `en`: `en` or `zh` (by its first part, so `zh-CN` is `zh`; anything else is `en`). The language of the fixed text the plugin shows: the reply phrases in the steward's prompt, the memory tools' lines and labels, the weekday in the clock line |
+
+`projectsDir` must exist (create it; one that does not reads as no projects). One project is a
+subdirectory named by its id (letters, digits, `_ . -`, starting with a letter or digit; other
+names are skipped), laid out like a director's `root`:
+
+| file | what the steward reads |
+|---|---|
+| `project.json` | `title` and `goal` (and `project_id`, `proposal_id`, `created_at` when the steward made it) |
+| `work.json` | `{ "items": [{ "id", "title", "state", "holder"? }] }`: counts by state, and the open items |
+| `questions.json` | the open questions of that project's director |
+| `progress.jsonl` | its last line: the director's phase |
+| `notes.md` | the director's notes (the steward writes the goal into it when it makes the project) |
+
+The steward only reads them; a director started with `root` set to that subdirectory works there.
 
 What a steward on this host can do:
 
-- talk with you. Every turn you write to it in a DSH client attached to its session is recorded
+- talk with you. Every turn you write to it in its DSH's web app ([Talk to it](#talk-to-it)) is recorded
   into your memory, with its replies in that turn, by the plugin itself; `memory_search` finds
   them, `memory_note` and `memory_profile_update` keep what it concluded or what you prefer. A
   file in `inbox/` wakes it as an event, like a director, and is not your words, so it is not
@@ -250,8 +283,10 @@ What a steward on this host can do:
 - with `projectsDir`: read every project there (`portfolio_projects`, `portfolio_project`,
   `portfolio_conversation`) and propose one new project (`propose`, kind `create_project`). You
   decide with `/proposals`, `/approve <id>` and `/decline <id> [reason]`; an approved project is a
-  new subdirectory with `project.json`, `notes.md` and `work.json`. Nobody works on it until you
-  start a director for it yourself (a profile of its own, `root` set to that subdirectory).
+  new subdirectory with `project.json`, `notes.md`, `work.json` (one item per seed node, each
+  `working` with no holder: open, and held by nobody yet) and an empty `inbox/`. Nobody works on it
+  until you start a director for it yourself (a profile of its own, `root` set to that
+  subdirectory).
 - ask you questions (`ask_owner`), which you answer with `/questions` and `/answer <id> <text>`, or
   a file `inbox/answer-<id>.json` as above.
 - forget, restore or purge one memory entry only when you type `/forget <id> [reason]`,
@@ -273,6 +308,38 @@ handoffs and letters, the connection catalog) is left out or replaced with what 
 (`lib/steward-prompt.mjs`). The owner's language (`ownerLanguage`) then swaps the reply phrases
 and fixed lines that are left (`lib/owner-text.mjs`). A `zh` host that provides everything gets
 `steward.md` unchanged.
+
+### Talk to it
+
+The profile in section 2 has no client: the steward runs, but nothing you type reaches it. Make
+the steward's profile like that one (say under `profiles/steward`, with the keys above in
+`director-local`'s `config`) and give it DSH's web app as well, in its `package.json`:
+
+```json
+{ "private": true, "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] } } }
+```
+
+and, in its `cordis.patch.yml`, next to the other disabled tools, the line that turns the
+compaction service back on (the web app turns it off, and the plugin then waits for it forever):
+
+```yaml
+- { id: compaction-basic, disabled: false }
+```
+
+Start it with
+
+```sh
+dsh --profile steward --no-open --port 8123
+```
+
+and open the address it prints after `dsh web:`. On another machine, forward the port first
+(`ssh -L 8123:127.0.0.1:8123 <that machine>`) and open the same address here. Your turns there are
+your conversation with the steward, and the commands above (`/proposals`, `/approve`, `/answer`,
+`/forget` and the rest) are typed there too.
+
+Only one DSH process can own the steward's session: a second `dsh --profile steward` exits with
+`SessionAlreadyOwnedError`, and a separate `dsh web` cannot write to it (`session/writer-held`).
+Talk to it through the web app of the process that runs it.
 
 ## When it does not start
 
@@ -302,6 +369,14 @@ The second line is the one to read.
 | `Windows is not supported` | run it on Linux |
 
 `pending (waiting for service: ...)` with no exit means the profile is not the one above.
+
+A memory that cannot open does not stop a steward; its memory tools refuse instead, for the whole
+run. At startup it says why on stderr, `dsh-director: memory unavailable: <the reason>`, and every
+line of `progress.jsonl` carries `memory_unavailable: <the reason>` in its `error`.
+
+| reason | fix |
+|---|---|
+| `memory: locked by process N` | another process has this memory open: a second DSH with the same `userId` and memory `root`. Stop it (`kill N`) and start again. A lock whose process is gone is taken over by itself at the next start; one left by a process that was killed hard (SIGKILL) while another process now has its number, as after a container restart, is removed by hand (`<memory root>/<userId>.lock`) while no DSH uses that memory. In Docker, run the container with `--init`, so exited processes are reaped |
 
 ## Checking this README
 

@@ -25,7 +25,8 @@ import { gitEnv } from '../lib/memory/git.mjs';
 const USER = 'owner@example.com';
 const SECRET = 'RECOVERY-ME secret account 90210';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-memory-recovery-'));
-const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, ...extra });
+// The stores here are zh, as the production steward's: their lines and notices as they always were.
+const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, language: 'zh', ...extra });
 const repo = root => join(root, USER);
 const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir, ...args], { cwd: dir, env: gitEnv(dir), encoding: 'utf8' });
 const logLines = root => readdirSync(join(repo(root), 'log')).filter(n => n.endsWith('.jsonl'))

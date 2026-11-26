@@ -292,7 +292,7 @@ export class VectorChannel {
     this.worker = this.#work();
   }
 
-  get source() { return `bm25+向量 · 本地索引 · ${this.modelName}`; }
+  get source() { return this.store.words.vectorSource(this.modelName); }
 
   /** Start a (new) load of the file; an older load and the embeddings in flight for it are
    *  void from here on. Called after the store's #load at boot and after a purge's #load. */
@@ -610,8 +610,8 @@ export class VectorChannel {
     // per outage: an owner who acknowledged it is not told again until the next outage.
     if (!this.outage.noticed && Date.parse(this.store.now()) - Date.parse(this.down.since) >= DOWN_NOTICE_MS) {
       this.outage.noticed = true;
-      this.store.notice('vector-down', `本地向量检索自 ${this.down.since} 不可用（${this.url} · ${this.modelName} · ${code}），`
-        + `排序检索只用 BM25，可能漏掉意思相近的记录；未嵌入 ${this.#backlog().left} 条`, { since: this.down.since });
+      this.store.notice('vector-down', this.store.words.vectorDown(this.down.since, this.url, this.modelName, code, this.#backlog().left),
+        { since: this.down.since });
     }
   }
 

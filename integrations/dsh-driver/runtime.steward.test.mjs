@@ -156,7 +156,10 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
     // snapshot carries its own, and the steps after a tool call (no new input) add none.
     const clockLines = r => r.users.filter(u => u.startsWith('[system clock] '));
     const [first, second, third] = rootRequests();
-    const wake = first.users.findIndex(u => u.startsWith('Director event (start.json)'));
+    // Stranger E: the wake and the snapshot name the steward, not a director.
+    const wake = first.users.findIndex(u => u.startsWith('Steward event (start.json)'));
+    assert.ok(first.users.some(u => u.startsWith('Steward context — startup / post-compaction snapshot:\n')), 'the snapshot names the steward');
+    assert.ok(!first.users.some(u => /^Director (event|context)/.test(u)), 'nothing names a director');
     assert.ok(wake >= 0, 'the first request carries the wake: ' + JSON.stringify(first.users).slice(0, 2000));
     assert.match(String(first.users[wake - 1]), /^\[system clock\] now \d{4}-\d\d-\d\dT\d\d:\d\dZ$/, 'the clock line right before the wake');
     assert.equal(clockLines(first).length, 1, 'one clock line for the step');
@@ -178,9 +181,9 @@ test('real pinned DSH, two boots: the steward sees exactly its tools and its own
     await writeFile(join(root, 'inbox', 'wake2.json'), JSON.stringify({ wake: 2 }));
     await until('boot 2 never went dormant', () => result('d2'));
     // memory.timeZone reaches the clock: the line before the wake carries the owner's time.
-    const woken = rootRequests().slice(before).find(r => r.users.some(u => u.startsWith('Director event (wake2.json)')));
+    const woken = rootRequests().slice(before).find(r => r.users.some(u => u.startsWith('Steward event (wake2.json)')));
     assert.ok(woken, 'a boot 2 request carries the wake');
-    assert.match(String(woken.users[woken.users.findIndex(u => u.startsWith('Director event (wake2.json)')) - 1]),
+    assert.match(String(woken.users[woken.users.findIndex(u => u.startsWith('Steward event (wake2.json)')) - 1]),
       /^\[system clock\] now \d{4}-\d\d-\d\dT\d\d:\d\dZ · owner's time Europe\/Paris \d{4}-\d\d-\d\d \S+ \d\d:\d\d[+-]\d\d:\d\d$/,
       'the clock line right before the boot 2 wake, in the owner\'s zone');
     assert.match(resultText('s2'), /STEWARD_NOTE_7/, 'the note survived the restart');

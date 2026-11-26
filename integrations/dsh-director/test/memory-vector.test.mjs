@@ -46,7 +46,8 @@ function clock(start = '2026-11-19T10:00:00.000Z') {
   return now;
 }
 
-const open = (root, url, extra = {}) => MemoryStore.open({ root, userId: USER,
+// zh, as the production steward's: its sources and notices as they always were.
+const open = (root, url, extra = {}) => MemoryStore.open({ root, userId: USER, language: 'zh',
   ...(url ? { vector: { url, model: extra.model ?? MODEL, timeoutMs: extra.timeoutMs ?? 2000 }, vectorTuning: TUNING } : {}), ...extra });
 
 async function until(predicate, what, ms = 15000) {

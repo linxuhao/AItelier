@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { once } from 'node:events';
 import { join } from 'node:path';
 import { Bm25Index, documentTokens, queryTokens } from '../lib/memory/bm25.mjs';
 import { MemoryStore, MemoryUnavailable, PROFILE_LIMIT, READ_CHARS, READ_IDS_MAX } from '../lib/memory/store.mjs';
@@ -14,7 +15,8 @@ import { gitEnv } from '../lib/memory/git.mjs';
 
 const USER = 'owner@example.com';
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-memory-'));
-const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, ...extra });
+// The stores here are zh, as the production steward's: their lines and notices as they always were.
+const open = (root, extra = {}) => MemoryStore.open({ root, userId: USER, language: 'zh', ...extra });
 const repo = root => join(root, USER);
 const gitIn = (dir, ...args) => spawnSync('git', ['-c', 'safe.directory=' + dir, ...args], { cwd: dir, env: gitEnv(dir), encoding: 'utf8' });
 const subjects = root => gitIn(repo(root), 'log', '--format=%s').stdout.trim().split('\n');
@@ -379,6 +381,38 @@ test('the lock: a second process is refused while the first holds it; a dead hol
   assert.equal(readFileSync(join(root, USER + '.lock'), 'utf8'), String(process.pid));
   await again.close();
   assert.ok(!existsSync(join(root, USER + '.lock')));
+});
+
+test('the lock: a zombie holder is dead - its lock is taken over', async () => {
+  const root = newRoot();
+  // sh forks a child it never waits for, then becomes sleep: the child stays a zombie.
+  const parent = spawn('sh', ['-c', 'sleep 0 & echo $!; exec sleep 30'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    const [chunk] = await once(parent.stdout, 'data');
+    const zombie = Number(String(chunk).trim());
+    const state = () => { try { const stat = readFileSync(`/proc/${zombie}/stat`, 'utf8'); return stat.slice(stat.lastIndexOf(')') + 2)[0]; } catch { return undefined; } };
+    for (let i = 0; i < 200 && state() !== 'Z'; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(state(), 'Z', 'the fixture made a zombie');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, USER + '.lock'), String(zombie));
+    const store = await open(root);
+    assert.equal(readFileSync(join(root, USER + '.lock'), 'utf8'), String(process.pid));
+    await store.close();
+  } finally { parent.kill(); }
+});
+
+test('the lock: a process that exits without close() - DSH\'s SIGTERM handler exits after a 5 s grace - leaves no lock behind', async () => {
+  const root = newRoot();
+  const child = spawn(process.execPath, ['--input-type=module', '-e',
+    `import { MemoryStore } from ${JSON.stringify(new URL('../lib/memory/store.mjs', import.meta.url).href)};
+     process.on('SIGTERM', () => process.exit(0));
+     await MemoryStore.open({ root: ${JSON.stringify(root)}, userId: ${JSON.stringify(USER)} });
+     console.log('open'); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'inherit'] });
+  await once(child.stdout, 'data');
+  assert.equal(readFileSync(join(root, USER + '.lock'), 'utf8'), String(child.pid));
+  child.kill('SIGTERM');
+  await once(child, 'exit');
+  assert.ok(!existsSync(join(root, USER + '.lock')), 'the lock went with the process');
 });
 
 test('older months load in the background; coverage says so until they are in', async () => {

@@ -160,15 +160,16 @@ export function apply() {}
     assert.equal(json('p1').updated, true, JSON.stringify(json('p1')));
     assert.match(json('n1').id, /^n-/);
     const s1 = json('s1');
-    assert.equal(s1.grep.source, 'grep · 字面匹配 · 本地记忆日志');
+    // No ownerLanguage in this host's config: memory answers in English (stranger C).
+    assert.equal(s1.grep.source, 'grep · literal match · local memory log');
     assert.equal(s1.grep.hits[0].id, json('n1').id);
     // Step 21: the whole entry, dated, once; the ranked answer points at grep's copy.
     assert.equal(s1.grep.hits[0].shown, 'full');
-    assert.match(s1.grep.text, new RegExp(`^\\[\\d{4}-\\d{2}-\\d{2} 周. \\d{2}:\\d{2}\\+00:00\\] 管家（笔记） \\{${json('n1').id}\\}: NOTE_MARKER_42 the owner wants a ledger$`));
-    assert.equal(s1.ranked.source, 'bm25 · 本地索引');
+    assert.match(s1.grep.text, new RegExp(`^\\[\\d{4}-\\d{2}-\\d{2} (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \\d{2}:\\d{2}\\+00:00\\] steward \\(note\\) \\{${json('n1').id}\\}: NOTE_MARKER_42 the owner wants a ledger$`));
+    assert.equal(s1.ranked.source, 'bm25 · local index');
     assert.deepEqual(s1.ranked.hits.map(h => [h.id, h.shown]), [[json('n1').id, 'see_grep']]);
-    assert.match(s1.ranked.text, / → 见 grep$/);
-    assert.match(s1.budget, /^\d+\/6000 字 · omitted 0$/);
+    assert.match(s1.ranked.text, / → see grep$/);
+    assert.match(s1.budget, /^\d+\/6000 chars · omitted 0$/);
     const listed = requests.find(r => r.session === 'mem-root' && r.tools.length)?.tools ?? [];
     assert.ok(!listed.some(name => name.startsWith('memory_')), 'registered, not presented: ' + JSON.stringify(listed));
     await until('dormancy did not compact', () => compactions() >= 1);

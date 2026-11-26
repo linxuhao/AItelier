@@ -3,7 +3,7 @@
  *  integrations/dsh-driver/runtime.steward.test.mjs. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Clock, CLOCK_TAG, CLOCK_TOOL_GAP_MS, clockLine, ContextInjection, Continuation, defaultLabels, endsDormancyFor,
+import { Clock, CLOCK_TAG, CLOCK_TOOL_GAP_MS, clockLine, ContextInjection, contextHeader, Continuation, defaultLabels, endsDormancyFor,
   grepHistory, wakeSourcesFor } from '../lib/core.mjs';
 
 const T = Date.parse('2026-11-20T10:14:59.900Z');
@@ -25,13 +25,32 @@ const throwing = () => { throw new Error('clock broke'); };
 // ---- 2. clockLine
 test('clockLine: UTC to the minute for a director; the owner\'s local time in winter and summer for a steward', () => {
   assert.equal(clockLine({ now: T }), '[system clock] now 2026-11-20T10:14Z');
-  assert.equal(clockLine({ now: T, tz: 'Europe/Paris' }),
+  assert.equal(clockLine({ now: T, tz: 'Europe/Paris', language: 'zh' }),
     '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 周五 11:14+01:00');
-  assert.equal(clockLine({ now: Date.parse('2027-07-01T10:14:00Z'), tz: 'Europe/Paris' }),
+  assert.equal(clockLine({ now: Date.parse('2027-07-01T10:14:00Z'), tz: 'Europe/Paris', language: 'zh' }),
     '[system clock] now 2027-07-01T10:14Z · owner\'s time Europe/Paris 2027-07-01 周四 12:14+02:00');
   assert.equal(clockLine({ now: T, where: 'snapshot' }), '[system clock] now 2026-11-20T10:14Z (context snapshot)');
   assert.equal(clockLine({ now: T, where: 'tool' }), '[system clock] now 2026-11-20T10:14Z (after tool)');
   assert.ok(clockLine({ now: T }).startsWith(CLOCK_TAG));
+});
+
+test('stranger C: the owner\'s local time names the weekday in the owner\'s language - English by default, zh as before', async () => {
+  assert.equal(clockLine({ now: T, tz: 'Europe/Paris', language: 'en' }),
+    '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 Fri 11:14+01:00');
+  assert.equal(clockLine({ now: T, tz: 'Europe/Paris', language: 'zh' }),
+    '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 周五 11:14+01:00');
+  const english = clockOf({ tz: 'Europe/Paris' });
+  assert.equal(texts(await english.clock.preStep(step([event('hello')]), enter([event('hello')])))[0],
+    '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 Fri 11:14+01:00');
+  const chinese = clockOf({ tz: 'Europe/Paris', language: 'zh' });
+  assert.equal(texts(await chinese.clock.preStep(step([event('hello')]), enter([event('hello')])))[0],
+    '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 周五 11:14+01:00');
+});
+
+test('stranger E: the snapshot\'s header names the root\'s role', () => {
+  assert.equal(contextHeader('steward'), 'Steward context — startup / post-compaction snapshot:\n');
+  assert.equal(contextHeader('director'), 'Director context — startup / post-compaction snapshot:\n');
+  assert.equal(contextHeader(undefined), 'Director context — startup / post-compaction snapshot:\n');
 });
 
 test('Clock: a zone that is not one, or none, leaves the clock in UTC (one log line for the bad one)', async () => {
@@ -44,7 +63,7 @@ test('Clock: a zone that is not one, or none, leaves the clock in UTC (one log l
   const none = clockOf();
   assert.equal(none.clock.tz, undefined);
   assert.deepEqual(none.logs, []);
-  const paris = clockOf({ tz: 'Europe/Paris' });
+  const paris = clockOf({ tz: 'Europe/Paris', language: 'zh' });
   assert.equal(texts(await paris.clock.preStep(step([event('hello')]), enter([event('hello')])))[0],
     '[system clock] now 2026-11-20T10:14Z · owner\'s time Europe/Paris 2026-11-20 周五 11:14+01:00');
 });

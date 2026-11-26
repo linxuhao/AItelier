@@ -1,6 +1,6 @@
 {
   "name": "aitelier-dsh-director",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A resident director and its native workers as a DSH plugin; work and memory come from a directorHost (built-in local host, or an external one).",
   "license": "MIT",
   "author": "Xuhao Lin",

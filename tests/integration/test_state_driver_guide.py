@@ -521,3 +521,16 @@ def test_the_served_guide_says_legacy_cas_custody_is_historical():
     # Literals other tests and readers quote stay untouched.
     assert "state-db:git-bundle:sha256:" in text
     assert "512 MiB" in text
+
+
+def test_revising_a_contract_is_described_as_a_whole_list_write():
+    """A partial acceptance list deletes the rest, so the guide must say it.
+
+    The behaviour itself is measured in tests/unit/test_state_graph.py
+    (test_revision_is_a_whole_list_write_and_a_partial_list_drops_the_rest);
+    this pins the sentence a driver reads before calling revise_node.
+    """
+    text = GUIDE_SECTIONS["handle-changes-without-inventing-acceptance"]["text"]
+    assert "Revising is a whole-list write" in text
+    assert "silently drops everything else" in text
+    assert "get_node(...).acceptance" in text

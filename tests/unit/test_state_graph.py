@@ -125,6 +125,29 @@ def test_revision_is_immutable_and_transitively_invalidates_dependents(store):
     assert [(r[0], r[1]) for r in revisions] == [(1, "Deliver a"), (2, "Two actions per month")]
 
 
+def test_revision_is_a_whole_list_write_and_a_partial_list_drops_the_rest(store):
+    """The behaviour the driver guide warns about: acceptance and dependencies
+    are stored as given, so an id or an edge left out of the call is deleted."""
+    store.add_nodes("shrimp", [
+        {"key": "a", "goal": "Deliver a", "dependencies": [], "priority": 0,
+         "acceptance": [{"id": "one", "kind": "test", "description": "First check"},
+                        {"id": "two", "kind": "test", "description": "Second check"},
+                        {"id": "three", "kind": "test", "description": "Third check"}]},
+        node("b"), node("c"),
+    ])
+    store.revise_node("shrimp", "a", 1, "Depend on b", dependencies=["b"])
+    store.revise_node("shrimp", "a", 2, "Keep only the second criterion",
+                      acceptance=[{"id": "two", "kind": "test", "description": "Second check"}])
+    current = store.get_node("shrimp", "a")
+    assert [c["id"] for c in current["acceptance"]] == ["two"]
+    assert current["dependencies"] == ["b"]
+    # Either parameter on its own keeps the other list exactly as stored.
+    store.revise_node("shrimp", "a", 3, "Depend on c instead", dependencies=["c"])
+    current = store.get_node("shrimp", "a")
+    assert [c["id"] for c in current["acceptance"]] == ["two"]
+    assert current["dependencies"] == ["c"]
+
+
 def test_competing_revisions_have_exactly_one_winner(store):
     store.add_nodes("shrimp", [node("a")])
     def edit(goal):

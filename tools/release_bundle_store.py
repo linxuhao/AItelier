@@ -33,8 +33,8 @@ released payload is NOT zeroed. The file only shrinks after an offline
 compaction, exactly as ``tools/migrate_bundle_store.py`` documents:
 
     1. python tools/release_bundle_store.py DB            (projection; writes nothing)
-    2. python tools/release_bundle_store.py DB --apply --actor NAME
-    3. stop the server and everything else that opens DB
+    2. stop the server and everything else that opens DB
+    3. python tools/release_bundle_store.py DB --apply --actor NAME
     4. sqlite3 DB "PRAGMA wal_checkpoint(TRUNCATE);"
     5. sqlite3 DB "VACUUM INTO '/path/with/room/new.db'"
     6. Verify the copy: sqlite3 new.db "PRAGMA integrity_check; PRAGMA foreign_key_check;"
@@ -43,10 +43,23 @@ compaction, exactly as ``tools/migrate_bundle_store.py`` documents:
        start the server, materialize one surviving candidate, check one released
        commit is REFUSED as released (not as corrupt), then remove the old file.
 
-Cost, measured on the 2026-11-20 snapshot (2,767 rows / 12.39 GiB): the
-store-wide counter each batch reads costs about 39 s, so keep ``--batch-size``
-modest while the server is stopped. One batch is one write transaction and the
-WAL is truncated after it.
+``--apply`` is step 3, AFTER the server stops, and that order is not stylistic:
+every batch of it runs the rule's whole-store selection inside its own
+``BEGIN IMMEDIATE`` (``core/state_git_artifacts.release_bundles`` opens the
+transaction before calling ``release_plan``), and while a server is up that is
+the one SQLite write lock every driver's State write waits on. The projection in
+step 1 writes nothing, so it may run against a live database; only the release
+needs the quiet one.
+
+Cost, measured on this host 2026-11-26 (2,109 rows, an 18.4 GB database): one
+batch's ``release_plan`` is the expensive term at a few seconds warm (3.1 s,
+measured twice), the whole two-batch projection measured 24.46 s at 13:26Z and
+12.42 s at 14:41Z on a store that grew between those two runs, and the
+store-wide counter ``store_totals`` is milliseconds (``length(blob)`` reads the
+record header, not the payload). Counts and times both grow with the store, so
+re-project before quoting any of these. ``--batch-size`` and
+``--max-payload-mib`` bound one transaction's work; the WAL is truncated after
+each batch.
 """
 from __future__ import annotations
 

@@ -719,11 +719,17 @@ def _released_refusal(digest, release):
 def store_totals(conn):
     """``(rows, payload_bytes)`` over the whole store.
 
-    Deliberately the only whole-store read the release does: ``payload`` holds
-    the bytes, so this walks them (measured 39 s over 2,767 rows / 12.39 GiB on
-    the production snapshot). It is the store-wide counter the ledger carries,
-    and it is what makes "store + releases = what the store held before" a
-    checkable identity instead of a claim."""
+    The release's store-wide counter, and it is a walk over ROWS, not over
+    bytes: ``length(payload)`` does not read the payload (SQLite answers a
+    blob's length from the value's record header), and 18 GB cannot be read in
+    1.5 ms anyway. Measured on this host 2026-11-26 over 2,111 rows /
+    18,099,227,730 payload bytes in an 18.52 GB database: 1.48, 1.66 and
+    1.76 ms warm, 128.58 ms for the first call on a fresh connection, and
+    1.42-2.43 ms for the same aggregate over the plain integer ``raw_size``
+    column. What it buys is the ledger's identity: every release row records
+    the totals just before and just after its own bytes left, so "store +
+    releases = what the store held before" is arithmetic a reader can check
+    instead of a claim."""
     row = conn.execute(f"SELECT count(*), coalesce(sum(length(payload)),0) FROM {BUNDLE_STORE}").fetchone()
     return int(row[0]), int(row[1])
 
@@ -876,8 +882,10 @@ def release_bundles(conn, *, actor, rule=RELEASE_RULE, window_days=0, limit=200,
         released_at = now()
         # Each row is one instant in the ledger: what the store held just before
         # THAT row left, and just after. Consecutive rows therefore chain
-        # (after(k) == before(k+1)) across batches as well as inside one, and the
-        # only whole-store reads are the first ``before`` and the final ``after``.
+        # (after(k) == before(k+1)) across batches as well as inside one, because
+        # this call reads the whole store exactly twice - its own ``before`` and
+        # its own ``after`` - and the rows in between are arithmetic: nothing in
+        # the loops below re-scans the store.
         current_rows, current_payload = rows_before, payload_before
         for row in plan["selected"]:
             payload = int(row["payload_bytes"])

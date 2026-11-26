@@ -555,6 +555,28 @@ delivered (the plan's own commands, not the worker's word), and sleeps when noth
 `rootRole: steward` and the same plugin is a long-running assistant you talk to, with a git-backed
 memory of what you told it.
 
+It runs three levels of DSH session, each with one job and only the tools that job needs:
+
+```mermaid
+flowchart LR
+    you(["You"]) <-->|chat| S["<b>Steward</b><br/>one per person<br/>conversation, memory,<br/>reads every project"]
+    S -->|"proposal / handoff"| D["<b>Director</b><br/>one per project or goal<br/>plans, dispatches, checks"]
+    D -->|"one frozen plan"| W["<b>Worker</b><br/>one per task<br/>edits, tests, commits"]
+    W -->|"commit + report"| D
+```
+
+- **Separate contexts.** Your conversation, a project's state and one task's details never compete
+  for the same context window.
+- **Whoever does the work does not grade it.** A worker's plan and the commands that decide it are
+  frozen before it starts; the director, not the worker, finishes the plan by re-running them.
+- **Small blast radius.** The steward, which reads your messages, mail and the web, has no file or
+  shell tools at all; a worker cannot start more workers. Cheap models can run the workers while a
+  stronger one directs.
+
+In AItelier itself the backend is the host: the steward talks to you on the dashboard, Slack or
+WeChat and hands work to one director per State DAG. Standalone, you are the bridge. The full
+rationale is in [Three levels, and why](integrations/dsh-director/README.md#three-levels-and-why).
+
 It is published on npm as [`aitelier-dsh-director`](https://www.npmjs.com/package/aitelier-dsh-director)
 (MIT), as a DSH bundle:
 

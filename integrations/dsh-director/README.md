@@ -15,6 +15,71 @@ native workers. What it does not have: a dependency graph, evidence or reviews, 
 channels (the Slack and WeChat channel plugins need a host that provides channels; next to this
 host they do not load), or several directors coordinating.
 
+## Three levels, and why
+
+The plugin runs three kinds of DSH session, and each does one job:
+
+```mermaid
+flowchart TD
+    you(["You"])
+    subgraph L1["Steward - one per person"]
+        steward["Steward<br/>talks with you, keeps your memory,<br/>reads across projects"]
+    end
+    subgraph L2["Director - one per project or goal"]
+        dirA["Director: project A<br/>work items, frozen plans, verdicts"]
+        dirB["Director: project B"]
+    end
+    subgraph L3["Worker - one per task"]
+        w1["Worker: task 1"]
+        w2["Worker: task 2"]
+        w3["Worker: task 3"]
+    end
+    check{{"the plan's own checks<br/>tests pass, only files in scope changed,<br/>a clean commit past the base"}}
+    you <-->|chat| steward
+    steward -->|"a proposal you approve, or a handoff"| dirA
+    steward -.->|reads| dirB
+    you -->|"a task in inbox/"| dirA
+    dirA -->|"one frozen plan"| w1
+    dirA -->|"one frozen plan"| w2
+    dirB -->|"one frozen plan"| w3
+    w1 -->|"commit + report"| check
+    check -->|"pass or fail"| dirA
+```
+
+| level | lives | its context holds | it may | it may not (enforced by `roles.json`, not by asking nicely) |
+|---|---|---|---|---|
+| **Steward** | one per person, for good | your conversation, your memory, a summary of every project | talk with you, remember, read projects, propose actions for you to approve, ask you questions; on a host that provides them, chat channels and handing work to a director | touch any project's files: no `bash`, `read`, `write`, `edit`, no workers, no plans |
+| **Director** | one per project or goal, its own `root` and session | that project's work items, notes, plans and verdicts | pick a template, freeze a plan, dispatch a worker, check what came back, ask you, sleep | - (it holds the full tool set; by protocol it plans and checks rather than doing the task) |
+| **Worker** | one per task, until the plan is finished | one frozen plan: the goal, its items, the files in scope, the commands that decide | edit files in scope, run commands, commit, report each item | start workers, create or finish plans, ask you, go dormant |
+
+Why split it this way:
+
+- **Each context holds one job.** A long conversation with you does not crowd a project's state out
+  of the director's context, and a project's history does not crowd a task out of the worker's.
+  Each level compacts what it alone needs, and loses less when it does.
+- **Whoever does the work does not grade it.** The plan, with the commands that decide it, is
+  frozen before the worker starts; the worker cannot finish its own plan (`todo_finish` is the
+  director's), and the director re-runs the checks itself. To review a commit it fans it out to
+  fresh workers that did not write it (the `find_verify` template: finders, then verifiers that try
+  to refute each finding). "Done" is a command's exit code, not a sentence.
+- **The right model at each level.** Workers can run a cheaper, faster model (`agentOptions` of
+  `tool-subagent`) while the director, which decides, runs a stronger one.
+- **A small blast radius.** The steward is the one that reads what comes from outside (your
+  messages, mail, web pages, chat groups), and it has no hands on any project; a worker sees one
+  plan and cannot start more workers or plans of its own.
+- **Failures stay small, and resume.** A worker that crashes leaves its plan and the project's
+  state behind; a restarted director resumes its session and the workers a restart interrupted; a
+  restarted steward keeps its memory.
+- **Idle costs nothing.** A director with nothing to do sleeps (`idle_dormant`) until a task or an
+  answer lands in its `inbox/`; nothing polls a model in a loop.
+- **Projects scale out side by side.** Each director has its own `root` and session, so several run
+  on one machine without seeing each other's work.
+
+On the local host described here, *you* are the bridge between the levels: the steward proposes a
+project, you approve it, and you start its director. An external host (a backend) adds the
+plumbing: the steward reaches you on chat channels and hands your words to the right director,
+and directors report back to it.
+
 ## Prerequisites
 
 - **Linux.** Tested on x86_64. On Windows the plugin refuses to start. macOS is untested: plans

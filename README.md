@@ -559,7 +559,7 @@ It runs three levels of DSH session, each with one job and only the tools that j
 
 ```mermaid
 flowchart LR
-    you(["You"]) <-->|chat| S["<b>Steward</b><br/>one per person<br/>conversation, memory,<br/>reads every project"]
+    you(["You"]) <-->|"dashboard, Slack, WeChat"| S["<b>Steward</b><br/>one per person<br/>conversation, memory,<br/>reads every project"]
     S -->|"proposal / handoff"| D["<b>Director</b><br/>one per project or goal<br/>plans, dispatches, checks"]
     D -->|"one frozen plan"| W["<b>Worker</b><br/>one per task<br/>edits, tests, commits"]
     W -->|"commit + report"| D
@@ -573,9 +573,27 @@ flowchart LR
   shell tools at all; a worker cannot start more workers. Cheap models can run the workers while a
   stronger one directs.
 
-In AItelier itself the backend is the host: the steward talks to you on the dashboard, Slack or
-WeChat and hands work to one director per State DAG. Standalone, you are the bridge. The full
-rationale is in [Three levels, and why](integrations/dsh-director/README.md#three-levels-and-why).
+In AItelier itself the backend is the host, and it gives the steward **chat channels**: once your
+Slack and/or WeChat account is bound on the dashboard (Steward card → **Channels**: Slack is a bot
+you DM, WeChat logs in by a QR code shown only there; either binds by sending the bot a six-digit
+code), you run most things from your phone:
+
+- talk to the steward, which remembers across channels and the dashboard, and hands your words to
+  the right project's director (one per State DAG), relaying what the directors report back;
+- answer a director's question by its code (`Q12 ...`), and approve or decline a proposal with the
+  exact line `同意 proposal <id>` / `拒绝 proposal <id>` (a few kinds, such as loosening a
+  connection's egress guard, are approvable only on the dashboard);
+- send photos, PDFs and office documents for it to read, set reminders and get a daily brief, and
+  use its connections (web search, image generation, documents, a browser) - anything that acts on
+  the outside asks you to confirm first;
+- let it answer in bound family group chats, from public projects, family memory and shared
+  shopping and to-do lists only, never from your private conversation.
+
+What stays on the dashboard is setup and the sensitive switches: binding accounts, the WeChat QR,
+connections and their per-tool permissions, and the capabilities panel. Standalone, without a
+backend, there are no channels: you talk to the steward in DSH's web app and you are the bridge to
+the directors. The full rationale is in
+[Three levels, and why](integrations/dsh-director/README.md#three-levels-and-why).
 
 It is published on npm as [`aitelier-dsh-director`](https://www.npmjs.com/package/aitelier-dsh-director)
 (MIT), as a DSH bundle:

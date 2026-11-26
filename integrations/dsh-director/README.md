@@ -35,7 +35,7 @@ flowchart TD
         w3["Worker: task 3"]
     end
     check{{"the plan's own checks<br/>tests pass, only files in scope changed,<br/>a clean commit past the base"}}
-    you <-->|chat| steward
+    you <-->|"chat: DSH web app, or chat channels"| steward
     steward -->|"a proposal you approve, or a handoff"| dirA
     steward -.->|reads| dirB
     you -->|"a task in inbox/"| dirA
@@ -75,10 +75,24 @@ Why split it this way:
 - **Projects scale out side by side.** Each director has its own `root` and session, so several run
   on one machine without seeing each other's work.
 
-On the local host described here, *you* are the bridge between the levels: the steward proposes a
-project, you approve it, and you start its director. An external host (a backend) adds the
-plumbing: the steward reaches you on chat channels and hands your words to the right director,
-and directors report back to it.
+On the local host described here, *you* are the bridge between the levels: you talk to the steward
+in DSH's web app ([Talk to it](#talk-to-it)), it proposes a project, you approve it, and you start
+its director. An external host (a backend) adds the plumbing, and with it the steward becomes the
+one place you run things from:
+
+- **Chat channels.** The channel plugins next to this one (`../dsh-channel-slack`,
+  `../dsh-channel-wechat`) load when the host declares the `channels` capability. Your bound Slack
+  DM or WeChat account then reaches the steward like the web app does: a conversation it remembers,
+  your words handed to the right director, the directors' questions pushed to you with a code you
+  answer from the chat (`Q12 ...`), and a proposal decided by sending back its exact line. Binding
+  an account, and the few switches that loosen a safeguard, stay on the host's own UI.
+- **Family group chats**, where it answers only from what that group may know.
+- **Connections**: outside tools (search, documents, image generation) it may call, with an
+  outward action confirmed by the person who asked first, and a pause on tools that send things out
+  once it has read outside content.
+
+None of it gives the steward hands on a project: what you ask for from a chat still reaches a
+project only as a director's plan.
 
 ## Prerequisites
 

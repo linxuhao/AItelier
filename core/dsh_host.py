@@ -250,7 +250,35 @@ def last_startup_error(runtime, driver_id):
     return lines[-1]
 
 
-def runtime_log_tail(runtime, driver_id):
+def _written_before(runtime, driver_id, started_after):
+    """The sentence naming a log last written BEFORE this process started, or None.
+
+    `runtime.log` is appended to, never truncated, so it outlives the child that
+    wrote it: the tail of a driver that wrote nothing is its PREDECESSOR's text, and
+    quoting that as this exit's cause reads as a cause this process never had
+    (measured 2026-11-26: 0 bytes written in 116957 s, and the record quoted a
+    process two generations back). The file's mtime is the evidence that separates
+    the two, and the age is spelled out because the reader would otherwise have to
+    subtract the uptime from a timestamp to see it.
+
+    The age is measured from `started_after` - the instant this process started -
+    not from "now": that is the interval the reader cares about, and it is exact
+    where a wall clock read here would be a race.
+    """
+    # The read above already succeeded, so a stat that does not is no evidence of
+    # staleness: it must not invent any.
+    try:
+        mtime = os.stat(runtime.root / driver_id / "runtime.log").st_mtime
+    except OSError:
+        return None
+    if mtime >= started_after:
+        return None
+    age = max(0.0, started_after - mtime)
+    ago = f"{age / 3600:.1f}h" if age >= 3600 else f"{max(1, round(age / 60))}m"
+    return _bounded(f"unchanged by this process (last written {ago} ago)")
+
+
+def runtime_log_tail(runtime, driver_id, *, started_after=None):
     """The newest lines of a serving driver's own log, or the reason there are none.
 
     The same file `last_startup_error` reads - the host redirects both of the
@@ -262,6 +290,12 @@ def runtime_log_tail(runtime, driver_id):
     A driver that wrote nothing is a diagnosis as much as one that wrote a
     traceback: "missing" and "no output" are named here rather than reaching the
     record as an empty field somebody has to interpret.
+
+    `started_after` (a wall-clock instant) is passed by the exit record, which knows
+    when this process started: a log whose mtime is older than that holds somebody
+    else's text, and naming the fact replaces quoting it. Left None, the answers are
+    exactly the ones this reader always gave - the "has no output" rows above stay
+    theirs, since an empty file is a fact about this process's own writing.
     """
     try:
         lines = [line.strip() for line in
@@ -273,6 +307,10 @@ def runtime_log_tail(runtime, driver_id):
     lines = [line for line in lines if line]
     if not lines:
         return "runtime.log has no output"
+    if started_after is not None:
+        stale = _written_before(runtime, driver_id, started_after)
+        if stale is not None:
+            return stale
     # Same bounds as the startup text: one redacted, capped line each.
     return " | ".join(_bounded(line) for line in lines[-EXIT_LOG_LINES:])
 
@@ -389,7 +427,7 @@ def _capped(text, limit):
     return text if len(text) <= limit else "… " + text[len(text) - limit + 2:]
 
 
-def exit_cause(runtime, row):
+def exit_cause(runtime, row, *, started_at=None):
     """What a serving driver left behind when it died, as the exit record keeps it.
 
     Three facts and one bound. The last lines of the driver's own log, the last
@@ -398,6 +436,11 @@ def exit_cause(runtime, row):
     first (it is the only part that is unbounded by construction) and it is cut
     from the OLD end, because the newest line is the one that names the cause;
     the labels and the session event are what a reader needs to interpret the rest.
+
+    `started_at` is the wall-clock instant this driver's process started, when the
+    caller knows it: it goes to `runtime_log_tail` as the boundary between lines
+    this process wrote and lines a predecessor left, so an appended log cannot be
+    quoted as this exit's cause. None keeps the unconditional tail.
 
     Only called for an exit this supervisor watched, so it is not on a hot path;
     each field is read once, from the files the driver itself left.
@@ -409,7 +452,7 @@ def exit_cause(runtime, row):
     session = last_session_event(runtime, row)
     # The readers open by the id the ROW holds, never by the bounded text that goes
     # into the record: a name too long to print is still a name a file is found by.
-    log = runtime_log_tail(runtime, row["driver_id"])
+    log = runtime_log_tail(runtime, row["driver_id"], started_after=started_at)
     body = f"runtime.log: {log}; {session}"
     if len(body) > room:
         keep = room - len(f"runtime.log: ; {session}")
@@ -524,6 +567,9 @@ def record_exit(runtime, row, watched, uptime, *, supervisor_stopped):
     the newest lines of its own `runtime.log` and the last event of its session log
     (`exit_cause`), from the same files the startup reader already uses, redacted
     and bounded the same way, and with an absent log NAMED rather than left blank.
+    The log is appended to, so the record also carries the start instant that makes
+    "these are this process's lines" a fact the reader can check: a log last written
+    before the child existed is named as unchanged, never quoted.
 
     Two physical lines: the status, then the cause. The status keeps its shape -
     the driver id, the pid, the code or - for a negative returncode - the signal,
@@ -547,7 +593,10 @@ def record_exit(runtime, row, watched, uptime, *, supervisor_stopped):
           f"after {uptime:.1f}s uptime, supervisor_stopped="
           f"{'true' if supervisor_stopped else 'false'}", flush=True)
     try:
-        cause = exit_cause(runtime, row)
+        # `uptime` is MONOTONIC and the log's mtime is WALL-clock, so the boundary
+        # between this process's own lines and a predecessor's is derived here, at
+        # the one place that holds both.
+        cause = exit_cause(runtime, row, started_at=time.time() - uptime)
     except Exception as exc:  # a diagnosis must never be why the record is lost
         cause = (f"DSH host {_bounded(str(row['project_id']))}: "
                  f"{_bounded(str(row['driver_id']))} exit cause unavailable: {_bounded(str(exc))}")

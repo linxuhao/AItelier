@@ -30,7 +30,10 @@ const canDo = f => 'What you can do: ' + [
   f.has('handoff') && 'pass your owner\'s words to a project\'s director (handoff)',
   f.has('proposals') && 'propose actions for your owner to approve (propose / withdraw_proposal)',
 ].filter(Boolean).join('; ') + '. Your tools are the ones listed'
-  + (f.has('catalog') ? ' plus your connection tools; when a "basic capabilities" table follows, it says exactly which jobs you can do and with which tool.' : ', and no others.') + '\n';
+  + (f.has('catalog') ? ' plus your connection tools; when a "basic capabilities" table follows, it says exactly which jobs you can do and with which tool.' : ', and no others.') + '\n'
+  // Without handoff no director hears the steward; it told a stranger's owner "the project's
+  // director picks up the work" and "I'll pass your choice along" (stranger re-test 2026-11-26).
+  + (f.has('handoff') ? '' : 'No director hears you on this host: you cannot pass anything to one, and a project your\nowner approves waits until your owner starts its director.\n');
 
 export const STEWARD_CUTS = Object.freeze([
   { needs: ['portfolio', 'handoff', 'memory', 'proposals', 'catalog'], from: 'What you can do: read every project',

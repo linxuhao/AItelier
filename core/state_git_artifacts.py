@@ -719,17 +719,28 @@ def _released_refusal(digest, release):
 def store_totals(conn):
     """``(rows, payload_bytes)`` over the whole store.
 
-    The release's store-wide counter, and it is a walk over ROWS, not over
-    bytes: ``length(payload)`` does not read the payload (SQLite answers a
-    blob's length from the value's record header), and 18 GB cannot be read in
-    1.5 ms anyway. Measured on this host 2026-11-26 over 2,111 rows /
-    18,099,227,730 payload bytes in an 18.52 GB database: 1.48, 1.66 and
+    The release's store-wide counter, and in THIS shape - one ungrouped
+    aggregate over every row - it is a walk over ROWS, not over bytes:
+    ``length(payload)`` is answered from each value's record header, so 18 GB of
+    payload costs no payload reads. Measured on this host 2026-11-26 over 2,111
+    rows / 18,099,227,730 payload bytes in an 18.52 GB database: 1.48, 1.66 and
     1.76 ms warm, 128.58 ms for the first call on a fresh connection, and
     1.42-2.43 ms for the same aggregate over the plain integer ``raw_size``
-    column. What it buys is the ledger's identity: every release row records
-    the totals just before and just after its own bytes left, so "store +
-    releases = what the store held before" is arithmetic a reader can check
-    instead of a claim."""
+    column.
+
+    That optimization does not survive a ``GROUP BY``: grouping this aggregate
+    by any key forces every payload byte through the sorter (measured on a
+    1,048,576,000-byte fixture: 0.000 s ungrouped, 4.81 and 4.54 s grouped in two
+    runs, and 5.50 s grouped with ``length`` pre-projected in a subquery - SQLite
+    flattens it away). On the live store that form ran past 85 s once and
+    answered "database or disk is full" once - with 16 GB free on / a minute
+    later, and this ungrouped function answering in 2 ms on the same database
+    minutes earlier - so a grouped payload accounting does not belong on a
+    monitoring path.
+
+    What it buys is the ledger's identity: every release row records the totals
+    just before and just after its own bytes left, so "store + releases = what
+    the store held before" is arithmetic a reader can check instead of a claim."""
     row = conn.execute(f"SELECT count(*), coalesce(sum(length(payload)),0) FROM {BUNDLE_STORE}").fetchone()
     return int(row[0]), int(row[1])
 

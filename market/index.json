@@ -43,7 +43,7 @@
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 0,
+          "publishTimestamp": 1795684626,
           "source": { "type": "npm" },
           "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0-0" }
         }

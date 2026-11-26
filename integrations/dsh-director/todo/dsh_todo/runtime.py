@@ -266,14 +266,14 @@ def _git_status(workspace: Path, *args: str) -> tuple[int, str, str]:
 # Interpreter caches a test run leaves behind (`python3 -m unittest` writes __pycache__ into a
 # checkout that has no .gitignore). An UNTRACKED one is never a deliverable, so it is neither a
 # change nor dirt; a tracked one is still both.
-_UNTRACKED_CACHES = (":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[co]",
+UNTRACKED_CACHES = (":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[co]",
                      ":(exclude,glob)**/.pytest_cache/**")
 
 
 def _untracked(workspace: Path) -> tuple[str, str]:
     """Untracked, not ignored paths (NUL-separated), interpreter caches left out."""
     return _git(workspace, "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
-                *_UNTRACKED_CACHES)
+                *UNTRACKED_CACHES)
 
 
 def _git(workspace: Path, *args: str) -> tuple[str, str]:

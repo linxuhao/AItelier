@@ -7,6 +7,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB)
 [![Engine: SkillFlow](https://img.shields.io/badge/engine-SkillFlow%20(MIT)-F59E0B)](https://github.com/linxuhao/SkillFlow)
+[![npm: aitelier-dsh-director](https://img.shields.io/npm/v/aitelier-dsh-director?label=npm%20aitelier-dsh-director)](https://www.npmjs.com/package/aitelier-dsh-director)
 
 </div>
 
@@ -131,6 +132,7 @@ Honest, current state — so nothing here reads as more finished than it is.
 | --- | --- |
 | Flagship **DPE software pipeline** — research → architect → plan → implement → verify | ✅ Available today |
 | **MCP endpoint + DeepSeek Harness plugin** — drive AItelier from any MCP-speaking agent: list / edit / run / export / import pipelines as native tools | ✅ Available today |
+| **Director & steward plugin for DeepSeek Harness, no backend** — a resident director that plans, dispatches and checks native DSH workers, or a steward with memory; npm [`aitelier-dsh-director`](#run-a-director-or-steward-in-dsh-no-backend) | ✅ Available today (0.1.0) |
 | Green/Red adversarial review · human approve/reject-with-feedback checkpoints · autonomous goal-loop | ✅ Available today |
 | Append-only trace + trace API · Git event-sourcing · Rich CLI/TUI | ✅ Available today |
 | Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (durable workflow-graph execution, tools, checkpoints, trace) | ✅ Available today |
@@ -224,8 +226,8 @@ aitelier server                   # Backend container (start/reuse)
 
 ### Resident DSH drivers: install from a clean checkout (Linux)
 
-(To run one director with no backend at all - a single DSH process and plain files - see
-[integrations/dsh-director/README.md](integrations/dsh-director/README.md).)
+(To run one director or steward with no backend at all - a single DSH process and plain files -
+see [Run a director or steward in DSH](#run-a-director-or-steward-in-dsh-no-backend).)
 
 The optional built-in director runs **one DSH driver per State DAG on the host**;
 the AItelier backend stays in Docker. Drivers and native subagents have full
@@ -542,6 +544,34 @@ echo 'AITELIER_MCP_URL=http://127.0.0.1:4444/mcp' >> ~/.dsh/.env   # where your 
 ```
 
 Any other MCP host configures the same endpoint URL directly (streamable HTTP transport). It needs a running backend — [Install](#install) above, or `docker compose up -d`.
+
+## Run a director or steward in DSH (no backend)
+
+The director that drives AItelier's projects also runs on its own, as a plugin for
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): one DSH process, a directory
+of plain files, no server or database. Drop a task into its `inbox/`; it records a work item,
+freezes a plan from a reviewed template, hands it to a native DSH worker, checks what the worker
+delivered (the plan's own commands, not the worker's word), and sleeps when nothing is left. Set
+`rootRole: steward` and the same plugin is a long-running assistant you talk to, with a git-backed
+memory of what you told it.
+
+It is published on npm as [`aitelier-dsh-director`](https://www.npmjs.com/package/aitelier-dsh-director)
+(MIT), as a DSH bundle:
+
+```bash
+npm install -g @deepseek-ai/dsh@0.2.1-rc.5 pnpm
+dsh plugin --profile director add aitelier-dsh-director
+```
+
+Then write the profile's own patch (where it keeps its files, which model it and its workers use)
+and start it with `dsh --profile director`. Any model behind an OpenAI-compatible endpoint works,
+including one on your own machine; it must handle tool calls well. Linux only; it needs python3
+with PyYAML and git. Everything - the profile patch, another model, talking to a steward, what to
+check when nothing happens - is in
+[integrations/dsh-director/README.md](integrations/dsh-director/README.md).
+
+For DSH's plugin market (the optional *Custom plugin markets* bundle, *Discover* tab), add this
+index: `https://raw.githubusercontent.com/linxuhao/AItelier/main/market/index.json`.
 
 ## Generate a workflow from a description
 

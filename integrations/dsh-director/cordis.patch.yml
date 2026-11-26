@@ -1,0 +1,20 @@
+# The bundle layer (package.json's dsh.bundle), applied after @deepseek-ai/dsh-base and before
+# the profile's own cordis.patch.yml. It carries only what every profile of this plugin needs;
+# the user's rows (director-local's config, the workers' model) stay in the profile.
+- id: hmr
+  disabled: true
+# Built-in tools the director's protocol does not use.
+- { id: tool-subagent-fork, disabled: true }
+- { id: tool-workflow, disabled: true }
+- { id: plan-mode, disabled: true }
+- { id: tool-todo, disabled: true }
+# No tool-subagent row: a later layer replaces a row's whole config, so a row here would be
+# restated in full by every profile that names the workers' model. dsh-base's own row
+# (provider spawn, toolName subagent) is what the workers run on until the profile names one.
+- insert:
+    - id: dsh-director
+      name: aitelier-dsh-director
+    # Its config (root, provider, model, ...) is the profile's: without one it refuses to start
+    # with "missing config: root".
+    - id: director-local
+      name: aitelier-dsh-director/hosts/local.mjs

@@ -994,6 +994,22 @@ test('local host apply(): the session tag is set on this process, and put back o
   assert.equal(process.env[key], undefined);
 });
 
+test('local host apply() without config: the process ends with the reason, it does not wait for a host that will never come', () => {
+  const printed = [], exits = [];
+  const saved = console.error;
+  console.error = line => printed.push(line);
+  const slot = Symbol.for('dsh.exit-cause');
+  delete globalThis[slot];
+  try {
+    const ctx = { on: () => {}, provide: () => assert.fail('provided a host'), logger: { error: () => {} },
+      get: name => name === 'appExit' ? code => exits.push(code) : undefined };
+    assert.throws(() => applyLocal(ctx, undefined), /missing config: root/);
+  } finally { console.error = saved; delete globalThis[slot]; }
+  assert.deepEqual(exits, [1]);
+  assert.deepEqual(printed, ['dsh exit cause: dsh-director startup: Error',
+    'dsh-director startup: directorHost refused: missing config: root (the local host keeps its files there)']);
+});
+
 test('startupFailure: with detail the first line of the reason follows the exit line; without, only the exit line', () => {
   const printed = [];
   const saved = console.error;

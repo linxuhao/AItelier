@@ -1,0 +1,53 @@
+{
+  "format": 1,
+  "title": {
+    "en": "AItelier plugins",
+    "zh": "AItelier 插件"
+  },
+  "description": {
+    "en": "DSH bundles from the AItelier repository.",
+    "zh": "来自 AItelier 仓库的 DSH 插件包。"
+  },
+  "metadata": {
+    "categories": {
+      "agents": { "title": { "en": "Agents", "zh": "智能体" } }
+    },
+    "labels": {
+      "director": { "title": { "en": "Director", "zh": "主管" } },
+      "steward": { "title": { "en": "Steward", "zh": "管家" } },
+      "local": { "title": { "en": "No server", "zh": "无需服务器" } }
+    }
+  },
+  "plugins": [
+    {
+      "name": "aitelier-dsh-director",
+      "title": {
+        "en": "Director and steward",
+        "zh": "主管与管家"
+      },
+      "description": {
+        "en": "A resident director that turns tasks into reviewed todo plans, hands each plan to a native DSH worker, checks what it delivered, and sleeps when nothing is left; or a steward you talk to, which keeps your memory. The built-in local host keeps everything in plain files: no server, no database. Install it into a profile of its own; the profile's patch names the root directory and the model.",
+        "zh": "常驻主管：把任务冻结成经过审阅的待办计划，交给 DSH 原生工作者执行，核对交付结果，无事可做时休眠；也可作为与你对话、保存你的记忆的管家。内置的本地宿主把一切保存在普通文件里：无需服务器，无需数据库。请装进一个专用的配置档（profile），并在该配置档的补丁里写明根目录和模型。"
+      },
+      "author": "Xuhao Lin",
+      "homepage": "https://github.com/linxuhao/AItelier/tree/main/integrations/dsh-director#readme",
+      "repository": {
+        "url": "https://github.com/linxuhao/AItelier",
+        "directory": "integrations/dsh-director"
+      },
+      "metadata": {
+        "category": "agents",
+        "keywords": ["director", "steward", "workers", "todo", "plans", "memory", "subagent"],
+        "labels": ["director", "steward", "local"]
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 0,
+          "source": { "type": "npm" },
+          "engines": { "dsh": ">=0.2.1-rc.5 <0.3.0-0" }
+        }
+      ]
+    }
+  ]
+}

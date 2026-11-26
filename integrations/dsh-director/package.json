@@ -1,8 +1,58 @@
 {
-  "name": "dsh-director",
-  "private": true,
-  "type": "module",
+  "name": "aitelier-dsh-director",
+  "version": "0.1.0",
   "description": "A resident director and its native workers as a DSH plugin; work and memory come from a directorHost (built-in local host, or an external one).",
+  "license": "MIT",
+  "author": "Xuhao Lin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linxuhao/AItelier.git",
+    "directory": "integrations/dsh-director"
+  },
+  "homepage": "https://github.com/linxuhao/AItelier/tree/main/integrations/dsh-director#readme",
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent",
+    "director"
+  ],
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./hosts/local.mjs": "./hosts/local.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "hosts/",
+    "lib/",
+    "todo/dsh_todo/*.py",
+    "todo/todo_templates/*.yaml",
+    "director.md",
+    "worker.md",
+    "steward.md",
+    "roles.json",
+    "media-types.json",
+    "host.d.ts",
+    "office/",
+    "pdf_read.py",
+    "media-gc.mjs",
+    "requirements.txt",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=24",
+    "dsh": ">=0.2.1-rc.5 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "test": "node --test test/host.test.mjs test/local-host.test.mjs test/outbox.test.mjs test/capacity.test.mjs test/resume.test.mjs test/boundary.test.mjs test/request-bodies.test.mjs test/memory.test.mjs test/memory-purge.test.mjs test/memory-recovery.test.mjs test/memory-remote.test.mjs test/memory-search.test.mjs test/memory-vector.test.mjs test/memory-perf.test.mjs test/memory-grep-helper.test.mjs test/steward-tools.test.mjs test/steward-prompt.test.mjs test/memory-turns.test.mjs test/channels.test.mjs test/owner-text.test.mjs test/clock.test.mjs test/group-turns.test.mjs test/group-wake-images.test.mjs test/catalog.test.mjs test/basics.test.mjs test/calc-tool.test.mjs test/confirm.test.mjs test/connections.test.mjs test/media.test.mjs test/media-gc.test.mjs test/read-document.test.mjs test/office.test.mjs test/make-document.test.mjs"
   }

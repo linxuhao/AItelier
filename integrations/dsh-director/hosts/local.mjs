@@ -58,6 +58,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
+import { startupFailure } from '../lib/exit-cause.mjs';
 import { registerOwnerCommands } from './local-commands.mjs';
 
 export const name = 'dsh-director-local-host';
@@ -696,7 +697,11 @@ export function dshVersion(entry) {
 }
 
 export function apply(ctx, config) {
-  const host = localHost(config ?? {});
+  let host;
+  // A refused config (no `root`: a bundle row the profile gave no config) ends the process the
+  // way a refusal at the director's boot does; thrown alone it leaves dsh-director waiting for
+  // this service, and DSH running with nothing to do.
+  try { host = localHost(config ?? {}); } catch (error) { startupFailure(ctx, error, { detail: true }); throw error; }
   // Every process this DSH starts - a job the director's or a worker's shell runs, detached or
   // not - carries the director's session in its environment: watch_process accepts it and
   // idle_dormant sees it (lib/core.mjs processSession, backgroundProcesses).

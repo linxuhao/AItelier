@@ -258,12 +258,17 @@ def _written_before(runtime, driver_id, started_after):
     quoting that as this exit's cause reads as a cause this process never had
     (measured 2026-11-26: 0 bytes written in 116957 s, and the record quoted a
     process two generations back). The file's mtime is the evidence that separates
-    the two, and the age is spelled out because the reader would otherwise have to
-    subtract the uptime from a timestamp to see it.
+    the two, and the gap is spelled out so the reader is not left subtracting two
+    timestamps.
 
-    The age is measured from `started_after` - the instant this process started -
-    not from "now": that is the interval the reader cares about, and it is exact
-    where a wall clock read here would be a race.
+    The number is the gap between the log's last write and THIS PROCESS'S START -
+    neither "now" nor "how long ago at exit". Measured from `started_after` it is
+    exact (a wall-clock read here would be a race), and the status line printed
+    above the cause already carries `after <uptime>s uptime`, so the instant of the
+    predecessor's last write is those two numbers together; printing the gap to the
+    exit instead would mean deriving it from the uptime here, and a wording that
+    claimed "ago" for a gap measured before the start would understate it by the
+    whole uptime - always in the same direction.
     """
     # The read above already succeeded, so a stat that does not is no evidence of
     # staleness: it must not invent any.
@@ -273,9 +278,9 @@ def _written_before(runtime, driver_id, started_after):
         return None
     if mtime >= started_after:
         return None
-    age = max(0.0, started_after - mtime)
-    ago = f"{age / 3600:.1f}h" if age >= 3600 else f"{max(1, round(age / 60))}m"
-    return _bounded(f"unchanged by this process (last written {ago} ago)")
+    gap = max(0.0, started_after - mtime)
+    before = f"{gap / 3600:.1f}h" if gap >= 3600 else f"{max(1, round(gap / 60))}m"
+    return _bounded(f"unchanged by this process (last written {before} before it started)")
 
 
 def runtime_log_tail(runtime, driver_id, *, started_after=None):

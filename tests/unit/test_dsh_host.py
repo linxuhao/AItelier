@@ -914,8 +914,10 @@ def test_the_exit_cause_names_a_log_written_before_this_process_started(tmp_path
     Measured 2026-11-26T09:32:16Z: the driver whose record was printed had written
     0 bytes in 116957 s, and the "exit cause" quoted a process two generations back
     as if those lines caused THIS exit - and writing nothing is the normal case for
-    a director driver. The record says so in words instead, with the age so nobody
-    has to subtract the uptime, and it quotes nothing from the file's body.
+    a director driver. The record says so in words instead, naming the gap between
+    the predecessor's last write and this process's start - the status line above it
+    carries the uptime, so the two numbers date the write and the wording claims
+    only what `exit_cause` measured - and it quotes nothing from the file's body.
 
     Both branches are asserted, because "even the log this process did write is now
     called stale" is the same defect from the other side. Deterministic: the mtime
@@ -930,14 +932,14 @@ def test_the_exit_cause_names_a_log_written_before_this_process_started(tmp_path
                    'predecessor: AItelier DSH exit: exit code 7\n')
     written = time.time() - 3600
     os.utime(log, (written, written))
-    # A minute of the log standing still before this process started: minutes, exact.
+    # A minute between the log's last write and this process's start: minutes, exact.
     cause = exit_cause(runtime, row, started_at=written + 60)
-    assert 'unchanged by this process (last written 1m ago)' in cause, cause
+    assert 'unchanged by this process (last written 1m before it started)' in cause, cause
     assert 'predecessor: loading the driver profile' not in cause, cause
     assert 'predecessor: AItelier DSH exit: exit code 7' not in cause, cause
     assert len(cause) <= EXIT_RECORD_LIMIT, len(cause)
     # Hours once the gap is an hour or more, so a host restart can be read at a glance.
-    assert 'unchanged by this process (last written 32.5h ago)' in exit_cause(
+    assert 'unchanged by this process (last written 32.5h before it started)' in exit_cause(
         runtime, row, started_at=written + 32.5 * 3600)
     # The fresh branch: a log THIS process wrote is still quoted, and the stale
     # sentence is absent - the two answers must not be able to trade places.

@@ -187,6 +187,113 @@ async def test_one_project_failure_does_not_end_supervision(runtimes):
         await task
 
 
+async def test_a_spawn_whose_post_spawn_reread_raised_is_watched_not_counted(runtimes, capsys):
+    """A live child left by a raising `start()` is registered, not a failed start.
+
+    The host-controller `start()` spawns the node and only then reads the row to
+    return its public view; a lock on that last read raises with the child up.
+    The child's later exit must still get the normal serving-driver record.
+    """
+    backend, host = runtimes
+    row = await backend.start('alpha', actor='fixture')
+    marker = host.root / row['driver_id'] / 'host-process.json'
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    real_start = host.start
+
+    async def spawn_then_raise(project_id, **kwargs):
+        await real_start(project_id, **kwargs)
+        raise RuntimeError('database is locked on the post-spawn row re-read')
+
+    host.start = spawn_then_raise
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(marker.exists)  # publish() runs after the start's except/else
+        proc = host.processes['alpha']
+        assert proc.returncode is None
+        # None of the failed-start sinks was touched by the raise itself.
+        assert not record.exists()
+        current = backend.get('alpha')
+        assert not (current['last_error'] or '').startswith('DSH: failed start '), current
+        assert 'post-spawn row re-read' not in (current['last_error'] or ''), current
+        assert 'database is locked' not in capsys.readouterr().out
+        # A serving phase is the runtime's own witness; one more tick marks the
+        # registered child as served, so its exit takes the ordinary record path.
+        seen_at = json.loads(marker.read_text())['seen_at']
+        backend.update('alpha', phase='running')
+        await eventually(lambda: json.loads(marker.read_text())['seen_at'] > seen_at)
+        proc.terminate()
+        out = await journal(capsys, lambda text: 'exited with' in text)
+        lines = [line for line in out.splitlines() if 'exited with' in line]
+        assert len(lines) == 1, out
+        assert f"pid {proc.pid} exited with" in lines[0], out
+        assert 'supervisor_stopped=false' in lines[0], out
+        assert not [line for line in out.splitlines() if 'failed start' in line], out
+    finally:
+        stopped.set()
+        await task
+
+
+async def test_a_start_that_raises_with_no_child_keeps_the_failed_start_path(runtimes, capsys):
+    """A raise with nothing running still grows the streak, stamps and prints."""
+    backend, host = runtimes
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+
+    async def raise_without_spawning(project_id, **kwargs):
+        raise RuntimeError('database is locked before spawn')
+
+    host.start = raise_without_spawning
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(record.exists)
+        state = json.loads(record.read_text())
+        assert state['attempts'] == 1, state
+        assert 'database is locked before spawn' in state['last_error'], state
+        out = await journal(
+            capsys, lambda text: 'DSH host alpha: database is locked before spawn' in text)
+        assert 'DSH host alpha: database is locked before spawn' in out, out
+        current = backend.get('alpha')
+        assert current['phase'] == 'failed', current
+        assert current['last_error'].startswith('DSH: failed start 1 in a row: '), current
+        assert not host.processes
+    finally:
+        stopped.set()
+        await task
+
+
+async def test_an_exited_process_left_in_processes_is_a_failed_start(runtimes, capsys):
+    """Presence in `processes` is not liveness: a set returncode says the child is gone.
+
+    This is the state between an exit and `_observe` removing the entry. A
+    presence-only check would register a dead child and lose its failed start.
+    """
+    backend, host = runtimes
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+
+    async def spawn_dead_then_raise(project_id, **kwargs):
+        host.processes[project_id] = SimpleNamespace(pid=4242, returncode=1)
+        raise RuntimeError('database is locked after exit')
+
+    host.start = spawn_dead_then_raise
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(record.exists)
+        assert json.loads(record.read_text())['attempts'] == 1
+        out = await journal(
+            capsys, lambda text: 'DSH host alpha: database is locked after exit' in text)
+        assert 'failed start' not in out, out  # the raised-start line, not a child's death
+        current = backend.get('alpha')
+        assert current['phase'] == 'failed', current
+        assert current['last_error'].startswith('DSH: failed start 1 in a row: '), current
+    finally:
+        stopped.set()
+        await task
+
+
 @pytest.fixture
 def crashing(tmp_path):
     """`alpha`'s child dies seconds after spawn (once); `beta`'s stays up.

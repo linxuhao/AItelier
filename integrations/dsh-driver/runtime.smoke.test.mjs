@@ -19,13 +19,17 @@ import { watchProgress } from './progress.mjs';
 const effective = aitelierRoles(loadRoles());
 
 /** What each role REGISTERS in this fixture, per execution mode (D1(b)): measured on
- *  the pinned DSH 2026-11-15 with the production switch-offs. Host mode has no
+ *  the pinned DSH 2026-11-15 with the production switch-offs; re-measured on 0.2.2-rc.5
+ *  (2026-11-27): dsh-base no longer registers interrupt_agent (its tool-subagent-control row
+ *  sets interrupt: false), adds wait_agent, and loads the Team task tools, which no model
+ *  step admits while the session's Team mode is off (the default; only DSH's web UI turns it on). Host mode has no
  *  project_work; workspace mode adds it for both roles. A lost MCP handshake or plugin
  *  shrinks these sets and reds here even when the presented lists still match. */
-const shared = ['bash', 'call_tool', 'create_goal', 'edit', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list',
+const shared = ['bash', 'call_tool', 'create_goal', 'edit', 'get_goal', 'glob', 'grep', 'job_kill', 'job_list',
   'job_output', 'list_agents', 'list_mcp_resource_templates', 'list_mcp_resources', 'mcp__aitelier__list_pipelines',
   'mcp__aitelier__state_graph_write', 'read', 'read_image', 'read_mcp_resource', 'search_tools', 'send_message', 'skill', 'subagent',
-  'todo_begin', 'todo_done', 'todo_report', 'todo_status', 'update_goal', 'web_fetch', 'web_search', 'working_directory', 'write'];
+  'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
+  'todo_begin', 'todo_done', 'todo_report', 'todo_status', 'update_goal', 'wait_agent', 'web_fetch', 'web_search', 'working_directory', 'write'];
 const hostRegistered = {
   director: [...shared, 'ask_owner', 'close_question', 'grep_chat_history', 'idle_dormant', 'media_call', 'send_user_message', 'state_read', 'todo_batch_plan', 'todo_batch_status',
     'todo_finish', 'todo_plan', 'todo_rebind', 'todo_templates', 'watch_process'].sort(),
@@ -313,7 +317,7 @@ test('real pinned DSH: native child, auto compact, fresh injection, raw history 
       assert.deepEqual(names.filter(n => n.startsWith('mcp__')), r.child ? [] : ['mcp__aitelier__state_graph_write'],
         (r.child ? 'child' : 'root') + ' MCP schemas: ' + names.join(','));
       for (const gone of ['subagent_fork', 'workflow', 'exit_plan_mode', 'todo_write', 'glob', 'web_fetch', 'web_search',
-        'interrupt_agent', 'create_goal', 'get_goal', 'update_goal', 'skill', 'working_directory', 'list_mcp_resources'])
+        'interrupt_agent', 'team_task_create', 'wait_agent', 'create_goal', 'get_goal', 'update_goal', 'skill', 'working_directory', 'list_mcp_resources'])
         assert.ok(!names.includes(gone), gone + ' is still listed');
       // Equality, not intersection (D1/MF7): a presented name the role never
       // registered is printed, so a misspelling or a missing plugin reds.

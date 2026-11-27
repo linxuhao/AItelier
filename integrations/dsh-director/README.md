@@ -98,9 +98,9 @@ project only as a director's plan.
 
 - **Linux.** Tested on x86_64. On Windows the plugin refuses to start. macOS is untested: plans
   work there, but `watch_process` cannot see jobs (it reads `/proc`).
-- **DSH `0.2.1-rc.5`** (the release this plugin is tested on) and the Node.js it needs (tested
+- **DSH `0.2.2-rc.5`** (the release this plugin is tested on) and the Node.js it needs (tested
   with Node 24). Another DSH release starts with a warning in the DSH log. The npm package
-  declares `engines.dsh` `>=0.2.1-rc.5 <0.3.0-0`: a DSH outside that range does not load it
+  declares `engines.dsh` `>=0.2.2-rc.5 <0.3.0-0`: a DSH outside that range does not load it
   (`dsh plugin --profile <name> allow-version` accepts the risk for one exact version).
 - **pnpm**, to install the plugin from npm: `dsh plugin` runs it in the profile, and stops with
   `pnpm was not found` without it (`npm install -g pnpm`). A checkout needs none.
@@ -143,7 +143,7 @@ Both end in a profile named `director`; only how the plugin gets into it differs
 ### From npm
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.5 pnpm
+npm install -g @deepseek-ai/dsh@0.2.2-rc.5 pnpm
 sudo apt install python3-yaml git       # Debian/Ubuntu; elsewhere: python3 -m pip install PyYAML
 dsh plugin --profile director add aitelier-dsh-director
 ```
@@ -162,7 +162,7 @@ is `dsh plugin --profile director add aitelier-dsh-director@<version>`.
 ### From a checkout
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.5
+npm install -g @deepseek-ai/dsh@0.2.2-rc.5
 cd integrations/dsh-director            # in your checkout of this repository
 sudo apt install python3-yaml           # Debian/Ubuntu; elsewhere: python3 -m pip install -r requirements.txt
 ```
@@ -291,7 +291,7 @@ example a server on your own machine:
 ```
 
 Put it in every profile that uses the route (a director's, a steward's), not in DSH's
-`${DSH_HOME:-$HOME/.dsh}/settings.yaml`: DSH `0.2.1-rc.5` moves that file into the first profile
+`${DSH_HOME:-$HOME/.dsh}/settings.yaml`: DSH `0.2.2-rc.5` moves that file into the first profile
 it starts (as this same row of that profile's `cordis.patch.yml`) and renames it
 `settings.yaml.imported`, so a profile started later has no route
 (`Model completion: no adapter registered for provider "local"`). A patch replaces a row's whole

@@ -599,7 +599,7 @@ It is published on npm as [`aitelier-dsh-director`](https://www.npmjs.com/packag
 (MIT), as a DSH bundle:
 
 ```bash
-npm install -g @deepseek-ai/dsh@0.2.1-rc.5 pnpm
+npm install -g @deepseek-ai/dsh@0.2.2-rc.5 pnpm
 dsh plugin --profile director add aitelier-dsh-director
 ```
 

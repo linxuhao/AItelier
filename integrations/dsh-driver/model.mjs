@@ -151,7 +151,7 @@ export function routeInputCache(read, { ttlMs = 60000, now = Date.now, log = () 
 
 // ---- Step 24.2c R-M3 (design-steward 7.8.12b "八" 4): only images the model has seen are offloaded ----
 
-/** DSH dsh-llm `offloadedImagePrefixCount` (lib/index.js:692-710, 0.2.1-rc.5), copied verbatim
+/** DSH dsh-llm `offloadedImagePrefixCount` (lib/index.js:741-759, 0.2.2-rc.5; unchanged since 0.2.1-rc.5), copied verbatim
  *  because DSH does not export it; a test compares it with DSH `requiredImageOffload`. */
 export function offloadedImagePrefixCount(lengths, budget) {
   const total = lengths.reduce((sum, bytes) => sum + bytes, 0);

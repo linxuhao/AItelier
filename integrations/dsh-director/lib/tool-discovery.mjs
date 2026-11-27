@@ -96,7 +96,7 @@ export const defaultDiscoveryTexts = Object.freeze({
  *  is searched as before. The request's tool list, the guards and the catalog are unchanged. */
 export const BASICS_QUERY = /^basics:([a-z_]{1,32})$/;
 export const BASICS_MAX = 8;
-export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {}, catalog, pinned }) {
+export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSession, rootRole = 'director', roles, texts = {}, catalog, pinned, runTool }) {
   const wording = { ...defaultDiscoveryTexts, ...Object.fromEntries(Object.entries(texts).filter(([, v]) => v !== undefined)) };
   const roleFor = sessionId => roles[roleOf(sessionId, rootSession, rootRole)];
   const hostCatalog = roles[rootRole]?.catalog === 'host';
@@ -112,15 +112,32 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
   });
   // Presentation only: restrictions would also deny execution, and root-local
   // registrations would miss fresh native children. Resolve each caller anew.
+  // A host-catalog role whose host gives no catalog (the standalone local host) has
+  // nothing to discover: search_tools and call_tool are not shown to it at all.
+  const shown = (tools, sessionId) => {
+    const role = roleFor(sessionId);
+    return presentTools(tools, role).filter(t => !(role.catalog && !catalog && metaTools.has(t.name)));
+  };
+  // DSH 0.2.2: the model's tool list is what the agent scope's executor describes (the
+  // system-prompt/assemble waterfall no longer carries tools). Each agent gets an executor
+  // that describes its role's tools and leaves running every call to the deployment's own.
+  ctx.on('agent/created', ({ agent }) => {
+    const base = () => ctx.tools.selectExecutor();
+    agent.ctx.tools.setExecutor({
+      describe: definitions => {
+        const description = base().describe(definitions);
+        return { ...description, schemas: shown(description.schemas, agent.session.id) };
+      },
+      execute: input => base().execute(input),
+    });
+  });
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembly = await next();
     // DSH assembles with { agent, scope: agent }; the scope alone also names the caller.
     const caller = context?.agent ?? context?.scope;
     const role = roleFor(caller?.session?.id);
-    // A host-catalog role whose host gives no catalog (the standalone local host) has
-    // nothing to discover: search_tools and call_tool are not shown to it at all.
-    const tools = presentTools(assembly.tools, role).filter(t => !(role.catalog && !catalog && metaTools.has(t.name)));
-    return { ...assembly, tools, sections: presentSections(assembly.sections, role, wording.sectionName, tools.map(t => t.name)) };
+    const names = shown(ctx.tools.definitions(caller, context?.toolSet), caller?.session?.id).map(t => t.name);
+    return { ...assembly, sections: presentSections(assembly.sections, role, wording.sectionName, names) };
   });
   ctx.systemPrompt.section({ name: wording.sectionName, order: 3090, interpolate: false, text: wording.section });
   ctx.tools.register(defineTool({ name: 'search_tools',
@@ -152,7 +169,7 @@ export function installToolDiscovery(ctx, { defineTool, HarnessError, rootSessio
     output: { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute({ name, arguments: args }, exec) {
       if (metaTools.has(name)) throw new Error('call_tool must target an end tool, not another discovery/execution transport');
-      const result = await ctx.tools.execute({ name, arguments: args, agent: exec.agent,
+      const result = await runTool({ name, arguments: args, agent: exec.agent, ...(exec.toolSet ? { toolSet: exec.toolSet } : {}),
         callId: exec.callId + ':call_tool', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
       outcomes.set(exec.token, result);
       for (const context of result.additionalContexts ?? []) exec.deferContext(context);

@@ -114,7 +114,7 @@ const MEDIA_CALL_PARAMETERS = Object.freeze({ name: { type: 'string', required: 
  *  of `args.media` must be in this host's own library (media.resolve reads only its own
  *  subdirectory) and covered by `audience`; the files' base64 fill their arguments here, the
  *  whole call must fit one gateway body, and the call runs as a nested ctx.tools.execute. */
-async function callWithMedia({ ctx, HarnessError, media, outcomes }, turn, args, exec) {
+async function callWithMedia({ ctx, HarnessError, media, outcomes, runTool }, turn, args, exec) {
   const given = args.arguments ?? {};
   if (typeof given !== 'object' || Array.isArray(given)) return { refused: 'invalid_arguments' };
   const map = args.media;
@@ -143,8 +143,8 @@ async function callWithMedia({ ctx, HarnessError, media, outcomes }, turn, args,
       + `over the ${mib(MEDIA_LIMITS.call_body_bytes)} MiB one call can carry: send fewer refs per call` };
   }
   for (const [param, bytes] of files) filled[param] = Buffer.from(bytes).toString('base64');
-  const result = await ctx.tools.execute({ name: args.name, arguments: filled, agent: exec.agent,
-    callId: exec.callId + ':media_call', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
+  const result = await (runTool ?? (input => ctx.tools.execute(input)))({ name: args.name, arguments: filled, agent: exec.agent,
+    ...(exec.toolSet ? { toolSet: exec.toolSet } : {}), callId: exec.callId + ':media_call', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
   outcomes.set(exec.token, result);
   if (result.isError) {
     const error = new HarnessError(result.error.message, result.error.info?.code ?? 'TOOL_ERROR');
@@ -162,7 +162,8 @@ async function callWithMedia({ ctx, HarnessError, media, outcomes }, turn, args,
  *  call it. No send_media: a director's files reach its owner as its message's attachments.
  *  @param media host.media ({resolve(ref), read(ref)}) @param rootSession the director's session
  *  @param projectId its project @param names the tool names it may run. */
-export function registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError, media, rootSession, projectId, names }) {
+/** `runTool`: as registerConfirmTools' (lib/confirm.mjs). */
+export function registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError, media, rootSession, projectId, names, runTool }) {
   const outcomes = new Map();
   const allowed = Object.freeze([...names]);
   const turn = Object.freeze({ kind: 'project', project_id: projectId });
@@ -175,7 +176,7 @@ export function registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, 
       if (!allowed.includes(args.name)) return { refused: 'not_allowed', reason: `media_call runs only ${allowed.join(', ')}` };
       const registered = new Set((ctx.tools.schemas?.() ?? []).map(schema => schema?.name));
       if (!registered.has(args.name)) return { refused: 'not_registered', reason: `${args.name} is not available in this session` };
-      return callWithMedia({ ctx, HarnessError, media, outcomes }, turn, args, exec);
+      return callWithMedia({ ctx, HarnessError, media, outcomes, runTool }, turn, args, exec);
     },
     projectContent(exec) { return outcomes.get(exec.token)?.content; },
     finalizeContent(exec) { outcomes.delete(exec.token); },
@@ -319,7 +320,7 @@ const readDocumentOutput = Object.freeze({ schema: { type: 'json' }, render: (_a
  *  @param channels the owner channels handle (canSendFile, sendFile: a group's files), or undefined.
  *  @param limits the media-types limits (read_document's pdf_* ones). */
 export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError, media, catalog, turns, channels, ledger,
-  limits = MEDIA_LIMITS }) {
+  limits = MEDIA_LIMITS, runTool }) {
   const outcomes = new Map();
   const audience = () => { try { return turns?.audience() ?? { kind: 'group', unknown: true }; } catch { return { kind: 'group', unknown: true }; } };
   const mine = exec => exec.agent?.session?.id === catalog.rootSession;
@@ -333,7 +334,7 @@ export function registerMediaTools(scope, { ctx, defineTool, jsonOutput, Harness
       const names = catalog.catalog(exec.agent.session.id);
       if (!names?.has(args.name)) return { refused: 'not_visible_in_this_turn', reason: `${args.name} is not one of your connection tools in this conversation` };
       if (catalog.outward(args.name) === true) return { refused: 'outward_media_not_supported', reason: 'an outward tool cannot take media files yet' };
-      return callWithMedia({ ctx, HarnessError, media, outcomes }, audience(), args, exec);
+      return callWithMedia({ ctx, HarnessError, media, outcomes, runTool }, audience(), args, exec);
     },
     projectContent(exec) { return outcomes.get(exec.token)?.content; },
     finalizeContent(exec) { outcomes.delete(exec.token); },

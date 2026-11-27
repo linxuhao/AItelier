@@ -99,7 +99,7 @@ overrides), retains per-driver tokens, and uses the host's
 existing GitHub secret-file credential helper. Provider API keys remain in the
 backend model gateway. No Docker socket is mounted into the backend.
 
-The Docker image also installs `@deepseek-ai/dsh@0.2.1-rc.5` and its lockfile outside
+The Docker image also installs `@deepseek-ai/dsh@0.2.2-rc.5` and its lockfile outside
 the live source mount, together with Node 24. Rebuild the image to install this
 runtime; restarting an old image does not install it. No production deployment
 is performed by the implementation tests.

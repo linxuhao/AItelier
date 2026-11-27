@@ -29,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { installToolDiscovery, searchTools, presentTools } from './tool-discovery.mjs';
+import { nestedToolCaller } from '../dsh-director/lib/nested-call.mjs';
 import { StewardCatalog } from '../dsh-director/lib/catalog.mjs';
 import { GroupTurns, GROUP_SOURCE } from '../dsh-director/lib/group-turns.mjs';
 import { GROUP_LIMITS } from '../dsh-director/lib/channels.mjs';
@@ -45,7 +46,7 @@ import { DSH_PACKAGE, describeDeclinedToMeasure, resolveDshLibraries } from './d
 
 /** The install libraries these tests import; each one must come from the measured install. */
 const HARNESS_LIBRARIES = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools',
-  '@deepseek-ai/dsh-scope', '@deepseek-ai/dsh-llm'];
+  '@deepseek-ai/dsh-tool-executor-native', '@deepseek-ai/dsh-scope', '@deepseek-ai/dsh-llm'];
 
 const libraries = await resolveDshLibraries();
 
@@ -93,6 +94,8 @@ if (libraries.status === 'unmeasured') {
   const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
   const { default: SystemPrompt } = await import(require.resolve('@deepseek-ai/dsh-system-prompt'));
   const { default: Tools, defineTool } = await import(require.resolve('@deepseek-ai/dsh-tools'));
+  const NativeExecutor = await import(require.resolve('@deepseek-ai/dsh-tool-executor-native'));
+  const { ToolExecutionPipeline } = await import(require.resolve('@deepseek-ai/dsh-tools/pipeline'));
   const { createScope } = await import(require.resolve('@deepseek-ai/dsh-scope'));
   const { HarnessError, createUserMessage } = await import(require.resolve('@deepseek-ai/dsh-llm'));
   const output = { schema: { type: 'json' }, render: (_args, value) => [{ type: 'text', text: 'rendered:' + JSON.stringify(value) }] };
@@ -113,21 +116,27 @@ if (libraries.status === 'unmeasured') {
     const ctx = new Context();
     const prompt = ctx.plugin(SystemPrompt); await prompt.await();
     const tools = ctx.plugin(Tools); await tools.await();
-    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles, ...(rootRole ? { rootRole } : {}), ...options });
+    // The deployment's executor (dsh-base mounts this one); each agent's own wraps it.
+    const executor = ctx.plugin(NativeExecutor); await executor.await();
+    const runTool = nestedToolCaller(ctx, ToolExecutionPipeline);
+    installToolDiscovery(ctx, { defineTool, HarnessError, rootSession: 'root', roles, runTool, ...(rootRole ? { rootRole } : {}), ...options });
     let scopeOwner;
     const dependencies = ctx.inject(['tools', 'systemPrompt'], owner => { scopeOwner = owner; }); await dependencies.await();
     const scopes = [];
     const agent = id => {
       const subject = { session: { id } };
       const scope = createScope(scopeOwner, subject); scopes.push(scope); subject.ctx = scope.ctx;
+      // As DSH's agent registry announces every agent; the listeners here are synchronous.
+      void ctx.serial('agent/created', { agent: subject, source: 'startup' });
       return subject;
     };
     let sequence = 0;
-    const call = (name, args, subject, signal = new AbortController().signal) => ctx.tools.execute({
+    // One call as a model step makes it: the pipeline's prepare (policy, guards), dispatch, complete.
+    const call = (name, args, subject, signal = new AbortController().signal) => runTool({
       name, arguments: args, agent: subject, signal, callId: 'discovery-test-' + ++sequence,
     });
     try { await body({ ctx, agent, call }); }
-    finally { for (const scope of scopes.reverse()) await scope.dispose(); await dependencies.dispose(); await tools.dispose(); await prompt.dispose(); }
+    finally { for (const scope of scopes.reverse()) await scope.dispose(); await dependencies.dispose(); await executor.dispose(); await tools.dispose(); await prompt.dispose(); }
   }
 
   test('real registry assembly hides MCP schemas, keeps native tools, and discovers live changes', () => fixture(async ({ctx, agent, call}) => {
@@ -336,7 +345,7 @@ if (libraries.status === 'unmeasured') {
       // A session that is not the steward's root (or none) never reaches an MCP tool or the transports.
       for (const name of ['mcp__sw__media__web_search', 'search_tools', 'call_tool'])
         assert.equal((await call(name, name === 'search_tools' ? { query: 'x' } : name === 'call_tool' ? { name: 'bash', arguments: {} } : {}, child)).isError, true, name);
-      assert.equal((await ctx.tools.execute({ name: 'mcp__sw__media__web_search', arguments: {}, signal: new AbortController().signal, callId: 'no-agent' })).isError, true);
+      assert.equal((await call('mcp__sw__media__web_search', {}, undefined)).isError, true, 'a call with no agent');
       // The request's tool list is the same whatever the catalog holds.
       const before = (await ctx.systemPrompt.assemble({ scope: root })).tools;
       turn = new Set(['mcp__sw__media__web_search', 'mcp__sw__mailme__search_messages']);

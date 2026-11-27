@@ -81,7 +81,7 @@ export const LOCAL_SESSION_ENV = 'DIRECTOR_LOCAL_SESSION';
 export const localSessionEnv = root => `${LOCAL_SESSION_ENV}_${createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12)}`;
 /** The DSH release this host is tested on (the repository's pin; README.md). Another one
  *  starts with a warning, not a refusal. */
-export const TESTED_DSH_VERSION = '0.2.1-rc.5';
+export const TESTED_DSH_VERSION = '0.2.2-rc.5';
 /** The plugin's python requirements (PyYAML, for the todo package). */
 const REQUIREMENTS = fileURLToPath(new URL('../requirements.txt', import.meta.url));
 /** The running DSH entry, its symlinks resolved: a global install starts from

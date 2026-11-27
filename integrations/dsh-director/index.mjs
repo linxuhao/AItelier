@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
+import { nestedToolCaller } from './lib/nested-call.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { basicsSection } from './lib/basics.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
@@ -171,6 +172,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     }
   };
   const { defineTool } = await import(dshLibrary('@deepseek-ai/dsh-tools'));
+  const runTool = nestedToolCaller(ctx, (await import(dshLibrary('@deepseek-ai/dsh-tools/pipeline'))).ToolExecutionPipeline);
   const llm = await import(dshLibrary('@deepseek-ai/dsh-llm'));
   const { createUserMessage } = llm;
   // roles() is synchronous and must return a valid table (the loaded one, extended):
@@ -204,7 +206,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     // A family-group question opens a turn as a person's message does (7.8.8).
     personMessage: message => message?.source?.kind === GROUP_SOURCE,
     registryNames: () => ctx.tools.schemas().map(schema => schema.name) }) : undefined;
-  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, rootRole, roles,
+  installToolDiscovery(ctx, { defineTool, HarnessError: llm.HarnessError, rootSession: config.sessionId, rootRole, roles, runTool,
     texts: { sectionName: labels.sectionPrefix + ':tool-discovery', section: texts.toolDiscoverySection,
       searchDescription: texts.tools.search_tools },
     ...(stewardCatalog ? { catalog: sessionId => stewardCatalog.catalog(sessionId),
@@ -450,15 +452,17 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   const resumeWorkers = async () => {
     if (config.resumeWorkers === false) return;
     const subagents = ctx.get('subagents');
-    if (typeof subagents?.sendMessage !== 'function' || typeof subagents.listChildren !== 'function') {
-      ctx.logger.warn('resume: no subagents service with sendMessage/listChildren; interrupted workers are not resumed'); return;
+    if (typeof subagents?.sendMessage !== 'function' || typeof subagents.listDescendants !== 'function') {
+      ctx.logger.warn('resume: no subagents service with sendMessage/listDescendants; interrupted workers are not resumed'); return;
     }
     const { plans, settled } = await planWork();
     pruneChildren();
     const candidates = resumeCandidates({ plans, settled, director: config.sessionId,
       isLive: id => children.has(id) || ctx.agents.get(id) !== undefined });
     if (!candidates.length) return;
-    const catalog = new Map((await subagents.listChildren(config.sessionId)).map(row => [row.id, row]));
+    // The director's direct children (DSH 0.2.2 lists the whole tree; each row names its parent).
+    const catalog = new Map((await subagents.listDescendants(config.sessionId))
+      .filter(row => row.kind === 'child' && row.parentId === config.sessionId).map(row => [row.id, row]));
     const resumed = [], failed = [];
     for (const plan of candidates) {
       const child = plan.child_session;
@@ -843,7 +847,7 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (host.proposals) registerProposalTools(scope, { defineTool, jsonOutput, proposals: host.proposals });
     // Step 24.1b (design-steward 7.8.9): outward actions confirmed by the person who asked,
     // when the host's catalog provides confirmations.
-    if (stewardCatalog && catalogHost.confirm) registerConfirmTools(scope, { ctx, defineTool, jsonOutput,
+    if (stewardCatalog && catalogHost.confirm) registerConfirmTools(scope, { ctx, defineTool, jsonOutput, runTool,
       HarnessError: llm.HarnessError, confirm: catalogHost.confirm, catalog: stewardCatalog,
       // A group turn's requester is one of its askers (7.8.9): the questions it took, newest last.
       groupQuestions: () => { const turn = groupTurns?.open(); return turn?.audience.kind === 'group' ? [...turn.questions] : undefined; },
@@ -854,11 +858,11 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (stewardCatalog && catalogHost.manage) registerConnectionTools(scope, { defineTool, jsonOutput,
       manage: catalogHost.manage, catalog: stewardCatalog, host: catalogHost });
     // Step 24.2 (design-steward 7.8.12): media_call and send_media, when the host has a media library.
-    if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
+    if (mediaHost && groupTurns) registerMediaTools(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError, runTool,
       media: mediaHost, catalog: stewardCatalog, turns: groupTurns, channels, ledger: urlLedger });
     // Step 24.4b (design-steward 7.8.24 "十"): calculate, the host's sandbox (absent: calc_unavailable at call time).
     if (mediaHost && groupTurns) registerCalcTool(scope, { defineTool, jsonOutput, media: mediaHost, catalog: stewardCatalog, turns: groupTurns });
-    if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError,
+    if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError, runTool,
       media: directorMedia, rootSession: config.sessionId, projectId: config.projectId, names: DIRECTOR_MEDIA_TOOLS });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
     if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });

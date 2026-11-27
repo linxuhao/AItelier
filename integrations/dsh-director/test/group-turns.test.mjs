@@ -829,6 +829,10 @@ async function bootWorld() {
     writeFileSync(join(base, 'index.mjs'), source);
   };
   stub('dsh-tools', 'export const defineTool = tool => tool;\n');
+  // Its ./pipeline subpath, which the boot reads for nested calls (lib/nested-call.mjs).
+  writeFileSync(join(dir, 'node_modules/@deepseek-ai/dsh-tools/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-tools', version: '0.0.0',
+    type: 'module', exports: { '.': './index.mjs', './pipeline': './pipeline.mjs' } }));
+  writeFileSync(join(dir, 'node_modules/@deepseek-ai/dsh-tools/pipeline.mjs'), 'export class ToolExecutionPipeline {}\n');
   stub('dsh-llm', 'export class HarnessError extends Error {}\nexport const createUserMessage = input => ({ ...input, id: "msg-1", role: "user" });\n');
   const installed = [], steered = [], images = [];
   let ready = 0;

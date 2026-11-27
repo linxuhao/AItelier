@@ -15,7 +15,7 @@ FastAPI app with the write gate ON, not argued.
 5. The whole chain in one run (the press witness of 7.7.16 end, director 418 item 4 and 420
    Q3): this real backend served over a loopback socket through a recording layer (each
    request's path, X-AItelier-Read-As, body, status and answer bytes), the real pinned DSH
-   0.2.1-rc.5 steward host with dsh-director and the AItelier adapter (runtime.mjs), a
+   0.2.2-rc.5 steward host with dsh-director and the AItelier adapter (runtime.mjs), a
    scripted model that records every request body, and a WeChat-shaped channel plugin
    carrying one family member's @-message of the bound group and the owner's 1:1 messages:
    - the anonymous answer: the group turn's portfolio_project reads of a private project and

@@ -30,7 +30,7 @@ export function apply(ctx) {
       }
       else if (child && !childMessaged) {
         childMessaged = true;
-        block = { type: 'tool-call', id: 'fixture-child-message', name: 'send_message', arguments: JSON.stringify({ agent_id: process.env.AITELIER_DSH_SESSION, message: 'CHILD_MESSAGE_MARKER' }) };
+        block = { type: 'tool-call', id: 'fixture-child-message', name: 'send_message', arguments: JSON.stringify({ agent: process.env.AITELIER_DSH_SESSION, message: 'CHILD_MESSAGE_MARKER' }) };
       }
       else if (child && !childShell) {
         childShell = true;

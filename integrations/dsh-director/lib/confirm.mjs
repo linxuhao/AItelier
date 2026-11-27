@@ -29,8 +29,10 @@
  *  @param catalog the StewardCatalog of this process.
  *  @param groupQuestions () => the open group turn's question ids (newest last), else undefined.
  *  @param currentTurn () => the turn open now (the one the host recorded), else undefined. */
+/** `runTool` runs one nested call (lib/nested-call.mjs); without it, `ctx.tools.execute` must answer one call
+ *  (a stand-in registry: the unit tests). */
 export function registerConfirmTools(scope, { ctx, defineTool, jsonOutput, HarnessError, confirm, catalog, groupQuestions = () => undefined,
-  currentTurn = () => undefined }) {
+  currentTurn = () => undefined, runTool }) {
   const outcomes = new Map();
   scope.tools.register(defineTool({ name: 'request_confirmation',
     description: 'Ask the person who requested it to confirm ONE outward action (send a mail, change or share a document) before it runs. name is the exact tool name search_tools gave you, arguments the exact arguments. The person gets a message written by code with every argument and a code to reply with; tell them you sent it, and after they reply with the code call run_confirmed(code). Only a person\'s request in this conversation can start it.',
@@ -85,8 +87,8 @@ export function registerConfirmTools(scope, { ctx, defineTool, jsonOutput, Harne
       const note = record.group ? { type: 'text', text: `[This action was asked for and confirmed in the family group 「${record.group}」 by ${record.confirmed_by ?? 'a member of that group'}; it ran in your owner's turn.]` } : undefined;
       // The stored name and arguments, through the same guards (catalog, visibility,
       // outside content) as a direct call; the gateway consumes the confirmation.
-      const result = await ctx.tools.execute({ name: record.name, arguments: record.arguments, agent: exec.agent,
-        callId: exec.callId + ':run_confirmed', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
+      const result = await (runTool ?? (input => ctx.tools.execute(input)))({ name: record.name, arguments: record.arguments, agent: exec.agent,
+        ...(exec.toolSet ? { toolSet: exec.toolSet } : {}), callId: exec.callId + ':run_confirmed', rootCallId: exec.rootCallId, parent: exec.token, signal: exec.signal });
       // Whatever the outcome: a failed forward still used the group's confirmation (PRIV-2). The
       // backend's gateway puts the same line in what it forwards; it is not repeated.
       const named = note && (result.content ?? []).some(block => block?.text === note.text);

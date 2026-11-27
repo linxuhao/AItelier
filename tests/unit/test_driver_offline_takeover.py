@@ -784,6 +784,31 @@ def test_take_over_attempt_refusals_for_an_offline_owner(world):
     assert again.code == "stale_fence"                               # the fence moved to 2
 
 
+def test_take_over_attempt_by_the_owner_terminal_names_a_route_it_can_actually_take(world):
+    """Since 6f0cbae the env admin token is the owner's terminal: kind `cli_owner`,
+    is_admin from the `owner-cli` row, and NO driver_id (`world.owner` is that shape,
+    minus the request layer that mints it). The refusal may not promise an "admin
+    driver token" - no credential authenticates as one any more - and the route it
+    does name must work for exactly the identity that was just refused."""
+    enforced(world)
+    _, attempt = bob_attempt(world)
+    refused = refusal(lambda: take_attempt(world.owner, attempt))
+    assert refused.code == "driver_identity_required"
+    message = str(refused)
+    assert "admin driver token" not in message
+    assert "abandon_external_attempt" in message
+    # Measured, not asserted: that same no-driver admin abandons this attempt (an admin
+    # does it on a healthy lease as break glass), and a registered driver then registers
+    # the work again - the whole route the message names.
+    abandoned = write(world.owner, "abandon_external_attempt", attempt_id=attempt["attempt_id"],
+                      expected_owner_fence=1, abandon_kind="unknown", reason="owner at the terminal")
+    assert abandoned["status"] == "abandoned" and abandoned["break_glass"] is True
+    # The other half of that route - the replacement attempt needs a base_sha verified
+    # against the bound source and a checkout other than the abandoned worker's - is
+    # pinned by tests/unit/test_state_p3_enforced_claims.py
+    # (`test_abandon_unknown_binds_the_next_attempt_to_a_base_and_another_workspace`).
+
+
 def test_take_over_attempt_refuses_a_non_member_only_through_the_strict_registry_check(world, monkeypatch):
     """With the P3 membership helper unable to judge (no live registry), the
     offline path still fails closed on the transaction's own registry rows."""

@@ -273,8 +273,18 @@ class StateRecovery:
         reason = text(reason, "takeover reason", 4000)
         override_reason = override_reason_text(override_reason)
         if not self.driver_id:
-            raise ClaimError("driver_identity_required", "an attempt is owned by a registered driver; the owner's "
-                             "e-mail cannot take one over - use an admin driver token (owner-cli)")
+            # Since 6f0cbae (owner ruling 2026-11-18) neither the owner's e-mail nor the
+            # environment's admin token is a driver: that token mints `cli-owner` (no
+            # driver_id, is_admin from the `owner-cli` row). Naming an "admin driver
+            # token" here promised a credential shape that does not exist - and the
+            # token the reader already holds is the one being refused.
+            raise ClaimError("driver_identity_required",
+                             "an attempt is owned by a registered driver, and taking one over needs a driver "
+                             "identity; the owner's e-mail and the environment's admin token (the owner's "
+                             "terminal, `cli-owner`) are not drivers. Present a registered driver's token "
+                             "(driver_whoami reports which identity the token you hold carries), or - while the "
+                             "attempt is reclaimable, and an admin may do it on a healthy lease too - "
+                             "abandon_external_attempt it and register the work again under a driver")
         from core.state_takeover import refuse_shared_identity
         refuse_shared_identity(self.driver_id)
         current = now_stamp()

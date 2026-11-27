@@ -8,7 +8,9 @@ certify the honesty of a report. Acceptance itself is shared with SkillFlow.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 
 from core.state_graph import StateConflict, StateGraphError, digest, integer, key, now, text
 from core import driver_presence
@@ -17,6 +19,12 @@ from core.state_attempts import _public, release_bound_claims
 from core.state_claims import ClaimError
 from core.state_enforcement import enforced
 from core.state_report_integrity import retain_report, store_report_blob, validate_external_semantics
+
+logger = logging.getLogger(__name__)
+# A candidate retention must never hold the single State write lock long enough
+# to evict another writer's 10 s budget. The measured fix (0.059 s delta,
+# 0.421 s raw keyframe on a 120 MB bundle) is far below this promise.
+BUNDLE_HOLD_PROMISE_SEC = 1.0
 
 
 class ExternalAttempts:
@@ -201,118 +209,139 @@ class ExternalAttempts:
                    'quiescent':quiescent, 'artifact':artifact, 'artifact_kind':artifact_kind,
                    'detail':detail, 'actor':self.actor}
         fingerprint = digest(payload)
-        with self.store.transaction(write=True) as conn:
-            # The reporter is back: commits with this observation or not at all.
-            driver_presence.mark_back(conn, self.driver_id, 'report_external_attempt')
-            a = self.attempts._attempt(conn, attempt_id)
-            if a['execution_kind'] != 'external':
-                raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
-            late = self._authorize_report(conn, a, fence)
-            if late and quiescent and report_bytes is None:
-                raise StateConflict('a quiescence attestation on an abandoned attempt needs its retained report')
-            prior = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
-                                 (attempt_id, observation_id)).fetchone()
-            if prior:
-                if prior['payload_hash'] != fingerprint:
-                    raise StateConflict('observation ID was already used with a different payload; append a new correction')
-                return {**_public(a), 'observation':dict(prior), 'idempotent':True}
-            if context_hash != digest(json.loads(a['context_json'])):
-                raise StateConflict('report describes a different frozen goal/contract/dependency context')
-            if a['observation_version'] != expected_version:
-                raise StateConflict('external observation version changed; reload before appending')
-            if a['status'] in {'failed','superseded'}:
-                raise StateConflict('this external attempt is terminal; use a new attempt')
-            # Once settled, success may only be retracted as a settled failure.
-            # The original artifact/report stays immutable; changed code means
-            # a new attempt, not a silently edited completion receipt.
-            if a['status'] == 'candidate' and status != 'failed':
-                raise StateConflict('candidate completion is immutable; record evidence or start a new attempt')
-            if status == 'candidate':
-                used = conn.execute(
-                    'SELECT attempt_id,observation_id FROM state_external_observations '
-                    'WHERE report_sha256=? LIMIT 1', (report_sha256,)).fetchone()
-                if used:
-                    raise StateConflict(
-                        'candidate report digest was already bound to an earlier observation; '
-                        'produce a fresh report for this candidate')
-            current = self.attempts._pins_current(conn, a)
-            result_status = 'superseded' if terminal and not current else status
-            if late:
-                # §4.4: the attempt was abandoned after its lease lapsed. The
-                # bytes are kept, the row says late_after_abandon, and the result
-                # is superseded: it cannot make the node CANDIDATE or revive the
-                # attempt. A finished worker registers its artifact anew.
-                result_status = 'superseded'
-            version = expected_version + 1
-            if report_bytes is not None:
-                store_report_blob(conn, report_ref, report_sha256, report_bytes)
-            if git_artifact is not None:
-                from core.state_git_artifacts import store_candidate
-                store_candidate(conn, git_artifact, plan=bundle_plan)
-            conn.execute('INSERT INTO state_external_observations(attempt_id,observation_id,version,status,resulting_status,'
-                         'quiescent,artifact_ref,artifact_kind,report_ref,report_sha256,actor,detail,payload_hash,context_hash,created_at,'
-                         'late_after_abandon,fence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                         (attempt_id,observation_id,version,status,result_status,int(quiescent),artifact,artifact_kind,
-                          report_ref,report_sha256,self.actor,detail,fingerprint,context_hash,now(),int(late),fence))
-            if late:
-                conn.execute('UPDATE state_attempts SET observation_version=?,updated_at=? WHERE attempt_id=?',
-                             (version,now(),attempt_id))
-                owner_settled = False
-                if quiescent and a['owner_fence'] is not None:
-                    # The original reporter attests the abandoned worker is
-                    # quiescent: the owner-registry row settles, so the deployment
-                    # gate stops counting an abandon_kind=unknown attempt as a live
-                    # external owner. The attempt itself stays abandoned.
-                    owner_settled = conn.execute(
-                        "UPDATE state_external_owners SET status='settled',updated_at=?,settled_at=? "
-                        "WHERE attempt_id=? AND status='abandoned'", (now(), now(), attempt_id)).rowcount == 1
+        # Hold of the single State write lock, NOT the planning time above: the
+        # clock starts on the line before the transaction and stops in finally,
+        # after its context manager has committed (or rolled back).
+        retained = None
+        committed = False
+        hold_start = time.monotonic() if git_artifact is not None else None
+        try:
+            with self.store.transaction(write=True) as conn:
+                # The reporter is back: commits with this observation or not at all.
+                driver_presence.mark_back(conn, self.driver_id, 'report_external_attempt')
+                a = self.attempts._attempt(conn, attempt_id)
+                if a['execution_kind'] != 'external':
+                    raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
+                late = self._authorize_report(conn, a, fence)
+                if late and quiescent and report_bytes is None:
+                    raise StateConflict('a quiescence attestation on an abandoned attempt needs its retained report')
+                prior = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
+                                     (attempt_id, observation_id)).fetchone()
+                if prior:
+                    if prior['payload_hash'] != fingerprint:
+                        raise StateConflict('observation ID was already used with a different payload; append a new correction')
+                    return {**_public(a), 'observation':dict(prior), 'idempotent':True}
+                if context_hash != digest(json.loads(a['context_json'])):
+                    raise StateConflict('report describes a different frozen goal/contract/dependency context')
+                if a['observation_version'] != expected_version:
+                    raise StateConflict('external observation version changed; reload before appending')
+                if a['status'] in {'failed','superseded'}:
+                    raise StateConflict('this external attempt is terminal; use a new attempt')
+                # Once settled, success may only be retracted as a settled failure.
+                # The original artifact/report stays immutable; changed code means
+                # a new attempt, not a silently edited completion receipt.
+                if a['status'] == 'candidate' and status != 'failed':
+                    raise StateConflict('candidate completion is immutable; record evidence or start a new attempt')
+                if status == 'candidate':
+                    used = conn.execute(
+                        'SELECT attempt_id,observation_id FROM state_external_observations '
+                        'WHERE report_sha256=? LIMIT 1', (report_sha256,)).fetchone()
+                    if used:
+                        raise StateConflict(
+                            'candidate report digest was already bound to an earlier observation; '
+                            'produce a fresh report for this candidate')
+                current = self.attempts._pins_current(conn, a)
+                result_status = 'superseded' if terminal and not current else status
+                if late:
+                    # §4.4: the attempt was abandoned after its lease lapsed. The
+                    # bytes are kept, the row says late_after_abandon, and the result
+                    # is superseded: it cannot make the node CANDIDATE or revive the
+                    # attempt. A finished worker registers its artifact anew.
+                    result_status = 'superseded'
+                version = expected_version + 1
+                if report_bytes is not None:
+                    store_report_blob(conn, report_ref, report_sha256, report_bytes)
+                if git_artifact is not None:
+                    from core.state_git_artifacts import store_candidate
+                    store_candidate(conn, git_artifact, plan=bundle_plan)
+                    retained = (git_artifact['bundle_sha256'], len(git_artifact['bundle_bytes']),
+                                'delta' if bundle_plan.codec == 'zstd-prefix' else 'keyframe',
+                                bundle_plan.codec)
+                conn.execute('INSERT INTO state_external_observations(attempt_id,observation_id,version,status,resulting_status,'
+                             'quiescent,artifact_ref,artifact_kind,report_ref,report_sha256,actor,detail,payload_hash,context_hash,created_at,'
+                             'late_after_abandon,fence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                             (attempt_id,observation_id,version,status,result_status,int(quiescent),artifact,artifact_kind,
+                              report_ref,report_sha256,self.actor,detail,fingerprint,context_hash,now(),int(late),fence))
+                if late:
+                    conn.execute('UPDATE state_attempts SET observation_version=?,updated_at=? WHERE attempt_id=?',
+                                 (version,now(),attempt_id))
+                    owner_settled = False
+                    if quiescent and a['owner_fence'] is not None:
+                        # The original reporter attests the abandoned worker is
+                        # quiescent: the owner-registry row settles, so the deployment
+                        # gate stops counting an abandon_kind=unknown attempt as a live
+                        # external owner. The attempt itself stays abandoned.
+                        owner_settled = conn.execute(
+                            "UPDATE state_external_owners SET status='settled',updated_at=?,settled_at=? "
+                            "WHERE attempt_id=? AND status='abandoned'", (now(), now(), attempt_id)).rowcount == 1
+                    self.store._event(conn, a['project_id'], a['node_key'], 'external_attempt_observed',
+                        {'attempt_id':attempt_id,'observation_id':observation_id,'version':version,'status':result_status,
+                         'reported_status':status,'report_sha256':report_sha256,'quiescent':quiescent,'actor':self.actor,
+                         'stale_inputs':not current,'late_after_abandon':True,'fence':fence,
+                         'owner_settled':owner_settled})
+                    updated = self.attempts._attempt(conn, attempt_id)
+                    row = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
+                                       (attempt_id,observation_id)).fetchone()
+                    committed = True
+                    return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current,
+                            'late_after_abandon':True,'owner_settled':owner_settled}
+                owner_status = {'running':'active','paused':'paused','unknown':'unknown'}.get(
+                    result_status, 'settled')
+                updated_owner = conn.execute(
+                    'UPDATE state_external_owners SET status=?,updated_at=?,settled_at=? WHERE attempt_id=?',
+                    (owner_status, now(), now() if owner_status == 'settled' else None, attempt_id))
+                if updated_owner.rowcount != 1:
+                    raise StateConflict('external attempt has no durable owner registration')
+                node = self.store._node(conn, a['project_id'], a['node_key'])
+                if result_status != 'candidate' and node['verified_receipt']:
+                    rec = conn.execute('SELECT attempt_id FROM state_acceptances WHERE receipt_id=?', (node['verified_receipt'],)).fetchone()
+                    if rec and rec[0] == attempt_id:
+                        affected = self.store._invalidate(conn, a['project_id'], a['node_key'])
+                        self.store._event(conn, a['project_id'], a['node_key'], 'acceptance_invalidated',
+                            {'reason':'external harness retracted its accepted candidate','attempt_id':attempt_id,'invalidated':affected})
+                conn.execute('UPDATE state_attempts SET status=?,observation_version=?,artifact_ref=?,artifact_kind=?,'
+                             'terminal_observation_id=?,error=?,updated_at=? WHERE attempt_id=?',
+                             (result_status,version,artifact if status=='candidate' else a['artifact_ref'],
+                              artifact_kind if status=='candidate' else a['artifact_kind'],
+                              observation_id if terminal else a['terminal_observation_id'],
+                              detail if status=='failed' else None,now(),attempt_id))
+                if result_status == 'candidate':
+                    latest = conn.execute('SELECT attempt_id FROM state_attempts WHERE project_id=? AND node_key=? ORDER BY seq DESC LIMIT 1',
+                                          (a['project_id'],a['node_key'])).fetchone()
+                    if latest[0] == attempt_id and node['status'] != 'VERIFIED':
+                        conn.execute("UPDATE state_nodes SET status='CANDIDATE',updated_at=? WHERE project_id=? AND node_key=?",
+                                     (now(),a['project_id'],a['node_key']))
                 self.store._event(conn, a['project_id'], a['node_key'], 'external_attempt_observed',
                     {'attempt_id':attempt_id,'observation_id':observation_id,'version':version,'status':result_status,
-                     'reported_status':status,'report_sha256':report_sha256,'quiescent':quiescent,'actor':self.actor,
-                     'stale_inputs':not current,'late_after_abandon':True,'fence':fence,
-                     'owner_settled':owner_settled})
+                     'report_sha256':report_sha256,'quiescent':quiescent,'actor':self.actor,'stale_inputs':not current,
+                     'fence':fence})
+                if terminal and a['owner_driver_id']:
+                    # A settled attempt releases the claims bound to it (design §4.3).
+                    release_bound_claims(self.store, conn, a, self.actor, result_status)
                 updated = self.attempts._attempt(conn, attempt_id)
                 row = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
                                    (attempt_id,observation_id)).fetchone()
-                return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current,
-                        'late_after_abandon':True,'owner_settled':owner_settled}
-            owner_status = {'running':'active','paused':'paused','unknown':'unknown'}.get(
-                result_status, 'settled')
-            updated_owner = conn.execute(
-                'UPDATE state_external_owners SET status=?,updated_at=?,settled_at=? WHERE attempt_id=?',
-                (owner_status, now(), now() if owner_status == 'settled' else None, attempt_id))
-            if updated_owner.rowcount != 1:
-                raise StateConflict('external attempt has no durable owner registration')
-            node = self.store._node(conn, a['project_id'], a['node_key'])
-            if result_status != 'candidate' and node['verified_receipt']:
-                rec = conn.execute('SELECT attempt_id FROM state_acceptances WHERE receipt_id=?', (node['verified_receipt'],)).fetchone()
-                if rec and rec[0] == attempt_id:
-                    affected = self.store._invalidate(conn, a['project_id'], a['node_key'])
-                    self.store._event(conn, a['project_id'], a['node_key'], 'acceptance_invalidated',
-                        {'reason':'external harness retracted its accepted candidate','attempt_id':attempt_id,'invalidated':affected})
-            conn.execute('UPDATE state_attempts SET status=?,observation_version=?,artifact_ref=?,artifact_kind=?,'
-                         'terminal_observation_id=?,error=?,updated_at=? WHERE attempt_id=?',
-                         (result_status,version,artifact if status=='candidate' else a['artifact_ref'],
-                          artifact_kind if status=='candidate' else a['artifact_kind'],
-                          observation_id if terminal else a['terminal_observation_id'],
-                          detail if status=='failed' else None,now(),attempt_id))
-            if result_status == 'candidate':
-                latest = conn.execute('SELECT attempt_id FROM state_attempts WHERE project_id=? AND node_key=? ORDER BY seq DESC LIMIT 1',
-                                      (a['project_id'],a['node_key'])).fetchone()
-                if latest[0] == attempt_id and node['status'] != 'VERIFIED':
-                    conn.execute("UPDATE state_nodes SET status='CANDIDATE',updated_at=? WHERE project_id=? AND node_key=?",
-                                 (now(),a['project_id'],a['node_key']))
-            self.store._event(conn, a['project_id'], a['node_key'], 'external_attempt_observed',
-                {'attempt_id':attempt_id,'observation_id':observation_id,'version':version,'status':result_status,
-                 'report_sha256':report_sha256,'quiescent':quiescent,'actor':self.actor,'stale_inputs':not current,
-                 'fence':fence})
-            if terminal and a['owner_driver_id']:
-                # A settled attempt releases the claims bound to it (design §4.3).
-                release_bound_claims(self.store, conn, a, self.actor, result_status)
-            updated = self.attempts._attempt(conn, attempt_id)
-            row = conn.execute('SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
-                               (attempt_id,observation_id)).fetchone()
-            return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current}
+                committed = True
+                return {**_public(updated),'observation':dict(row),'idempotent':False,'stale_inputs':not current}
+        finally:
+            # `with` has already committed (or rolled back) here. Measure only
+            # the lock hold; never log, format or read the clock inside it.
+            if retained is not None and committed:
+                hold_ms = (time.monotonic() - hold_start) * 1000.0
+                level = logging.WARNING if hold_ms >= BUNDLE_HOLD_PROMISE_SEC * 1000.0 else logging.INFO
+                logger.log(level, 'candidate bundle retention hold: bundle_sha256=%s digest=%s raw_size=%d '
+                                  'plan=%s codec=%s hold_ms=%.3f',
+                           retained[0], retained[0], retained[1], retained[2], retained[3], hold_ms)
 
     def inspect(self, attempt_id):
         """Read-only observation view; never calls a runtime or opens a report URL."""

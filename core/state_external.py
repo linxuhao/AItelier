@@ -22,9 +22,16 @@ from core.state_report_integrity import retain_report, store_report_blob, valida
 
 logger = logging.getLogger(__name__)
 # A candidate retention must never hold the single State write lock long enough
-# to evict another writer's 10 s budget. The measured fix (0.059 s delta,
-# 0.421 s raw keyframe on a 120 MB bundle) is far below this promise.
-BUNDLE_HOLD_PROMISE_SEC = 1.0
+# to evict another writer's 10 s retry budget. That hold is the WHOLE
+# BEGIN..COMMIT window, and the COMMIT dominates it - one fsync of the payload,
+# which the code does not size. On one 132 MB raw keyframe the same host
+# measured 1.52 s of hold in an arm whose io some avg10 ran 5.6 -> 13.0, and
+# 5.34 s / 7.92 s on the same fixture in other arms that day, against a
+# 0.46-0.47 s transaction body. The 0.42 s the old 1.0 s band was drawn from is
+# one quiet-host reading of that whole window, so it cannot be a band for the
+# code's own work; the warning therefore sits at half a waiting writer's
+# budget - where one retention starts spending somebody else's retries.
+BUNDLE_HOLD_WARN_SEC = 5.0
 
 
 class ExternalAttempts:
@@ -338,7 +345,7 @@ class ExternalAttempts:
             # the lock hold; never log, format or read the clock inside it.
             if retained is not None and committed:
                 hold_ms = (time.monotonic() - hold_start) * 1000.0
-                level = logging.WARNING if hold_ms >= BUNDLE_HOLD_PROMISE_SEC * 1000.0 else logging.INFO
+                level = logging.WARNING if hold_ms >= BUNDLE_HOLD_WARN_SEC * 1000.0 else logging.INFO
                 logger.log(level, 'candidate bundle retention hold: bundle_sha256=%s digest=%s raw_size=%d '
                                   'plan=%s codec=%s hold_ms=%.3f',
                            retained[0], retained[0], retained[1], retained[2], retained[3], hold_ms)

@@ -13,8 +13,9 @@ from types import SimpleNamespace
 import pytest
 
 from core.dsh_driver import DshDrivers
-from core.dsh_host import (EXIT_LOG_LINES, EXIT_RECORD_LIMIT, STARTUP_ERROR_LIMIT, exit_cause,
-                           last_startup_error, record_startup_failure, runtime_log_tail, supervise)
+from core.dsh_host import (EXIT_LOG_LINES, EXIT_RECORD_LIMIT, SERVING_PHASES, STARTUP_ERROR_LIMIT,
+                           exit_cause, last_startup_error, record_startup_failure, runtime_log_tail,
+                           supervise)
 from core.drivers import DriverRegistry
 from core.state_database import StateDatabase
 from core.state_service import StateService
@@ -234,7 +235,7 @@ async def test_a_foreign_last_error_survives_a_recovery(crashing):
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)
         await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
@@ -244,12 +245,13 @@ async def test_a_foreign_last_error_survives_a_recovery(crashing):
     recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
                            command=host.command)
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01))
     try:
         await eventually(lambda: recovered.running('alpha'))
-        # The foreign text lands while this start is still inside the window,
-        # so the recovery branch is what reads it.
+        # The foreign text lands while this start is still undecided: the
+        # clearing the serving row triggers is what reads it here.
         backend.update('alpha', last_error=foreign)
+        backend.update('alpha', phase='running')  # what the runtime reports when it serves
         await eventually(lambda: not record.exists())
         await asyncio.sleep(0.2)
         current = backend.get('alpha')
@@ -278,7 +280,7 @@ async def test_a_row_that_cannot_be_stamped_does_not_end_supervision(crashing, c
     real_update = host.update
     monkeypatch.setattr(host, 'update', locked)
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)  # the on-disk record is still written
         assert json.loads(record.read_text())['attempts'] >= 1
@@ -295,26 +297,28 @@ async def test_a_row_that_cannot_be_stamped_does_not_end_supervision(crashing, c
         stopped.set(); await task
 
 
-async def test_a_start_that_outlives_the_window_is_never_stamped(crashing):
-    """The healthy path stays silent: a good start needs no failure text."""
+async def test_a_start_that_serves_is_never_stamped(crashing):
+    """The healthy path stays silent: a serving start needs no failure text."""
     backend, host = crashing
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)  # alpha's one death is spent on this run
         await eventually(lambda: backend.get('alpha')['phase'] == 'failed')
     finally:
         stopped.set(); await task
-    # A fresh supervisor whose FIRST start of alpha outlives the window: it must
-    # end with no failure text and no failed phase of the supervisor's making.
+    # A fresh supervisor whose FIRST start of alpha reports a serving phase: it
+    # must end with no failure text and no failed phase of the supervisor's making.
     recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
                            command=host.command)
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01, startup_window=0.3))
+    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01))
     try:
-        await eventually(lambda: not record.exists())  # the window passed, survived
+        await eventually(lambda: recovered.running('alpha'))
+        backend.update('alpha', phase='running')  # what the runtime reports when it serves
+        await eventually(lambda: not record.exists())  # that phase decided the start
         await asyncio.sleep(0.4)
         current = backend.get('alpha')
         assert (current['last_error'] or '') == '', current
@@ -336,7 +340,7 @@ async def test_the_runtime_exit_notice_does_not_hide_the_streak(crashing):
     record = host.root / alpha['driver_id'] / 'startup-failures.json'
     streak = 'DSH: failed start 1 in a row: '
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)
         await eventually(lambda: (backend.get('alpha')['last_error'] or '').startswith(streak))
@@ -392,7 +396,7 @@ async def test_a_child_that_dies_after_spawn_is_a_failed_start(crashing):
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)
         state = json.loads(record.read_text())
@@ -420,12 +424,12 @@ async def test_a_child_that_dies_after_spawn_is_a_failed_start(crashing):
 
 
 async def test_a_start_that_stays_up_clears_the_record(crashing):
-    """A later start that outlives the window ends the streak: no stale failure."""
+    """A later start that reports a serving phase ends the streak: no stale failure."""
     backend, host = crashing
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)
         # The failed start was stamped on the row too; a recovery has to undo
@@ -434,13 +438,14 @@ async def test_a_start_that_stays_up_clears_the_record(crashing):
     finally:
         stopped.set(); await task
     # A new supervisor process, the way the fault gets fixed: the driver it
-    # respawns now stays up, and the record of the old streak must go with it.
+    # respawns now reports in, and the record of the old streak must go with it.
     recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
                            command=host.command)
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01))
     try:
         await eventually(lambda: recovered.running('alpha'))
+        backend.update('alpha', phase='running')  # what the runtime reports when it serves
         await eventually(lambda: not record.exists())
         await asyncio.sleep(0.2)
         assert not record.exists()
@@ -460,7 +465,7 @@ async def test_each_failed_start_is_printed_once_and_a_healthy_driver_prints_not
     await backend.start('beta', actor='fixture')
     record = host.root / alpha['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(record.exists)
         # Many more iterations over a child that is already counted: the failure
@@ -490,7 +495,7 @@ async def test_the_other_driver_keeps_being_supervised_while_one_fails(crashing)
     record = host.root / alpha['driver_id'] / 'startup-failures.json'
     marker = host.root / beta['driver_id'] / 'host-process.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(lambda: record.exists() and marker.exists())
         pid = host.processes['beta'].pid
@@ -516,7 +521,7 @@ async def test_a_failure_record_that_cannot_be_written_does_not_end_supervision(
 
     monkeypatch.setattr('core.dsh_host.record_startup_failure', full_disk)
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=1))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
 
     def refusal_reported():
         return 'No space left on device' in capsys.readouterr().out
@@ -536,11 +541,11 @@ async def test_a_failure_record_that_cannot_be_written_does_not_end_supervision(
 def never_serves(tmp_path):
     """`alpha`'s child dies 6 s after EVERY spawn; `beta`'s stays up.
 
-    Six seconds is past the 5 s startup window, so an age-keyed rule diagnosed
-    nothing here; the child also never reports a serving phase, because it cannot
-    load its session at all. Each spawn records its own wall-clock instant, so a
-    test can measure the retry spacing the supervisor chose: 15 s for a start that
-    has no counted failure behind it, 30 s after one.
+    Six seconds is long enough that an age-keyed rule called this a working
+    start; the child never reports a serving phase, because it cannot load its
+    session at all, so every death here is a failed start. Each spawn records its
+    own wall-clock instant, so a test can measure the retry spacing the supervisor
+    chose: 15 s for a start that has no counted failure behind it, 30 s after one.
     """
     spawns = tmp_path / 'alpha-spawns'
     script = tmp_path / 'child.py'
@@ -576,11 +581,11 @@ def spawn_times(path):
 
 
 async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_serves, capsys):
-    """Alive past the 5 s window is not "served": the age is the wrong question.
+    """Alive for 6 s is not "served": the age is the wrong question.
 
-    The same child that is a failed start with the window at 12 s produced nothing
-    at the shipped 5 s, because surviving the window was treated as proof that the
-    start worked and the death that followed was judged by nobody.
+    The same child that a 12 s age rule called a working start produced nothing
+    under a 5 s rule, because surviving an elapsed window was mistaken for proof
+    that the start worked and the death that followed was judged by nobody.
     """
     backend, host, spawns = never_serves
     row = await backend.start('alpha', actor='fixture')
@@ -619,18 +624,98 @@ async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_s
         stopped.set(); await task
 
 
-async def test_a_death_after_the_driver_served_is_an_ordinary_restart(never_serves, capsys):
-    """The same child, the same exit: served is what separates a boot failure from a kill.
+async def test_two_deaths_that_never_served_grow_one_streak(never_serves, capsys):
+    """Two children that outlive 5 s without serving are starts 1 and 2, not two 1s.
 
-    The window is longer than the child lives, so the death itself is what the
-    supervisor judges - and the row reported a serving phase before it, which is
-    exactly what the runtime writes when a driver really reports in.
+    The journal witness had 46 lines with uptimes 33-119 s, every one reading
+    "1 in a row": an age-keyed clear threw the streak away before the death that
+    should have grown it. Here the child dies at 6 s, so the same shape fits in
+    one test.
     """
     backend, host, spawns = never_serves
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=10))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(lambda: host.running('alpha'))
+        assert backend.get('alpha')['phase'] not in SERVING_PHASES  # alive, not served
+        await for_at_most(20, lambda: record.exists())
+        first = json.loads(record.read_text())
+        assert first['attempts'] == 1, first
+        first_failed_at = first['first_failed_at']
+        first_lines = [line for line in capsys.readouterr().out.splitlines()
+                       if 'alpha' in line and 'died' in line]
+        assert len(first_lines) == 1, first_lines
+        uptime = re.search(r'died ([0-9.]+)s after start', first_lines[0])
+        assert uptime and 5 < float(uptime.group(1)) < 120, first_lines[0]
+        assert 'failed start 1 in a row' in first_lines[0], first_lines[0]
+        # The second death comes after the backoff the first counted failure buys.
+        text = await journal(capsys, lambda out: 'failed start 2 in a row' in out, seconds=45)
+        second_lines = [line for line in text.splitlines()
+                        if 'alpha' in line and 'died' in line]
+        assert len(second_lines) == 1, text
+        assert second_lines[0].startswith(
+            f'DSH host alpha: {row["driver_id"]} died '), second_lines[0]
+        assert 'failed start 2 in a row' in second_lines[0], second_lines[0]
+        assert backend.get('alpha')['last_error'].startswith(
+            'DSH: failed start 2 in a row: '), backend.get('alpha')
+        state = json.loads(record.read_text())
+        assert state['attempts'] == 2, state
+        assert state['first_failed_at'] == first_failed_at, (first, state)
+        # The two deaths are 30 s apart, so the one-second stamps must differ:
+        # an unchanged first_failed_at here can only mean the streak continued.
+        assert state['last_failed_at'] > first['last_failed_at'], (first, state)
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_serving_phase_ends_the_streak_and_its_death_is_not_counted(
+        never_serves, capsys):
+    """Service clears a counted streak; the served child's later death is ordinary."""
+    backend, host, spawns = never_serves
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await for_at_most(20, lambda: record.exists())
+        assert json.loads(record.read_text())['attempts'] == 1
+    finally:
+        stopped.set(); await task
+    capsys.readouterr()  # the first death's line belongs to the old streak
+    recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
+                           command=host.command)
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01))
+    try:
+        await eventually(lambda: recovered.running('alpha'))
+        proc = recovered.processes['alpha']
+        backend.update('alpha', phase='running')  # the runtime says THIS spawn served
+        await eventually(lambda: not record.exists())
+        assert not (backend.get('alpha')['last_error'] or '').startswith('DSH: failed start ')
+        text = await journal(capsys, lambda out: f'pid {proc.pid}' in out)
+        text += capsys.readouterr().out  # drain whatever came after the exit line too
+        assert not [line for line in text.splitlines()
+                    if 'alpha' in line and 'died' in line], text
+        assert not record.exists()
+        assert not (backend.get('alpha')['last_error'] or '').startswith('DSH: failed start ')
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_death_after_the_driver_served_is_an_ordinary_restart(never_serves, capsys):
+    """The same child, the same exit: served is what separates a boot failure from a kill.
+
+    The child never reports a serving phase on its own, so the test writes the
+    phase the runtime would have written for a real driver; it is that phase,
+    not the child's age, that makes the later death an ordinary restart.
+    """
+    backend, host, spawns = never_serves
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(lambda: host.running('alpha'))
         # Every spawn reports in before it dies, so every death here is a served
@@ -656,10 +741,9 @@ def serves_then_exits(tmp_path):
 
     The row's serving phase is written by the runtime, never by the child, so the
     test stamps it the way /activity would. Two seconds is long enough for the
-    supervisor to read that phase - and, with the window this test passes, long
-    enough for the start to be DECIDED, which is the state a driver that had been
-    serving for hours is in when it dies: nothing about its start is pending any
-    more, so nothing was watching it.
+    supervisor to read that phase, which DECIDES the start: it is the state a
+    driver that had been serving for hours is in when it dies, with nothing about
+    its start pending any more and nothing watching it.
     """
     script = tmp_path / 'child.py'
     script.write_text("import sys, time\ntime.sleep(2)\nsys.exit(7)\n")
@@ -694,7 +778,7 @@ async def test_a_serving_driver_that_exits_on_its_own_is_recorded(serves_then_ex
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(lambda: host.running('alpha'))
         proc = host.processes['alpha']
@@ -810,7 +894,7 @@ async def test_a_serving_exit_record_carries_what_the_driver_said_before_dying(
     backend, host = serving_exit
     row = await backend.start('alpha', actor='fixture')
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(lambda: host.running('alpha'))
         backend.update('alpha', phase='running')  # what the runtime reports when it serves
@@ -845,7 +929,7 @@ async def test_a_serving_exit_record_names_an_absent_log_instead_of_an_empty_fie
     backend, host = serving_exit
     row = await backend.start('alpha', actor='fixture')
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(lambda: host.running('alpha'))
         backend.update('alpha', phase='running')
@@ -871,7 +955,7 @@ async def test_a_serving_exit_record_bounds_a_log_far_longer_than_the_cap(
     backend, host = serving_exit
     row = await backend.start('alpha', actor='fixture')
     stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(host, stopped, interval=0.01, startup_window=0.2))
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
         await eventually(lambda: host.running('alpha'))
         backend.update('alpha', phase='running')

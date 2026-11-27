@@ -18,23 +18,6 @@ from pathlib import Path
 
 from core.dsh_driver import DshDrivers, fallback_restart, media_root, role_for_project
 
-# How long a child must stay up before its start counts as a successful one.
-#
-# `start()` returning means a process was spawned, not that it can run: a driver
-# that cannot load its session dies in seconds, and every liveness signal this
-# system already has is too slow to see that. `publish()` removes the process
-# marker the moment the child is gone, and the container reads that marker
-# through a 15 s freshness window, so a driver that dies and is respawned between
-# two reads looks exactly like an idle one. Measured 2026-11-15: two drivers
-# respawned for about three hours and the only trace was a repeated line in each
-# driver's own runtime.log - the unit journal stayed empty.
-#
-# Five seconds: long enough that an ordinary start - the runtime loading itself
-# and its MCP servers - is not mistaken for a death, and well under the 15 s
-# floor of the retry backoff, so a fast death is decided before the retry it has
-# to influence rather than after it.
-STARTUP_WINDOW_SECONDS = 5.0
-
 # Whether a start WORKED is not a question about elapsed time. A driver has served
 # once its row reports one of the phases only the runtime itself writes, and a real
 # boot reaches its first turn in about 25 s - so "alive for 5 s" was never evidence,
@@ -503,7 +486,7 @@ def record_startup_failure(runtime, row, attempts, error):
 
 
 def clear_startup_failure(runtime, driver_id):
-    """A start that stayed up ends the streak; a stale record must not outlive it."""
+    """A start that SERVED ends the streak; a stale record must not outlive it."""
     startup_failure_path(runtime, driver_id).unlink(missing_ok=True)
 
 
@@ -609,8 +592,7 @@ def record_exit(runtime, row, watched, uptime, *, supervisor_stopped):
     return True
 
 
-async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WINDOW_SECONDS,
-                    media=None):
+async def supervise(runtime, stopped, *, interval=1, media=None):
     """One controller per installation; systemd owns its entire process group.
 
     One project's failure must not stop the others. This loop is the only thing
@@ -627,10 +609,10 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
     phase - never the child's age - is what says whether a boot worked. Such a
     death is counted, backed off from and reported, exactly like a `start()` that
     raised, because "a process exists" was never the question: a session that
-    cannot be loaded answers no to it whether it dies in 2 s or in 6 s.
-    `startup_window` keeps its own, narrower job - a child alive past it has
-    survived its start, which ends a streak - and `STARTUP_DECISION_SECONDS`
-    bounds how long a spawn stays undecided when nothing ever reports in.
+    cannot be loaded answers no to it whether it dies in 2 s or in 6 s. The row's
+    serving phase ends the streak; `STARTUP_DECISION_SECONDS` only bounds how long
+    a spawn stays undecided when nothing ever reports in, after which its death is
+    an ordinary restart rather than a boot problem.
 
     A SERVING driver's exit is a different event with its own record: one line in
     the journal (`record_exit`), written for the child this loop spawned, naming
@@ -743,31 +725,21 @@ async def supervise(runtime, stopped, *, interval=1, startup_window=STARTUP_WIND
                                 # The runtime reported in over /activity: this
                                 # spawn served, whatever it does next.
                                 served.add(project)
-                            if spawned is not None and alive and now - spawned >= startup_window:
-                                # It outlived the window: this start worked, so the
-                                # counter and any record left by earlier starts go.
+                            if spawned is not None and project in served:
+                                # The row reported a serving phase for THIS spawn:
+                                # that start worked, so the counter and any record
+                                # left by earlier starts go, and it is decided.
                                 failures.pop(project, None)
                                 last_errors.pop(project, None)
                                 # The row needs no clearing here: this spawn's own
                                 # `start()` wrote `phase='starting', last_error=''`
                                 # before the streak could end (see the note above).
                                 clear_startup_failure(runtime, row["driver_id"])
-                                if project in served or now - spawned >= STARTUP_DECISION_SECONDS:
-                                    # Served, or too old to be a start problem any
-                                    # more: nothing is left to judge here.
-                                    spawned_at.pop(project)
-                                    served.discard(project)
+                                spawned_at.pop(project)
+                                served.discard(project)
                             elif spawned is not None and not alive:
                                 spawned_at.pop(project)
-                                did_serve = project in served
-                                served.discard(project)
-                                if did_serve:
-                                    # A session that ran and was killed is an
-                                    # ordinary restart: the boot question is not why
-                                    # it is gone, and its delay must not grow.
-                                    failures.pop(project, None)
-                                    last_errors.pop(project, None)
-                                elif now - spawned < STARTUP_DECISION_SECONDS:
+                                if now - spawned < STARTUP_DECISION_SECONDS:
                                     failures[project] = failures.get(project, 0) + 1
                                     # One text goes to both sinks, and it passes
                                     # the same bounds: the journal is centralized

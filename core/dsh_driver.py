@@ -804,6 +804,16 @@ class DshDrivers:
                 # The steward's chat channels, each only when its secrets exist.
                 + (enabled_channel_plugins() if role == "steward" else [])},
         ]
+        # Measured 2026-11-27 (iss-d8f0a93de8ca4e64): dsh-tool-subagent-control
+        # appends its `subagent:identity` context entry when the plugin is
+        # REGISTERED, not when the role presents a subagent tool, so a restricted
+        # role was told it was the root agent and to call send_message/list_agents
+        # even though its session presents neither. Switch the plugin off only when
+        # the role's presented list names none of those tools; a role that presents
+        # one keeps exactly the profile it has today.
+        if not {"send_message", "list_agents", "wait_agent"} & set(
+                _root_entry(roles, row["project_id"])["presented"]):
+            patches.append({"id": "tool-subagent-control", "disabled": True})
         import yaml
         (profile / "cordis.patch.yml").write_text(yaml.safe_dump(patches, sort_keys=False).replace(
             "__DRIVER_TOKEN__", "!!js process.env.AITELIER_DRIVER_TOKEN"))

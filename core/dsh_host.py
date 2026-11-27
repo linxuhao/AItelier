@@ -490,10 +490,11 @@ def clear_startup_failure(runtime, driver_id):
     startup_failure_path(runtime, driver_id).unlink(missing_ok=True)
 
 
-# What the supervisor writes into `last_error`, and the only thing it will ever
-# take back out: `last_error` is a shared field, so the shape it can recognise as
-# its own is what lets a recovery clear its stamp without erasing somebody else's
-# diagnosis.
+# What the supervisor writes into `last_error`. Nothing here reads it back: the
+# supervisor builds this text when it records a failed start and never matches the
+# prefix to remove text again. A streak ends because the `/activity` request that
+# reports a serving phase writes `last_error` itself, in the statement that writes
+# the phase - so the field always holds the last writer's diagnosis.
 START_FAILURE_PREFIX = "DSH: failed start "
 
 # The runtime's own diagnosis of the same death, written by `DshDrivers._observe`

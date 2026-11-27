@@ -752,11 +752,28 @@ async def test_a_serving_report_after_the_deadline_clears_the_record(crashing, m
         assert host.processes['alpha'].returncode is None
         assert record.exists()  # the old streak is still on disk and on the page
         backend.update('alpha', last_error='DSH: failed start 1 in a row: late witness')
-        # One request, the way the route writes it: `POST /activity` sets the phase
-        # and `last_error` together, so the row the supervisor reads as serving
-        # already carries the runtime's text. The supervisor writes no row text
-        # here; it only retires the streak.
-        backend.update('alpha', phase='running', last_error='')  # /activity, after the deadline
+        # The report goes through the REAL `POST /activity` handler, because it is
+        # that handler which sets the phase and `last_error` in one statement: a row
+        # written here by hand would stay green with the route's text write deleted,
+        # and could not say whether a late report still clears the stamp. Only the
+        # route's inputs are replaced, the way test_dsh_driver_activity_stamp.py does
+        # it: `manager`, `require_writer` and `request_identity` (which `owned` calls
+        # directly, so it cannot be replaced as a dependency).
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+        from api import authz, dsh_driver_routers
+        from core.drivers import Identity
+        app = FastAPI()
+        app.include_router(dsh_driver_routers.router)
+        app.dependency_overrides[dsh_driver_routers.manager] = lambda: host
+        app.dependency_overrides[authz.require_writer] = lambda: None
+        monkeypatch.setattr(authz, 'request_identity',
+                            lambda request: Identity('driver', row['driver_id'],
+                                                     driver_id=row['driver_id']))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url='http://test') as client:
+            response = await client.post('/api/dsh-drivers/alpha/activity',
+                                         json={'phase': 'running', 'error': ''})
+        assert response.status_code == 200, response.text
         await eventually(lambda: not record.exists())
         assert (backend.get('alpha')['last_error'] or '') == ''
         assert backend.get('alpha')['phase'] in SERVING_PHASES

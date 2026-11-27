@@ -525,12 +525,12 @@ def stamp_start_failure(runtime, row, attempts, error):
                    last_error=_start_failure_text(attempts, error))
 
 
-# Deliberately NO clear-on-recovery. A recovery needs no writer: `start()` already
+# Deliberately NO general clear-on-recovery. A recovery needs no writer: `start()`
 # stamped `phase='starting', last_error=''` for the spawn being judged, so by the
-# time a streak can end, the supervisor's own text is gone. Measured 2026-11-15 on
-# this candidate: with such a helper present and then disabled, all 15 tests of
-# tests/unit/test_dsh_host.py still passed - nothing depended on it, and the only
-# thing it could still do is erase a diagnosis somebody else wrote.
+# time a streak can end, the supervisor's own text is gone. The one exception is a
+# row that reports a serving phase LATE, after its spawn left the watched set: no
+# fresh start erased the stamp then, so the loop takes back only text that still
+# begins with its own prefix - never a diagnosis somebody else wrote.
 
 
 def _overwritten_by_runtime_exit(text):
@@ -610,9 +610,10 @@ async def supervise(runtime, stopped, *, interval=1, media=None):
     death is counted, backed off from and reported, exactly like a `start()` that
     raised, because "a process exists" was never the question: a session that
     cannot be loaded answers no to it whether it dies in 2 s or in 6 s. The row's
-    serving phase ends the streak; `STARTUP_DECISION_SECONDS` only bounds how long
-    a spawn stays undecided when nothing ever reports in, after which its death is
-    an ordinary restart rather than a boot problem.
+    serving phase ends the streak even when it arrives after the deadline below:
+    the row is the evidence, and a driver that reports in is not a failed start.
+    `STARTUP_DECISION_SECONDS` only bounds how long a spawn stays undecided when
+    nothing ever reports in, after which its death is an ordinary restart.
 
     A SERVING driver's exit is a different event with its own record: one line in
     the journal (`record_exit`), written for the child this loop spawned, naming
@@ -713,30 +714,36 @@ async def supervise(runtime, stopped, *, interval=1, media=None):
                                 publish(runtime, row)
                                 continue
                             now = time.monotonic()
+                            serving = row.get("phase") in SERVING_PHASES
                             watching = children.get(project)
-                            if watching is not None and row.get("phase") in SERVING_PHASES:
+                            if watching is not None and serving:
                                 # The runtime reported in over /activity for THIS
                                 # child, so whatever ends it from here is the exit
                                 # of a driver that had been serving.
                                 watching["served"] = True
                             alive = runtime.running(project)
                             spawned = spawned_at.get(project)
-                            if spawned is not None and row.get("phase") in SERVING_PHASES:
-                                # The runtime reported in over /activity: this
-                                # spawn served, whatever it does next.
-                                served.add(project)
-                            if spawned is not None and project in served:
-                                # The row reported a serving phase for THIS spawn:
-                                # that start worked, so the counter and any record
-                                # left by earlier starts go, and it is decided.
+                            if serving and project not in served:
+                                # The row is the platform's own evidence: it reports
+                                # a serving phase only after /activity. That ends
+                                # the streak whether or not this spawn is still in
+                                # `spawned_at` - a late report after the deadline
+                                # must not leave a working driver stamped as failed.
                                 failures.pop(project, None)
                                 last_errors.pop(project, None)
-                                # The row needs no clearing here: this spawn's own
-                                # `start()` wrote `phase='starting', last_error=''`
-                                # before the streak could end (see the note above).
                                 clear_startup_failure(runtime, row["driver_id"])
-                                spawned_at.pop(project)
-                                served.discard(project)
+                                if str(row.get("last_error") or "").startswith(
+                                        START_FAILURE_PREFIX):
+                                    # No fresh `start()` erased our stamp when the
+                                    # report came late; take back only our own text,
+                                    # never a diagnosis somebody else wrote.
+                                    try:
+                                        runtime.update(project, last_error="")
+                                    except Exception as exc:
+                                        print(f"DSH host {project}: cannot clear the "
+                                              f"failure stamp on its row: {exc}", flush=True)
+                                served.add(project)  # this spawn's service is decided
+                                spawned_at.pop(project, None)
                             elif spawned is not None and not alive:
                                 spawned_at.pop(project)
                                 if now - spawned < STARTUP_DECISION_SECONDS:

@@ -249,7 +249,8 @@ async def test_a_foreign_last_error_survives_a_recovery(crashing):
     try:
         await eventually(lambda: recovered.running('alpha'))
         # The foreign text lands while this start is still undecided: the
-        # clearing the serving row triggers is what reads it here.
+        # serving row ends the streak without writing `last_error`, so a
+        # diagnosis the supervisor did not make survives the clearing.
         backend.update('alpha', last_error=foreign)
         backend.update('alpha', phase='running')  # what the runtime reports when it serves
         await eventually(lambda: not record.exists())
@@ -423,7 +424,7 @@ async def test_a_child_that_dies_after_spawn_is_a_failed_start(crashing):
         stopped.set(); await task
 
 
-async def test_a_start_that_stays_up_clears_the_record(crashing):
+async def test_a_start_that_serves_clears_the_record(crashing):
     """A later start that reports a serving phase ends the streak: no stale failure."""
     backend, host = crashing
     row = await backend.start('alpha', actor='fixture')
@@ -583,9 +584,9 @@ def spawn_times(path):
 async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_serves, capsys):
     """Alive for 6 s is not "served": the age is the wrong question.
 
-    The same child that a 12 s age rule called a working start produced nothing
-    under a 5 s rule, because surviving an elapsed window was mistaken for proof
-    that the start worked and the death that followed was judged by nobody.
+    An age rule at 12 s never decided this 6 s child: it died before the rule's
+    threshold, so the death grew the streak. The shipped 5 s rule cleared the
+    streak first, and the death that followed started a new streak at 1 again.
     """
     backend, host, spawns = never_serves
     row = await backend.start('alpha', actor='fixture')
@@ -593,6 +594,8 @@ async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_s
     stopped = asyncio.Event()
     task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
+        await eventually(lambda: len(spawn_times(spawns)) >= 1)
+        counted_base = len(spawn_times(spawns))  # the spawn whose death is counted
         await for_at_most(20, lambda: record.exists())
         state = json.loads(record.read_text())
         assert state['attempts'] == 1, state
@@ -614,12 +617,13 @@ async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_s
                     if 'alpha' in line and 'died' in line]
         assert len(reported) == 1, reported
         assert 'failed start 1 in a row' in reported[0]
-        # The retry a counted failure buys is the one after it: a spawn's first
-        # retry is already scheduled when it starts, so the growth has to be read
-        # between the second and the third spawn (30 s instead of 15 s).
-        await for_at_most(90, lambda: len(spawn_times(spawns)) >= 3)
-        second, third = spawn_times(spawns)[1:3]
-        assert third - second > 25, third - second
+        # Anchor the pair to the counted death, not to a fixed index: whatever
+        # the first spawn cost under load, the TWO spawns after it must be
+        # separated by the backoff a counted failure buys (30 s, not 15 s).
+        await for_at_most(90, lambda: len(spawn_times(spawns)) >= counted_base + 2)
+        times = spawn_times(spawns)
+        first_after, second_after = times[counted_base:counted_base + 2]
+        assert second_after - first_after > 18, (first_after, second_after)
     finally:
         stopped.set(); await task
 
@@ -663,8 +667,9 @@ async def test_two_deaths_that_never_served_grow_one_streak(never_serves, capsys
         state = json.loads(record.read_text())
         assert state['attempts'] == 2, state
         assert state['first_failed_at'] == first_failed_at, (first, state)
-        # The two deaths are 30 s apart, so the one-second stamps must differ:
-        # an unchanged first_failed_at here can only mean the streak continued.
+        # These two deaths are ~15 s apart (the first retry was scheduled at the
+        # first spawn); the one-second stamps must still differ, so an unchanged
+        # first_failed_at here can only mean the streak continued.
         assert state['last_failed_at'] > first['last_failed_at'], (first, state)
     finally:
         stopped.set(); await task
@@ -672,34 +677,79 @@ async def test_two_deaths_that_never_served_grow_one_streak(never_serves, capsys
 
 async def test_a_serving_phase_ends_the_streak_and_its_death_is_not_counted(
         never_serves, capsys):
-    """Service clears a counted streak; the served child's later death is ordinary."""
+    """One supervisor: service resets the COUNTER, not merely the failure file."""
     backend, host, spawns = never_serves
     row = await backend.start('alpha', actor='fixture')
     record = host.root / row['driver_id'] / 'startup-failures.json'
     stopped = asyncio.Event()
     task = asyncio.create_task(supervise(host, stopped, interval=0.01))
     try:
+        await eventually(lambda: len(spawn_times(spawns)) >= 1)
         await for_at_most(20, lambda: record.exists())
         assert json.loads(record.read_text())['attempts'] == 1
-    finally:
-        stopped.set(); await task
-    capsys.readouterr()  # the first death's line belongs to the old streak
-    recovered = DshDrivers(host.db, host.registry, host.root, host_controller=True,
-                           command=host.command)
-    stopped = asyncio.Event()
-    task = asyncio.create_task(supervise(recovered, stopped, interval=0.01))
-    try:
-        await eventually(lambda: recovered.running('alpha'))
-        proc = recovered.processes['alpha']
+        await eventually(lambda: (backend.get('alpha')['last_error'] or '').startswith(
+            'DSH: failed start 1 in a row: '))
+        capsys.readouterr()  # the first death's line belongs to the old streak
+
+        # The recovery spawn is made by THIS supervisor, so its `failures` still
+        # holds the counted death; deleting the reset would change what follows.
+        await eventually(lambda: len(spawn_times(spawns)) >= 2)
+        proc = host.processes['alpha']
+        assert record.exists()  # the streak is live when service is reported
         backend.update('alpha', phase='running')  # the runtime says THIS spawn served
         await eventually(lambda: not record.exists())
+        # The file was still there when the phase was stamped: five seconds of
+        # uptime cannot explain this clearing.
+        assert time.time() - spawn_times(spawns)[1] < 4.5, time.time() - spawn_times(spawns)[1]
         assert not (backend.get('alpha')['last_error'] or '').startswith('DSH: failed start ')
+
+        # The served child's exit must really have been recorded, not merely
+        # inferred from an absence of "died" lines.
         text = await journal(capsys, lambda out: f'pid {proc.pid}' in out)
-        text += capsys.readouterr().out  # drain whatever came after the exit line too
+        lines = exit_lines(text, row['driver_id'])
+        assert len(lines) == 1, text
+        assert 'supervisor_stopped=false' in lines[0], lines[0]
         assert not [line for line in text.splitlines()
                     if 'alpha' in line and 'died' in line], text
         assert not record.exists()
+
+        # The NEXT child dies with no serving phase: a reset counter makes this
+        # "1 in a row"; a stale one would say "2 in a row".
+        await for_at_most(60, lambda: len(spawn_times(spawns)) >= 3)
+        assert backend.get('alpha')['phase'] not in SERVING_PHASES
+        text = await journal(capsys, lambda out: 'failed start 1 in a row' in out, seconds=60)
+        died = [line for line in text.splitlines() if 'alpha' in line and 'died' in line]
+        assert len(died) == 1, text
+        assert 'failed start 1 in a row' in died[0], died[0]
+        assert json.loads(record.read_text())['attempts'] == 1
+        await eventually(lambda: (backend.get('alpha')['last_error'] or '').startswith(
+            'DSH: failed start 1 in a row: '))
+    finally:
+        stopped.set(); await task
+
+
+async def test_a_serving_report_after_the_deadline_clears_the_record(crashing, monkeypatch):
+    """A late /activity report is still the platform's evidence that the start worked."""
+    # The real ceiling is 120 s; shortening it here keeps the late report in one
+    # test while leaving the shipped constant untouched.
+    monkeypatch.setattr('core.dsh_host.STARTUP_DECISION_SECONDS', 1.5)
+    backend, host = crashing
+    row = await backend.start('alpha', actor='fixture')
+    record = host.root / row['driver_id'] / 'startup-failures.json'
+    stopped = asyncio.Event()
+    task = asyncio.create_task(supervise(host, stopped, interval=0.01))
+    try:
+        await eventually(record.exists)  # alpha's immediate death was counted
+        assert json.loads(record.read_text())['attempts'] == 1
+        await eventually(lambda: host.running('alpha'))  # this supervisor's recovery spawn
+        await asyncio.sleep(2.0)  # past the deadline, with no serving phase reported
+        assert host.processes['alpha'].returncode is None
+        assert record.exists()  # the old streak is still on disk and on the page
+        backend.update('alpha', last_error='DSH: failed start 1 in a row: late witness')
+        backend.update('alpha', phase='running')  # /activity, after the deadline
+        await eventually(lambda: not record.exists())
         assert not (backend.get('alpha')['last_error'] or '').startswith('DSH: failed start ')
+        assert backend.get('alpha')['phase'] in SERVING_PHASES
     finally:
         stopped.set(); await task
 

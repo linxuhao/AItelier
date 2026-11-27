@@ -161,7 +161,7 @@ export interface DirectorHost {
   /** semver; the director accepts ^1. */
   version: string;
   /** The optional operations this host implements; declared and implemented must match. */
-  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
+  capabilities: Array<'progress' | 'workState' | 'heldWork' | 'openIssues' | 'roles' | 'install' | 'setup' | 'texts' | 'labels' | 'attention' | 'memory'
     | 'portfolio' | 'handoff' | 'proposals' | 'channels' | 'groups' | 'catalog' | 'media'>;
   config: HostConfig;
 
@@ -182,6 +182,12 @@ export interface DirectorHost {
   workState?(workId: string, signal?: AbortSignal): Promise<WorkState>;
   /** Work this director holds; idle_dormant refuses while any [none]. */
   heldWork?(signal?: AbortSignal): Promise<Array<{ node_key: string }>>;
+  /** v1.3: the project's open issues, which a successful idle_dormant reports (never a refusal):
+   *  how many, by kind, and every "untracked" one - open, with no work item and no work left that would
+   *  bring it back (the host decides what that means) - of which
+   *  it names a rotating few to triage (lib/triage.mjs). undefined: nothing to report [none]. */
+  openIssues?(signal?: AbortSignal): Promise<{ total: number; by_kind: Record<string, number>;
+    untracked: Array<{ id: string; kind: string; title: string; created_at?: string }> } | undefined>;
   /** v1.1, plugin step 8: the director's questions to its owner, behind ask_owner /
    *  close_question [none: both tools refuse, naming that the host has no channel].
    *  - ask: one concrete question under the director's own id. The same id with the

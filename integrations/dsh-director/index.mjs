@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { installToolDiscovery } from './lib/tool-discovery.mjs';
 import { nestedToolCaller } from './lib/nested-call.mjs';
+import { TriageRotation, openIssuesSummary } from './lib/triage.mjs';
 import { StewardCatalog } from './lib/catalog.mjs';
 import { basicsSection } from './lib/basics.mjs';
 import { registerConfirmTools } from './lib/confirm.mjs';
@@ -747,6 +748,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
       },
     }));
     const heldWork = op('heldWork');
+    const openIssues = op('openIssues');
+    const triage = new TriageRotation(config.stateDir);
     // Questions to the owner (plugin step 8): the host's attention channel. One question
     // per call, under the director's own id, so a retry asks nothing new and the
     // answer comes back naming it. Without a channel both tools refuse, naming why.
@@ -818,9 +821,16 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
           }
           catch (error) { waitingOnOwner = { unreadable: String(error?.message ?? error).slice(0, 300) }; }
         }
+        // What is open, reported and never counted against dormancy (lib/triage.mjs).
+        let issues;
+        try {
+          const answer = await openIssues(AbortSignal.any([exec.signal, AbortSignal.timeout(15000)]));
+          if (answer) issues = openIssuesSummary(answer, await triage.next(Array.isArray(answer.untracked) ? answer.untracked : []), texts.triageNote);
+        } catch (error) { issues = { unreadable: String(error?.message ?? error).slice(0, 300) }; }
         const dormant = idleReview.enterDormancy(reason, wakeAfter * dormantMinuteMs);
         return { dormant: true, since: dormant.since, until: dormant.until, wake_after_minutes: wakeAfter, reason,
           ...(waitingOnOwner ? { waiting_on_owner: waitingOnOwner } : {}),
+          ...(issues ? { open_issues: issues } : {}),
           compaction: `once on the next idle if the context is at least ${compactFloor} tokens`,
           wakes_on: texts.wakesOn ?? ['host event', 'owner message', 'child message', 'wake_after_minutes running out'] };
       },

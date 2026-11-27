@@ -154,7 +154,7 @@ async function scenario(t, floor, { minuteMs } = {}) {
   // real-DSH test files run their own drivers in parallel.
   const session = 'dormancy-root-' + process.pid + '-' + Math.random().toString(36).slice(2, 8);
   const here = dirname(fileURLToPath(import.meta.url));
-  const events = [], requests = [], claimQueries = [], parked = new Set(), phases = [];
+  const events = [], requests = [], claimQueries = [], issueQueries = [], parked = new Set(), phases = [];
   const held = new Set();
   let changed = false, released = false, output = '', proc;
   const server = createServer(async (req, res) => {
@@ -170,6 +170,17 @@ async function scenario(t, floor, { minuteMs } = {}) {
       // Live claim on the first query only; another driver's claim never counts.
       return send({ claims: [...(claimQueries.length === 1 ? [{ node_key: 'n', status: 'live', driver_id: 'dsh-fixture' }] : []),
         { node_key: 'other', status: 'live', driver_id: 'someone-else' }] });
+    }
+    // Open issues, two pages: one linked to a node still to be done, one with a work item, and three untracked:
+    // no node, or linked only to VERIFIED / SUPERSEDED nodes.
+    if (req.url === '/api/state/query/list_issues') {
+      issueQueries.push(body);
+      const at = (id, kind, extra = {}) => ({ issue_id: id, kind, title: 'title of ' + id, status: 'open', nodes: [], work_item: null,
+        created_at: id === 'iss-old' ? '2026-10-01T00:00:00Z' : id === 'iss-done' ? '2026-10-15T00:00:00Z' : '2026-11-20T00:00:00Z', ...extra });
+      return send(body.after === 0
+        ? { issues: [at('iss-linked', 'defect', { nodes: [{ node_key: 'n', status: 'READY' }, { node_key: 'm', status: 'VERIFIED' }] }), at('iss-new', 'gap')], has_more: true, next_after: 7, status_counts: { open: 5, fixed: 9 } }
+        : { issues: [at('iss-old', 'gap'), at('iss-worked', 'defect', { work_item: { status: 'open' } }),
+          at('iss-done', 'defect', { nodes: [{ node_key: 'v', status: 'VERIFIED' }, { node_key: 's', status: 'SUPERSEDED' }] })], has_more: false, next_after: 9, status_counts: { open: 5, fixed: 9 } });
     }
     if (req.url.endsWith('/context')) return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,
       nodes: [{ name: 'n', status: changed ? 'VERIFIED' : 'PENDING' }], project_note: { index: [] }, private_note: { index: [] }, driver_skill: 'fixture driver skill' });
@@ -270,6 +281,14 @@ async function scenario(t, floor, { minuteMs } = {}) {
     assert.equal(entered.dormant, true);
     assert.equal(entered.reason, 'nothing authorized is available');
     assert.equal(entered.wake_after_minutes, 15);
+    // Open issues are reported, never a refusal: counted by kind, the untracked ones (no node, no
+    // work item) named oldest first, with the triage note; both list_issues pages were read.
+    assert.deepEqual(issueQueries.map(q => [q.project_id, q.statuses, q.after]), [['alpha', ['open'], 0], ['alpha', ['open'], 7]]);
+    assert.equal(entered.open_issues.total, 5);
+    assert.deepEqual(entered.open_issues.by_kind, { defect: 3, gap: 2 });
+    assert.equal(entered.open_issues.untracked, 3);
+    assert.deepEqual(entered.open_issues.triage.map(i => i.id), ['iss-old', 'iss-done', 'iss-new']);
+    assert.match(entered.open_issues.note, /resolve_issue/);
     assert.equal(Date.parse(entered.until) - Date.parse(entered.since), 15 * (minuteMs ?? 60000));
     const enteredAt = Date.now();
     if (minuteMs) {

@@ -310,6 +310,31 @@ export const { NOTHING_LEFT, MAX_AUTO_CONTINUE, processAlive, watchRefusal, DORM
   DORMANT_MAX_MINUTES, wakeAfterRefusal, pruneDepartedChildren, LiveChildren, phaseReport, continuationWaitKey,
   DORMANT_COMPACT_MIN_TOKENS, IdleReview, awaitingFinish, batchesToRedispatch, batchRedispatchRows, todoSummary,
   unfinishedWithoutChild, rebindRefusal, grepHistory } = core;
+/** The project's open issues for idle_dormant's report (host.d.ts openIssues): State's own open
+ *  count, the open ones by kind, and the untracked ones - no work item, and no linked node still
+ *  to be done (none, or each VERIFIED or SUPERSEDED: measured 2026-11-27, 263 of wuxia-myth's 357
+ *  open issues were linked only to VERIFIED nodes, so nothing brings them back either). Paged
+ *  with list_issues (200 a page) up to OPEN_ISSUES_PAGES pages; a longer list reports what it read. */
+const OPEN_ISSUES_PAGES = 10;
+const FINISHED_NODE = new Set(['VERIFIED', 'SUPERSEDED']);
+async function openIssues({ request, project, signal }) {
+  const by_kind = {}, untracked = [];
+  let after = 0, total, read = 0;
+  for (let page = 0; page < OPEN_ISSUES_PAGES; page++) {
+    const answer = await request('/api/state/query/list_issues', { project_id: project, statuses: ['open'], after, limit: 200 }, signal);
+    const listed = answer.result ?? answer;
+    total ??= listed.status_counts?.open;
+    for (const issue of listed.issues ?? []) {
+      read++;
+      by_kind[issue.kind] = (by_kind[issue.kind] ?? 0) + 1;
+      if (!issue.work_item && (issue.nodes ?? []).every(node => FINISHED_NODE.has(node.status)))
+        untracked.push({ id: issue.issue_id, kind: issue.kind, title: issue.title, created_at: issue.created_at });
+    }
+    if (!listed.has_more || !Number.isInteger(listed.next_after) || listed.next_after === after) break;
+    after = listed.next_after;
+  }
+  return { total: total ?? read, by_kind, untracked };
+}
 /** Why idle_dormant must refuse, with this deployment's wording for held work (State claims). */
 export const dormancyRefusal = options => core.dormancyRefusal({ heldReason: texts.heldWork, ...options });
 /** One durable snapshot per session bootstrap / successful compaction epoch. */
@@ -691,7 +716,7 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
   const host = {
     version: '1.0.0',
     capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention',
-      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog'] : []),
+      ...(steward ? ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog'] : ['openIssues']),
       ...(library ? ['media'] : [])],
     config: { sessionId: env.AITELIER_DSH_SESSION, provider: env.AITELIER_DSH_PROVIDER, model: env.AITELIER_DSH_MODEL,
       projectId: project, stateDir: env.AITELIER_DSH_STATE_DIR, dshEntry: env.AITELIER_DSH_ENTRY, rolesFile,
@@ -1010,6 +1035,8 @@ export function aitelierHost(env = process.env, { request: suppliedRequest, runt
         signal);
       return ((listed.result ?? listed).claims ?? []).filter(c => c.status === 'live' && c.driver_id === env.AITELIER_DRIVER_ID);
     },
+    /** The project's open State issues, which idle_dormant reports (a director only: the steward has none). */
+    ...(steward ? {} : { openIssues: signal => openIssues({ request, project, signal }) }),
     /** The director's questions to its owner (plugin step 8) on State's conversation:
      *  ask is send_user_message with ONE question block whose id is the question id
      *  (a thin wrapper: askOwnerRequest is the whole mapping, and the bytes it stores

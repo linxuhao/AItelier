@@ -340,7 +340,8 @@ test('the AItelier host started as the steward: steward root, memory, portfolio 
   assert.equal(director.config.rootRole, undefined);
   assert.equal(director.config.memory, undefined);
   assert.equal(director.config.permissionPreset, 'danger-full-access');
-  assert.deepEqual(director.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention']);
+  assert.deepEqual(director.capabilities, ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'openIssues']);
+  assert.equal(steward.openIssues, undefined, 'the steward has no project issues to report at dormancy');
   for (const op of ['memory', 'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog']) assert.equal(director[op], undefined, op);
   assert.doesNotThrow(() => validateHost(director));
   // A root role the table does not have is refused when the host is loaded.

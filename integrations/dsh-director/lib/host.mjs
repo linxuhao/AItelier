@@ -17,7 +17,7 @@ import { ROOT_ROLES } from './roles.mjs';
 
 export const HOST_MAJOR = 1;
 export const REQUIRED_OPS = ['config', 'context', 'events'];
-export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory',
+export const OPTIONAL_OPS = ['progress', 'workState', 'heldWork', 'openIssues', 'roles', 'install', 'setup', 'texts', 'labels', 'attention', 'memory',
   'portfolio', 'handoff', 'proposals', 'channels', 'groups', 'catalog', 'media'];
 /** v1.2 (plugin step 12): what each object-shaped capability must implement. */
 const OBJECT_OPS = { attention: ['ask', 'close', 'list'], memory: ['ownerMessage'], portfolio: ['projects', 'project', 'conversation'],
@@ -173,6 +173,7 @@ export const optionalDefaults = Object.freeze({
   progress: () => {},                  // status reports are dropped (the runtime still logs)
   workState: async () => 'unknown',    // no work item is known to have settled
   heldWork: async () => [],            // the director holds no external locks
+  openIssues: async () => undefined,   // no issue tracker: idle_dormant names no open issues
   roles: table => table,               // the table as loaded (a host's roles() must return its table synchronously)
   install: async () => {},             // no host-scoped tools or sections of its own
   setup: async () => {},               // no director-scope tools, sections or hooks of its own

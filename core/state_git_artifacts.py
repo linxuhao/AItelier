@@ -41,6 +41,12 @@ keyframe; the schema refuses anything else). A row with non-empty
 ``bundle_bytes`` (written before the store, or never migrated) is read as
 before. Either way the restored bytes are verified against ``bundle_sha256``
 on every read, and any defect in a payload, base or codec field fails closed.
+
+Keyframe selection, encoding and the decode-and-compare exactness check are a
+READ-side ``plan_bundle``/``plan_candidate`` step. The report path plans before
+it opens its write transaction and hands the verified plan to
+``store_candidate``; the write lock is held only for insert-once re-checks and
+the INSERT (with a raw-keyframe fallback if the planned base was released).
 """
 from __future__ import annotations
 
@@ -53,6 +59,7 @@ import subprocess
 import tempfile
 import threading
 from concurrent.futures import Future
+from dataclasses import dataclass
 from pathlib import Path
 
 from core import closed_git
@@ -450,14 +457,59 @@ def retained_bundle_bytes(conn, artifact):
     return load_stored_bundle(conn, artifact["bundle_sha256"])
 
 
-def store_bundle(conn, digest, raw):
-    """Insert-once: ensure the store holds ``raw`` under ``digest``.
+@dataclass(frozen=True)
+class BundlePlan:
+    """The verified result of choosing how to store ONE bundle.
 
-    Picks a keyframe (most recent raw keyframes of comparable size with fewer
-    than KEYFRAME_MAX_DEPENDENTS deltas), keeps the first delta no larger than
-    DELTA_MAX_FRACTION of the raw size that decodes back to exactly ``raw``,
-    and otherwise stores ``raw`` as a new keyframe. Returns the stored
-    ``(codec, payload_size)``. Runs in the caller's transaction."""
+    ``raw`` is the input whose digest was checked, ``payload`` is exactly what
+    the INSERT writes, and ``base_*`` describes the keyframe the payload was
+    encoded against. A plan is made on a READ connection, before a write
+    transaction opens: it holds no lock, and every byte-level check it makes
+    (keyframe read, delta encode, decode-and-compare) has already happened when
+    the write half runs.
+    """
+
+    digest: str
+    raw: bytes
+    codec: str
+    base_sha256: str | None
+    payload: bytes
+    base_size: int | None = None
+    base_payload_size: int | None = None
+
+
+def _store_shape(conn, digest):
+    """The base row's cheap identity check; never reads a payload byte.
+
+    ``length(payload)`` is answered from SQLite's record header, not by walking
+    a 266 MB BLOB. A row is immutable under the shipped triggers (it can only
+    be deleted after a release record), so matching shape is the whole in-lock
+    re-check the planned base needs; the byte-level verification is in the plan.
+    """
+    row = conn.execute(
+        f"SELECT codec,base_sha256,raw_size,length(payload) FROM {BUNDLE_STORE} "
+        "WHERE bundle_sha256=?", (digest,)).fetchone()
+    return None if row is None else (row[0], row[1], int(row[2]), int(row[3]))
+
+
+def _keyframe_query():
+    return (
+        f"SELECT k.bundle_sha256 FROM {BUNDLE_STORE} k WHERE k.codec='raw' "
+        "AND k.raw_size BETWEEN ? AND ? AND (SELECT count(*) FROM "
+        f"{BUNDLE_STORE} d WHERE d.base_sha256=k.bundle_sha256) < ? "
+        "ORDER BY k.rowid DESC LIMIT ?")
+
+
+def plan_bundle(conn, digest, raw):
+    """Choose a raw keyframe or one verified delta, writing NOTHING.
+
+    The most recent raw keyframes of comparable size (within 2x either way)
+    with fewer than KEYFRAME_MAX_DEPENDENTS deltas are tried in order. The
+    first delta no larger than DELTA_MAX_FRACTION that decodes back to exactly
+    ``raw`` is planned; otherwise ``raw`` itself becomes a new keyframe. This
+    is the whole CPU-heavy half of retention and it runs on ``conn`` with no
+    write lock held. ``apply_bundle_plan`` performs the INSERT later.
+    """
     raw = bytes(raw)
     if not raw or len(raw) > MAX_BUNDLE_BYTES or hashlib.sha256(raw).hexdigest() != digest:
         raise StateConflict("Git bundle store input does not match its digest")
@@ -465,16 +517,14 @@ def store_bundle(conn, digest, raw):
     if existing is not None:
         if load_stored_bundle(conn, digest) != raw:
             raise StateConflict("Git bundle store already holds different bytes for this digest")
-        return existing[1], len(existing[4])
+        return BundlePlan(digest, raw, existing[1], existing[2], bytes(existing[4]))
     keyframes = conn.execute(
-        f"SELECT k.bundle_sha256 FROM {BUNDLE_STORE} k WHERE k.codec='raw' "
-        "AND k.raw_size BETWEEN ? AND ? AND (SELECT count(*) FROM "
-        f"{BUNDLE_STORE} d WHERE d.base_sha256=k.bundle_sha256) < ? "
-        "ORDER BY k.rowid DESC LIMIT ?",
+        _keyframe_query(),
         ((len(raw) + 1) // 2, len(raw) * 2, KEYFRAME_MAX_DEPENDENTS, KEYFRAME_CANDIDATES)).fetchall()
     for (base_digest,) in keyframes:
         try:
-            base = _keyframe_bytes(_store_entry(conn, base_digest), base_digest)
+            entry = _store_entry(conn, base_digest)
+            base = _keyframe_bytes(entry, base_digest)
         except StateConflict:
             continue  # a damaged keyframe is never used as a base
         payload = encode_delta(base, raw)
@@ -485,17 +535,61 @@ def store_bundle(conn, digest, raw):
         except StateConflict:
             exact = False
         if exact:
-            conn.execute(f"INSERT INTO {BUNDLE_STORE} ({_STORE_COLUMNS},created_at) "
-                         "VALUES(?,'zstd-prefix',?,?,?,?)",
-                         (digest, base_digest, len(raw), payload, now()))
-            return "zstd-prefix", len(payload)
+            return BundlePlan(digest, raw, "zstd-prefix", base_digest, payload,
+                              len(base), len(entry[4]))
+    return BundlePlan(digest, raw, "raw", None, raw)
+
+
+def apply_bundle_plan(conn, plan):
+    """Insert-once re-checks and the INSERT, with no keyframe read/encode/decode.
+
+    Runs in the caller's write transaction. If the planned base was released or
+    changed after planning, the verified raw bytes are stored as a new keyframe
+    instead: a delta is never inserted against a base that is no longer there.
+    Returns the stored ``(codec, payload_size)``.
+    """
+    shape = _store_shape(conn, plan.digest)
+    if shape is not None:
+        if shape == (plan.codec, plan.base_sha256, len(plan.raw), len(plan.payload)):
+            return plan.codec, len(plan.payload)
+        # Only an unexpected concurrent insert or damage past the immutability
+        # triggers reaches this slow path: re-verify against the raw input, and
+        # never accept different bytes under the same digest.
+        if load_stored_bundle(conn, plan.digest) != plan.raw:
+            raise StateConflict("Git bundle store already holds different bytes for this digest")
+        return shape[0], shape[3]
+    if plan.codec == "zstd-prefix":
+        base_shape = _store_shape(conn, plan.base_sha256)
+        if (base_shape is None or base_shape[0] != "raw" or base_shape[1] is not None
+                or base_shape[2:] != (plan.base_size, plan.base_payload_size)):
+            # Released, deleted or damaged between plan and INSERT. The delta's
+            # exactness was already proved, but its base may no longer restore;
+            # fall back to the same verified bytes as a raw keyframe.
+            plan = BundlePlan(plan.digest, plan.raw, "raw", None, plan.raw)
+    if plan.codec == "zstd-prefix":
+        conn.execute(f"INSERT INTO {BUNDLE_STORE} ({_STORE_COLUMNS},created_at) "
+                     "VALUES(?,'zstd-prefix',?,?,?,?)",
+                     (plan.digest, plan.base_sha256, len(plan.raw), plan.payload, now()))
+        return "zstd-prefix", len(plan.payload)
     conn.execute(f"INSERT INTO {BUNDLE_STORE} ({_STORE_COLUMNS},created_at) "
-                 "VALUES(?,'raw',NULL,?,?,?)", (digest, len(raw), raw, now()))
-    return "raw", len(raw)
+                 "VALUES(?,'raw',NULL,?,?,?)", (plan.digest, len(plan.raw), plan.raw, now()))
+    return "raw", len(plan.raw)
 
 
-def store_candidate(conn, artifact):
-    # In-memory checks first; a failure rolls back the whole write transaction.
+def store_bundle(conn, digest, raw):
+    """Insert-once: ensure the store holds ``raw`` under ``digest``.
+
+    Plans on ``conn`` and then applies the plan on the same connection. This is
+    the migration/legacy entry point: callers with a write transaction ALREADY
+    open must use ``plan_bundle`` on a read connection and pass that plan to
+    ``apply_bundle_plan`` (or to ``store_candidate``), so the keyframe read,
+    encode and decode stay outside the write lock.
+    """
+    return apply_bundle_plan(conn, plan_bundle(conn, digest, raw))
+
+
+def _validated_candidate(artifact):
+    """The in-memory input checks shared by planning and storing."""
     raw = artifact.get("bundle_bytes")
     if not isinstance(raw, (bytes, bytearray)) or not raw:
         raise StateConflict("Git artifact bundle bytes are missing")
@@ -510,6 +604,36 @@ def store_candidate(conn, artifact):
         value = artifact.get(key)
         if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
             raise StateConflict(f"Git artifact {key} must be 40 lowercase hex")
+    return raw, digest
+
+
+def plan_candidate(conn, artifact):
+    """The read half of ``store_candidate``: call on a read connection FIRST.
+
+    A report path can retain its candidate bytes long before it opens its write
+    transaction; planning here moves the measured 1.1 s keyframe read, 6.5-9 s
+    encode and 0.3 s verify out of the single global State write lock.
+    """
+    raw, digest = _validated_candidate(artifact)
+    return plan_bundle(conn, digest, raw)
+
+
+def store_candidate(conn, artifact, plan=None):
+    """Store the verified bytes and insert the artifact row, insert-once.
+
+    ``plan`` is ``plan_candidate``'s result from a READ connection. Omitting it
+    plans on ``conn`` for direct/legacy callers; the report path must pass one
+    so no CPU-heavy work runs inside its write transaction. A failure rolls
+    back the whole write transaction, so a stored bundle never exists without
+    its artifact row and an artifact row never without its bytes.
+    """
+    # In-memory checks first; a failure rolls back the whole write transaction.
+    raw, digest = _validated_candidate(artifact)
+    if plan is None:
+        plan = plan_bundle(conn, digest, raw)
+    if (not isinstance(plan, BundlePlan) or plan.digest != digest
+            or len(plan.raw) != len(raw) or plan.raw != raw):
+        raise StateConflict("Git bundle store plan does not describe these bytes")
     old = conn.execute("SELECT tree_sha FROM state_git_artifacts WHERE commit_sha=?",
                        (artifact["commit_sha"],)).fetchone()
     if old:
@@ -517,10 +641,7 @@ def store_candidate(conn, artifact):
         if old["tree_sha"] != artifact["tree_sha"]:
             raise StateConflict("retained commit has conflicting tree identity")
         return
-    # The bytes go to the content-addressed store (verified before insertion);
-    # the row keeps every column, with an empty bundle_bytes. Encoding runs in
-    # this write transaction: about 2-3 s per keyframe tried for an 80 MB bundle.
-    store_bundle(conn, digest, raw)
+    apply_bundle_plan(conn, plan)
     artifact = {**artifact, "bundle_bytes": b""}
     conn.execute("INSERT INTO state_git_artifacts "
                  "(commit_sha,tree_sha,bundle_sha256,retained_ref,bundle_bytes,created_at) "

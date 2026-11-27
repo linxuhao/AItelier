@@ -46,7 +46,7 @@ look up history with MCP `novel_ledger_query` or `GET /api/projects/<id>/novel/l
 | Caller | Credential | Recorded actor (feature on) |
 |---|---|---|
 | Registered LAN driver (codex, grok-bot, ...) | its own token, `X-AItelier-Driver-Token` (or `Authorization: Bearer` on the State-only service) | `driver:<id>` |
-| Owner CLI / scripts (unchanged config) | legacy `AITELIER_ADMIN_TOKEN` in `X-AItelier-Admin-Token` | `driver:owner-cli` (is_admin) |
+| Owner CLI / scripts (unchanged config) | legacy `AITELIER_ADMIN_TOKEN` in `X-AItelier-Admin-Token` | `cli-owner` (is_admin, no driver id: the owner's terminal, not a driver - it cannot claim, heartbeat, report or take over a driver's attempt) |
 | Owner in the browser via Cloudflare Access | allowlisted email (`AITELIER_WRITERS`) | `owner:<email>` |
 | Remote agent through the tunnel | `X-AItelier-MCP-External-Token` | `driver:public` |
 | Anything else | - | as before (`authorized-state-operator`) |

@@ -276,15 +276,17 @@ class StateRecovery:
             # Since 6f0cbae (owner ruling 2026-11-18) neither the owner's e-mail nor the
             # environment's admin token is a driver: that token mints `cli-owner` (no
             # driver_id, is_admin from the `owner-cli` row). Naming an "admin driver
-            # token" here promised a credential shape that does not exist - and the
-            # token the reader already holds is the one being refused.
+            # token" here promised the reader a credential it does not hold - what went
+            # away is that token's `owner-cli` DRIVER identity, not is_admin drivers.
             raise ClaimError("driver_identity_required",
                              "an attempt is owned by a registered driver, and taking one over needs a driver "
-                             "identity; the owner's e-mail and the environment's admin token (the owner's "
-                             "terminal, `cli-owner`) are not drivers. Present a registered driver's token "
-                             "(driver_whoami reports which identity the token you hold carries), or - while the "
-                             "attempt is reclaimable, and an admin may do it on a healthy lease too - "
-                             "abandon_external_attempt it and register the work again under a driver")
+                             "identity (a member driver, and a reclaimable lease or an offline owner); the "
+                             "owner's e-mail and the environment's admin token (the owner's terminal, "
+                             "`cli-owner`) are not drivers. Present a registered driver's token (driver_whoami "
+                             "reports which identity your credential carries), or - while the attempt is "
+                             "reclaimable, and an admin may do it on a healthy lease too - abandon_external_attempt "
+                             "it and register the work again under a driver (a fresh base_sha and a checkout other "
+                             "than the abandoned worker's)")
         from core.state_takeover import refuse_shared_identity
         refuse_shared_identity(self.driver_id)
         current = now_stamp()

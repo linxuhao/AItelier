@@ -5,7 +5,9 @@ write transaction was guarded only by unit tests. These witnesses drive the real
 report path (``StateService.report_external_attempt``) twice with distinguishable
 plan-phase and transaction-phase durations and read the line the operator would
 read in production: one record per retention with the stored digest, raw_size,
-plan kind and the measured hold, INFO below the 1.0 s promise and WARNING at it.
+plan kind and the measured hold, INFO below the 5 s budget warning and WARNING
+at it. The band is the one a waiting writer can survive, not the quiet-host
+hold: the measured hold includes the commit's fsync, which the code does not size.
 """
 from __future__ import annotations
 
@@ -74,10 +76,10 @@ def hold_of(message):
     return float(match.group(1))
 
 
-@pytest.mark.parametrize("hold_s,level", [(0.25, logging.INFO), (1.25, logging.WARNING)])
+@pytest.mark.parametrize("hold_s,level", [(2.5, logging.INFO), (6.25, logging.WARNING)])
 def test_one_line_per_retention_carries_the_four_fields_and_the_level(
         tmp_path, monkeypatch, caplog, hold_s, level):
-    assert se.BUNDLE_HOLD_PROMISE_SEC == 1.0
+    assert se.BUNDLE_HOLD_WARN_SEC == 5.0
     service, source, producer, db, _attempt, _commit, _tree, _payload, _bundle = fixture(tmp_path / "fx")
     # A comparable-size keyframe, so the witnessed retention takes the delta branch.
     base_commit, base_bundle = candidate(producer, tmp_path, "base")
@@ -85,7 +87,7 @@ def test_one_line_per_retention_carries_the_four_fields_and_the_level(
     commit, bundle = candidate(producer, tmp_path, "watched")
 
     # Two clock reads: immediately before the write transaction and in finally,
-    # after it committed. No sleeps: the level is forced at the 1.0 s boundary.
+    # after it committed. No sleeps: the level is forced at the warn boundary.
     clock = iter((100.0, 100.0 + hold_s))
     monkeypatch.setattr(se, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     caplog.clear()

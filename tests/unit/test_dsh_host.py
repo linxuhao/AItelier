@@ -668,8 +668,14 @@ async def test_two_deaths_that_never_served_grow_one_streak(never_serves, capsys
         assert second_lines[0].startswith(
             f'DSH host alpha: {row["driver_id"]} died '), second_lines[0]
         assert 'failed start 2 in a row' in second_lines[0], second_lines[0]
-        assert backend.get('alpha')['last_error'].startswith(
-            'DSH: failed start 2 in a row: '), backend.get('alpha')
+        # The row has TWO writers for one death: this loop stamps the streak, and
+        # `DshDrivers._observe` writes `DSH exited with code 1` for the same exit
+        # from a monitor thread. The loop puts the streak back over that notice on
+        # a later pass, so sampling the row the instant the journal line appears
+        # reads whichever writer landed last - measured red that way on 2026-11-27.
+        # Wait for the content the assertion is about.
+        await eventually(lambda: (backend.get('alpha')['last_error'] or '').startswith(
+            'DSH: failed start 2 in a row: '))
         state = json.loads(record.read_text())
         assert state['attempts'] == 2, state
         assert state['first_failed_at'] == first_failed_at, (first, state)

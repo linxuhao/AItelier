@@ -120,7 +120,7 @@ test('composed, every feature set: no cut fails on a swapped passage and none le
 // is pinned on a text where it shows: a passage split by a section the host lacks is whole, and
 // swapped, only once the cut has run.
 test('composed: the cuts run first and the language swaps the text they leave', () => {
-  const cut = STEWARD_CUTS.find(c => !c.through && !c.else && c.needs.length === 1 && c.needs[0] === 'channels');
+  const cut = STEWARD_CUTS.find(c => !c.through && !c.else && c.needs.includes('channels'));
   const [zhPassage, enPassage] = EN_PASSAGES.find(([from]) => from.startsWith('only '));
   const half = zhPassage.length >> 1;
   const text = zhPassage.slice(0, half) + cut.from + zhPassage.slice(half);

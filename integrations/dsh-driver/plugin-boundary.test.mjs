@@ -24,6 +24,7 @@ import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../dsh-director/test/host.test.mjs';
 import '../dsh-director/test/local-host.test.mjs';
+import '../dsh-director/test/local-channels.test.mjs';
 import '../dsh-director/test/outbox.test.mjs';
 import '../dsh-director/test/capacity.test.mjs';
 import '../dsh-director/test/resume.test.mjs';

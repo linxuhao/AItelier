@@ -207,7 +207,7 @@ test('local host, step 15: /questions and /answer - the answer is recorded as ow
   const api = commandApi(commands);
   const events = await host.events(api);
   // No projectsDir and no memory: the question commands only.
-  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'questions']);
+  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'questions', 'status']);
   const listed = await commands.run('questions');
   assert.equal(listed.kind, 'success');
   assert.match(listed.text, /Open questions \(2\):\n- q-1: Restart now\?\n {2}context: two workers idle/);
@@ -233,7 +233,7 @@ test('local host, step 15: /questions and /answer - the answer is recorded as ow
   assert.doesNotMatch((await commands.run('questions')).text, /q-1|q-3/);
   await until('the second answer never woke the root', () => api.notified.length === 2);
   events.stop(); await events.done;
-  assert.deepEqual(commands.removed.sort(), ['answer', 'questions'], 'stop() unregisters the commands');
+  assert.deepEqual(commands.removed.sort(), ['answer', 'questions', 'status'], 'stop() unregisters the commands');
   assert.equal(api.notified.length, 2);
 });
 
@@ -377,7 +377,7 @@ test('local host, step 15: proposals - create_project only; the owner approves w
   const commands = fakeCommands();
   const api = commandApi(commands);
   const events = await host.events(api);
-  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'approve', 'decline', 'proposals', 'questions']);
+  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'approve', 'decline', 'proposals', 'questions', 'status']);
   const listed = (await commands.run('proposals')).text;
   assert.match(listed, /Open proposals \(3\):/);
   assert.match(listed, /- p-2 create_project: gamma "Gamma" \(1 work item\(s\)\)\n {2}goal: try gamma\n {2}reason: the owner asked/);
@@ -482,7 +482,7 @@ test('local host, step 15: /profile shows the profile and its file; /purge asks 
     await store.recordTurn('t1', [{ role: 'owner', text: 'my account is 4242' }, { role: 'steward', text: 'noted' }]);
     const commands = fakeCommands();
     const events = await localHost({ root, ...required, pollMs: 10 }).events(commandApi(commands, store));
-    assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'forget', 'profile', 'purge', 'questions', 'restore']);
+    assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'forget', 'profile', 'purge', 'questions', 'restore', 'status']);
     // The owner edits the file directly; /profile reads (and commits) it as the owner's.
     await writeFile(join(memRoot, 'owner', 'profile.md'), 'Likes short replies.');
     const profile = await commands.run('profile');
@@ -761,7 +761,7 @@ test('local host, review 467: stop() is safe when the registry\'s register retur
   const registered = [];
   const commands = { register: def => { registered.push(def.name); } };
   const events = await localHost({ root, pollMs: 60000 }).events(commandApi(commands));
-  assert.deepEqual(registered.sort(), ['answer', 'questions']);
+  assert.deepEqual(registered.sort(), ['answer', 'questions', 'status']);
   events.stop(); await events.done;
 });
 
@@ -770,7 +770,7 @@ test('local host, review 467: /profile and /purge tell the owner when the config
   const commands = fakeCommands();
   const events = await localHost({ root, pollMs: 60000, memory: { userId: 'owner' } })
     .events({ ...commandApi(commands), memoryError: 'unknown time zone Mars/Base' });
-  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'forget', 'profile', 'purge', 'questions', 'restore']);
+  assert.deepEqual([...commands.defs.keys()].sort(), ['answer', 'forget', 'profile', 'purge', 'questions', 'restore', 'status']);
   for (const name of ['profile', 'purge', 'forget', 'restore']) {
     const said = await commands.run(name, ' t-1');
     assert.equal(said.kind, 'error');
@@ -780,7 +780,7 @@ test('local host, review 467: /profile and /purge tell the owner when the config
   // No memory configured: no memory commands, as before.
   const plain = fakeCommands();
   const again = await localHost({ root, pollMs: 60000 }).events(commandApi(plain));
-  assert.deepEqual([...plain.defs.keys()].sort(), ['answer', 'questions']);
+  assert.deepEqual([...plain.defs.keys()].sort(), ['answer', 'questions', 'status']);
   again.stop(); await again.done;
 });
 

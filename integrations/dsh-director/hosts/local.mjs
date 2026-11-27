@@ -50,7 +50,18 @@
  *  `proposals` of the one kind it can execute itself: create_project, a new subdirectory with
  *  project.json, notes.md (the goal), work.json (one work item per seed node, each `working` with
  *  no holder: the open state of this contract, held by nobody until a director takes it) and an
- *  empty inbox/. */
+ *  empty inbox/.
+ *
+ *  Every root has /status (local-commands.mjs: the last phase, the work items, the open questions
+ *  and proposals, one line per project). With `channels: true` (a steward root only) the host
+ *  also offers `channels` (local-channels.mjs, files under channels/): the channel plugins
+ *  (Slack, WeChat) load next to it, the owner binds an account with /bind <channel> and sees
+ *  them with /channels (/unbind, /default). A message from the bound account wakes the steward
+ *  as inbox/owner-message-<id>.json and joins the owner's memory as their turn; the steward
+ *  answers it with message_owner (registered only then), and when a turn that was given such
+ *  a message ends with it unanswered, the turn's last words go back to where it came from. An
+ *  exact approval phrase from the bound account (同意 proposal <id>, ...) decides that proposal,
+ *  as /approve and /decline do. */
 import { readFile, writeFile, appendFile, readdir, mkdir, rename, stat, rm } from 'node:fs/promises';
 import { readFileSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -59,7 +70,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WORK_STATES, isSettled } from '../lib/host.mjs';
 import { startupFailure } from '../lib/exit-cause.mjs';
-import { registerOwnerCommands } from './local-commands.mjs';
+import { registerOwnerCommands, statusText } from './local-commands.mjs';
+import { localChannels, OWNER_MESSAGE_FILE } from './local-channels.mjs';
+import { withoutLeadingClockLines } from '../lib/core.mjs';
+import { ownerLanguage, OWNER_TEXTS } from '../lib/owner-text.mjs';
 
 export const name = 'dsh-director-local-host';
 export const inject = [];
@@ -109,6 +123,39 @@ const STEWARD_PROPOSAL_COMMANDS = '; they list your open proposals with /proposa
   + ' When you ask them to decide a proposal, give them that command instead of an approval phrase line';
 /** With memory: memory_forget refuses here (no_owner_channel - a DSH command carries no owner
  *  message to cite), so the steward sends its owner to the commands that forget and restore. */
+/** With `channels`: the owner is also on the chat channels they bound, and decides a proposal from
+ *  there with the exact approval phrase line. */
+const STEWARD_CHANNEL_COMMANDS = 'Your owner is in this DSH and on the chat channels they bound with /bind (Slack, WeChat; /channels lists them), with no dashboard: they list your open questions with /questions and answer one with /answer <id> <text> here';
+const STEWARD_CHANNEL_PROPOSAL_COMMANDS = '; they list your open proposals with /proposals and decide one with /approve <id> or /decline <id> [reason] here,'
+  + ' or from a bound chat channel with the exact approval phrase line. When you ask them to decide a proposal, give them both the phrase line and the command';
+/** With `channels`: the steward's message tool (message_owner, this host's) and what the
+ *  WeChat QR tool says here (the QR is a file on this machine; /channels names it). */
+const SEND_USER_MESSAGE = 'Send your owner one message on their chat channel. reply_to_message_id is the message_id of the owner message from a channel you answer: it goes back where that came from. Without it the message goes to your owner\'s default channel, when they chose one. request_key makes a retry safe: the same key with the same body sends nothing new, another body under it is refused. Your owner sees it in this conversation too. Answers {sent, message_id, mirrored, channel?, reason?}: mirrored false names why it did not reach a chat (no_default_channel, not_bound, channel_not_connected, send_failed).';
+const LOCAL_QR = 'Ask the WeChat bridge for a new login QR code, when your owner wants to connect (or reconnect) WeChat. '
+  + 'The QR is written to a file on this machine and never comes back to you: never send, describe or promise a QR over chat. '
+  + 'Answers {requested: true} (tell your owner to type /channels, which names the file, and scan it with the WeChat account to connect, '
+  + 'within about 2 minutes) or {refused}: qr_waiting (a QR is already waiting: /channels names it), already_logged_in (WeChat is '
+  + 'connected), login_starting (one is on its way), resuming (the bridge is resuming the saved login without a QR: wait a minute and '
+  + 'check again), rate_limited with retry_after_s (try again after that), not_registered / not_configured / bridge_unreachable / '
+  + 'not_supported (WeChat is not set up or its bridge is not running or too old: say so). Call it once per request of your owner; never in a loop.';
+/** The lines the channel layer sends that name a dashboard, as this host says them (lib/owner-text.mjs). */
+function channelReplies(language) {
+  const base = OWNER_TEXTS[ownerLanguage(language)].replies;
+  const undated = 'Not done: the message carried no time, so it cannot approve or decline; use /approve or /decline in your steward\'s DSH.';
+  const lines = ownerLanguage(language) === 'zh' ? {
+    more: '\n…（全文见管家的 DSH 对话）',
+    refused: code => `Not delivered (${code}); the whole conversation is in your steward's DSH. 未送达（${code}），完整对话在管家的 DSH 里。`,
+    approval_undated: undated + ' 未执行：消息没有时间，不能用来批准或拒绝，请在管家的 DSH 里用 /approve 或 /decline。',
+    code_sent_to_bound_account: 'That was a binding code; it is now retired - make a new one with /bind in your steward\'s DSH. 这是绑定码，已作废，请在管家的 DSH 里用 /bind 重新生成。',
+  } : {
+    more: '\n… (full text in your steward\'s DSH conversation)',
+    refused: code => `Not delivered (${code}); the whole conversation is in your steward's DSH.`,
+    approval_undated: undated,
+    code_sent_to_bound_account: 'That was a binding code; it is now retired - make a new one with /bind in your steward\'s DSH.',
+  };
+  return { ...lines, approval: approval => approval?.refusal === 'approval_undated'
+    ? `proposal ${approval.proposal_id}: ${lines.approval_undated}` : base.approval(approval) };
+}
 const STEWARD_MEMORY_COMMANDS = '; they see their resident profile with /profile, forget one memory entry with /forget <id> [reason]'
   + ' and bring it back with /restore <id>, or remove one from every version, for good, with /purge <id>.'
   + ' When memory_forget refuses with no_owner_channel, give them /forget <id> [reason] instead';
@@ -158,10 +205,14 @@ function createProjectProblem(payload) {
 
 /** @param options - root, provider, model (required), sessionId, dshEntry, rolesFile, sessionEnv,
  *  permissionPreset, objective, holder, pollMs, todo: { python, cwd, module, stateDirEnv },
- *  projectsDir (step 15). */
+ *  projectsDir (step 15), channels (true: the owner's chat channels; a steward root only). */
 export function localHost(options = {}) {
   const root = options.root;
   if (!root) throw new Error('directorHost refused: missing config: root (the local host keeps its files there)');
+  if (options.channels !== undefined && typeof options.channels !== 'boolean')
+    throw new Error('directorHost refused: config: channels must be true or false');
+  if (options.channels && (options.rootRole ?? 'director') !== 'steward')
+    throw new Error('directorHost refused: config: channels needs rootRole: steward (only a steward talks with its owner on a chat channel)');
   const holder = options.holder ?? options.sessionId ?? 'director';
   const files = { work: join(root, 'work.json'), notes: join(root, 'notes.md'), inbox: join(root, 'inbox'),
     done: join(root, 'inbox', 'done'), progress: join(root, 'progress.jsonl'), noteKeys: join(root, 'note-keys.json'),
@@ -179,6 +230,8 @@ export function localHost(options = {}) {
   const projectsDir = options.projectsDir;
   const items = async () => (await readJson(files.work, { items: [] })).items ?? [];
   let timer, finish, lastFailure = '';
+  // The director api, from install() on: the owner's memory store (channels record a turn in it).
+  let director;
 
   /** The owner's answer (plugin step 15, /answer): the answer file first - it is the wake event
    *  and survives a crash before questions.json is written; the sweep records it then - and
@@ -389,14 +442,15 @@ export function localHost(options = {}) {
       return { withdrawn: true, proposal_id: id };
     }),
   };
-  /** The owner's decision (/approve, /decline): an open proposal only; an approval runs it now. */
-  const decide = ({ id, approve, reason, by = LOCAL_OWNER }) => lockedProposals(async () => {
+  /** The owner's decision (/approve, /decline, or an approval phrase from a bound chat channel,
+   *  whose channel message is `via`): an open proposal only; an approval runs it now. */
+  const decide = ({ id, approve, reason, by = LOCAL_OWNER, via }) => lockedProposals(async () => {
     const all = await proposalList();
     const proposal = own(all, id);
     if (!isRecord(proposal)) return { refused: 'unknown_proposal', reason: `no proposal ${id}` };
     if (proposal.status !== 'open') return { refused: 'not_open', reason: `${id} is ${proposal.status}`, status: proposal.status };
     // The map key is the id (a record's own id field could name another file in the inbox).
-    const decided = { ...proposal, id, decided_at: new Date().toISOString(), decided_by: by };
+    const decided = { ...proposal, id, decided_at: new Date().toISOString(), decided_by: by, ...(via ? { decided_via: via } : {}) };
     if (!approve) {
       all[id] = { ...decided, status: 'declined', ...(reason ? { decline_reason: reason } : {}) };
     } else {
@@ -433,9 +487,27 @@ export function localHost(options = {}) {
     }
   });
 
+  // ---- channels: the owner's chat channels (a steward root only)
+  const channels = options.channels ? localChannels({ root, inbox: files.inbox, memory: () => director?.memory,
+    log: line => console.error('dsh-director local host: ' + line),
+    ...(projectsDir ? { proposals: { list: proposalList, decide } } : {}) }) : undefined;
+  /** The turn's last words to the owner message from a channel it was given and left unanswered
+   *  (the newest one), once per message: the auto-reply the backend's steward host sends. */
+  const autoReply = async (said, given, mirror) => {
+    const waiting = await channels.steward.unanswered([...new Set(given.match(/m-[0-9a-f]{20}/g) ?? [])]);
+    const body = withoutLeadingClockLines(said).trim();
+    if (!waiting.length || !body) return;
+    const newest = waiting.at(-1), id = 'auto-' + newest.message_id;
+    const text = body.length > 8000 ? body.slice(0, 7990) + '\n[…]' : body;
+    if ((await channels.steward.record({ message_id: id, reply_to: newest.message_id, auto: true })).duplicate) return;
+    await channels.steward.remember(id, newest.message_id, text);
+    await mirror(id, text, newest.message_id);
+  };
+
   return {
     version: '1.0.0',
-    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'attention', ...(projectsDir ? ['portfolio', 'proposals'] : [])],
+    capabilities: ['progress', 'workState', 'heldWork', 'roles', 'install', 'setup', 'attention', ...(projectsDir ? ['portfolio', 'proposals'] : []),
+      ...(channels ? ['channels', 'texts'] : [])],
     config: {
       sessionId: options.sessionId ?? 'director',
       provider: options.provider, model: options.model,
@@ -459,15 +531,19 @@ export function localHost(options = {}) {
       ...(options.rootRole ? { rootRole: options.rootRole } : {}),
       // The owner's language (lib/owner-text.mjs), passed through as given (absent: English).
       ...(options.ownerLanguage ? { ownerLanguage: options.ownerLanguage } : {}),
+      // No dashboard here: the steward's prompt says what this host has instead (lib/steward-prompt.mjs).
+      ownerDashboard: false,
     },
+    ...(channels ? { channels: channels.ops,
+      texts: { tools: { request_wechat_qr: LOCAL_QR }, channelReplies: channelReplies(options.ownerLanguage) } } : {}),
     /** The startup / post-compaction snapshot: the work items and the notes; for the steward
      *  also how its owner answers and decides here (step 15: steward.md speaks of Slack,
      *  WeChat and a dashboard, none of which a standalone DSH has). */
     async context(role) {
       let notes = '';
       try { notes = await readFile(files.notes, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-      return JSON.stringify({ work: await items(), notes, ...(role === 'steward' ? { owner_commands: STEWARD_OWNER_COMMANDS
-        + (projectsDir ? STEWARD_PROPOSAL_COMMANDS : '') + (options.memory ? STEWARD_MEMORY_COMMANDS : '') + '.' } : {}) });
+      return JSON.stringify({ work: await items(), notes, ...(role === 'steward' ? { owner_commands: (channels ? STEWARD_CHANNEL_COMMANDS : STEWARD_OWNER_COMMANDS)
+        + (projectsDir ? channels ? STEWARD_CHANNEL_PROPOSAL_COMMANDS : STEWARD_PROPOSAL_COMMANDS : '') + (options.memory ? STEWARD_MEMORY_COMMANDS : '') + '.' } : {}) });
     },
     async progress(body) {
       await mkdir(root, { recursive: true });
@@ -514,10 +590,13 @@ export function localHost(options = {}) {
     },
     /** The table as loaded, with this host's two recording tools shown to the director (they
      *  are registered in its scope only; without this they would be deferred behind search_tools). */
-    roles: table => ({ ...table, director: { ...table.director, presented: [...table.director.presented, 'work_update', 'note_write'] } }),
+    roles: table => ({ ...table, director: { ...table.director, presented: [...table.director.presented, 'work_update', 'note_write'] },
+      // With channels the steward answers its owner's chat messages with this host's message_owner.
+      ...(channels && table.steward ? { steward: { ...table.steward, presented: [...table.steward.presented, 'message_owner'] } } : {}) }),
     /** Before the director exists: refuse to start, naming each one, when something the plugin
      *  needs is missing here; warn on a DSH release this host is not tested on. */
     async install(api) {
+      director = api;
       const problems = await prerequisiteProblems({ todo: api.todo, director: (options.rootRole ?? 'director') === 'director',
         memory: !!options.memory });
       if (problems.length) throw new Error('dsh-director local host cannot start here: ' + problems.join('; '));
@@ -526,7 +605,7 @@ export function localHost(options = {}) {
         api.ctx.logger.warn(`dsh-director local host: tested on DSH ${TESTED_DSH_VERSION}, running ${version ?? 'an unknown version'}`);
     },
     /** The director records with two small tools: a work item's state, and a note. */
-    async setup(scope, _subject, { defineTool, jsonOutput, runtimeSection }) {
+    async setup(scope, _subject, { defineTool, jsonOutput, runtimeSection, ownerMessageSent }) {
       if ((options.rootRole ?? 'director') === 'director') {
         runtimeSection();
         scope.systemPrompt.section({ name: 'dsh-director:local-host', order: 12.5, interpolate: false, text: HOST_NOTE });
@@ -568,12 +647,36 @@ export function localHost(options = {}) {
           return { written: true };
         },
       }));
+      if (channels) scope.tools.register(defineTool({ name: 'message_owner', description: SEND_USER_MESSAGE,
+        parameters: { request_key: { type: 'string', required: true }, body: { type: 'string', required: true }, reply_to_message_id: { type: 'string' } },
+        output: jsonOutput,
+        async execute(args) {
+          const body = String(args.body ?? '').trim(), key = String(args.request_key ?? '').trim();
+          if (!body) return { refused: 'empty_body', reason: 'say something' };
+          if (Array.from(body).length > 8000) return { refused: 'body_too_long', reason: 'at most 8000 characters' };
+          if (!key) return { refused: 'request_key_required', reason: 'give each message its own request_key' };
+          const replyTo = typeof args.reply_to_message_id === 'string' && args.reply_to_message_id.trim() ? args.reply_to_message_id.trim() : undefined;
+          if (replyTo && !await channels.steward.inbound(replyTo))
+            return { refused: 'unknown_message', reason: `${replyTo} is not a message your owner sent from a chat channel` };
+          const id = 's-' + createHash('sha256').update(key).digest('hex').slice(0, 20);
+          const digest = createHash('sha256').update(JSON.stringify([body, replyTo ?? null])).digest('hex');
+          const recorded = await channels.steward.record({ message_id: id, ...(replyTo ? { reply_to: replyTo } : {}), request_key: key, digest });
+          if (recorded.duplicate && recorded.row.digest !== digest)
+            return { refused: 'request_key_reused', reason: `request_key ${key} already sent another message` };
+          if (!recorded.duplicate) await channels.steward.remember(id, replyTo, body);
+          // A retry sends only what did not go out yet: a delivered message answers already_mirrored.
+          const mirrored = await ownerMessageSent(id, body, replyTo);
+          return { sent: !recorded.duplicate, ...(recorded.duplicate ? { duplicate: true } : {}), message_id: id, mirrored: mirrored?.mirrored === true,
+            ...(mirrored?.channel ? { channel: mirrored.channel } : {}), ...(mirrored?.mirrored === true ? {} : { reason: String(mirrored?.reason ?? 'unknown') }) };
+        },
+      }));
     },
     /** Wake events: every file that lands in inbox/ is delivered, then moved to
      *  inbox/done/ (the move is the cursor). A crash before the move redelivers it under
      *  the same id; the director recognises it. */
     async events(api) {
       const { ctx, notify, agent, isDisposed } = api;
+      director = api;
       // A wake names the root it wakes: the director, or the steward (rootRole).
       const eventWord = (options.rootRole ?? 'director') === 'steward' ? 'Steward' : 'Director';
       // A configured memory that did not open leaves the memory tools refusing for the whole
@@ -592,6 +695,14 @@ export function localHost(options = {}) {
           if (isDisposed()) return;
           const path = join(files.inbox, file);
           const [text, { ino, mtimeMs }] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
+          // An owner message from a chat channel (local-channels.mjs): the owner's words, said as such.
+          if (channels && OWNER_MESSAGE_FILE.test(file)) {
+            let channel = 'a chat channel';
+            try { channel = JSON.parse(text).source_channel ?? channel; } catch { /* delivered as it is */ }
+            await notify(`Owner message from ${channel} (${file}):\n` + text, { id: `inbox:${file}:${ino}:${mtimeMs}` });
+            await rename(path, join(files.done, file));
+            continue;
+          }
           const answered = ANSWER_FILE.exec(file)?.[1];
           if (answered) {
             // The owner's answer: recorded on the question (an answer wins over a
@@ -631,9 +742,28 @@ export function localHost(options = {}) {
       const isRoot = invoked => { const mine = api.agent?.session?.id, theirs = invoked?.session?.id;
         return invoked === api.agent || mine === undefined || theirs === undefined || mine === theirs; };
       const unregister = commands ? registerOwnerCommands(commands, { questions, answer, isRoot, memory: api.memory, wake: wakeLine,
+        status: () => statusText({ root, projectsDir }), ...(channels ? { channels: channels.owner } : {}),
         // Memory configured but not open: the memory commands say so instead of vanishing.
         ...(api.memory ? {} : api.memoryError || options.memory ? { memoryError: api.memoryError ?? 'it did not open (see the DSH log)' } : {}),
         ...(projectsDir ? { proposals: proposalList, decide } : {}) }) : [];
+      // With channels: a turn given an owner message from a channel and ending with it unanswered
+      // sends its last words there (the backend steward host's auto-reply).
+      let unwatch;
+      if (channels && typeof ctx.on === 'function') {
+        let last = '', given = '';
+        const blockText = message => (message?.content ?? []).filter(b => b?.type === 'text').map(b => b.text ?? '').join('');
+        unwatch = ctx.on('session/event', (session, event) => {
+          if (session?.id === undefined || session.id !== api.agent?.session?.id) return;
+          if (event?.type === 'turn/start') { last = ''; given = ''; }
+          else if (event?.type === 'user/message') given += blockText(event.data?.message ?? event.data) + '\n';
+          else if (event?.type === 'assistant/message') { const said = blockText(event.data?.message).trim(); if (said) last = said; }
+          else if (event?.type === 'turn/end') {
+            const said = last, input = given; last = ''; given = '';
+            if (said && event.data?.reason?.kind === 'completed')
+              void autoReply(said, input, api.ownerMessageSent).catch(error => ctx.logger?.warn?.('auto-reply: ' + String(error?.message ?? error).slice(0, 300)));
+          }
+        });
+      }
       const done = new Promise((resolve, reject) => {
         finish = resolve;
         // One sweep at a time: a tick that lands while a sweep still awaits a delivery
@@ -647,7 +777,8 @@ export function localHost(options = {}) {
         timer.unref?.();
       });
       // A registry whose register returns no disposer leaves nothing to undo.
-      return { done, stop: () => { clearInterval(timer); for (const off of unregister ?? []) if (typeof off === 'function') off(); finish?.(); } };
+      return { done, stop: () => { clearInterval(timer); for (const off of unregister ?? []) if (typeof off === 'function') off();
+        if (typeof unwatch === 'function') unwatch(); finish?.(); } };
     },
     ...(projectsDir ? { portfolio, proposals } : {}),
   };

@@ -2,7 +2,8 @@
 
 The owner's WeChat as an owner channel of the steward: a DSH plugin that registers the
 channel `wechat` with the `ownerChannels` service (provided by dsh-director when its host
-declares the `channels` capability; today only the AItelier backend's steward does). It
+declares the `channels` capability: the AItelier backend's steward, or dsh-director's built-in
+local host with `channels: true`, see its README's "Chat channels"). It
 does not speak WeChat itself: the login lives in the wechat-bridge container
 (`integrations/wechat-bridge`), and this plugin long-polls the bridge's `/events`, sends
 through its `/send`, and shows its login QR on the dashboard.

@@ -47,6 +47,11 @@ export interface HostConfig {
    *  and decision lines) and for the reply phrases the steward's prompt names: 'en' or 'zh', by
    *  its primary subtag ('zh-CN' is 'zh'); absent or anything else, 'en'. */
   ownerLanguage?: string;
+  /** Whether the owner has a dashboard of the host's own (the whole conversation, proposal cards,
+   *  the channels' status and login QR, reminders and the daily brief). Default true; false (the
+   *  built-in local host) cuts the steward prompt's passages about it and, with `channels`, puts
+   *  what that host does instead (lib/steward-prompt.mjs). */
+  ownerDashboard?: boolean;
   /** The worker capacity this host expects (default: DSH's own maxActiveSubagents). The guard
    *  uses the smaller of this and the limit DSH runs with, so it is never above DSH's. */
   maxActiveSubagents?: number;
@@ -555,7 +560,9 @@ export interface DirectorHost {
   /** Director-scope sections/tools/hooks, before the director's own; may call
    *  api.runtimeSection() and api.contextHooks() to place those [none]. */
   setup?(scope: unknown, subject: unknown, api: DirectorApi & { runtimeSection(): void; contextHooks(): void }): Promise<void>;
-  /** Wording overrides: continuationQuestion, reviewInstruction, tools.<name>, ... [neutral defaults]. */
+  /** Wording overrides: continuationQuestion, reviewInstruction, tools.<name>, ... [neutral defaults];
+   *  channelReplies: lines of lib/owner-text.mjs's `replies` the channel layer sends in the host's
+   *  own words (the built-in host's name no dashboard), over the owner's language's. */
   texts?: Record<string, unknown>;
   /** Message source kinds and section names (persisted in session logs) [dsh-director-*]. */
   labels?: Record<string, string>;

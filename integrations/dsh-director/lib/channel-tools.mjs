@@ -15,9 +15,10 @@ const DESCRIPTION = 'Ask the WeChat bridge for a new login QR code, when your ow
   + 'not_supported (WeChat is not set up or its bridge is not running or too old: say so). Call it '
   + 'once per request of your owner; never in a loop.';
 
-/** @param login (channel) => Promise<{requested: true} | {refused: string, retry_after_s?: number}> */
-export function registerChannelTools(scope, { defineTool, jsonOutput, login }) {
-  scope.tools.register(defineTool({ name: 'request_wechat_qr', description: DESCRIPTION, parameters: {}, output: jsonOutput,
+/** @param login (channel) => Promise<{requested: true} | {refused: string, retry_after_s?: number}>
+ *  @param description the host's own wording (texts.tools.request_wechat_qr: where its QR shows), else DESCRIPTION */
+export function registerChannelTools(scope, { defineTool, jsonOutput, login, description = DESCRIPTION }) {
+  scope.tools.register(defineTool({ name: 'request_wechat_qr', description: description ?? DESCRIPTION, parameters: {}, output: jsonOutput,
     async execute() {
       const answer = await login('wechat');
       // Only the two documented shapes reach the model, whatever the channel answered.

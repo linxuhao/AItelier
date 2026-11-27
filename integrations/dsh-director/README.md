@@ -401,9 +401,12 @@ To answer an open question, drop its answer into the inbox (the director gets it
 printf '%s\n' '{"answer": "Yes, drop Node 18."}' > "$ROOT/inbox/answer-<question id>.json"
 ```
 
-The plugin also registers DSH commands for this (`/questions`, `/answer <id> <text>`), but the
-profile above has no chat client to type them in; files are the way in (or add DSH's web app to
-the profile, as in [Talk to it](#talk-to-it)).
+The plugin also registers DSH commands for this (`/questions`, `/answer <id> <text>`, and `/status`:
+the last line of `progress.jsonl`, the work items by state and the open ones, how many questions
+are open; with `projectsDir` also how many proposals are open and one line per project). `/status`
+only reads, and a missing or hand-edited file is named in its answer, not thrown on. The profile
+above has no chat client to type commands in; files are the way in (or add DSH's web app to the
+profile, as in [Talk to it](#talk-to-it)).
 
 ## A steward instead of a director
 
@@ -416,7 +419,8 @@ to `director-local`'s `config`:
 | `rootRole: steward` | the session named by `sessionId` is the steward, not a director |
 | `memory: { userId: <name> }` | your memory: a git repository under `~/.local/share/dsh-director/memory/<name>/` (`root` puts it elsewhere; keep it outside anything mounted into containers). `timeZone` (an IANA name, default UTC) dates what it shows |
 | `projectsDir` | optional: a directory whose every subdirectory is one local host root (a project); below |
-| `ownerLanguage` | optional, default `en`: `en` or `zh` (by its first part, so `zh-CN` is `zh`; anything else is `en`). The language of the fixed text the plugin shows: the reply phrases in the steward's prompt, the memory tools' lines and labels, the weekday in the clock line |
+| `ownerLanguage` | optional, default `en`: `en` or `zh` (by its first part, so `zh-CN` is `zh`; anything else is `en`). The language of the fixed text the plugin shows: the reply phrases in the steward's prompt, the memory tools' lines and labels, the weekday in the clock line, the lines the chat channels send |
+| `channels: true` | optional: your Slack and WeChat as chat channels to the steward ([Chat channels](#chat-channels)). Only with `rootRole: steward`; a director refuses to start with it |
 
 `projectsDir` must exist (create it; one that does not reads as no projects). One project is a
 subdirectory named by its id (letters, digits, `_ . -`, starting with a letter or digit; other
@@ -451,20 +455,28 @@ What a steward on this host can do:
 - forget, restore or purge one memory entry only when you type `/forget <id> [reason]`,
   `/restore <id>` or `/purge <id>`; `/profile` shows your resident profile. Its own
   `memory_forget` refuses here (a DSH command carries no message of yours it could cite).
+- with `channels: true`: talk with you on Slack and WeChat ([Chat channels](#chat-channels)).
+- `/status`, in any root: as in [Watch and answer](#6-watch-and-answer).
 
 What it cannot do here, because this host does not provide it:
 
 - pass anything to a director (no `handoff`), read a director's letters, or propose to start,
   stop, archive or unarchive a director or project;
-- reach you anywhere but this DSH: no dashboard, no Slack or WeChat (the channel plugins do not
-  load next to this host), no family groups, no daily brief and no reminders;
+- reach you anywhere but this DSH and, with `channels: true`, your bound Slack and WeChat
+  accounts: no dashboard, no family groups (a group code binds nothing here), no daily brief and
+  no reminders, no alert through one channel that another is down, no push of a director's
+  questions to your chat;
+- answer a question from a chat: an answer to a question it asked you is `/answer <id> <text>` in
+  this DSH (or the file `inbox/answer-<id>.json`); a reply on Slack or WeChat is a message to the
+  steward, not an answer recorded on the question;
 - use connections: no MCP servers through a catalog, no confirmations, no attachments, PDF or
-  office files, no `make_document` or `calculate`.
+  office files, no `make_document` or `calculate` (a picture, voice or file sent on a chat reaches
+  the steward only as a placeholder such as `[图片 未收：渠道不支持]`, never its bytes).
 
 Its prompt is cut to match: `steward.md` is written for the fullest host, and each passage about
-something this host does not provide (the dashboard, chat channels, the brief, family groups,
-handoffs and letters, the connection catalog) is left out or replaced with what to do here
-(`lib/steward-prompt.mjs`). The owner's language (`ownerLanguage`) then swaps the reply phrases
+something this host does not provide (the dashboard, chat channels unless `channels: true`, the
+brief, family groups, handoffs and letters, the connection catalog) is left out or replaced with
+what to do here (`lib/steward-prompt.mjs`; the host's config says `ownerDashboard: false`). The owner's language (`ownerLanguage`) then swaps the reply phrases
 and fixed lines that are left (`lib/owner-text.mjs`). A `zh` host that provides everything gets
 `steward.md` unchanged.
 
@@ -519,6 +531,87 @@ your conversation with the steward, and the commands above (`/proposals`, `/appr
 Only one DSH process can own the steward's session: a second `dsh --profile steward` exits with
 `SessionAlreadyOwnedError`, and a separate `dsh web` cannot write to it (`session/writer-held`).
 Talk to it through the web app of the process that runs it.
+
+### Chat channels
+
+With `channels: true` the steward talks with you on Slack and WeChat as well as in its DSH. The
+two channel plugins are in this repository, next to this one: `integrations/dsh-channel-slack`
+and `integrations/dsh-channel-wechat` (they are not in the npm package; use a checkout). Each
+needs its own setup first:
+
+- Slack: a Slack app of your own and its two tokens, made as `integrations/dsh-channel-slack/README.md`
+  says (the app manifest is `slack-app-manifest.json` there). Save the tokens as the files
+  `slack-app-token` and `slack-bot-token` (one line each, mode 0600) in a directory of your own and
+  give its path as `secretsDir`. The plugin's Slack SDK is not in DSH: install it once, for
+  instance `npm install --prefix $HOME/slack-sdk @slack/socket-mode@3.1.1 @slack/web-api@8.3.0`,
+  and give `resolveFrom: $HOME/slack-sdk/package.json`.
+- WeChat: the wechat-bridge container holds the WeChat login; build and start it as
+  `integrations/wechat-bridge/README.md` says, with a token file the bridge and the plugin share
+  (`integrations/dsh-channel-wechat/README.md`, step 1). Give that file as `tokenFile`; the plugin
+  reaches the bridge at `http://127.0.0.1:18741` unless `url` (or `WECHAT_BRIDGE_PORT` in DSH's
+  environment) says otherwise.
+
+Then add the plugins to the steward's profile after `director-local`, in the same `insert` list
+(`$CHECKOUT` is the repository; leave out the channel you do not use):
+
+```yaml
+    - id: director-local
+      name: $PLUGIN/hosts/local.mjs
+      config:
+        root: $ROOT
+        provider: deepseek-official
+        model: deepseek-flash
+        sessionId: steward
+        rootRole: steward
+        channels: true
+    - id: dsh-channel-slack
+      name: $CHECKOUT/integrations/dsh-channel-slack/index.mjs
+      config: { secretsDir: $HOME/chat-secrets, resolveFrom: $HOME/slack-sdk/package.json }
+    - id: dsh-channel-wechat
+      name: $CHECKOUT/integrations/dsh-channel-wechat/index.mjs
+      config: { tokenFile: $HOME/chat-secrets/wechat-bridge-token }
+```
+
+Start the steward and type, in its web app ([Talk to it](#talk-to-it)):
+
+| command | what it does |
+|---|---|
+| `/bind <slack\|wechat>` | a one-time 6-digit code, valid 10 minutes. Send it to the bot from your own account: that account is bound (the bot answers `Bound`), and only its messages reach the steward. The code works once; a new `/bind` replaces it; five wrong codes sent to the bot while it is valid retire it. It is kept in the running process only, never on disk: after a restart, `/bind` again. Sent from an account that is bound already, it is retired and nothing is bound |
+| `/channels` | who is bound to each channel and since when, whether its plugin is connected, the default channel, and the file of the WeChat login QR while one is waiting |
+| `/unbind <channel>` | that account's messages no longer reach the steward |
+| `/default <slack\|wechat\|none>` | where the steward's own messages go when they answer no chat message (a proposal's result, say); default none |
+
+WeChat's login QR is written to `$ROOT/channels/wechat-qr.svg` (mode 0600) while a scan is needed
+and removed once WeChat is connected; open it and scan it with the WeChat account the bot will
+use. Ask the steward for a new one (it calls `request_wechat_qr`). The QR never reaches the model.
+
+What happens to a message from your bound account: it wakes the steward as
+`inbox/owner-message-<id>.json` (your words, the channel, when you sent it), with `memory` it is
+your turn in your memory (with its channel, and the steward's answer in the same turn), and the
+bot answers that it arrived (`Received; working on it…`, in `ownerLanguage`). The steward
+answers it with `message_owner`; if it ends its turn without doing so, its last words go back
+as the answer. Each answer goes once, to the message it answers. A message delivered again is
+not delivered twice. Six messages a minute and sixty an hour per channel reach the steward;
+past that the channel holds them and hands them in later. A message from any other account is
+dropped without an answer, and six digits from one are a binding attempt (answered bound or not
+bound, nothing else).
+
+A message that is exactly `同意 proposal <id>` or `拒绝 proposal <id>` (or `approve proposal <id>`
+/ `decline proposal <id>`, lower case) for one of the steward's proposals, sent from your bound
+account and written less than 10 minutes ago, decides it as `/approve` or `/decline` would, and
+the bot answers with the outcome. The steward reads the message too, and the result wakes it.
+
+Files under `$ROOT/channels/` (all mode 0600):
+
+| file | what is in it |
+|---|---|
+| `channels.json` | the bound account of each channel, the default channel, and the binding attempts (to answer a binding message delivered again) |
+| `messages.jsonl` | one line per message relayed in and per steward message sent out, with the channel's refs and when |
+| `sent.jsonl` | the steward's messages to you: which message each one answers |
+| `status.json` | each channel's last reported status |
+| `wechat-qr.svg` | the login QR, while one is waiting |
+
+The channel layer keeps the messages it still owes a line in `$ROOT/state/channel-owed.json`.
 
 ## Find it in DSH's plugin market
 

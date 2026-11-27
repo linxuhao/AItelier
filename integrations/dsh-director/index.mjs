@@ -86,8 +86,11 @@ export function ownerChannelsFor(ctx, host) {
   // The owner's language (HostConfig.ownerLanguage; overfit review 重-18): the lines the
   // channel layer sends and how long a mirrored message may be.
   const owner = ownerTexts(host.config?.ownerLanguage);
+  // A host's own wording of some of these lines (texts.channelReplies: the built-in host has no
+  // dashboard to point to), over the language's.
+  const own = host.texts?.channelReplies;
   return createOwnerChannels({ host: host.channels, ...(host.groups ? { groups: host.groups } : {}),
-    replies: owner.replies, limits: { ...CHANNEL_LIMITS, mirrorChars: owner.mirrorChars },
+    replies: { ...owner.replies, ...(own && typeof own === 'object' ? own : {}) }, limits: { ...CHANNEL_LIMITS, mirrorChars: owner.mirrorChars },
     // Step 24.2 (7.8.12): storeMedia stores into the host's media library, when it has one.
     ...(host.capabilities.includes('media') && host.media ? { media: host.media } : {}),
     ...(typeof stateDir === 'string' && stateDir ? { owedFile: join(stateDir, 'channel-owed.json') } : {}),
@@ -193,7 +196,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
   // lib/steward-prompt.mjs stewardPromptFor. A 'zh' host with every feature gets its prompt file unchanged.
   const rolePrompt = readFileSync(join(promptDir, roles[rootRole].prompt), 'utf8');
   const runtimeSkill = rootRole === 'steward' ? stewardPromptFor(rolePrompt, {
-    features: stewardPromptFeatures(host.capabilities, { memory: config.memory }), language: config.ownerLanguage }) : rolePrompt;
+    features: stewardPromptFeatures(host.capabilities, { memory: config.memory, dashboard: config.ownerDashboard !== false }),
+    language: config.ownerLanguage }) : rolePrompt;
   const workerSkill = readFileSync(join(promptDir, roles.worker.prompt), 'utf8');
   // Step 24.1a (design-steward 7.8.7): a role with `catalog: "host"` (the steward) finds and
   // calls its further tools only in the catalog its host gives for the turn; without such a
@@ -875,7 +879,8 @@ export async function boot(ctx, { host = ctx.directorHost, channels = ownerChann
     if (directorMedia) registerDirectorMediaCall(scope, { ctx, defineTool, jsonOutput, HarnessError: llm.HarnessError, runTool,
       media: directorMedia, rootSession: config.sessionId, projectId: config.projectId, names: DIRECTOR_MEDIA_TOOLS });
     // Step 19: a new WeChat login QR on request; the QR itself never reaches the model.
-    if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel) });
+    if (channels) registerChannelTools(scope, { defineTool, jsonOutput, login: channel => channels.login(channel),
+      description: texts.tools.request_wechat_qr });
     // Step 23, 25 C4, 23.1: the family memory, the family lists and group_reminder_set (lib/group-tools.mjs).
     if (groupTurns && host.groups) registerGroupTools(scope, { defineTool, jsonOutput, groups: host.groups, turns: groupTurns });
   };

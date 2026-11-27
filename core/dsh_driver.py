@@ -811,6 +811,14 @@ class DshDrivers:
         # even though its session presents neither. Switch the plugin off only when
         # the role's presented list names none of those tools; a role that presents
         # one keeps exactly the profile it has today.
+        #
+        # The unit of the decision is therefore the profile, i.e. the role this
+        # process runs as: the entry is appended for the process, so a table that
+        # gave this role none of the three while another role in the same process
+        # presented one could not be served by this switch and would have to be
+        # decided in the table. No shipped table has that shape - the only role
+        # presenting none is the steward, and `subagent`/`subagent_fork` are in its
+        # forbidden list.
         if not {"send_message", "list_agents", "wait_agent"} & set(
                 _root_entry(roles, row["project_id"])["presented"]):
             patches.append({"id": "tool-subagent-control", "disabled": True})

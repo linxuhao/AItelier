@@ -1004,23 +1004,27 @@ def test_a_role_presenting_no_identity_tools_disables_subagent_control(runtime):
         "id": SUBAGENT_CONTROL_ID, "disabled": True}
 
 
-def test_a_role_table_whose_steward_presents_send_message_keeps_the_plugin(runtime, monkeypatch):
-    """The decision reads the table, never the role's name: the same reserved
-    project with send_message added to its entry keeps today's profile."""
+@pytest.mark.parametrize("presented_name", sorted(_IDENTITY_TOOLS))
+def test_a_role_table_presenting_one_identity_tool_keeps_the_plugin(
+        runtime, monkeypatch, presented_name):
+    """The decision reads the table, never the role's name, and it tests the SET:
+    each of the three names on its own keeps today's profile, so narrowing the
+    predicate to one name would be measured here."""
     import copy
     from core import dsh_driver
     table = copy.deepcopy(dsh_driver.load_roles())
-    dsh_driver._root_entry(table, STEWARD_PROJECT)["presented"].append("send_message")
+    dsh_driver._root_entry(table, STEWARD_PROJECT)["presented"].append(presented_name)
     dsh_driver.validate_roles(table)  # the simulated roles.json is a valid one
     monkeypatch.setattr(dsh_driver, "load_roles", lambda: table)
-    assert "send_message" in dsh_driver._root_entry(
+    assert presented_name in dsh_driver._root_entry(
         dsh_driver.load_roles(), STEWARD_PROJECT)["presented"]
 
     steward = _steward_row(runtime)
     runtime._environment(steward)
 
     assert _subagent_control_patch(runtime, steward) is None, (
-        "one presented tool is enough: the identity block would be truthful")
+        "one presented identity tool is enough: the switch keys on the set, not"
+        " on a single name")
 
 
 # ── Auto-compact policy ──────────────────────────────────────────────────────

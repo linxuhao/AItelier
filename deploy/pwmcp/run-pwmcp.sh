@@ -14,10 +14,38 @@
 #   NO_PROXY=1 run-pwmcp.sh ... = v2 layout (playwright directly on PORT, no auto screenshots).
 # Drivers: bound to 127.0.0.1 only. Rollback: docker rm -f <driver>-pwmcp ; previous script: run-pwmcp.sh.bak-20261110c
 set -euo pipefail
-B=/home/linxuhao/.AItelier/browser
+# PWMCP_BROWSER_DIR only redirects the browser root for isolated tests; the default is unchanged.
+B=${PWMCP_BROWSER_DIR:-/home/linxuhao/.AItelier/browser}
 PKG=$B/pkg-0.0.84
 DRIVER=${1:?driver name}; PORT=${2:?port}
 EXTRA_FLAGS=${EXTRA_FLAGS:-}
+
+# One iGPU detection for both arms. A render node counts as present by existence
+# alone: the launching user has no render-group membership, so a host-side r/w
+# probe would be false even though --group-add grants access in the container.
+# PWMCP_GPU=off (exact) is the old SwiftShader path: same docker argv and base
+# config as before, no device/group and no generated copy. Any other value = auto.
+GPU_NODE=${PWMCP_DRI_DIR:-/dev/dri}/renderD128
+gpu_setup() {  # $1 = the instance's own writable dir, mounted into the container at $1
+  GPU_ARGS=(); GPU_CONFIG=$B/pwmcp-config.json
+  if [ "${PWMCP_GPU:-auto}" = off ] || [ ! -c "$GPU_NODE" ]; then return 0; fi
+  local copy=$1/pwmcp-config.gpu.json
+  # The MCP CLI has no browser-argument switch: --config is the only route. Derive
+  # a per-instance copy so the base config and its non-GPU args stay authoritative.
+  python3 - "$B/pwmcp-config.json" "$copy" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    config = json.load(f)
+args = config.setdefault("browser", {}).setdefault("launchOptions", {}).setdefault("args", [])
+args.extend(("--use-angle=gl-egl", "--enable-gpu", "--ignore-gpu-blocklist"))
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+    f.write("\n")
+PY
+  GPU_CONFIG=$copy
+  # -L: a symlinked render node must contribute its target's group, not the link's.
+  GPU_ARGS=(--device "$GPU_NODE" --group-add "$(stat -Lc %g "$GPU_NODE")")
+}
 if [ "$DRIVER" = steward ]; then
   # The steward's own instance: same image, package and config as the drivers', its own container,
   # profile and port; the one client is the backend's steward gateway (a `browser` connection the
@@ -40,6 +68,7 @@ if [ "$DRIVER" = steward ]; then
   D=${STEWARD_BROWSER_DIR:-$HOME/.local/share/aitelier/steward-browser}
   PROFILE=$D/profile; OUT=$D/out; HOMED=$D/home; NET=${STEWARD_BROWSER_NETWORK:-steward-browser}
   (umask 077; mkdir -p "$PROFILE" "$OUT" "$HOMED")
+  gpu_setup "$D"
   docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
   PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --headless --browser chromium --no-sandbox \
@@ -47,12 +76,12 @@ if [ "$DRIVER" = steward ]; then
  --host 0.0.0.0 --port $PORT --allowed-hosts steward-pwmcp:$PORT \
  --viewport-size 1280x720 --image-responses allow \
  --user-data-dir $PROFILE --output-dir $OUT \
- --config $B/pwmcp-config.json $EXTRA_FLAGS"
+ --config $GPU_CONFIG $EXTRA_FLAGS"
   docker rm -f steward-pwmcp >/dev/null 2>&1 || true
   docker run -d --name steward-pwmcp --restart unless-stopped --network "$NET" --init --shm-size 1g \
     --log-opt max-size=5m --log-opt max-file=2 \
     --user "$(id -u):$(id -g)" -e HOME="$HOMED" -v "$PKG:$PKG:ro" -v "$B/pwmcp-config.json:$B/pwmcp-config.json:ro" \
-    -v "$D:$D" -w "$D" \
+    -v "$D:$D" -w "$D" "${GPU_ARGS[@]}" \
     mcr.microsoft.com/playwright:v1.65.0-noble bash -c "exec $PW"
   echo "steward-pwmcp -> http://steward-pwmcp:$PORT/mcp on $NET (no host port) profile=$PROFILE"
   exit 0
@@ -60,6 +89,7 @@ fi
 if [ "$DRIVER" = dsh ]; then D=$B; PROFILE=$B/profile; OUT=$B/out; HOMED=$B/home
 else D=$B/drivers/$DRIVER; PROFILE=$D/profile; OUT=$D/out; HOMED=$D/home; fi
 mkdir -p "$PROFILE" "$OUT" "$HOMED"
+gpu_setup "$D"
 if [ "${NO_PROXY:-0}" = 1 ]; then BPORT=$PORT; else BPORT=$((PORT+1000)); fi
 PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --headless --browser chromium --no-sandbox \
@@ -68,12 +98,12 @@ PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --caps vision --viewport-size 1280x720 --image-responses allow \
  --allowed-origins https://linxuhao.github.io\;http://127.0.0.1:4444\;http://localhost:4444\;http://127.0.0.1:5173 \
  --user-data-dir $PROFILE --output-dir $OUT --save-session --snapshot-mode none \
- --config $B/pwmcp-config.json $EXTRA_FLAGS"
+ --config $GPU_CONFIG $EXTRA_FLAGS"
 if [ "${NO_PROXY:-0}" = 1 ]; then CMD="exec $PW"
 else CMD="$PW & LISTEN_PORT=$PORT BACKEND_URL=http://127.0.0.1:$BPORT/mcp AUTO_DIR=$OUT/auto node $B/proxy/autoshot-proxy.mjs & wait -n; exit 1"; fi
 docker rm -f "$DRIVER-pwmcp" >/dev/null 2>&1 || true
 docker run -d --name "$DRIVER-pwmcp" --restart unless-stopped --network host --init --ipc=host \
   --log-opt max-size=5m --log-opt max-file=2 \
-  --user "$(id -u):$(id -g)" -e HOME="$HOMED" -v $B:$B -w "$D" \
+  --user "$(id -u):$(id -g)" -e HOME="$HOMED" -v $B:$B -w "$D" "${GPU_ARGS[@]}" \
   mcr.microsoft.com/playwright:v1.65.0-noble bash -c "$CMD"
 echo "$DRIVER-pwmcp -> http://127.0.0.1:$PORT/mcp (backend $BPORT) profile=$PROFILE"

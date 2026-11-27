@@ -381,3 +381,34 @@ def test_restart_still_restarts_the_endpoint_this_project_serves(tmp_path, monke
     assert server.restart_server('http://localhost:4444', max_wait=1) is True
     assert _owned_commands(log) == [['compose', '-f', str(compose_file),
                                      'restart', 'aitelier']]
+
+
+# iss-3c51d8e4dd1d4f8e: the guard decides BEFORE any compose command runs whether
+# a --url names this project's endpoint. It used to check host and port but not
+# the scheme, and accepted the IPv6 loopback literal although compose publishes
+# 127.0.0.1 only. Drive the guard directly here, so both halves of that narrowing
+# are visible together; the observation-path cases above are a different route.
+def _guarded_url(scheme, host):
+    return f'{scheme}://{host}:{server._DEFAULT_PORT}'
+
+
+@pytest.mark.parametrize('scheme,host', [
+    ('https', 'localhost'),
+    ('https', '127.0.0.1'),
+    ('http', '[::1]'),
+], ids=['https-localhost', 'https-127', 'http-ipv6'])
+def test_local_deployment_guard_refuses_other_schemes_and_ipv6_loopback(scheme, host):
+    url = _guarded_url(scheme, host)
+    with pytest.raises(RuntimeError) as refused:
+        server._require_local_deployment_url(url, action='start or repair')
+    assert url in str(refused.value)
+    assert f'serves http://localhost:{server._DEFAULT_PORT}' in str(refused.value)
+
+
+@pytest.mark.parametrize('build_url', [
+    lambda: _guarded_url('http', 'localhost'),
+    lambda: _guarded_url('http', '127.0.0.1'),
+    lambda: server._DEFAULT_URL,
+], ids=['http-localhost', 'http-127', 'module-default-url'])
+def test_local_deployment_guard_accepts_this_checkouts_http_endpoint(build_url):
+    server._require_local_deployment_url(build_url(), action='start or repair')

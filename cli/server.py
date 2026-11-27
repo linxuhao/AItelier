@@ -367,31 +367,40 @@ def _compose_up(*, no_deps: bool = False):
     _warn_if_edge_network_is_alone()
 
 
-_LOCAL_DEPLOYMENT_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_LOCAL_DEPLOYMENT_HOSTNAMES = frozenset({"localhost", "127.0.0.1"})
 
 
 def _require_local_deployment_url(base_url: str, *, action: str) -> None:
     """Refuse to change this compose project for a deployment it does not serve.
 
     Every compose command below runs in THIS checkout's project, so the URL that
-    justified it has to name the endpoint that project publishes:
+    justified it has to name the endpoint that project publishes: plain ``http``
+    on ``AITELIER_PORT`` with hostname ``localhost`` or ``127.0.0.1``.
     ``AITELIER_PORT`` is both what docker-compose.yml binds
-    (``127.0.0.1:${AITELIER_PORT:-4444}:4444``) and what the CLI connects to.
+    (``127.0.0.1:${AITELIER_PORT:-4444}:4444``) and what the CLI connects to;
+    that publish is IPv4-only and serves HTTP, so ``http://[::1]:4444`` and
+    ``https://localhost:4444`` are refused rather than rewritten.
 
-    ``--url`` is the supported way to make the two different, and the deployment
-    clearance accepts any loopback host, so ``--url http://127.0.0.1:5555``
-    measured a *different* deployment (a scratch backend started from this same
-    checkout and .env) and then repaired this project — a wrong-object press,
-    which on a host whose project is the production one is also the most
-    expensive press available. A READ-ONLY diagnosis of another deployment stays
-    allowed; only the effect is refused, and it names both addresses.
+    ``--url`` is the supported way to make the two different, and a URL naming
+    another port on one of those two hosts measured a *different* deployment (a
+    scratch backend started from this same checkout and .env) and then repaired
+    this project — a wrong-object press, which on a host whose project is the
+    production one is also the most expensive press available. A READ-ONLY
+    diagnosis of another deployment stays allowed; only the effect is refused,
+    and it names both addresses.
+
+    Remaining boundary: this compares the hostname STRING, not its resolution.
+    A CLI process whose own resolver maps ``localhost`` to ``::1`` still passes
+    the guard while talking to an address this compose project does not publish;
+    closing that arm needs an address-level check, not a larger host set.
     """
     from urllib.parse import urlsplit
 
     url = urlsplit(base_url)
     port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
     served = int(_DEFAULT_PORT)
-    if url.hostname not in _LOCAL_DEPLOYMENT_HOSTNAMES or port != served:
+    if (url.scheme != "http" or url.hostname not in _LOCAL_DEPLOYMENT_HOSTNAMES
+            or port != served):
         raise RuntimeError(
             f"refusing to {action} this checkout's backend for {base_url}: it "
             f"serves http://localhost:{served} (AITELIER_PORT), so a deployment "

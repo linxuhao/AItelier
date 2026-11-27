@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   listStewardProposals: vi.fn(), stewardProposalImpact: vi.fn(), listStewardSchedules: vi.fn(),
   listOwnerChannels: vi.fn(), createOwnerChannelCode: vi.fn(), unbindOwnerChannel: vi.fn(),
   setDefaultOwnerChannel: vi.fn(), stewardMessageSources: vi.fn(), requestOwnerChannelQr: vi.fn(),
+  listOwnerGroups: vi.fn(),
 }));
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
 import type { DriverConversationEntry, OwnerChannelLoginRequest, OwnerChannels } from '../../lib/api';
@@ -70,6 +71,10 @@ beforeEach(() => {
   api.listStewardProposals.mockResolvedValue([]);
   api.listStewardSchedules.mockResolvedValue([]);
   api.stewardMessageSources.mockResolvedValue({});
+  // The groups under each channel must read through this mock too: spreading the real api
+  // module leaves every unlisted name real, and StewardGroups.onMount(load) would then issue
+  // real GET /api/steward/groups whose deferred flush lands in a later test's fetch recorder.
+  api.listOwnerGroups.mockResolvedValue({groups: [], groups_per_channel: 3});
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 

@@ -196,15 +196,24 @@ def test_steward_profile_has_no_state_mcp_and_its_own_compaction(runtime, roles_
     assert "mcp-aitelier" not in _inserted_ids(steward_patch)
     assert _inserted_ids(steward_patch)[:2] == ["dsh-director", "aitelier-driver"]
     assert "mcp-aitelier" in _inserted_ids(director_patch)
-    # Apart from the State MCP entry, the local MCP services and the compaction
-    # policy, the two profiles are the same. The steward gets none of the local
-    # services: its role presents no tool of theirs, and the pwmcp entry pointed
-    # it at the SHARED browser, where its own `initialize` evicted a director.
+    # Apart from the State MCP entry, the local MCP services, the compaction
+    # policy and the identity plugin, the two profiles are the same. The steward
+    # gets none of the local services: its role presents no tool of theirs, and
+    # the pwmcp entry pointed it at the SHARED browser, where its own
+    # `initialize` evicted a director. It also presents none of send_message /
+    # list_agents / wait_agent, so tool-subagent-control is not loaded for it:
+    # that plugin's `subagent:identity` block named those tools to a session
+    # that has neither (iss-d8f0a93de8ca4e64).
     compaction = {p["id"]: p for p in steward_patch if p.get("id")}["compaction-basic"]["config"]
     assert compaction["modelPolicies"][0] == {"provider": "aitelier", "model": "steward-route",
                                               "thresholdRatio": 0.4, "retainTokens": 3}
+    identity = {"id": "tool-subagent-control", "disabled": True}
+    assert [p for p in steward_patch if p.get("id") == identity["id"]] == [identity], (
+        "the steward presents none of the plugin's tools: one exact disable entry")
+    assert [p for p in director_patch if p.get("id") == identity["id"]] == [], (
+        "the director presents send_message and list_agents: no disable entry")
     strip = lambda patches: [p for p in patches if p.get("id") != "compaction-basic" and "insert" not in p]
-    assert strip(steward_patch) == strip(director_patch)
+    assert [p for p in strip(steward_patch) if p != identity] == strip(director_patch)
     extras = {"mcp-aitelier", "mcp-devmcp", "mcp-zvec", "mcp-agentmcp", "mcp-pwmcp"}
     # Step 24.1a (design-steward 7.8.18): the steward's inserts are the director's without
     # those five, plus ONE fixed entry for the backend's gateway (its own connections).

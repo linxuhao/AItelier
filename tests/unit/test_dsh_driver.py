@@ -975,6 +975,58 @@ def test_a_steward_profile_already_on_disk_loses_the_four_entries(runtime):
         "the profile was rewritten whole, not merged with the stale entries")
 
 
+# ── The identity block must not name tools the session does not present ──────
+# Measured 2026-11-27 (iss-d8f0a93de8ca4e64): dsh-tool-subagent-control writes
+# `subagent:identity` from PLUGIN REGISTRATION, not from the role's presented
+# tools, so a restricted role was told it was the root agent and to call
+# send_message/list_agents, neither of which its session presents. The writer
+# switches that plugin off only when the role's presented list names none of
+# the three identity tools; the decision comes from the roles table.
+
+SUBAGENT_CONTROL_ID = "tool-subagent-control"
+_IDENTITY_TOOLS = {"send_message", "list_agents", "wait_agent"}
+
+
+def _subagent_control_patch(runtime, row):
+    return next((entry for entry in _patch_document(runtime, row)
+                 if entry.get("id") == SUBAGENT_CONTROL_ID), None)
+
+
+def test_a_role_presenting_no_identity_tools_disables_subagent_control(runtime):
+    from core import dsh_driver
+    steward = _steward_row(runtime)
+    presented = dsh_driver._root_entry(dsh_driver.load_roles(), STEWARD_PROJECT)["presented"]
+    assert not _IDENTITY_TOOLS & set(presented), "the fixture role must present none of the three"
+
+    runtime._environment(steward)
+
+    assert _subagent_control_patch(runtime, steward) == {
+        "id": SUBAGENT_CONTROL_ID, "disabled": True}
+
+
+@pytest.mark.parametrize("presented_name", sorted(_IDENTITY_TOOLS))
+def test_a_role_table_presenting_one_identity_tool_keeps_the_plugin(
+        runtime, monkeypatch, presented_name):
+    """The decision reads the table, never the role's name, and it tests the SET:
+    each of the three names on its own keeps today's profile, so narrowing the
+    predicate to one name would be measured here."""
+    import copy
+    from core import dsh_driver
+    table = copy.deepcopy(dsh_driver.load_roles())
+    dsh_driver._root_entry(table, STEWARD_PROJECT)["presented"].append(presented_name)
+    dsh_driver.validate_roles(table)  # the simulated roles.json is a valid one
+    monkeypatch.setattr(dsh_driver, "load_roles", lambda: table)
+    assert presented_name in dsh_driver._root_entry(
+        dsh_driver.load_roles(), STEWARD_PROJECT)["presented"]
+
+    steward = _steward_row(runtime)
+    runtime._environment(steward)
+
+    assert _subagent_control_patch(runtime, steward) is None, (
+        "one presented identity tool is enough: the switch keys on the set, not"
+        " on a single name")
+
+
 # ── Auto-compact policy ──────────────────────────────────────────────────────
 # DSH fires automatic compaction at min(W * thresholdRatio, W - O - B), shipped
 # ratio 0.8. The director's own route compacts near-clear: the State snapshot is

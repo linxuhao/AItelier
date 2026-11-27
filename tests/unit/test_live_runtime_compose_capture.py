@@ -383,8 +383,9 @@ def test_restart_still_restarts_the_endpoint_this_project_serves(tmp_path, monke
                                      'restart', 'aitelier']]
 
 
-# iss-3c51d8e4dd1d4f8e: the guard decides BEFORE any compose command runs whether
-# a --url names this project's endpoint. It used to check host and port but not
+# iss-3c51d8e4dd1d4f8e: the guard decides BEFORE any compose MUTATION runs whether
+# a --url names this project's endpoint (a read-only `compose ps` reuse check runs
+# ahead of it, which changes nothing). It used to check host and port but not
 # the scheme, and accepted the IPv6 loopback literal although compose publishes
 # 127.0.0.1 only. Drive the guard directly here, so both halves of that narrowing
 # are visible together; the observation-path cases above are a different route.

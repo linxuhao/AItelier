@@ -1603,11 +1603,20 @@ const require = createRequire('/opt/aitelier-dsh/node_modules/.probe.js');
 const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
 const { default: SystemPrompt } = await import(require.resolve('@deepseek-ai/dsh-system-prompt'));
 const { default: Tools } = await import(require.resolve('@deepseek-ai/dsh-tools'));
+// One call as dsh-director makes one (integrations/dsh-director/lib/nested-call.mjs): since DSH 0.2.2
+// ctx.tools.execute runs a model step's batch, and a single call goes through the pipeline's stages.
+const { ToolExecutionPipeline } = await import(require.resolve('@deepseek-ai/dsh-tools/pipeline'));
 const mcp = await import(require.resolve('@deepseek-ai/dsh-mcp-client'));
 const [url, token] = process.argv.slice(2);
 const ctx = new Context();
 const prompt = ctx.plugin(SystemPrompt); await prompt.await();
 const tools = ctx.plugin(Tools); await tools.await();
+const pipeline = new ToolExecutionPipeline(ctx);
+const runTool = async input => {
+  const prepared = await pipeline.prepare(input);
+  if (prepared.kind !== 'dispatch') return pipeline.complete(prepared.exec, prepared);
+  return pipeline.complete(prepared.exec, { ...(await pipeline.dispatch(prepared.exec)), exec: prepared.exec });
+};
 ctx.plugin(mcp, { serverName: 'sw', transport: 'streamable-http', url, headers: { 'X-AItelier-Driver-Token': token },
   failOnStartupError: false, toolCallTimeoutMs: 30000, reconnect: { maxAttempts: 1000000 } });
 const names = () => ctx.tools.schemas().map(s => s.name).filter(n => n.startsWith('mcp__sw__')).sort();
@@ -1619,7 +1628,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     while (Date.now() < deadline && JSON.stringify(names()) !== JSON.stringify(arg)) await new Promise(r => setTimeout(r, 50));
     say({ names: names(), pid: process.pid });
   } else if (command === 'call') {
-    const result = await ctx.tools.execute({ name: arg, arguments: { query: 'x', image_file_id: 'f' },
+    const result = await runTool({ name: arg, arguments: { query: 'x', image_file_id: 'f' },
       signal: new AbortController().signal, callId: 'c' + Date.now() });
     say({ isError: result.isError, error: result.error?.message ?? null });
   }
@@ -1691,12 +1700,21 @@ const require = createRequire('/opt/aitelier-dsh/node_modules/.probe.js');
 const { Context } = await import(require.resolve('@deepseek-ai/cordis'));
 const { default: SystemPrompt } = await import(require.resolve('@deepseek-ai/dsh-system-prompt'));
 const { default: Tools } = await import(require.resolve('@deepseek-ai/dsh-tools'));
+// One call as dsh-director makes one (integrations/dsh-director/lib/nested-call.mjs): since DSH 0.2.2
+// ctx.tools.execute runs a model step's batch, and a single call goes through the pipeline's stages.
+const { ToolExecutionPipeline } = await import(require.resolve('@deepseek-ai/dsh-tools/pipeline'));
 const mcp = await import(require.resolve('@deepseek-ai/dsh-mcp-client'));
 const [url, token, catalogFile] = process.argv.slice(2);
 const { gatewayError } = await import(pathToFileURL(catalogFile).href);
 const ctx = new Context();
 const prompt = ctx.plugin(SystemPrompt); await prompt.await();
 const tools = ctx.plugin(Tools); await tools.await();
+const pipeline = new ToolExecutionPipeline(ctx);
+const runTool = async input => {
+  const prepared = await pipeline.prepare(input);
+  if (prepared.kind !== 'dispatch') return pipeline.complete(prepared.exec, prepared);
+  return pipeline.complete(prepared.exec, { ...(await pipeline.dispatch(prepared.exec)), exec: prepared.exec });
+};
 ctx.plugin(mcp, { serverName: 'sw', transport: 'streamable-http', url, headers: { 'X-AItelier-Driver-Token': token },
   failOnStartupError: false, toolCallTimeoutMs: 30000, reconnect: { maxAttempts: 1000000 } });
 const names = () => ctx.tools.schemas().map(s => s.name).filter(n => n.startsWith('mcp__sw__')).sort();
@@ -1708,7 +1726,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     while (Date.now() < deadline && JSON.stringify(names()) !== JSON.stringify(arg)) await new Promise(r => setTimeout(r, 50));
     say({ names: names() });
   } else if (command === 'call') {
-    const result = await ctx.tools.execute({ name: arg, arguments: { query: 'x' }, signal: new AbortController().signal,
+    const result = await runTool({ name: arg, arguments: { query: 'x' }, signal: new AbortController().signal,
       callId: 'c' + Date.now() });
     say({ isError: result.isError, error: result.error?.message ?? null, gateway: gatewayError(result) });
   }

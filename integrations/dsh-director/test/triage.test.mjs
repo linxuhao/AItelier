@@ -54,6 +54,9 @@ test('the summary: counts always, the named issues and the note only when someth
   assert.equal(summary.note, 'NOTE');
   const none = openIssuesSummary({ total: 2, by_kind: { gap: 2 }, untracked: [] }, [], 'NOTE', now);
   assert.deepEqual(none, { total: 2, by_kind: { gap: 2 }, untracked: 0 });
+  // A host that read only part of a long list says so.
+  assert.equal(openIssuesSummary({ ...answer, truncated: true }, [], 'NOTE', now).truncated, true);
+  assert.equal('truncated' in summary, false);
   // A long title is cut: the result stays small.
   assert.equal(openIssuesSummary({ total: 1, by_kind: {}, untracked: [1] }, [{ id: 'x', kind: 'gap', title: 'y'.repeat(500) }], 'N').triage[0].title.length, 200);
 });

@@ -50,7 +50,7 @@ export const texts = Object.freeze({
   slotFree: 'AItelier worker slot free:\n',
   workersResumed: 'AItelier workers resumed after a restart:\n',
   wakesOn: ['State event', 'inbox message', 'owner message', 'child message', 'wake_after_minutes running out'],
-  triageNote: 'These open issues have no work item and no DAG node left to do (none, or only VERIFIED or SUPERSEDED ones), so nothing else brings them back. Before you sleep again, triage each one you can decide now: resolve_issue (fixed, duplicate, moot, rejected or observed, naming the State record that took it), start_issue_work, or a node that takes it. Leave one you cannot decide yet; the next sleep names others. A decision only your user can make is an open question, not an open issue.',
+  triageNote: 'These open issues have no work item and no DAG node left to do (none, or only VERIFIED or SUPERSEDED ones), so nothing else brings them back. Before you sleep again, triage each one you can decide now: resolve_issue (fixed, duplicate, moot, rejected or observed, naming the State record that took it), start_issue_work, or a node that takes it (both are refused while the project\'s node budget is full). Closing one is a claim too: close only what you measured or already ruled on. Leave one you cannot decide yet; the next sleep names others. A decision only your user can make is an open question, not an open issue.',
   tools: {
     search_tools: discoveryTexts.searchDescription,
     todo_status: 'Read the frozen todo plan of a State attempt: brief, goal, next item, done and remaining items. Call it first, and again whenever you lost track (for example after compaction).',

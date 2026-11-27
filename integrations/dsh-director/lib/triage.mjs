@@ -46,7 +46,7 @@ export class TriageRotation {
 export function openIssuesSummary(answer, picked, note, now = Date.now()) {
   const untracked = Array.isArray(answer.untracked) ? answer.untracked.length : 0;
   return {
-    total: answer.total, by_kind: answer.by_kind, untracked,
+    total: answer.total, by_kind: answer.by_kind, untracked, ...(answer.truncated ? { truncated: true } : {}),
     ...(picked.length ? {
       triage: picked.map(issue => ({ id: issue.id, kind: issue.kind, title: String(issue.title ?? '').slice(0, 200),
         ...(issue.created_at ? { age_days: Math.max(0, Math.floor((now - Date.parse(issue.created_at)) / 86400000)) } : {}) })),

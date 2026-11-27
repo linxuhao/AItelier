@@ -313,8 +313,10 @@ export const { NOTHING_LEFT, MAX_AUTO_CONTINUE, processAlive, watchRefusal, DORM
 /** The project's open issues for idle_dormant's report (host.d.ts openIssues): State's own open
  *  count, the open ones by kind, and the untracked ones - no work item, and no linked node still
  *  to be done (none, or each VERIFIED or SUPERSEDED: measured 2026-11-27, 263 of wuxia-myth's 357
- *  open issues were linked only to VERIFIED nodes, so nothing brings them back either). Paged
- *  with list_issues (200 a page) up to OPEN_ISSUES_PAGES pages; a longer list reports what it read. */
+ *  open issues were linked only to VERIFIED nodes, so nothing brings them back either). Known
+ *  boundary: an issue whose only node waits (a CANDIDATE on hold, say) counts as tracked and is
+ *  never named. Paged with list_issues (200 a page) up to OPEN_ISSUES_PAGES pages; past that,
+ *  by_kind and untracked cover the pages read and `truncated` says so (total is State's own count). */
 const OPEN_ISSUES_PAGES = 10;
 const FINISHED_NODE = new Set(['VERIFIED', 'SUPERSEDED']);
 async function openIssues({ request, project, signal }) {
@@ -330,10 +332,10 @@ async function openIssues({ request, project, signal }) {
       if (!issue.work_item && (issue.nodes ?? []).every(node => FINISHED_NODE.has(node.status)))
         untracked.push({ id: issue.issue_id, kind: issue.kind, title: issue.title, created_at: issue.created_at });
     }
-    if (!listed.has_more || !Number.isInteger(listed.next_after) || listed.next_after === after) break;
+    if (!listed.has_more || !Number.isInteger(listed.next_after) || listed.next_after === after) return { total: total ?? read, by_kind, untracked };
     after = listed.next_after;
   }
-  return { total: total ?? read, by_kind, untracked };
+  return { total: total ?? read, by_kind, untracked, truncated: true };
 }
 /** Why idle_dormant must refuse, with this deployment's wording for held work (State claims). */
 export const dormancyRefusal = options => core.dormancyRefusal({ heldReason: texts.heldWork, ...options });

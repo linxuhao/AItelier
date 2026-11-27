@@ -179,7 +179,7 @@ async function scenario(t, floor, { minuteMs } = {}) {
         created_at: id === 'iss-old' ? '2026-10-01T00:00:00Z' : id === 'iss-done' ? '2026-10-15T00:00:00Z' : '2026-11-20T00:00:00Z', ...extra });
       return send(body.after === 0
         ? { issues: [at('iss-linked', 'defect', { nodes: [{ node_key: 'n', status: 'READY' }, { node_key: 'm', status: 'VERIFIED' }] }), at('iss-new', 'gap')], has_more: true, next_after: 7, status_counts: { open: 5, fixed: 9 } }
-        : { issues: [at('iss-old', 'gap'), at('iss-worked', 'defect', { work_item: { status: 'open' } }),
+        : { issues: [at('iss-old', 'gap'), at('iss-worked', 'defect', { work_item: 'issue.iss-worked' }),
           at('iss-done', 'defect', { nodes: [{ node_key: 'v', status: 'VERIFIED' }, { node_key: 's', status: 'SUPERSEDED' }] })], has_more: false, next_after: 9, status_counts: { open: 5, fixed: 9 } });
     }
     if (req.url.endsWith('/context')) return send({ project_id: 'alpha', driver_id: 'dsh-fixture', event_seq: 10,

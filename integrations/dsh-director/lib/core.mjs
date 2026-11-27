@@ -52,7 +52,7 @@ export function defaultTexts() {
     modelCompletion: 'Model completion',
     slotFree: 'Worker slot free:\n',
     workersResumed: 'Workers resumed after a restart:\n',
-    triageNote: 'These open issues have no work item and no work left that would bring them back. Before you sleep again, triage each one you can decide now: close it with a reason (fixed, duplicate, moot or rejected), or turn it into work. Leave one you cannot decide yet; the next sleep names others. Anything that needs your owner\'s decision is a question, not an open issue.',
+    triageNote: 'These open issues have no work item and no work left that would bring them back. Before you sleep again, triage each one you can decide now: close it with a reason (fixed, duplicate, moot or rejected), or turn it into work. Closing one is a claim too: close only what you measured or already ruled on. Leave one you cannot decide yet; the next sleep names others. Anything that needs your owner\'s decision is a question, not an open issue.',
     tools: {},
   };
 }

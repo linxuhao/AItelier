@@ -187,7 +187,9 @@ export interface DirectorHost {
    *  bring it back (the host decides what that means) - of which
    *  it names a rotating few to triage (lib/triage.mjs). undefined: nothing to report [none]. */
   openIssues?(signal?: AbortSignal): Promise<{ total: number; by_kind: Record<string, number>;
-    untracked: Array<{ id: string; kind: string; title: string; created_at?: string }> } | undefined>;
+    untracked: Array<{ id: string; kind: string; title: string; created_at?: string }>;
+    /** true: the host read only part of the list; by_kind and untracked cover that part. */
+    truncated?: boolean } | undefined>;
   /** v1.1, plugin step 8: the director's questions to its owner, behind ask_owner /
    *  close_question [none: both tools refuse, naming that the host has no channel].
    *  - ask: one concrete question under the director's own id. The same id with the

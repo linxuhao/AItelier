@@ -525,12 +525,15 @@ def stamp_start_failure(runtime, row, attempts, error):
                    last_error=_start_failure_text(attempts, error))
 
 
-# Deliberately NO general clear-on-recovery. A recovery needs no writer: `start()`
-# stamped `phase='starting', last_error=''` for the spawn being judged, so by the
-# time a streak can end, the supervisor's own text is gone. The one exception is a
-# row that reports a serving phase LATE, after its spawn left the watched set: no
-# fresh start erased the stamp then, so the loop takes back only text that still
-# begins with its own prefix - never a diagnosis somebody else wrote.
+# Deliberately NO clear-on-recovery, not even when a row reports a serving phase
+# LATE, after its spawn left the watched set. `start()` stamps
+# `phase='starting', last_error=''` for the spawn being judged, so a recovery
+# needs no writer; and the only writer that can put a serving phase on a row -
+# `POST /api/dsh-drivers/<project>/activity` - writes that row's `last_error` in
+# the same statement, with the runtime's own text. A late report therefore retires
+# the streak without the supervisor writing anything, which is also the only safe
+# division: the loop acts on a snapshot of `rows()` that another writer may have
+# replaced since, so text it read cannot be taken back as if it were still there.
 
 
 def _overwritten_by_runtime_exit(text):
@@ -647,9 +650,10 @@ async def supervise(runtime, stopped, *, interval=1, media=None):
         # project -> {"proc": child, "started": monotonic instant, "served": bool}
         # for each child THIS loop spawned whose exit it has not yet recorded.
         # Deliberately separate from `spawned_at`/`served` above: those answer
-        # whether a START worked and are dropped the moment that is decided, so
-        # they stop watching the child entirely - and the death worth a record is
-        # the one after that point, of a driver that had been serving for minutes.
+        # whether a START worked, and `spawned_at` is dropped the moment that is
+        # decided (it served, it died, or it outlived the deadline), so they stop
+        # watching the child entirely - and the death worth a record is the one
+        # after that point, of a driver that had been serving for minutes.
         children = {}
         # subdirectory name (or the orphan sweep's key) -> the monotonic instant of
         # its last media cleanup: at most one a day each.
@@ -725,23 +729,17 @@ async def supervise(runtime, stopped, *, interval=1, media=None):
                             spawned = spawned_at.get(project)
                             if serving and project not in served:
                                 # The row is the platform's own evidence: it reports
-                                # a serving phase only after /activity. That ends
+                                # a serving phase only after /activity, and that
+                                # request wrote the row's `last_error` too. That ends
                                 # the streak whether or not this spawn is still in
                                 # `spawned_at` - a late report after the deadline
                                 # must not leave a working driver stamped as failed.
+                                # No row text is written here: the supervisor cannot
+                                # tell its own stamp from a newer diagnosis it read
+                                # before that write, and it does not have to.
                                 failures.pop(project, None)
                                 last_errors.pop(project, None)
                                 clear_startup_failure(runtime, row["driver_id"])
-                                if str(row.get("last_error") or "").startswith(
-                                        START_FAILURE_PREFIX):
-                                    # No fresh `start()` erased our stamp when the
-                                    # report came late; take back only our own text,
-                                    # never a diagnosis somebody else wrote.
-                                    try:
-                                        runtime.update(project, last_error="")
-                                    except Exception as exc:
-                                        print(f"DSH host {project}: cannot clear the "
-                                              f"failure stamp on its row: {exc}", flush=True)
                                 served.add(project)  # this spawn's service is decided
                                 spawned_at.pop(project, None)
                             elif spawned is not None and not alive:

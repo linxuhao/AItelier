@@ -622,8 +622,14 @@ async def test_a_death_without_ever_serving_is_a_failed_start_at_any_age(never_s
         # separated by the backoff a counted failure buys (30 s, not 15 s).
         await for_at_most(90, lambda: len(spawn_times(spawns)) >= counted_base + 2)
         times = spawn_times(spawns)
-        first_after, second_after = times[counted_base:counted_base + 2]
-        assert second_after - first_after > 18, (first_after, second_after)
+        # Anchored to the counted death (the spawn at counted_base - 1) and read as a
+        # DIFFERENCE of two gaps: the retry after one counted failure is 30 s, the one
+        # before it was 15 s. A load shift moves both gaps by about the same amount,
+        # while a streak that never grows schedules both at 15 s - that is the shape
+        # this has to see, and one absolute interval cannot tell it from a slow tick.
+        death, first_after, second_after = times[counted_base - 1:counted_base + 2]
+        first_gap, second_gap = first_after - death, second_after - first_after
+        assert second_gap - first_gap > 8, (first_gap, second_gap)
     finally:
         stopped.set(); await task
 
@@ -746,9 +752,13 @@ async def test_a_serving_report_after_the_deadline_clears_the_record(crashing, m
         assert host.processes['alpha'].returncode is None
         assert record.exists()  # the old streak is still on disk and on the page
         backend.update('alpha', last_error='DSH: failed start 1 in a row: late witness')
-        backend.update('alpha', phase='running')  # /activity, after the deadline
+        # One request, the way the route writes it: `POST /activity` sets the phase
+        # and `last_error` together, so the row the supervisor reads as serving
+        # already carries the runtime's text. The supervisor writes no row text
+        # here; it only retires the streak.
+        backend.update('alpha', phase='running', last_error='')  # /activity, after the deadline
         await eventually(lambda: not record.exists())
-        assert not (backend.get('alpha')['last_error'] or '').startswith('DSH: failed start ')
+        assert (backend.get('alpha')['last_error'] or '') == ''
         assert backend.get('alpha')['phase'] in SERVING_PHASES
     finally:
         stopped.set(); await task

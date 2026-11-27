@@ -179,13 +179,21 @@ class ExternalAttempts:
             # digest-verified retained evidence, never a bare path and hash.
             report_ref, report_bytes = retain_report(report_ref, report_sha256, completed=False)
         git_artifact = None
+        bundle_plan = None
         if status == 'candidate':
             size = {'git-sha1': 40, 'sha256': 64}.get(artifact_kind) if isinstance(artifact_kind,str) else None
             if size is None or not isinstance(artifact,str) or not re.fullmatch('[0-9a-f]{'+str(size)+'}', artifact):
                 raise StateGraphError('candidate requires an exact artifact digest and explicit git-sha1 or sha256 kind')
             if artifact_kind == 'git-sha1':
-                from core.state_git_artifacts import retain_candidate
+                from core.state_git_artifacts import plan_candidate, retain_candidate
                 git_artifact = retain_candidate(report_bytes, artifact)
+                # Measured 8-10.5 s for a 266 MB keyframe attempt: reading the
+                # base, encoding the delta and decoding it to compare. None of
+                # that belongs inside the single global State write lock. Plan
+                # on a READ connection while the bytes are already in hand;
+                # the write transaction below only re-checks and INSERTs.
+                with self.store.transaction() as read_conn:
+                    bundle_plan = plan_candidate(read_conn, git_artifact)
         elif artifact is not None or artifact_kind is not None:
             raise StateGraphError('only a candidate report may declare the immutable artifact')
         payload = {'attempt_id':attempt_id, 'observation_id':observation_id, 'expected_version':expected_version,
@@ -240,7 +248,7 @@ class ExternalAttempts:
                 store_report_blob(conn, report_ref, report_sha256, report_bytes)
             if git_artifact is not None:
                 from core.state_git_artifacts import store_candidate
-                store_candidate(conn, git_artifact)
+                store_candidate(conn, git_artifact, plan=bundle_plan)
             conn.execute('INSERT INTO state_external_observations(attempt_id,observation_id,version,status,resulting_status,'
                          'quiescent,artifact_ref,artifact_kind,report_ref,report_sha256,actor,detail,payload_hash,context_hash,created_at,'
                          'late_after_abandon,fence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',

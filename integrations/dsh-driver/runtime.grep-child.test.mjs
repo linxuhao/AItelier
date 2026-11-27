@@ -77,6 +77,16 @@ const SHORT_IDLE_MS = 1200;
 const newRoot = () => mkdtempSync(join(tmpdir(), 'dsh-grepchild-'));
 const open = (extra = {}) => MemoryStore.open({ root: newRoot(), userId: USER, ...extra });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** Test 2's bound on the child ENTERING its parked state. A helper that has just answered can be
+ *  'R' (runnable, not yet scheduled) when a 2-CPU host carries three `yes` spinners: the old
+ *  fixed-1200 ms sample reddened 3/10 times on exactly that shape (iss-4b4d9e3c830244b6).
+ *  5000 ms gives that scheduling delay four times the room, and is still a BOUND: a child that
+ *  never parks reddens this row in about five seconds rather than hanging it. */
+const PARK_SETTLE_MS = 5000;
+/** Test 2's observation window, once 'S' has actually been seen: the original 1200 ms of idling
+ *  the row's CPU and fd assertions were written for. It is a floor, not a sleep - the window
+ *  REPORTED below is the real elapsed time between the two /proc samples. */
+const PARK_WINDOW_MS = 1200;
 
 /** Whether a process is running, from /proc: a zombie is not a process still at work, and a
  *  pid whose /proc entry is gone is not either. */
@@ -187,13 +197,35 @@ test('2: while its store lives, what keeps the child alive is the parent\'s open
     const epoll = readdirSync(`/proc/${pid}/fd`).filter(fd => fdTarget(pid, fd) === 'anon_inode:[eventpoll]'
       && watchesFd(readFdinfo(pid, fd), 0));
     assert.equal(epoll.length, 1, `nothing waits on fd 0 any more: ${JSON.stringify(readdirSync(`/proc/${pid}/fd`).map(fd => [fd, fdTarget(pid, fd)]))}`);
-    const before = procState(pid);
+    // A just-answered helper can still be 'R' when the host is busy: runnable, not yet scheduled.
+    // That is the scheduler's state, not the helper's parking. Wait for the state this assertion
+    // names, within a bound, instead of sleeping a fixed multiple of a threshold and sampling once.
+    let before;
+    const settleMs = await until(() => {
+      const sample = procState(pid);
+      if (sample?.state !== 'S') return false;
+      before = sample;                  // the very sample the predicate saw: no read-back race
+      return true;
+    }, PARK_SETTLE_MS);
+    assert.notEqual(settleMs, undefined, `the child never parked in state S within ${PARK_SETTLE_MS} ms (pid ${pid}, last state ${procState(pid)?.state}); a helper that cannot wait on its stdin must red this row, not time out silently`);
     assert.equal(before.state, 'S', 'asleep in that wait');
-    await sleep(1200);
-    const after = procState(pid);
+    // Watch it STAY parked for a real window, sampling as we go rather than sleeping once. The CPU
+    // and fd assertions below cover exactly the span between the two observations we made.
+    const windowStart = Date.now();
+    let after;
+    const observedMs = await until(() => {
+      if (Date.now() - windowStart < PARK_WINDOW_MS) return false;
+      const sample = procState(pid);
+      if (sample?.state !== 'S') return false;
+      after = sample;
+      return true;
+    }, PARK_SETTLE_MS);
+    assert.notEqual(observedMs, undefined, `the child was not seen parked in state S after ${PARK_WINDOW_MS} ms of watching (pid ${pid}, last state ${procState(pid)?.state})`);
+    assert.equal(after.state, 'S', 'still asleep in that wait at the end of the parked window');
     assert.equal(running(pid), true, 'it does not leave while its stdin is open - which is the side of the leak the fix must bound');
-    assert.equal(after.cpu_ms - before.cpu_ms, 0, `an idle helper burned ${after.cpu_ms - before.cpu_ms} ms of CPU in 1.2 s`);
-    assert.equal(fdTarget(pid, 0), stdin, 'the descriptor is still there, unchanged, after 1.2 s of idling');
+    assert.equal(after.cpu_ms - before.cpu_ms, 0, `an idle helper burned ${after.cpu_ms - before.cpu_ms} ms of CPU in ${observedMs} ms`);
+    assert.equal(fdTarget(pid, 0), stdin, `the descriptor is still there, unchanged, after ${observedMs} ms of idling`);
+    console.log(`IDLE_PARK pid=${pid} settle_ms=${settleMs} window_ms=${observedMs} cpu_delta_ms=${after.cpu_ms - before.cpu_ms}`);
     // Evidence for the record, not a gate: /proc/<pid>/syscall needs ptrace permission, and which
     // syscall number means "wait for events" is the architecture's business.
     try { console.log(`IDLE_WAIT pid=${pid} epoll_fd=${epoll[0]} syscall=${readFileSync(`/proc/${pid}/syscall`, 'latin1').trim()}`); }

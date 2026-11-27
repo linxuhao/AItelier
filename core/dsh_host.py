@@ -802,16 +802,28 @@ async def supervise(runtime, stopped, *, interval=1, media=None):
                                 try:
                                     await runtime.start(project, actor="dsh-host-recovery")
                                 except Exception as exc:
-                                    failures[project] = failures.get(project, 0) + 1
-                                    error = _bounded(str(exc))
-                                    last_errors[project] = error
-                                    record_startup_failure(runtime, row, failures[project], error)
-                                    print(f"DSH host {project}: {error}", flush=True)
-                                    try:
-                                        stamp_start_failure(runtime, row, failures[project], error)
-                                    except Exception as stamp_error:
-                                        print(f"DSH host {project}: cannot stamp the failure "
-                                              f"on its row: {stamp_error}", flush=True)
+                                    # Measured sequence: `start()` spawned the child, then its
+                                    # post-spawn row re-read raised (a locked database). The
+                                    # child is alive, so watch it as the success path does;
+                                    # only a raise that left nothing running is a failed start.
+                                    if runtime.running(project):
+                                        spawned_at[project] = time.monotonic()
+                                        children[project] = {
+                                            "proc": runtime.processes[project],
+                                            "started": spawned_at[project],
+                                            "served": False}
+                                        served.discard(project)  # a new spawn, nothing served yet
+                                    else:
+                                        failures[project] = failures.get(project, 0) + 1
+                                        error = _bounded(str(exc))
+                                        last_errors[project] = error
+                                        record_startup_failure(runtime, row, failures[project], error)
+                                        print(f"DSH host {project}: {error}", flush=True)
+                                        try:
+                                            stamp_start_failure(runtime, row, failures[project], error)
+                                        except Exception as stamp_error:
+                                            print(f"DSH host {project}: cannot stamp the failure "
+                                                  f"on its row: {stamp_error}", flush=True)
                                 else:
                                     if runtime.processes.get(project) is not None:
                                         spawned_at[project] = time.monotonic()

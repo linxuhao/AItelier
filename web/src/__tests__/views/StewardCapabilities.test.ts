@@ -14,6 +14,7 @@ import { t } from '../../lib/i18n.svelte';
 const api = vi.hoisted(() => ({
   listStewardCapabilities: vi.fn(),
   listOwnerChannels: vi.fn(),
+  listOwnerGroups: vi.fn(),
   dshDriverConversation: vi.fn(),
   dshDriverHistory: vi.fn(),
   markDriverConversationRead: vi.fn(),
@@ -51,6 +52,7 @@ beforeEach(() => {
   cleanup(); vi.resetAllMocks(); langStore.set('en');
   authStore.set({canWrite: true, permissionResolved: true, email: 'owner@example.test'} as never);
   api.listStewardCapabilities.mockResolvedValue(payload());
+  api.listOwnerGroups.mockResolvedValue({groups: [], groups_per_channel: 3});
 });
 afterEach(() => { cleanup(); });
 
@@ -245,6 +247,10 @@ describe('the steward channels pane', () => {
     await waitFor(() => expect(row(view.container, 'transcribe')).not.toBeNull());
     expect(view.container.querySelector('.channels-with-capabilities')).not.toBeNull();
     expect(route(view.container, 'transcribe')).toContain('transcribe_audio');
+    // The groups rendered under each channel must read through this mock, never through
+    // the real api module (whose GET /api/steward/groups can leak into the next test's
+    // fetch recorder when the Svelte effect flush is deferred under load).
+    await waitFor(() => expect(api.listOwnerGroups).toHaveBeenCalled());
   });
 });
 

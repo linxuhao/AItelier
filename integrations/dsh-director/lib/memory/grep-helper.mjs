@@ -108,12 +108,21 @@ export class GrepHelper {
     }
     this.#child = child;
     this.#pid = child.pid;
+    // The child arms its idle clock when it starts (grep-child.mjs's module-level armIdle()),
+    // and clears/re-arms it only around a request. This parent-side deadline is therefore
+    // spawn-anchored until the first write, then re-anchored by #request and by #settle. It is
+    // how a busy parent recognises, at write time, that a child which has not yet reported its
+    // exit left on its OWN clock rather than died (see #idleGone).
+    child.idleAt = this.idleExitMs > 0 ? this.now() + this.idleExitMs : Infinity;
     // Every event is this child's own: one heard after it was replaced (a SIGKILLed helper's
     // exit arrives a poll phase later, and the next search may have started a fresh one by
     // then) is about a process that is already gone and must not touch its successor.
     const own = handler => (...a) => { if (this.#child === child) handler(...a); };
     child.on('error', own(error => this.#fail('helper-unavailable: ' + say(error))));
-    child.on('exit', (code, signal) => { child.exited = true; own(() => this.#fail(`helper-died (${signal ?? 'exit code ' + code})`))(); });
+    child.on('exit', (code, signal) => {
+      child.exited = true; child.exitCode = code; child.exitSignal = signal;
+      own(() => this.#fail(`helper-died (${signal ?? 'exit code ' + code})`))();
+    });
     child.stdin.on('error', own(error => this.#fail('helper-gone: ' + say(error))));
     child.stdout.on('data', own(chunk => this.#stdout(chunk)));
     child.stderr.on('data', own(chunk => { if (this.#stderr.length < 8) this.#stderr.push(chunk); }));
@@ -133,6 +142,32 @@ export class GrepHelper {
       try { if (on) stream?.ref?.(); else stream?.unref?.(); } catch { /* a closed stream */ }
     }
     try { if (on) child.ref(); else child.unref(); } catch { /* a closed child */ }
+  }
+
+  /** Is this child gone because of ITS OWN idle clock, with no request of ours outstanding?
+   *  grep-child.mjs arms that clock at process start and clears it only while a request runs, so
+   *  a helper that has not been asked for a full window leaves by itself, cleanly (exit 0).
+   *  A parent held off the event loop at that instant writes into its dead pipe first and hears
+   *  the queued 'exit' only afterwards - the ordering that used to be recorded as a fault and
+   *  answered by the direct spawn. At write time we already know the deadline it was armed with:
+   *  either its exit has been dispatched and says code 0 with no signal, or the deadline has
+   *  passed with nothing in flight (the dispatch is still pending). Both mean IDLE, not failure.
+   *  A nonzero exit, a signal, or a death while a request is outstanding is still a fault. */
+  #idleGone(child) {
+    if (!child || this.idleExitMs <= 0 || this.#active) return false;
+    if (child.exited) return child.exitCode === 0 && !child.exitSignal;
+    return this.now() >= child.idleAt;
+  }
+
+  /** Hand an idle-dead child over: the request will go to one fresh helper instead. Its late
+   *  'exit'/'error' must not be read as a fault on the replacement - start()'s `own` wrapper
+   *  already makes every handler of a child that is no longer #child a no-op. */
+  #retireIdle(child) {
+    this.#child = undefined;
+    for (const stream of [child.stdin, child.stdout, child.stderr, child.stdio[3]]) {
+      try { stream.destroy(); } catch { /* already closed */ }
+    }
+    try { child.kill('SIGKILL'); } catch { /* already gone */ }
   }
 
   /** One grep through the helper: git()'s shape ({code, stdout, stderr, killed, pid}) when the
@@ -178,8 +213,17 @@ export class GrepHelper {
   #request({ spec, timeoutMs, onSpawn, onStdout }) {
     if (this.#closed) return Promise.resolve({ fallback: 'helper-closed' });
     this.start();
-    const child = this.#child;
+    let child = this.#child;
     if (!child) return Promise.resolve({ fallback: this.#reason ?? 'helper-unavailable' });
+    if (this.#idleGone(child)) {
+      // The child left on its own idle clock, with no request of ours in flight: an IDLE exit,
+      // not a fault. No reason, no fallback - start exactly one fresh helper and write there.
+      // A failure of THAT write is a second, genuine fault and still goes through #fail.
+      this.#retireIdle(child);
+      this.start();
+      child = this.#child;
+      if (!child) return Promise.resolve({ fallback: this.#reason ?? 'helper-unavailable' });
+    }
     this.#hold(true);
     return new Promise(resolve => {
       const active = { id: ++this.#seq, onSpawn, onStdout, out: [], got: 0, pid: undefined, end: undefined,
@@ -191,6 +235,7 @@ export class GrepHelper {
       if (deadline > 0) active.timer = setTimeout(() => {
         this.#fail(`helper-no-answer after ${deadline} ms`);
       }, deadline);
+      child.idleAt = Infinity; // a request in hand: not idle, however long it runs
       try { child.stdin.write(JSON.stringify({ id: active.id, spec, timeoutMs }) + '\n'); }
       catch (error) { this.#fail('helper-gone: ' + say(error)); }
     });
@@ -239,7 +284,14 @@ export class GrepHelper {
     if (!active || active.settled) return;
     active.settled = true;
     clearTimeout(active.timer);
-    if (this.#active === active) { this.#active = undefined; this.#hold(false); }
+    if (this.#active === active) {
+      this.#active = undefined;
+      this.#hold(false);
+      // Answered: the child re-arms its own idle clock now (grep-child.mjs's pump), so this
+      // helper's view of that deadline moves with it.
+      const child = this.#child;
+      if (child && this.idleExitMs > 0) child.idleAt = this.now() + this.idleExitMs;
+    }
     active.resolve(result);
   }
 

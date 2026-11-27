@@ -298,3 +298,50 @@ test('4: an internal helper is not a background job - dormancy is refused only b
     if (previous === undefined) delete process.env[SESSION_ENV]; else process.env[SESSION_ENV] = previous;
   }
 });
+
+test('5: a helper that left on its spawn-anchored idle clock before the first request is restarted, not faulted', async () => {
+  // The failure this forces (iss-5790276bf12140ef) is an ORDERING, not a duration. grep-child.mjs
+  // arms its idle clock at process start (:127) and grep-helper.mjs starts the helper as the last
+  // act of boot (store.mjs:345); if the loop is held at the deadline the child leaves while its
+  // parent cannot dispatch the exit, so a subsequent request writes into a dead pipe first and
+  // learns of the exit later. On the fault path that is `helper-gone: write EPIPE` (or
+  // `helper-died (exit code 0)`) as grepHelper.reason, plus a direct-spawn fallback. The idle
+  // path restarts one helper, retries that write, and records neither a reason nor a fallback.
+  const events = [];
+  const log = (event, fields) => events.push([event, fields]);
+  const WINDOW = 400;                     // short against the product's 60000, longer than boot
+  const store = await open({ logger: log, grepHelper: { idleExitMs: WINDOW } });
+  try {
+    const pid = store.grepHelper.pid;
+    assert.ok(Number.isInteger(pid) && pid > 1, 'the store boots one helper');
+    assert.equal(store.grepHelper.reason, undefined, 'no fault before the race');
+    // Hold THIS loop across the child's own deadline: no exit callback can run while it is busy.
+    // Wait for the child's actual state in /proc (zombie or reaped), not a timer approximation,
+    // so a slow host cannot turn this into a guess about when the child's clock fired.
+    const heldFrom = Date.now();
+    const ceiling = heldFrom + WINDOW + 5000;
+    while (Date.now() < ceiling) {
+      const state = procState(pid)?.state;
+      if (state === undefined || state === 'Z') break;
+    }
+    const heldMs = Date.now() - heldFrom;
+    console.log(`IDLE_RACE pid=${pid} window_ms=${WINDOW} held_ms=${heldMs}`);
+    assert.ok(heldMs >= WINDOW, `the loop was held only ${heldMs} ms, short of the ${WINDOW} ms window the child started with`);
+    assert.equal(store.grepHelper.reason, undefined, 'the exit was not dispatched during the hold');
+    const args = ['grep', '-F', '-i', '-I', '-n', '-z', '--no-color', '--untracked', '-e', 'needle', '--', 'log', 'profile.md'];
+    const reasons = [];
+    // grep()'s request runs in a microtask, so this write lands before libuv can dispatch the
+    // child's pending exit. That is the ordering no amount of host load could force reliably.
+    const pending = store.grepHelper.grep(store.dir, args, { timeoutMs: 5000,
+      onSpawn: () => reasons.push(store.grepHelper.reason),
+      onStdout: () => reasons.push(store.grepHelper.reason) });
+    const answered = await pending;
+    console.log(`IDLE_RACE_ANSWER pid=${pid} new_pid=${store.grepHelper.pid} fallback=${JSON.stringify(answered.fallback)} reason=${JSON.stringify(store.grepHelper.reason)} reasons=${JSON.stringify(reasons)}`);
+    assert.equal(answered.fallback, undefined, 'the helper answered; no direct-spawn fallback was paid');
+    assert.equal(store.grepHelper.reason, undefined, 'a clean self-exit is idle, not a fault');
+    assert.deepEqual(reasons, reasons.map(() => undefined), 'no fault reason was recorded on the way to the answer');
+    assert.deepEqual(events.filter(([event]) => event === FALLBACK), [], 'no fallback event was recorded');
+    assert.ok(Number.isInteger(store.grepHelper.pid) && store.grepHelper.pid !== pid,
+      'exactly one fresh helper served the request that reached the dead one');
+  } finally { await store.close(); }
+});

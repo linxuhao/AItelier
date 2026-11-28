@@ -5908,10 +5908,23 @@ def _playtest_spec_inner(dst: Path, spec: dict, frames: int, timeout: int,
     if ledger is not None:
         ledger["scenarios"] = scen_timing
         ledger["controls"] = ctrl_timing
+    # A pass that fell back to headless never measured what a drawn frame is
+    # needed for (font metrics above all), yet every advisory assertion in
+    # `behavior` still reports its own FAIL. Name that on the report itself,
+    # beside `render_mode`, and not only in the ledger row: the authored path
+    # always asks for the render pass, so a caller that reads `passed` or
+    # `behavior.all_passed` and never opens `timing` would otherwise see a dead
+    # GPU pass as a product red (2026-11-28: a carrier reported "55 asserts /
+    # 30 failed" with nothing on the report naming the fallback). Deliberately
+    # NOT a spec_error: `hard_passed` below would turn every host whose GL stack
+    # is down into a whole-playtest HARD failure, which is the opposite of the
+    # degradation `_run_probe` promises.
+    headless_retry = any(bool(t.get("headless_retry")) for t in scen_timing)
     report = {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
               "native_debt": all_debt,
               "state": last_state, "spec_used": True, "spec_errors": spec_errors,
               "captures": captures, "render_mode": render_mode,
+              "headless_retry": headless_retry,
               "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
               "summary": summary}
     if abandoned:

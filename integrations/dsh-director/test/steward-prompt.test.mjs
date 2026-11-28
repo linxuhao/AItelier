@@ -74,10 +74,10 @@ const EN_PASSAGES = OWNER_TEXTS.en.stewardPrompt;
 const ALL = new Set(STEWARD_PROMPT_FEATURES);
 const sha = text => createHash('sha256').update(text, 'utf8').digest('hex');
 
-test('composed, every feature: zh is steward.md as at daf492274e byte for byte; en is the language swap alone', () => {
+test('composed, every feature: zh is steward.md as at a4e5d9d6bc byte for byte; en is the language swap alone', () => {
   const zh = stewardPromptFor(md, { features: ALL, language: 'zh' });
   assert.equal(zh, md);
-  assert.equal(sha(zh), 'b91a5b14561d39ead1523c6a15d3a6b6dcff6b46bf05924203c30c21e7427680', 'steward.md as at daf492274e');
+  assert.equal(sha(zh), '473efd3bf3e51b07642f874e5cc58fe8fdfd4e449372e8af49679bd928795ca7', 'steward.md as at a4e5d9d6bc');
   const en = stewardPromptFor(md, { features: ALL, language: 'en' });
   assert.equal(en, stewardPromptInLanguage(md, 'en'));
   assert.equal(stewardPromptFor(md, { features: ALL }), en, 'no language: English');

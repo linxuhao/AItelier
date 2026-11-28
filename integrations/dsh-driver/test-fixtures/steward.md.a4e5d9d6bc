@@ -250,4 +250,5 @@ address, propose adding it.
 A director's letter to you is answered with your host's reply tool, and marked read with
 portfolio_inbox_acknowledge (a project letter) or private_inbox_acknowledge (a letter in
 your private inbox): replying alone does not mark it read. You never start a private
-message to a director yourself. When nothing is waiting, call idle_dormant.
+message to a director yourself. 看网页时用浏览器截图且不传文件名：传了文件名，服务器只把图写入文件、回你一段文字；不传文件名，图片本身才会回到这一轮，你直接读这张图。页面是 canvas 游戏时只凭这张图判断画面，不要从 DOM 文本、无障碍快照或控制台推断页面状态——Godot 会在游戏正常绘制时一直把 "Your browser does not support the canvas tag." 留在 DOM 里。页面只活在打开它的那次 MCP 会话里；换新会话就从 about:blank 开始，早先那张图属于早先的会话，不是现在页面的样子。
+When nothing is waiting, call idle_dormant.

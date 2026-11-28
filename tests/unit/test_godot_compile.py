@@ -302,7 +302,7 @@ def test_summary_names_a_headless_retry_as_advisory(tmp_path):
     }
     md = _write_summary_from_report(tmp_path, report)
 
-    assert "- render: headless (the mode of the last probe in this run)" in md, md
+    assert "- render: headless\n" in md, md
     assert ("- headless retry: true — at least one probe in this run was not "
             "drawn: it was re-run with rendering off after Godot returned no "
             "snapshot, so its measurements are advisory, not a product red."
@@ -323,9 +323,9 @@ def test_summary_names_a_drawn_pass_without_degradation(tmp_path):
     }
     md = _write_summary_from_report(tmp_path, report)
 
-    assert "- render: render (the mode of the last probe in this run)" in md, md
-    assert ("- headless retry: false — every probe in this run drew; "
-            "no degradation.") in md, md
+    assert "- render: render\n" in md, md
+    assert ("- headless retry: false — no probe in this run was re-run with "
+            "rendering off.") in md, md
     assert "was not drawn" not in md and "not a product red" not in md, md
 
 
@@ -346,7 +346,7 @@ def test_summary_scopes_the_mode_and_the_retry_so_a_mixed_run_cannot_contradict_
     }
     md = _write_summary_from_report(tmp_path, report)
 
-    assert "- render: render (the mode of the last probe in this run)" in md, md
+    assert "- render: render\n" in md, md
     assert "- headless retry: true" in md, md
     assert "at least one probe in this run was not drawn" in md, md
     # Neither line is written as a verdict on "the pass" as a whole.
@@ -366,9 +366,32 @@ def test_summary_claims_nothing_from_a_retry_value_that_is_not_a_boolean(tmp_pat
         }
         md = _write_summary_from_report(tmp_path, report)
 
-        assert "- render: headless (the mode of the last probe in this run)" in md, md
+        assert "- render: headless\n" in md, md
         assert "headless retry" not in md, md
         assert "no degradation" not in md, md
+
+
+def test_summary_claims_no_drawing_when_the_probe_never_returned(tmp_path):
+    """The harness starts `render_mode` at "headless" and only overwrites it from
+    a probe that returned; `_run_probe` skips the headless retry when the probe
+    timed out, so `headless_retry` stays False. That report therefore says
+    nothing about drawing, and the summary must not either."""
+    report = {
+        "passed": False, "spec_used": True, "frames": 10, "errors": [],
+        "render_mode": "headless", "headless_retry": False,
+        "behavior": {"scenarios": []}, "summary": "probe timed out",
+    }
+    md = _write_summary_from_report(tmp_path, report)
+
+    assert "- render: headless\n" in md, md
+    assert ("- headless retry: false — no probe in this run was re-run with "
+            "rendering off.") in md, md
+    # No claim that a pass was drawn, and no "no degradation" verdict: neither
+    # was measured here.
+    assert "drew" not in md, md
+    assert "no degradation" not in md, md
+    # Nor a claim about "the pass" as a whole.
+    assert "the pass was drawn" not in md and "the pass could not be drawn" not in md, md
 
 
 def test_summary_invents_no_render_verdict_for_an_incomplete_report(tmp_path):

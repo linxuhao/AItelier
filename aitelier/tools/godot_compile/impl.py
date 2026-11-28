@@ -61,19 +61,25 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
     # skipped or failed-to-summarise report has neither key, so it gets no
     # render verdict — silence is the only honest value there.
     #
-    # The two keys have DIFFERENT scopes and must not be printed as one
-    # statement. `render_mode` is the last probe's mode (godot_harness assigns
-    # it from the probe that just ran), while `headless_retry` is a run-wide
-    # rollup (any scenario timing row that was re-run with rendering off). A
-    # run can be both — an early probe falls back, a later one draws — so each
-    # line names its own scope, and a value that is neither True nor False
-    # (an older or partial producer) claims nothing rather than borrowing
-    # False's meaning.
+    # Both keys say less than they look like they say, so the summary may not
+    # print more than they do:
+    #   * `render_mode` is the mode recorded for the last probe that RETURNED,
+    #     and godot_harness starts it at "headless" before any probe runs — on a
+    #     run whose probe timed out it is the default, not a measurement. The
+    #     line prints the field and claims nothing about drawing.
+    #   * `headless_retry` is a run-wide rollup (any scenario timing row that was
+    #     re-run with rendering off). That retry is skipped whenever the probe
+    #     timed out, so `false` means only "no probe in this run was re-run with
+    #     rendering off" — never "the pass was drawn".
+    #   * `true` is the one value that states a drawing fact, so it is scoped to
+    #     the probe it happened to: one probe can be retried and a later one
+    #     drawn.
+    # A value that is neither True nor False (an older or partial producer)
+    # claims nothing rather than borrowing False's meaning.
     render_lines = []
     render_mode = pt.get("render_mode")
     if render_mode:
-        render_lines.append(
-            f"- render: {render_mode} (the mode of the last probe in this run)")
+        render_lines.append(f"- render: {render_mode}")
     retry = pt.get("headless_retry")
     if retry is True:
         render_lines.append(
@@ -82,8 +88,8 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
             "snapshot, so its measurements are advisory, not a product red.")
     elif retry is False:
         render_lines.append(
-            "- headless retry: false — every probe in this run drew; "
-            "no degradation.")
+            "- headless retry: false — no probe in this run was re-run with "
+            "rendering off.")
     lines = [
         "# playtest_summary.md",
         "",

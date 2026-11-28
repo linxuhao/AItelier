@@ -9,10 +9,11 @@
   import StewardCapabilityRoute from './StewardCapabilityRoute.svelte';
   const { proposal, onupdate, onreload, onrevise, onconnect }: {
     proposal: StewardProposal;
-    /** A newer form of this row: the decision's answer, or the current row a 409 carried. */
-    onupdate: (row: StewardProposal) => void;
-    /** Re-read the list: a 409 that carried no row. */
-    onreload: () => void;
+    /** A newer form of this row: the decision's answer, or the current row a 409 carried.
+     *  `meta.conflict` says the row came from a refusal, not from the owner's own click. */
+    onupdate: (row: StewardProposal, meta?: {conflict?: boolean}) => void;
+    /** Re-read the list: a 409 that carried no row, for this proposal. */
+    onreload: (proposalId: string) => void;
     /** "Change it": the steward is asked in the conversation; it proposes again. */
     onrevise: (row: StewardProposal) => void;
     /** Step 24.1c: open a connection's secret / sign-in on the connections tab. */
@@ -64,7 +65,7 @@
       if (e instanceof ApiError && e.status === 409) {
         // The version or status moved under the owner: show the current row and say so.
         changed = true; confirmStop = false;
-        if (isRow(e.detail)) onupdate(e.detail); else onreload();
+        if (isRow(e.detail)) onupdate(e.detail, {conflict: true}); else onreload(proposal.proposal_id);
       } else {
         // Work started between rendering this card and pressing Approve: the approve
         // endpoint measured the impact again and refused until the owner confirms.
@@ -89,63 +90,73 @@
   {/if}
 {/snippet}
 <article class="proposal" data-proposal={proposal.proposal_id} data-status={proposal.status}>
-  <header>
+  <header data-card-pane="title">
     <strong>{t('steward.kind.' + proposal.kind)}{#if isArchive && proposal.payload?.project_id}{' ' + proposal.payload.project_id}{/if}</strong>
     <span class="status status-{proposal.status}">{t('steward.status.' + proposal.status)}</span>
   </header>
-  <dl>
-    {#if proposal.payload?.project_id}
-      <dt>{t('steward.project')}</dt><dd><a href={stateProjectHref(String(proposal.payload.project_id))}>{proposal.payload.project_id}</a>{#if proposal.payload.title} · {proposal.payload.title}{/if}</dd>
-    {/if}
-    {#if proposal.payload?.goal}<dt>{t('steward.goal')}</dt><dd>{proposal.payload.goal}</dd>{/if}
-    {#if Array.isArray(proposal.payload?.seed_nodes) && proposal.payload.seed_nodes.length}
-      <dt>{t('steward.seedNodes')}</dt>
-      <dd><ul>{#each proposal.payload.seed_nodes as node, i (i)}<li>{node.key ? `${node.key}: ${node.goal ?? ''}` : node.title ?? node.node_key ?? show(node)}</li>{/each}</ul></dd>
-    {/if}
-    {#if proposal.reason}<dt>{t('steward.reason')}</dt><dd>{proposal.reason}</dd>{/if}
-    {#if isArchive && proposal.payload?.reason && proposal.payload.reason !== proposal.reason}
-      <dt>{t('steward.archiveReason')}</dt><dd data-archive-reason>{proposal.payload.reason}</dd>
-    {/if}
-  </dl>
-  {#if proposal.kind === 'connection_change'}<StewardConnectionChange {proposal} {onconnect} />{/if}
-  {#if proposal.kind === 'capability_route'}<StewardCapabilityRoute {proposal} />{/if}
-  {#if isStop}
-    <section class="impact" aria-label={t('steward.impactHeading')}>
-      <strong>{t('steward.impactHeading')}</strong>
-      <div>{t('steward.impactRecorded')} {@render impactList(recorded)}</div>
-      {#if proposal.status === 'open'}
-        <div data-impact-now>{t('steward.impactNow')}
-          {#if impactState === 'loading'}<span aria-busy="true">{t('steward.impactLoading')}</span>
-          {:else if impactState === 'failed'}<span>{t('steward.impactUnknown')}</span>
-          {:else}{@render impactList(impact)}{/if}
-        </div>
+  <div class="body" data-card-pane="content">
+    <dl>
+      {#if proposal.payload?.project_id}
+        <dt>{t('steward.project')}</dt><dd><a href={stateProjectHref(String(proposal.payload.project_id))}>{proposal.payload.project_id}</a>{#if proposal.payload.title} · {proposal.payload.title}{/if}</dd>
       {/if}
-    </section>
-  {/if}
-  {#if changed}<p class="changed" role="status">{t('steward.changed')}</p>{/if}
-  {#if impactMoved}<p class="changed" role="status">{t('steward.impactMoved')}</p>{/if}
-  {#if error}<p class="error" role="alert">{error}</p>{/if}
-  {#if proposal.status === 'open'}
-    {#if needsConfirm}
-      <label class="confirm"><input type="checkbox" bind:checked={confirmStop} /> {t('steward.stopConfirm')}</label>
+      {#if proposal.payload?.goal}<dt>{t('steward.goal')}</dt><dd>{proposal.payload.goal}</dd>{/if}
+      {#if Array.isArray(proposal.payload?.seed_nodes) && proposal.payload.seed_nodes.length}
+        <dt>{t('steward.seedNodes')}</dt>
+        <dd><ul>{#each proposal.payload.seed_nodes as node, i (i)}<li>{node.key ? `${node.key}: ${node.goal ?? ''}` : node.title ?? node.node_key ?? show(node)}</li>{/each}</ul></dd>
+      {/if}
+      {#if proposal.reason}<dt>{t('steward.reason')}</dt><dd>{proposal.reason}</dd>{/if}
+      {#if isArchive && proposal.payload?.reason && proposal.payload.reason !== proposal.reason}
+        <dt>{t('steward.archiveReason')}</dt><dd data-archive-reason>{proposal.payload.reason}</dd>
+      {/if}
+    </dl>
+    {#if proposal.kind === 'connection_change'}<StewardConnectionChange {proposal} {onconnect} />{/if}
+    {#if proposal.kind === 'capability_route'}<StewardCapabilityRoute {proposal} />{/if}
+    {#if isStop}
+      <section class="impact" aria-label={t('steward.impactHeading')}>
+        <strong>{t('steward.impactHeading')}</strong>
+        <div>{t('steward.impactRecorded')} {@render impactList(recorded)}</div>
+        {#if proposal.status === 'open'}
+          <div data-impact-now>{t('steward.impactNow')}
+            {#if impactState === 'loading'}<span aria-busy="true">{t('steward.impactLoading')}</span>
+            {:else if impactState === 'failed'}<span>{t('steward.impactUnknown')}</span>
+            {:else}{@render impactList(impact)}{/if}
+          </div>
+        {/if}
+      </section>
     {/if}
-    <div class="actions">
-      <button type="button" disabled={busy || approveBlocked} onclick={() => void decide('approve')}>{t('steward.approve')}</button>
-      <button type="button" class="secondary outline" disabled={busy} onclick={() => void decide('decline')}>{t('steward.decline')}</button>
-      <button type="button" class="outline" disabled={busy} onclick={() => onrevise(proposal)}>{t('steward.change')}</button>
-    </div>
-  {:else if proposal.status === 'executing'}
-    <p class="executing" aria-busy="true">{t('steward.executing')}</p>
-  {:else}
-    <div class="result">
-      {#if proposal.decided_by}<small>{proposal.decided_by}{#if proposal.decided_at} · {new Date(proposal.decided_at).toLocaleString()}{/if}</small>{/if}
-      {#if proposal.result !== null && proposal.result !== undefined}<pre data-result>{show(proposal.result)}</pre>{/if}
+    {#if changed}<p class="changed" role="status">{t('steward.changed')}</p>{/if}
+    {#if impactMoved}<p class="changed" role="status">{t('steward.impactMoved')}</p>{/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    {#if proposal.status === 'executing'}
+      <p class="executing" aria-busy="true">{t('steward.executing')}</p>
+    {:else if proposal.status !== 'open'}
+      <div class="result">
+        {#if proposal.decided_by}<small>{proposal.decided_by}{#if proposal.decided_at} · {new Date(proposal.decided_at).toLocaleString()}{/if}</small>{/if}
+        {#if proposal.result !== null && proposal.result !== undefined}<pre data-result>{show(proposal.result)}</pre>{/if}
+      </div>
+    {/if}
+  </div>
+  {#if proposal.status === 'open'}
+    <div class="actions" data-card-pane="actions">
+      {#if needsConfirm}
+        <label class="confirm"><input type="checkbox" bind:checked={confirmStop} /> {t('steward.stopConfirm')}</label>
+      {/if}
+      <div class="actions">
+        <button type="button" disabled={busy || approveBlocked} onclick={() => void decide('approve')}>{t('steward.approve')}</button>
+        <button type="button" class="secondary outline" disabled={busy} onclick={() => void decide('decline')}>{t('steward.decline')}</button>
+        <button type="button" class="outline" disabled={busy} onclick={() => onrevise(proposal)}>{t('steward.change')}</button>
+      </div>
     </div>
   {/if}
 </article>
 <style>
-  .proposal{margin:0 0 10px;padding:12px 14px;border:1px solid var(--pico-muted-border-color);border-radius:8px;font-size:13px;}
-  header{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:0 0 6px;padding:0;background:none;border:0;}
+  /* A bound on the whole card, with the title and the decision row outside the
+     one scrolling body: a long description can never push Approve off screen. */
+  .proposal{display:flex;flex-direction:column;max-height:min(82vh, 780px);margin:0 0 10px;padding:12px 14px;border:1px solid var(--pico-muted-border-color);border-radius:8px;font-size:13px;}
+  header{display:flex;flex:0 0 auto;justify-content:space-between;align-items:center;gap:8px;margin:0 0 6px;padding:0;background:none;border:0;
+    max-height:80px;overflow:auto;}
+  .body{flex:1 1 auto;min-height:0;max-height:52vh;overflow:auto;}
+  [data-card-pane="actions"]{display:flex;flex-direction:column;align-items:flex-start;flex:0 0 auto;margin-top:8px;padding-top:8px;border-top:1px solid var(--pico-muted-border-color);background:var(--pico-card-background-color, var(--pico-background-color));}
   .status{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--pico-muted-border-color);}
   .status-open{background:var(--pico-primary);color:var(--pico-primary-inverse);}
   .status-failed{background:var(--pico-del-color);color:#fff;}

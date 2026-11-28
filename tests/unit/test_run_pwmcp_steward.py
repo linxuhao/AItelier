@@ -141,7 +141,7 @@ def test_the_steward_instance_is_on_its_own_network_with_its_own_profile(tmp_pat
     assert flags[flags.index("--image-responses") + 1] == "allow"
     for absent in ("--allowed-origins", "--snapshot-mode", "--save-session"):
         assert absent not in flags, absent
-    # A re-opened session must land in the context the previous one left (dedicated test below).
+    # A second session must land in the context the live one is using (dedicated test below).
     assert "--shared-browser-context" in flags
     assert "http://steward-pwmcp:8921/mcp" in out and "on steward-browser" in out
     # The network is there already (the stub's inspect succeeds): nothing is created.
@@ -245,14 +245,15 @@ def test_pwmcp_gpu_off_keeps_the_original_run_even_with_a_node(tmp_path, driver)
 
 @pytest.mark.parametrize("driver", ["steward", "grok"])
 def test_both_launch_shapes_share_one_browser_context_across_sessions(tmp_path, driver):
-    """A re-opened MCP session must land in the page the previous one left.
+    """A second MCP session must land in the browser context the live one is using.
 
     Measured 2026-11-28 on two sessions against one server (same image, same package): without
-    the flag the second session's browser_take_screenshot of a page the first had opened came
-    back "Error: Browser is already in use for <profile>, use --isolated"; with it the same
-    second session returned that page (the demo's title frame, 1280x720, 971,613 B). The
-    steward's own client is behind the backend gateway, which re-opens its upstream session on
-    a restart or a broken stream, so dropping the flag silently costs it the page.
+    the flag the second session's browser_take_screenshot came back "Error: Browser is already
+    in use for <profile>, use --isolated"; with it the same second session returned the page the
+    first still had open (the demo's title frame, 1280x720, 971,613 B). The flag keeps the
+    context, not the page: once the session that opened a page has ended, the next session opens
+    about:blank (measured on both launch shapes), so dropping the flag costs a session that
+    arrives while another is open, not a resurrected page.
     """
     _home, calls, _out = run_instance(tmp_path, driver)
     flags = shlex.split(the(calls, "run")[-1])

@@ -1258,6 +1258,35 @@ def test_an_sse_answer_is_collected_and_an_expired_session_retried_once(world, s
     assert "result" in again and upstream.initialized == 2
 
 
+def test_a_refresh_recovers_a_session_lost_to_a_recreated_container(world, server, upstream):
+    """A recreated upstream leaves the cached session's alive flag true, so the probe goes
+    down a dead session. The probe path must drop and reopen it once: ONE refresh then
+    answers with the server's tools, no error key, and exactly one new initialize."""
+    ready(world)
+    first = body_of(rpc(server, world, "tools/call", {"name": "media__web_search",
+                                                      "arguments": {"query": "x"}}))[0]
+    assert "result" in first and upstream.initialized == 1
+    found = app.state.steward_gateway
+    for _ in range(100):  # let the first session's re-list finish before resetting the probe clock
+        if not [t for t in list(found.tasks) if t is not found.checker and not t.done()]:
+            break
+        time.sleep(0.02)
+    # The upstream container was recreated: its sessions are gone, the client's still looks alive.
+    grown = TOOLS + [{"name": "generate_image", "inputSchema": {"type": "object", "properties": {"prompt": {}}}}]
+    upstream.tools = json.loads(json.dumps(grown))
+    upstream.sessions.clear()
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_connections SET last_probe_at=NULL")
+        conn.commit()
+    answer = execute(world.steward, "steward_connection_refresh", {"conn_id": "media"}, allow_write=True)
+    assert "error" not in answer, answer
+    assert {t["raw_name"] for t in answer["tools"]} == {t["name"] for t in grown}
+    assert answer["added"] == ["generate_image"]
+    assert upstream.initialized == 2  # one reopen, however many list pages
+    with pytest.raises(StateGraphError, match="refresh_too_soon"):
+        execute(world.steward, "steward_connection_refresh", {"conn_id": "media"}, allow_write=True)
+
+
 def test_only_a_lost_session_is_reopened_and_retried(world, server, upstream):
     ready(world)
     call = lambda: body_of(rpc(server, world, "tools/call", {"name": "media__web_search", "arguments": {"query": "x"}}))[0]

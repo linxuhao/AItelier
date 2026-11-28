@@ -133,7 +133,13 @@ def test_the_steward_instance_is_on_its_own_network_with_its_own_profile(tmp_pat
     assert flags[flags.index("--host") + 1] == "0.0.0.0" and flags[flags.index("--port") + 1] == "8921"
     assert flags[flags.index("--allowed-hosts") + 1] == "steward-pwmcp:8921"
     assert flags[flags.index("--user-data-dir") + 1] == str(profile_root / "profile")
-    for absent in ("--allowed-origins", "--caps", "--snapshot-mode", "--save-session"):
+    # The coordinate tools: a canvas game has no element to click by ref, so the steward needs to
+    # press where it sees (measured: 25 tools without this flag, 31 with it).
+    assert flags[flags.index("--caps") + 1] == "vision"
+    # The image path must stay on, and the text snapshots the steward reads pages through must not
+    # be traded for the drivers' no-snapshot mode.
+    assert flags[flags.index("--image-responses") + 1] == "allow"
+    for absent in ("--allowed-origins", "--snapshot-mode", "--save-session"):
         assert absent not in flags, absent
     assert "http://steward-pwmcp:8921/mcp" in out and "on steward-browser" in out
     # The network is there already (the stub's inspect succeeds): nothing is created.

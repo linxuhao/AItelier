@@ -59,8 +59,14 @@ if [ "$DRIVER" = steward ]; then
   #     Not --internal: the browser must reach the web. No published port. --shm-size instead of
   #     --ipc=host (no host namespace left).
   #   - no autoshot proxy (it listens on 127.0.0.1 only), playwright directly on PORT.
-  #   - no --allowed-origins (the steward browses the web), no --caps vision, default text snapshots
-  #     (the drivers' vision + no-snapshot mode is for canvas games), no --save-session logs.
+  #   - --caps vision: the coordinate input tools (browser_mouse_click_xy, ...). A canvas game has no
+  #     element to click by ref, so seeing the screen is not enough to play it; measured on the
+  #     steward-browser network, the same flags without --caps vision expose 25 tools and with it 31.
+  #     Default text snapshots stay (the steward reads web pages through the snapshot), so no
+  #     --snapshot-mode none: that is a drivers-only choice. --image-responses allow is what makes a
+  #     screenshot taken WITHOUT a filename come back as an image; with a filename the server saves
+  #     the file and answers with text only. No --allowed-origins (the steward browses the web), no
+  #     --save-session logs.
   #   - profile (login state) under STEWARD_BROWSER_DIR, outside ~/.AItelier, which dev_mcp mounts.
   #     The package and config are mounted read-only.
   # Accepted (owner 2026-11-23): like the drivers' browser, its pages can reach the LAN (and the
@@ -72,6 +78,7 @@ if [ "$DRIVER" = steward ]; then
   docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
   PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --headless --browser chromium --no-sandbox \
+ --caps vision \
  --executable-path /ms-playwright/chromium-1254/chrome-linux64/chrome \
  --host 0.0.0.0 --port $PORT --allowed-hosts steward-pwmcp:$PORT \
  --viewport-size 1280x720 --image-responses allow \

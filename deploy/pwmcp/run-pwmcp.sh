@@ -111,6 +111,14 @@ if [ "$DRIVER" = steward ]; then
   #     the file and answers with text only. No --allowed-origins (the steward browses the web), no
   #     --save-session logs.
   #   - profile (login state) under STEWARD_BROWSER_DIR, outside ~/.AItelier, which dev_mcp mounts.
+  #   - --shared-browser-context, on BOTH shapes (measured 2026-11-28): without it every MCP
+  #     session gets its own browser context, so a client that reconnects loses the page. Arm A
+  #     (the launch as shipped): the second session's browser_take_screenshot of a page the first
+  #     session had opened returned "Error: Browser is already in use for <profile>, use --isolated".
+  #     Arm B (this flag): the same second session returned that page - the demo's title frame at
+  #     1280x720, 971,613 B (the steward got a blank 4,254 B frame after its gateway session was
+  #     reopened). One client per instance is unchanged: the flag only makes a RE-opened session
+  #     land in the context the previous one left.
   #     The package and config are mounted read-only.
   # Accepted (owner 2026-11-23): like the drivers' browser, its pages can reach the LAN (and the
   # backend, its one neighbour on steward-browser); nothing proxies or filters its traffic.
@@ -124,7 +132,7 @@ if [ "$DRIVER" = steward ]; then
  --caps vision \
  --executable-path /ms-playwright/chromium-1254/chrome-linux64/chrome \
  --host 0.0.0.0 --port $PORT --allowed-hosts steward-pwmcp:$PORT \
- --viewport-size 1280x720 --image-responses allow \
+ --viewport-size 1280x720 --image-responses allow --shared-browser-context \
  --user-data-dir $PROFILE --output-dir $OUT \
  --config $GPU_CONFIG $EXTRA_FLAGS"
   docker rm -f steward-pwmcp >/dev/null 2>&1 || true
@@ -146,7 +154,7 @@ PW="node $PKG/node_modules/@playwright/mcp/cli.js \
  --headless --browser chromium --no-sandbox \
  --executable-path /ms-playwright/chromium-1254/chrome-linux64/chrome \
  --host 127.0.0.1 --port $BPORT --allowed-hosts 127.0.0.1:$BPORT,localhost:$BPORT \
- --caps vision --viewport-size 1280x720 --image-responses allow \
+ --caps vision --viewport-size 1280x720 --image-responses allow --shared-browser-context \
  --allowed-origins https://linxuhao.github.io\;http://127.0.0.1:4444\;http://localhost:4444\;http://127.0.0.1:5173 \
  --user-data-dir $PROFILE --output-dir $OUT --save-session --snapshot-mode none \
  --config $GPU_CONFIG $EXTRA_FLAGS"

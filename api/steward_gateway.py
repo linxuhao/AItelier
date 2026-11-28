@@ -632,10 +632,11 @@ class Gateway:
             return
         await asyncio.to_thread(sc.record_discovery, _store(self.app), conn_id, listed, upstream.instructions)
 
-    async def drop(self, conn_id, session=None):
-        """Close one connection's cached session. `session`, when given, is the one the caller
-        saw fail: it is dropped only while it is still the cached one, because a task that
-        lost the race must not close the session its winner has already opened under it."""
+    async def drop(self, conn_id, session):
+        """Close one connection's cached session. `session` is the one the caller saw fail: it
+        is dropped only while it is still the cached one, because a task that lost the race
+        must not close the session its winner has already opened under it. It is required,
+        not optional: a drop that does not name the session it failed on is the race itself."""
         async with self._lock(conn_id):
             if session is not None and self.upstreams.get(conn_id) is not session:
                 return

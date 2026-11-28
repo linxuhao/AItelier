@@ -165,10 +165,10 @@ test('the approval phrase line is kept whole in either language: the Chinese phr
 });
 
 const STEWARD_MD = new URL('../steward.md', import.meta.url);
-test('steward prompt: zh is steward.md byte for byte (as at daf492274e); en names the English phrases and brief lines', () => {
+test('steward prompt: zh is steward.md byte for byte (as at a4e5d9d6bc); en names the English phrases and brief lines', () => {
   const md = readFileSync(STEWARD_MD, 'utf8');
   assert.equal(createHash('sha256').update(stewardPromptInLanguage(md, 'zh')).digest('hex'),
-    'b91a5b14561d39ead1523c6a15d3a6b6dcff6b46bf05924203c30c21e7427680', 'steward.md as at daf492274e');
+    '473efd3bf3e51b07642f874e5cc58fe8fdfd4e449372e8af49679bd928795ca7', 'steward.md as at a4e5d9d6bc');
   assert.equal(stewardPromptInLanguage(md, 'zh'), md);
   // Each passage as often as steward.md has it today: the withheld sentence three times (group
   // turns, list_add, request_confirmation), every other once.

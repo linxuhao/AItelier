@@ -51,8 +51,9 @@ PY
 # treats a lock written by the previous instance as "in use by another computer" and
 # exits 21 (which Playwright reports as "Browser is already in use"). The pid recorded
 # in the lock belongs to the old container and is absent here, so a pid liveness check
-# proves nothing: scan the process table for an exact --user-data-dir=<profile> argument
-# and clear the three singleton files only when no process names this profile.
+# proves nothing: scan the process table for a process whose --user-data-dir value resolves
+# to this profile (readlink -f on both sides; any process counts, not only chromium) and
+# clear the three singleton files only when no such process exists.
 clear_stale_profile_lock() {
   local profile=$1 proc_root=${PWMCP_PROC_ROOT:-/proc}
   local target seen entry pid arg live=''
@@ -63,8 +64,10 @@ clear_stale_profile_lock() {
     pid=${entry##*/}
     case $pid in ''|*[!0-9]*) continue ;; esac
     argv=()
-    # cmdline is NUL-separated; a missing, unreadable or vanishing entry is not fatal.
-    mapfile -d '' -t argv < "$entry/cmdline" 2>/dev/null || continue
+    # cmdline is NUL-separated; a missing, unreadable or vanishing entry is skipped. stderr is
+    # redirected BEFORE the input redirect, so a process that vanished between the glob and
+    # this open is not reported as an error either (redirections apply left to right).
+    mapfile -d '' -t argv 2>/dev/null < "$entry/cmdline" || continue
     for arg in "${argv[@]}"; do
       case $arg in
         --user-data-dir=*)

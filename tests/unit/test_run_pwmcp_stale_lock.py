@@ -1,8 +1,9 @@
 """The stale Chromium singleton lock guard in deploy/pwmcp/run-pwmcp.sh.
 
 The marked helper is extracted from the script and EXECUTED with bash against a
-fixture proc root and temporary profiles. The branch order is checked by running
-the script with a recording docker stub, the same rendering as test_run_pwmcp_steward.py.
+fixture proc root and temporary profiles. The branch order is checked with the same
+shape as test_run_pwmcp_steward.py (real bash, a recording docker stub), plus a
+PWMCP_TIMELINE trace written from inside the helper and an empty fixture proc root.
 No docker daemon, network or browser is needed.
 """
 from __future__ import annotations
@@ -86,11 +87,23 @@ def test_a_stale_lock_is_cleared_when_no_process_names_the_profile(tmp_path):
     assert str(profile) in done.stdout
     assert all(lock in done.stdout for lock in LOCKS), done.stdout
 
-    # A cmdline that cannot be read is skipped, not fatal under set -e.
+    # A cmdline that cannot be read is skipped, not fatal under set -e, and leaves no
+    # error on stderr: on a real recreate /proc entries do vanish between the glob and the
+    # open, and 4 such lines appeared on stderr before stderr was redirected first.
     profile2 = locked_profile(tmp_path, "profile2")
     done2 = run_helper(tmp_path, profile2, unreadable)
     assert done2.returncode == 0, done2.stderr
+    assert done2.stderr == "", done2.stderr
     assert all(not os.path.lexists(profile2 / lock) for lock in LOCKS)
+
+    # Same for an entry whose cmdline file is absent altogether (a process that vanished).
+    absent = proc_root(tmp_path, {}, "absent")
+    (absent / "9999").mkdir()
+    profile3 = locked_profile(tmp_path, "profile3")
+    done3 = run_helper(tmp_path, profile3, absent)
+    assert done3.returncode == 0, done3.stderr
+    assert done3.stderr == "", done3.stderr
+    assert all(not os.path.lexists(profile3 / lock) for lock in LOCKS)
 
 
 def test_the_lock_is_kept_when_a_live_process_names_this_profile(tmp_path):

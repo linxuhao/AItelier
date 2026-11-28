@@ -60,18 +60,30 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
     # Render facts exist only on a report that actually ran a play-test. A
     # skipped or failed-to-summarise report has neither key, so it gets no
     # render verdict — silence is the only honest value there.
+    #
+    # The two keys have DIFFERENT scopes and must not be printed as one
+    # statement. `render_mode` is the last probe's mode (godot_harness assigns
+    # it from the probe that just ran), while `headless_retry` is a run-wide
+    # rollup (any scenario timing row that was re-run with rendering off). A
+    # run can be both — an early probe falls back, a later one draws — so each
+    # line names its own scope, and a value that is neither True nor False
+    # (an older or partial producer) claims nothing rather than borrowing
+    # False's meaning.
     render_lines = []
-    if pt.get("render_mode"):
-        render_lines.append(f"- render: {pt['render_mode']}")
-    if "headless_retry" in pt:
-        if pt["headless_retry"]:
-            render_lines.append(
-                "- headless retry: true — the pass could not be drawn "
-                "(Godot returned no snapshot); measurements below are advisory, "
-                "not a product red.")
-        else:
-            render_lines.append(
-                "- headless retry: false — the pass was drawn; no degradation.")
+    render_mode = pt.get("render_mode")
+    if render_mode:
+        render_lines.append(
+            f"- render: {render_mode} (the mode of the last probe in this run)")
+    retry = pt.get("headless_retry")
+    if retry is True:
+        render_lines.append(
+            "- headless retry: true — at least one probe in this run was not "
+            "drawn: it was re-run with rendering off after Godot returned no "
+            "snapshot, so its measurements are advisory, not a product red.")
+    elif retry is False:
+        render_lines.append(
+            "- headless retry: false — every probe in this run drew; "
+            "no degradation.")
     lines = [
         "# playtest_summary.md",
         "",

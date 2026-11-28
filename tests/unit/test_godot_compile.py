@@ -302,10 +302,11 @@ def test_summary_names_a_headless_retry_as_advisory(tmp_path):
     }
     md = _write_summary_from_report(tmp_path, report)
 
-    assert "- render: headless" in md, md
-    assert ("- headless retry: true — the pass could not be drawn "
-            "(Godot returned no snapshot); measurements below are advisory, "
-            "not a product red.") in md, md
+    assert "- render: headless (the mode of the last probe in this run)" in md, md
+    assert ("- headless retry: true — at least one probe in this run was not "
+            "drawn: it was re-run with rendering off after Godot returned no "
+            "snapshot, so its measurements are advisory, not a product red."
+            ) in md, md
     # The degradation marker is added to the existing sections, not instead of
     # them: the FAIL the reviewer would misread is still present.
     assert "orbit_drift" in md and "**0/1**" in md, md
@@ -322,10 +323,52 @@ def test_summary_names_a_drawn_pass_without_degradation(tmp_path):
     }
     md = _write_summary_from_report(tmp_path, report)
 
-    assert "- render: render" in md, md
-    assert ("- headless retry: false — the pass was drawn; "
+    assert "- render: render (the mode of the last probe in this run)" in md, md
+    assert ("- headless retry: false — every probe in this run drew; "
             "no degradation.") in md, md
-    assert "could not be drawn" not in md and "not a product red" not in md, md
+    assert "was not drawn" not in md and "not a product red" not in md, md
+
+
+def test_summary_scopes_the_mode_and_the_retry_so_a_mixed_run_cannot_contradict_itself(
+        tmp_path):
+    # A run can hold both facts: an early probe was re-run with rendering off
+    # (`headless_retry`, a run-wide rollup) and the last probe drew
+    # (`render_mode`, the last probe's mode). The v1 wording printed
+    # "render: render" beside "the pass could not be drawn", which reads as one
+    # contradictory claim about one pass. Each line must say what it is about.
+    report = {
+        "passed": True, "spec_used": True, "frames": 240, "errors": [],
+        "render_mode": "render", "headless_retry": True,
+        "behavior": {"scenarios": [{"name": "orbit_drift", "passed": True,
+                                    "asserts": [{"name": "orbit_x",
+                                                 "passed": True}]}]},
+        "summary": "one probe fell back, the last one drew",
+    }
+    md = _write_summary_from_report(tmp_path, report)
+
+    assert "- render: render (the mode of the last probe in this run)" in md, md
+    assert "- headless retry: true" in md, md
+    assert "at least one probe in this run was not drawn" in md, md
+    # Neither line is written as a verdict on "the pass" as a whole.
+    assert "the pass could not be drawn" not in md, md
+    assert "the pass was drawn" not in md, md
+
+
+def test_summary_claims_nothing_from_a_retry_value_that_is_not_a_boolean(tmp_path):
+    # A producer that carries the key without a verdict must not be read as
+    # False: v1 printed "the pass was drawn; no degradation" for `None`, which
+    # asserts a fact the report never stated.
+    for retry in (None, "yes", 0):
+        report = {
+            "passed": True, "spec_used": True, "frames": 120, "errors": [],
+            "render_mode": "headless", "headless_retry": retry,
+            "behavior": {"scenarios": []}, "summary": "no retry verdict",
+        }
+        md = _write_summary_from_report(tmp_path, report)
+
+        assert "- render: headless (the mode of the last probe in this run)" in md, md
+        assert "headless retry" not in md, md
+        assert "no degradation" not in md, md
 
 
 def test_summary_invents_no_render_verdict_for_an_incomplete_report(tmp_path):

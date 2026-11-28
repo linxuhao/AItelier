@@ -608,10 +608,7 @@ class Gateway:
         for conn_id, upstream in list(self.upstreams.items()):
             row = rows.get(conn_id)
             if row is None or not row["enabled"] or fingerprint(row) != upstream.fingerprint or not upstream.alive:
-                async with self._lock(conn_id):
-                    if self.upstreams.get(conn_id) is upstream:
-                        del self.upstreams[conn_id]
-                await upstream.close()
+                await self.drop(conn_id, upstream)
 
     async def upstream(self, row: dict) -> Upstream:
         async with self._lock(row["conn_id"]):
@@ -635,8 +632,13 @@ class Gateway:
             return
         await asyncio.to_thread(sc.record_discovery, _store(self.app), conn_id, listed, upstream.instructions)
 
-    async def drop(self, conn_id):
+    async def drop(self, conn_id, session=None):
+        """Close one connection's cached session. `session`, when given, is the one the caller
+        saw fail: it is dropped only while it is still the cached one, because a task that
+        lost the race must not close the session its winner has already opened under it."""
         async with self._lock(conn_id):
+            if session is not None and self.upstreams.get(conn_id) is not session:
+                return
             upstream = self.upstreams.pop(conn_id, None)
         if upstream is not None:
             await upstream.close()
@@ -676,25 +678,25 @@ class Gateway:
     async def _probe(self, row: dict) -> dict:
         if row["enabled"]:
             # Same one-reopen policy as `call`: a recreated upstream leaves the cached
-            # session's `alive` flag true, so the list goes down a dead session. A lost
-            # session is dropped and reopened once; a second failure is the answer.
+            # session's `alive` flag true, so the list goes down a dead session. The lost
+            # session is dropped and reopened once - dropped only while it is still the
+            # cached one, since another task may have replaced it in the meantime - and a
+            # second failure is the upstream's own error, recorded as its own type.
             for attempt in (1, 2):
                 upstream = await self.upstream(row)
                 try:
                     return {"tools": await self._list(upstream), "instructions": upstream.instructions}
                 except asyncio.TimeoutError:
                     raise
-                except SessionBroken as exc:
-                    broken = exc
                 except Exception as exc:  # noqa: BLE001 - judged just below
                     if not _session_lost(exc):
                         raise
                     broken = exc
                 logger.info("steward gateway: upstream session of %s failed while probing (%s)",
                             row["conn_id"], type(broken).__name__)
-                await self.drop(row["conn_id"])
+                await self.drop(row["conn_id"], upstream)
                 if attempt == 2:
-                    raise SessionBroken(type(broken).__name__)
+                    raise broken
             raise SessionBroken("unreachable")
         temporary = Upstream(self, row)
         await temporary.open()
@@ -725,7 +727,7 @@ class Gateway:
                     raise
                 broken = exc
             logger.info("steward gateway: upstream session of %s failed (%s)", row["conn_id"], type(broken).__name__)
-            await self.drop(row["conn_id"])
+            await self.drop(row["conn_id"], upstream)
             if not retry or attempt == 2:
                 raise SessionBroken(type(broken).__name__)
         raise SessionBroken("unreachable")

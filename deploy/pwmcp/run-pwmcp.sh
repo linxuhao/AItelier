@@ -111,14 +111,20 @@ if [ "$DRIVER" = steward ]; then
   #     the file and answers with text only. No --allowed-origins (the steward browses the web), no
   #     --save-session logs.
   #   - profile (login state) under STEWARD_BROWSER_DIR, outside ~/.AItelier, which dev_mcp mounts.
-  #   - --shared-browser-context, on BOTH shapes (measured 2026-11-28): without it every MCP
-  #     session gets its own browser context, so a client that reconnects loses the page. Arm A
-  #     (the launch as shipped): the second session's browser_take_screenshot of a page the first
-  #     session had opened returned "Error: Browser is already in use for <profile>, use --isolated".
-  #     Arm B (this flag): the same second session returned that page - the demo's title frame at
-  #     1280x720, 971,613 B (the steward got a blank 4,254 B frame after its gateway session was
-  #     reopened). One client per instance is unchanged: the flag only makes a RE-opened session
-  #     land in the context the previous one left.
+  #   - --shared-browser-context, on BOTH shapes (measured 2026-11-28). Without it every MCP
+  #     session gets its own browser context and a second session on the same instance is refused
+  #     outright: arm A's browser_take_screenshot came back "Error: Browser is already in use for
+  #     <profile>, use --isolated". With it the second session joins the context the live session is
+  #     using and can see its page: the same call returned the demo's title frame at 1280x720,
+  #     971,613 B (arm B). Both arms kept one client per instance; the flag changes what a second
+  #     session finds, not how many sessions the instance accepts.
+  #     Boundary, measured: the flag keeps the CONTEXT (cookies, storage), not the page. Once the
+  #     session that opened a page has ended, the browser is gone and the next session opens
+  #     about:blank - measured on the steward shape (session 1 closed, session 2 after it: about:blank)
+  #     and on the per-driver shape, where the autoshot proxy evicts the previous backend session on
+  #     every new client ("evicting previous session ... for new client"), so both arms of that shape
+  #     return a blank 1280x720 frame (5,672 b64). A page lives only while its session lives; what
+  #     the flag buys is that a session arriving while another is still open no longer fails.
   #     The package and config are mounted read-only.
   # Accepted (owner 2026-11-23): like the drivers' browser, its pages can reach the LAN (and the
   # backend, its one neighbour on steward-browser); nothing proxies or filters its traffic.

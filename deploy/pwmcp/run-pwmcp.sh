@@ -46,6 +46,49 @@ PY
   # -L: a symlinked render node must contribute its target's group, not the link's.
   GPU_ARGS=(--device "$GPU_NODE" --group-add "$(stat -Lc %g "$GPU_NODE")")
 }
+# >>> stale-profile-lock
+# Recreating the container gives it a new hostname, so Chromium's ProcessSingleton
+# treats a lock written by the previous instance as "in use by another computer" and
+# exits 21 (which Playwright reports as "Browser is already in use"). The pid recorded
+# in the lock belongs to the old container and is absent here, so a pid liveness check
+# proves nothing: scan the process table for a process whose --user-data-dir value resolves
+# to this profile (readlink -f on both sides; any process counts, not only chromium) and
+# clear the three singleton files only when no such process exists.
+clear_stale_profile_lock() {
+  local profile=$1 proc_root=${PWMCP_PROC_ROOT:-/proc}
+  local target seen entry pid arg live=''
+  local -a argv=()
+
+  target=$(readlink -f -- "$profile" 2>/dev/null) || target=$profile
+  for entry in "$proc_root"/*; do
+    pid=${entry##*/}
+    case $pid in ''|*[!0-9]*) continue ;; esac
+    argv=()
+    # cmdline is NUL-separated; a missing, unreadable or vanishing entry is skipped. stderr is
+    # redirected BEFORE the input redirect, so a process that vanished between the glob and
+    # this open is not reported as an error either (redirections apply left to right).
+    mapfile -d '' -t argv 2>/dev/null < "$entry/cmdline" || continue
+    for arg in "${argv[@]}"; do
+      case $arg in
+        --user-data-dir=*)
+          seen=${arg#--user-data-dir=}
+          seen=$(readlink -f -- "$seen" 2>/dev/null) || seen=$seen
+          if [ "$seen" = "$target" ]; then live=$pid; break 2; fi
+          ;;
+      esac
+    done
+  done
+
+  if [ -n "$live" ]; then
+    printf 'Kept singleton lock for %s: pid %s is using that profile\n' "$profile" "$live"
+    return 0
+  fi
+  # -L too: SingletonLock is usually a dangling symlink to the old host and pid.
+  [ -e "$profile/SingletonLock" ] || [ -L "$profile/SingletonLock" ] || return 0
+  rm -f -- "$profile/SingletonLock" "$profile/SingletonCookie" "$profile/SingletonSocket"
+  printf 'Removed SingletonLock, SingletonCookie, SingletonSocket from %s (no live process names that profile)\n' "$profile"
+}
+# <<< stale-profile-lock
 if [ "$DRIVER" = steward ]; then
   # The steward's own instance: same image, package and config as the drivers', its own container,
   # profile and port; the one client is the backend's steward gateway (a `browser` connection the
@@ -85,6 +128,7 @@ if [ "$DRIVER" = steward ]; then
  --user-data-dir $PROFILE --output-dir $OUT \
  --config $GPU_CONFIG $EXTRA_FLAGS"
   docker rm -f steward-pwmcp >/dev/null 2>&1 || true
+  clear_stale_profile_lock "$PROFILE"
   docker run -d --name steward-pwmcp --restart unless-stopped --network "$NET" --init --shm-size 1g \
     --log-opt max-size=5m --log-opt max-file=2 \
     --user "$(id -u):$(id -g)" -e HOME="$HOMED" -v "$PKG:$PKG:ro" -v "$B/pwmcp-config.json:$B/pwmcp-config.json:ro" \
@@ -109,6 +153,7 @@ PW="node $PKG/node_modules/@playwright/mcp/cli.js \
 if [ "${NO_PROXY:-0}" = 1 ]; then CMD="exec $PW"
 else CMD="$PW & LISTEN_PORT=$PORT BACKEND_URL=http://127.0.0.1:$BPORT/mcp AUTO_DIR=$OUT/auto node $B/proxy/autoshot-proxy.mjs & wait -n; exit 1"; fi
 docker rm -f "$DRIVER-pwmcp" >/dev/null 2>&1 || true
+clear_stale_profile_lock "$PROFILE"
 docker run -d --name "$DRIVER-pwmcp" --restart unless-stopped --network host --init --ipc=host \
   --log-opt max-size=5m --log-opt max-file=2 \
   --user "$(id -u):$(id -g)" -e HOME="$HOMED" -v $B:$B -w "$D" "${GPU_ARGS[@]}" \

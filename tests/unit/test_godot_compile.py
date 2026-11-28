@@ -8,7 +8,7 @@ import json
 import urllib.error
 import urllib.request
 
-from aitelier.tools.godot_compile.impl import godot_compile
+from aitelier.tools.godot_compile.impl import _write_playtest_summary, godot_compile
 
 
 # The builder's per-pass record for a complete compile. A pass is only believed
@@ -276,3 +276,65 @@ def test_the_summary_exists_even_when_the_playtest_was_skipped(tmp_path, monkeyp
     godot_compile(project_root=str(tmp_path), out_dir=str(out))
     md = (out / "playtest_summary.md").read_text()
     assert "not a Godot project" in md
+
+
+# ── The render verdict in the distilled summary ─────────────────────────────
+# A degraded pass looks exactly like a product failure when the only artefact a
+# reviewer sees is the summary: the advisory FAILs are there, the reason they
+# cannot be trusted is not. Each test below writes playtest_report.json, runs
+# the writer on that file, and reads back the summary it actually produced.
+def _write_summary_from_report(tmp_path, report):
+    path = tmp_path / "playtest_report.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    _write_playtest_summary(tmp_path, json.loads(path.read_bytes()))
+    return (tmp_path / "playtest_summary.md").read_bytes().decode("utf-8")
+
+
+def test_summary_names_a_headless_retry_as_advisory(tmp_path):
+    report = {
+        "passed": True, "spec_used": True, "frames": 120, "errors": [],
+        "render_mode": "headless", "headless_retry": True,
+        "behavior": {"scenarios": [{
+            "name": "orbit_drift", "passed": False,
+            "asserts": [{"name": "orbit_x", "passed": False,
+                         "expr": "orbit_x > 1", "actual": False}]}]},
+        "summary": "no snapshot; advisory assertions recorded",
+    }
+    md = _write_summary_from_report(tmp_path, report)
+
+    assert "- render: headless" in md, md
+    assert ("- headless retry: true — the pass could not be drawn "
+            "(Godot returned no snapshot); measurements below are advisory, "
+            "not a product red.") in md, md
+    # The degradation marker is added to the existing sections, not instead of
+    # them: the FAIL the reviewer would misread is still present.
+    assert "orbit_drift" in md and "**0/1**" in md, md
+
+
+def test_summary_names_a_drawn_pass_without_degradation(tmp_path):
+    report = {
+        "passed": True, "spec_used": True, "frames": 120, "errors": [],
+        "render_mode": "render", "headless_retry": False,
+        "behavior": {"scenarios": [{
+            "name": "quiet_menu", "passed": True,
+            "asserts": [{"name": "menu_visible", "passed": True}]}]},
+        "summary": "drawn pass",
+    }
+    md = _write_summary_from_report(tmp_path, report)
+
+    assert "- render: render" in md, md
+    assert ("- headless retry: false — the pass was drawn; "
+            "no degradation.") in md, md
+    assert "could not be drawn" not in md and "not a product red" not in md, md
+
+
+def test_summary_invents_no_render_verdict_for_an_incomplete_report(tmp_path):
+    # The skipped and failed-to-summarise shapes carry neither render key.
+    report = {"passed": True, "frames": 0, "errors": [], "state": {},
+              "gate_skipped": True, "summary": "not a Godot project"}
+    md = _write_summary_from_report(tmp_path, report)
+
+    assert "hard gate `passed`: **True**" in md and "not a Godot project" in md, md
+    assert "render:" not in md, md
+    assert "headless retry" not in md, md
+    assert "- render: None" not in md, md

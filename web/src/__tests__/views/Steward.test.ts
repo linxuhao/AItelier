@@ -387,7 +387,7 @@ describe('a proposal card', () => {
     const view = render(StewardProposalCard, p);
     await fireEvent.click(view.getByRole('button', {name: 'Approve'}));
     await view.findByText('This proposal changed while you were looking; the current version is shown.');
-    expect(p.onupdate).toHaveBeenCalledWith(current);
+    expect(p.onupdate).toHaveBeenCalledWith(current, {conflict: true});
     expect(p.onreload).not.toHaveBeenCalled();
   });
 

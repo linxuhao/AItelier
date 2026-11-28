@@ -16,6 +16,14 @@
   let rows = $state<StewardProposal[]>([]), loaded = $state(false), error = $state('');
   // Decided cards start folded: the owner sees only what still needs a decision.
   let showPast = $state(false);
+  // A conflict answer can carry a row that is ALREADY decided. The row then leaves
+  // the active section, its card unmounts, and the notice that card raised ("this
+  // proposal changed while you were looking") would unmount with it. So the list
+  // says it, and offers the fold where the row now lives.
+  let moved = $state<StewardProposal | null>(null);
+  // A 409 that carried no row re-reads the list; these ids are the ones whose
+  // decided state the re-read is meant to explain.
+  let pendingConflict = $state<string[]>([]);
   const LIVE = new Set(['open', 'executing']);
   const newestFirst = (a: StewardProposal, b: StewardProposal) =>
     a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0;
@@ -28,11 +36,25 @@
       const result = await listStewardProposals('all', 50);
       if (!alive) return;
       rows = result; error = ''; loaded = true;
+      if (pendingConflict.length) {
+        const carried = result.find(row => pendingConflict.includes(row.proposal_id) && !LIVE.has(row.status));
+        if (carried) moved = carried;
+        pendingConflict = [];
+      }
     } catch (e) { if (alive) error = String(e instanceof Error ? e.message : e); }
   }
-  function update(row: StewardProposal) {
+  function update(row: StewardProposal, meta?: {conflict?: boolean}) {
     rows = rows.map(r => r.proposal_id === row.proposal_id ? row : r);
+    // The owner's own decision is not a change "while you were looking": only a
+    // refusal reports one, and only when the row it carried has left the section.
+    if (meta?.conflict && !LIVE.has(row.status)) moved = row;
+    else if (LIVE.has(row.status)) moved = null;
     onchange();
+  }
+  /** A 409 carried no row: re-read, and explain the row if it comes back decided. */
+  function reload(proposalId: string) {
+    pendingConflict = [proposalId];
+    void load();
   }
   onMount(() => {
     alive = true;
@@ -43,6 +65,12 @@
 </script>
 <section class="steward-proposals" aria-label={t('steward.tabProposals')}>
   {#if error}<p role="alert">{error}</p>{/if}
+  {#if moved}
+    <p class="moved" role="status">
+      {t('steward.changed')} <strong>{t('steward.kind.' + moved.kind)}</strong>
+      <button type="button" class="secondary outline" onclick={() => { showPast = true; moved = null; }}>{t('steward.pastShow').replace('{n}', String(past.length))}</button>
+    </p>
+  {/if}
   {#if !loaded && !error}<p aria-busy="true">{t('steward.loading')}</p>
   {:else if loaded && !rows.length}<p class="empty">{t('steward.proposalsEmpty')}</p>
   {:else if loaded}
@@ -50,7 +78,7 @@
       <h3>{t('steward.sectionActive')} <span class="count">{active.length}</span></h3>
       {#if active.length}
         {#each active as proposal (proposal.proposal_id)}
-          <StewardProposalCard {proposal} onupdate={update} onreload={() => void load()} {onrevise} {onconnect} />
+          <StewardProposalCard {proposal} onupdate={update} onreload={reload} {onrevise} {onconnect} />
         {/each}
       {:else}<p class="empty">{t('steward.activeEmpty')}</p>{/if}
     </section>
@@ -62,7 +90,7 @@
       </h3>
       {#if showPast}
         {#each past as proposal (proposal.proposal_id)}
-          <StewardProposalCard {proposal} onupdate={update} onreload={() => void load()} {onrevise} {onconnect} />
+          <StewardProposalCard {proposal} onupdate={update} onreload={reload} {onrevise} {onconnect} />
         {/each}
       {/if}
     </section>
@@ -71,5 +99,7 @@
 <style>
   .empty{color:var(--pico-muted-color);font-size:13px;}
   .count{color:var(--pico-muted-color);font-size:12px;}
+  .moved{font-size:13px;color:var(--pico-muted-color);}
+  .moved button{width:auto;margin:0 0 0 6px;padding:1px 8px;font-size:12px;}
   [data-proposal-section="past"] h3 button{width:auto;margin:0;padding:2px 8px;font-size:13px;}
 </style>

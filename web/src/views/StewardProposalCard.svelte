@@ -9,10 +9,11 @@
   import StewardCapabilityRoute from './StewardCapabilityRoute.svelte';
   const { proposal, onupdate, onreload, onrevise, onconnect }: {
     proposal: StewardProposal;
-    /** A newer form of this row: the decision's answer, or the current row a 409 carried. */
-    onupdate: (row: StewardProposal) => void;
-    /** Re-read the list: a 409 that carried no row. */
-    onreload: () => void;
+    /** A newer form of this row: the decision's answer, or the current row a 409 carried.
+     *  `meta.conflict` says the row came from a refusal, not from the owner's own click. */
+    onupdate: (row: StewardProposal, meta?: {conflict?: boolean}) => void;
+    /** Re-read the list: a 409 that carried no row, for this proposal. */
+    onreload: (proposalId: string) => void;
     /** "Change it": the steward is asked in the conversation; it proposes again. */
     onrevise: (row: StewardProposal) => void;
     /** Step 24.1c: open a connection's secret / sign-in on the connections tab. */
@@ -64,7 +65,7 @@
       if (e instanceof ApiError && e.status === 409) {
         // The version or status moved under the owner: show the current row and say so.
         changed = true; confirmStop = false;
-        if (isRow(e.detail)) onupdate(e.detail); else onreload();
+        if (isRow(e.detail)) onupdate(e.detail, {conflict: true}); else onreload(proposal.proposal_id);
       } else {
         // Work started between rendering this card and pressing Approve: the approve
         // endpoint measured the impact again and refused until the owner confirms.

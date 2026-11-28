@@ -20,7 +20,7 @@ const api = vi.hoisted(() => ({
 }));
 // Keep the real module underneath so ApiError is the class the card checks.
 vi.mock('../../lib/api', async (original) => ({...(await original<object>()), ...api}));
-import type { StewardProposal } from '../../lib/api';
+import { ApiError, type StewardProposal } from '../../lib/api';
 import StewardProposals from '../../views/StewardProposals.svelte';
 
 const at = (n: number) => `2026-11-20T00:00:0${n}Z`;
@@ -32,6 +32,9 @@ const props = () => ({onchange: vi.fn(), onrevise: vi.fn(), onconnect: vi.fn()})
 const css = (el: Element | null, prop: string) =>
   el ? getComputedStyle(el as HTMLElement).getPropertyValue(prop).trim() : '<missing>';
 const overflowY = (el: Element | null) => css(el, 'overflow-y') || css(el, 'overflow');
+// The CSS Svelte injected for the mounted components (css: 'injected'), as text:
+// the only way to check a shorthand jsdom refuses to expand.
+const injected = () => [...document.querySelectorAll('style')].map(s => s.textContent ?? '').join('\n');
 const ids = (section: Element) =>
   [...section.querySelectorAll('[data-proposal]')].map(el => el.getAttribute('data-proposal'));
 
@@ -130,10 +133,13 @@ describe('one card owns three panes', () => {
     // turns it into '' and fails here.
     expect(css(content, 'max-height')).toMatch(/px|vh/);
     expect(overflowY(content)).toBe('auto');
-    // The decision row is pinned: non-shrinking, separated, opaque.
+    // The decision row is pinned: non-shrinking (a real computed value), with the
+    // rule that separates it. jsdom does not expand the `border-top` shorthand, so
+    // its computed width is '' whether or not the rule exists (measured with the
+    // rule deleted); the injected rule text is what can fail.
     expect(css(actions, 'flex')).toBe('0 0 auto');
-    expect(css(actions, 'border-top-width')).not.toBe('0px');
-    expect(css(actions, 'background-color')).not.toBe('');
+    const actionsRule = injected().split('}').find(block => /data-card-pane/.test(block) && /actions/.test(block)) ?? '';
+    expect(actionsRule).toContain('border-top');
   });
 
   it('puts the executing and result branches inside the scrolling body', async () => {
@@ -147,6 +153,50 @@ describe('one card owns three panes', () => {
     await fireEvent.click(decided.toggle());
     const doneCard = decided.past().querySelector('[data-proposal="p-done"]') as HTMLElement;
     expect(doneCard.querySelector('[data-card-pane="content"] .result')).toBeTruthy();
+  });
+});
+
+describe('a conflict that decides the row still says so', () => {
+  it('reports it above the sections and offers the fold the row moved into', async () => {
+    const {view, active, past, toggle} = await mount([proposal('p-race', 'open', 2)]);
+    // The approve endpoint refuses with the CURRENT row, and that row is already decided:
+    // the card leaving the active section must not take the notice away with it.
+    const current = {...proposal('p-race', 'declined', 2), version: 2, decided_at: at(3), decided_by: 'owner@example.com'};
+    api.approveStewardProposal.mockRejectedValue(new ApiError(409, '', null, current));
+    await fireEvent.click(view.getByRole('button', {name: 'Approve'}));
+    await waitFor(() => expect(ids(active())).toEqual([]));
+    const notice = view.container.querySelector('p[role="status"]') as HTMLElement;
+    expect(notice).toBeTruthy();
+    expect(notice.textContent).toContain('This proposal changed while you were looking');
+    expect(notice.textContent).toContain(t('steward.kind.start_driver'));
+    // Still folded, and the notice is the way to the row.
+    expect(ids(past())).toEqual([]);
+    expect(toggle().getAttribute('aria-expanded')).toBe('false');
+    const open = notice.querySelector('button') as HTMLButtonElement;
+    expect(open.textContent).toContain('Show decided (1)');
+    await fireEvent.click(open);
+    await waitFor(() => expect(ids(past())).toEqual(['p-race']));
+  });
+
+  it('re-reads when the refusal carried no row, and names a row that came back decided', async () => {
+    const {view, active} = await mount([proposal('p-race2', 'open', 2)]);
+    const current = {...proposal('p-race2', 'declined', 2), version: 2};
+    api.listStewardProposals.mockResolvedValue([current]);
+    api.declineStewardProposal.mockRejectedValue(new ApiError(409, 'conflict'));
+    await fireEvent.click(view.getByRole('button', {name: 'Decline'}));
+    await waitFor(() => expect(ids(active())).toEqual([]));
+    const notice = view.container.querySelector('p[role="status"]') as HTMLElement;
+    expect(notice.textContent).toContain('This proposal changed while you were looking');
+    expect(view.container.querySelector('[data-past-toggle]')!.textContent).toContain('Show decided (1)');
+  });
+
+  it('does not call the owner\'s own decision a change while they were looking', async () => {
+    const {view, active} = await mount([proposal('p-mine', 'open', 2)]);
+    const decided = {...proposal('p-mine', 'approved', 2), version: 2};
+    api.approveStewardProposal.mockResolvedValue(decided);
+    await fireEvent.click(view.getByRole('button', {name: 'Approve'}));
+    await waitFor(() => expect(ids(active())).toEqual([]));
+    expect(view.container.querySelector('p[role="status"]')).toBeNull();
   });
 });
 

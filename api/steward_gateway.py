@@ -675,8 +675,27 @@ class Gateway:
 
     async def _probe(self, row: dict) -> dict:
         if row["enabled"]:
-            upstream = await self.upstream(row)
-            return {"tools": await self._list(upstream), "instructions": upstream.instructions}
+            # Same one-reopen policy as `call`: a recreated upstream leaves the cached
+            # session's `alive` flag true, so the list goes down a dead session. A lost
+            # session is dropped and reopened once; a second failure is the answer.
+            for attempt in (1, 2):
+                upstream = await self.upstream(row)
+                try:
+                    return {"tools": await self._list(upstream), "instructions": upstream.instructions}
+                except asyncio.TimeoutError:
+                    raise
+                except SessionBroken as exc:
+                    broken = exc
+                except Exception as exc:  # noqa: BLE001 - judged just below
+                    if not _session_lost(exc):
+                        raise
+                    broken = exc
+                logger.info("steward gateway: upstream session of %s failed while probing (%s)",
+                            row["conn_id"], type(broken).__name__)
+                await self.drop(row["conn_id"])
+                if attempt == 2:
+                    raise SessionBroken(type(broken).__name__)
+            raise SessionBroken("unreachable")
         temporary = Upstream(self, row)
         await temporary.open()
         try:

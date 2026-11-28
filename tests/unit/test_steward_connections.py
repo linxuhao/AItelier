@@ -1258,15 +1258,26 @@ def test_an_sse_answer_is_collected_and_an_expired_session_retried_once(world, s
     assert "result" in again and upstream.initialized == 2
 
 
-def test_a_refresh_recovers_a_session_lost_to_a_recreated_container(world, server, upstream):
+def test_a_refresh_recovers_a_session_lost_to_a_recreated_container(world, server, upstream, monkeypatch):
     """A recreated upstream leaves the cached session's alive flag true, so the probe goes
     down a dead session. The probe path must drop and reopen it once: ONE refresh then
-    answers with the server's tools, no error key, and exactly one new initialize."""
+    answers with the server's tools, no error key, and exactly one new initialize. The drop
+    it makes names the session it failed on, not whatever is cached by then - that argument
+    is the whole race, so it is measured here rather than only inside drop()."""
     ready(world)
     first = body_of(rpc(server, world, "tools/call", {"name": "media__web_search",
                                                       "arguments": {"query": "x"}}))[0]
     assert "result" in first and upstream.initialized == 1
     found = app.state.steward_gateway
+    dead = found.upstreams["media"]  # the session the probe is about to go down
+    named = []
+    original_drop = gw.Gateway.drop
+
+    async def recording_drop(self, conn_id, session):
+        named.append((conn_id, session))
+        await original_drop(self, conn_id, session)
+
+    monkeypatch.setattr(gw.Gateway, "drop", recording_drop)
     for _ in range(100):  # let the first session's re-list finish before resetting the probe clock
         if not [t for t in list(found.tasks) if t is not found.checker and not t.done()]:
             break
@@ -1283,8 +1294,57 @@ def test_a_refresh_recovers_a_session_lost_to_a_recreated_container(world, serve
     assert {t["raw_name"] for t in answer["tools"]} == {t["name"] for t in grown}
     assert answer["added"] == ["generate_image"]
     assert upstream.initialized == 2  # one reopen, however many list pages
+    # The one drop this refresh made named the dead session it saw fail: a probe that dropped
+    # by conn_id alone (the shape this change removes) would record None here instead.
+    assert named == [("media", dead)]
     with pytest.raises(StateGraphError, match="refresh_too_soon"):
         execute(world.steward, "steward_connection_refresh", {"conn_id": "media"}, allow_write=True)
+
+
+def test_a_drop_naming_a_replaced_session_leaves_the_live_one_alone(world, server, upstream):
+    """A task that lost the race must not close the session its winner opened: drop() takes
+    the session it means, and removes it only while it is still the cached one. Measured
+    through the real gateway: after the stale session is dropped, the recovered session is
+    still cached, one more call answers, and nothing is initialized again."""
+    ready(world)
+    found = app.state.steward_gateway
+    call = lambda: body_of(rpc(server, world, "tools/call", {"name": "media__web_search",
+                                                            "arguments": {"query": "x"}}))[0]
+    assert "result" in call()
+    stale = found.upstreams["media"]
+    # The upstream container is recreated: the next call drops the dead session and reopens one.
+    upstream.sessions.clear()
+    assert "result" in call()
+    live = found.upstreams["media"]
+    assert live is not stale and upstream.initialized == 2
+    asyncio.run_coroutine_threadsafe(found.drop("media", stale), found.loop).result(timeout=10)
+    assert found.upstreams.get("media") is live  # the losing drop did not take it
+    before = upstream.initialized
+    assert "result" in call()  # and the session it names still answers
+    assert upstream.initialized == before  # on that same session: nothing was reopened
+
+
+def test_a_probe_that_fails_twice_answers_the_upstreams_own_error(world, server, upstream, monkeypatch):
+    """Two lost sessions in one probe (a recreated upstream that is still not answering): the
+    answer records the upstream's own error type, not a wrapper's, and the row keeps it."""
+    import anyio
+    ready(world)
+    assert "result" in body_of(rpc(server, world, "tools/call", {"name": "media__web_search",
+                                                                "arguments": {"query": "x"}}))[0]
+
+    async def always_lost(self, one):
+        raise anyio.ClosedResourceError()
+
+    monkeypatch.setattr(gw.Gateway, "_list", always_lost)
+    with world.db.get_connection() as conn:
+        conn.execute("UPDATE state_steward_connections SET last_probe_at=NULL")
+        conn.commit()
+    answer = execute(world.steward, "steward_connection_refresh", {"conn_id": "media"}, allow_write=True)
+    assert answer == {"conn_id": "media", "error": "probe_failed:ClosedResourceError"}
+    assert upstream.initialized == 2  # it did make a second attempt, on a reopened session
+    with world.db.get_connection() as conn:
+        assert conn.execute("SELECT last_error FROM state_steward_connections WHERE conn_id='media'"
+                            ).fetchone()[0] == "probe_failed:ClosedResourceError"
 
 
 def test_only_a_lost_session_is_reopened_and_retried(world, server, upstream):

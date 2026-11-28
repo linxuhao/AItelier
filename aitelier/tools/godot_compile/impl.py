@@ -57,6 +57,21 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
     b = pt.get("behavior") or {}
     scenarios = b.get("scenarios") or []
     errors = pt.get("errors") or []
+    # Render facts exist only on a report that actually ran a play-test. A
+    # skipped or failed-to-summarise report has neither key, so it gets no
+    # render verdict — silence is the only honest value there.
+    render_lines = []
+    if pt.get("render_mode"):
+        render_lines.append(f"- render: {pt['render_mode']}")
+    if "headless_retry" in pt:
+        if pt["headless_retry"]:
+            render_lines.append(
+                "- headless retry: true — the pass could not be drawn "
+                "(Godot returned no snapshot); measurements below are advisory, "
+                "not a product red.")
+        else:
+            render_lines.append(
+                "- headless retry: false — the pass was drawn; no degradation.")
     lines = [
         "# playtest_summary.md",
         "",
@@ -67,6 +82,7 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
         f"(crash / scene-load / illegal spec key / input-not-received)",
         f"- `spec_used`: {pt.get('spec_used')}   `frames`: {pt.get('frames')}   "
         f"runtime errors: {len(errors)}",
+        *render_lines,
         f"- summary: {pt.get('summary', '')}",
         "",
     ]
